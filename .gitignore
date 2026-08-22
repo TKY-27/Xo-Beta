@@ -1,0 +1,7 @@
+node_modules/
+dist/
+qa/*.png
+*.local
+.DS_Store
+.wrangler/
+coverage/
