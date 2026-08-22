@@ -1,0 +1,36 @@
+{
+  "name": "xo-beta",
+  "version": "0.1.0",
+  "description": "Xo Beta — a browser-native single-player 3D battle royale FPS/TPS. 10 combatants, last one standing wins.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xo-beta/xo-beta"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "sim": "tsx tests/sim/run-sim.ts",
+    "lint": "eslint .",
+    "audit:licenses": "license-checker-rseidelsohn --onlyAllow 'MIT;BSD-2-Clause;BSD-3-Clause;Apache-2.0;ISC;0BSD;Zlib;CC0-1.0;BlueOak-1.0.0;Python-2.0;MPL-2.0' --production --summary"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "0.20.0",
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/three": "^0.182.0",
+    "license-checker-rseidelsohn": "^4.0.6",
+    "playwright": "^1.62.1",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.2",
+    "vite": "^7.0.0",
+    "vitest": "^4.1.11"
+  }
+}

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Xo Beta — a browser-native single-player 3D battle royale. 10 combatants, last one standing wins." />
+  <title>Xo Beta</title>
+  <link rel="stylesheet" href="/src/ui/styles.css" />
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+
+  <!-- Loading -->
+  <div id="loading-screen" class="screen">
+    <div class="loading-inner">
+      <h1 class="logo">XO<span>BETA</span></h1>
+      <div class="loading-bar"><div id="loading-fill"></div></div>
+      <div id="loading-status">Booting…</div>
+    </div>
+  </div>
+
+  <!-- Main menu -->
+  <div id="main-menu" class="screen hidden">
+    <div class="menu-backdrop"></div>
+    <div class="menu-content">
+      <h1 class="logo big">XO<span>BETA</span></h1>
+      <p class="tagline">Single-player battle royale · 10 combatants · last one standing</p>
+      <nav class="menu-buttons">
+        <button id="btn-play" class="btn primary">PLAY</button>
+        <button id="btn-settings" class="btn">SETTINGS</button>
+        <button id="btn-credits" class="btn">CREDITS</button>
+      </nav>
+      <p class="hint">Desktop keyboard &amp; mouse required · Click PLAY to lock the cursor</p>
+    </div>
+  </div>
+
+  <!-- Play flow: map + difficulty -->
+  <div id="play-menu" class="screen hidden">
+    <div class="menu-backdrop"></div>
+    <div class="menu-content wide">
+      <h2>SELECT ARENA</h2>
+      <div id="map-list" class="map-list"></div>
+      <h2>BOT DIFFICULTY</h2>
+      <div id="difficulty-list" class="difficulty-list"></div>
+      <div class="menu-row">
+        <button id="btn-play-start" class="btn primary">START MATCH</button>
+        <button id="btn-play-back" class="btn">BACK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div id="settings-menu" class="screen hidden">
+    <div class="menu-backdrop"></div>
+    <div class="menu-content wide scrollable">
+      <h2>SETTINGS</h2>
+      <div class="settings-columns">
+        <section id="settings-controls"><h3>Controls</h3></section>
+        <section id="settings-graphics"><h3>Graphics</h3></section>
+        <section id="settings-audio"><h3>Audio</h3></section>
+        <section id="settings-gameplay"><h3>Gameplay</h3></section>
+      </div>
+      <div class="menu-row">
+        <button id="btn-settings-back" class="btn">BACK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Credits -->
+  <div id="credits-menu" class="screen hidden">
+    <div class="menu-backdrop"></div>
+    <div class="menu-content">
+      <h2>CREDITS</h2>
+      <div class="credits-body">
+        <p><strong>Xo Beta</strong> — an original open-source browser battle royale.</p>
+        <p>Design, engineering, art direction, procedural audio &amp; music:<br/>the Xo Beta contributors.</p>
+        <p>Built with Three.js (MIT) and Rapier physics (Apache-2.0).<br/>All game assets are generated procedurally at runtime — original work, MIT licensed.</p>
+        <p class="dim">See THIRD_PARTY_NOTICES.md for dependency licenses.</p>
+      </div>
+      <div class="menu-row">
+        <button id="btn-credits-back" class="btn">BACK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pause -->
+  <div id="pause-menu" class="screen hidden">
+    <div class="menu-backdrop dark"></div>
+    <div class="menu-content">
+      <h2>PAUSED</h2>
+      <nav class="menu-buttons">
+        <button id="btn-resume" class="btn primary">RESUME</button>
+        <button id="btn-pause-settings" class="btn">SETTINGS</button>
+        <button id="btn-quit" class="btn">RETURN TO MENU</button>
+      </nav>
+    </div>
+  </div>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="crosshair"><span class="ch-t"></span><span class="ch-b"></span><span class="ch-l"></span><span class="ch-r"></span><span class="ch-dot"></span><span id="hitmarker"></span></div>
+
+    <div id="vignette"></div>
+    <div id="storm-vignette"></div>
+
+    <div id="hud-bottom-left">
+      <div class="bars">
+        <div class="bar shield"><div id="shield-fill"></div><span id="shield-text">100</span></div>
+        <div class="bar health"><div id="health-fill"></div><span id="health-text">100</span></div>
+      </div>
+      <div id="heal-channel" class="hidden"><span id="heal-label">Healing…</span><div class="bar tiny"><div id="heal-fill"></div></div></div>
+    </div>
+
+    <div id="hud-bottom-right">
+      <div id="ammo-display"><span id="ammo-mag">0</span><span class="ammo-sep">/</span><span id="ammo-reserve">0</span></div>
+      <div id="weapon-name">FISTS</div>
+      <div id="inventory-slots"></div>
+    </div>
+
+    <div id="hud-top-right">
+      <div id="alive-counter"><span id="alive-count">10</span> ALIVE</div>
+      <div id="kill-counter"><span id="kills-count">0</span> ELIMS</div>
+      <div id="storm-timer"></div>
+    </div>
+
+    <div id="killfeed"></div>
+
+    <canvas id="minimap" width="200" height="200"></canvas>
+    <div id="minimap-label">TAB — full map</div>
+
+    <div id="interact-prompt" class="hidden"><kbd>E</kbd> <span id="interact-text"></span></div>
+
+    <div id="center-banner" class="hidden"></div>
+    <div id="elim-banner" class="hidden"></div>
+    <div id="storm-warning" class="hidden"></div>
+
+    <div id="spectate-hud" class="hidden">
+      <div>SPECTATING <span id="spectate-name"></span></div>
+      <div class="dim">← → switch combatant · V camera · TAB map</div>
+    </div>
+
+    <div id="fps-counter" class="hidden"></div>
+  </div>
+
+  <!-- Results -->
+  <div id="results-screen" class="screen hidden">
+    <div class="menu-backdrop dark"></div>
+    <div class="menu-content">
+      <h1 id="results-title">VICTORY</h1>
+      <div id="results-subtitle"></div>
+      <div id="results-grid"></div>
+      <div class="menu-row">
+        <button id="btn-results-again" class="btn primary">PLAY AGAIN</button>
+        <button id="btn-results-menu" class="btn">MAIN MENU</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mobile / unsupported notice -->
+  <div id="mobile-gate" class="screen hidden">
+    <div class="menu-backdrop"></div>
+    <div class="menu-content">
+      <h1 class="logo">XO<span>BETA</span></h1>
+      <div class="credits-body">
+        <p>Xo Beta is designed for <strong>desktop browsers with keyboard &amp; mouse</strong>.</p>
+        <p>Open this page on a desktop browser to play.</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

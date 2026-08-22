@@ -1,0 +1,495 @@
+/**
+ * OLD FRONT — weathered historical European-style town at late afternoon.
+ * Cathedral landmark, old town streets, keep ruins, farmstead, military
+ * checkpoint, forest edge, tunnel. Rolling terrain.
+ */
+
+import { WorldBuilder } from '../builder';
+import type { MapDef } from '../types';
+import { Rng } from '../../core/rng';
+import { addBuilding, scatterRocks, scatterTrees } from './common';
+
+const S = 500;
+
+/** Gentle terrain — small undulation only (collision-safe for all structures). */
+function terrainH(x: number, z: number): number {
+  let h = Math.sin(x * 0.02) * 0.45 + Math.cos(z * 0.023) * 0.4 + Math.sin((x + z) * 0.008) * 0.25;
+  // South forest dip (shallow, no structures there)
+  const forestD = Math.hypot(x - 100, z - 195);
+  if (forestD < 60) h -= (1 - forestD / 60) * 0.8;
+  return h;
+}
+
+export function buildOldFront(): MapDef {
+  const rng = new Rng(0x01f7 + 3);
+  const b = new WorldBuilder('oldfront', 'OLD FRONT', 'A worn frontier town under an overcast sky. Stone streets, a cathedral, and war remnants.', S);
+
+  b.box(0, -1, 0, S + 200, 2, S + 200, 'grass', 0, { noCollide: true });
+
+  // Heightfield terrain (visual + collider)
+  buildHeightfield(b);
+
+  // ------------------------------------------------------------------
+  // POI: CATHEDRAL SQUARE (center-north of town)
+  // ------------------------------------------------------------------
+  b.poi('Cathedral Square', 20, -30, 60);
+  cathedral(b, 20, -55);
+  // Square paving
+  b.box(20, terrainH(20, -10) + 0.06, -10, 56, 0.16, 44, 'sidewalk', 0, { floor: true });
+  fountain(b, 20, -8);
+  // Row houses framing the square
+  townHouse(b, -18, -28, 0);
+  townHouse(b, 58, -28, 0);
+  townHouse(b, -18, 12, 2);
+  b.chest(34, terrainH(34, -22) + 0.3, -22, 'elite');
+  b.chest(6, terrainH(6, -50) + 0.3, -50, 'standard');
+
+  // ------------------------------------------------------------------
+  // POI: OLD TOWN (dense housing east)
+  // ------------------------------------------------------------------
+  b.poi('Old Town', 110, 30, 65);
+  townHouse(b, 88, 12, 1);
+  townHouse(b, 122, 12, 3);
+  townHouse(b, 88, 48, 1);
+  townHouse(b, 124, 50, 3);
+  townHouse(b, 106, 78, 0);
+  shopHouse(b, 108, 32);
+  b.chest(104, terrainH(104, 30) + 0.3, 30, 'standard');
+  b.chest(126, terrainH(126, 66) + 0.3, 66, 'elite');
+  well(b, 106, 58);
+  crates(b, rng, 96, 40, 5);
+
+  // ------------------------------------------------------------------
+  // POI: THE KEEP (ruined fortress on NW hill)
+  // ------------------------------------------------------------------
+  b.poi('The Keep', -150, -150, 60);
+  keepRuins(b, -150, -150);
+  b.chest(-142, terrainH(-142, -142) + 0.3, -142, 'vault');
+  b.chest(-160, terrainH(-160, -158) + 0.3, -158, 'standard');
+  scatterRocks(b, rng, 12, { minX: -200, maxX: -100, minZ: -200, maxZ: -100 }, [{ x: -150, z: -150, r: 45 }], terrainH);
+
+  // ------------------------------------------------------------------
+  // POI: FARMSTEAD (south-east fields)
+  // ------------------------------------------------------------------
+  b.poi('Farmstead', 150, 170, 55);
+  barn(b, 138, 158);
+  farmhouse(b, 168, 182);
+  silo(b, 152, 196);
+  fences(b, rng, 130, 150, 60, 40);
+  b.vehicle(146, 172, terrainH(146, 172) + 0.2, 0.7, 'truck', 0x4a3d2a);
+  b.chest(140, terrainH(140, 162) + 0.3, 162, 'standard');
+  b.chest(170, terrainH(170, 186) + 0.3, 186, 'elite');
+  hayCarts(b, rng, 155, 165);
+
+  // ------------------------------------------------------------------
+  // POI: CHECKPOINT (military remnant, west road)
+  // ------------------------------------------------------------------
+  b.poi('Checkpoint', -170, 60, 45);
+  bunker(b, -178, 52);
+  bunker(b, -156, 74);
+  sandbagLine(b, -170, 62, 24, 0.3);
+  sandbagLine(b, -166, 76, 18, 1.8);
+  watchtower(b, -184, 80);
+  b.vehicle(-164, 58, terrainH(-164, 58) + 0.2, 1.9, 'wrecked', 0x33302a);
+  b.chest(-176, terrainH(-176, 54) + 0.3, 54, 'elite');
+  b.chest(-183, terrainH(-183, 82) + 8.2, 82, 'vault');
+  crates(b, rng, -160, 66, 4);
+
+  // ------------------------------------------------------------------
+  // POI: FOREST CAMP (south woods)
+  // ------------------------------------------------------------------
+  b.poi('Forest Camp', 90, 195, 45);
+  logCabins(b, rng, 82, 188);
+  lumberPile(b, rng, 102, 202);
+  campfire(b, 92, 198);
+  b.chest(86, terrainH(86, 190) + 0.3, 190, 'standard');
+  b.loot(96, terrainH(96, 200) + 0.4, 200);
+
+  // ------------------------------------------------------------------
+  // POI: TUNNEL (through east hill)
+  // ------------------------------------------------------------------
+  b.poi('Hill Tunnel', 205, -90, 35);
+  tunnel(b, 205, -90);
+  b.chest(212, terrainH(212, -84) + 0.3, -84, 'elite');
+  b.loot(198, terrainH(198, -96) + 0.4, -96);
+
+  // ------------------------------------------------------------------
+  // Small POIs
+  // ------------------------------------------------------------------
+  b.poi('Chapel', -60, 130, 26);
+  chapel(b, -60, 130);
+  b.poi('Bridge', 0, 120, 24);
+  stoneBridge(b, 0, 120);
+  b.poi('Quarry', -90, -40, 30);
+  quarry(b, rng, -90, -40);
+  b.poi('Roadside Shrine', 60, -120, 16);
+  shrine(b, 60, -120);
+  b.poi('Water Mill', -30, 210, 28);
+  waterMill(b, -30, 210);
+  b.poi('Orchard', 190, 60, 30);
+  orchard(b, rng, 190, 60);
+  b.poi('Broken Column', -220, -30, 18);
+  ruinsSpot(b, -220, -30);
+  b.poi('Crossroads', 30, 80, 22);
+  crossroads(b, 30, 80);
+
+  // Forest belt south + scattered oaks
+  scatterTrees(b, rng, 90, { minX: -240, maxX: 240, minZ: 140, maxZ: 245 }, 'oak',
+    [{ x: 90, z: 195, r: 30 }, { x: -30, z: 210, r: 25 }, { x: 150, z: 170, r: 45 }], terrainH);
+  scatterTrees(b, rng, 40, { minX: -240, maxX: 240, minZ: -245, maxZ: -140 }, 'dead',
+    [{ x: -150, z: -150, r: 50 }], terrainH);
+  scatterTrees(b, rng, 30, { minX: 150, maxX: 245, minZ: -140, maxZ: 40 }, 'oak', [], terrainH);
+  scatterRocks(b, rng, 25, { minX: -245, maxX: 245, minZ: -245, maxZ: 245 },
+    [{ x: 20, z: -30, r: 70 }, { x: 110, z: 30, r: 60 }, { x: 150, z: 170, r: 50 }], terrainH);
+
+  return b.finish(
+    {
+      preset: 'overcast',
+      fogColor: 0x9aa5ae,
+      fogDensity: 0.003,
+      sunDirection: [-0.55, -0.75, 0.35],
+      sunColor: 0xe8ded0,
+      sunIntensity: 2.6,
+      ambientColor: 0xaeb9c6,
+      ambientIntensity: 1.6,
+      hemisphereSky: 0xc2cbd6,
+      hemisphereGround: 0x6a685c,
+      hemisphereIntensity: 1.5,
+    },
+    { from: [-330, 120], to: [330, -110] },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Terrain heightfield
+// ---------------------------------------------------------------------------
+
+function buildHeightfield(b: WorldBuilder): void {
+  const n = 64;
+  const heights = new Float32Array(n * n);
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const x = (c / (n - 1)) * S - S / 2;
+      const z = (r / (n - 1)) * S - S / 2;
+      heights[r * n + c] = terrainH(x, z); // ground slab top at -1.5+... align to ground plane top y=-1.5? ground box top is at y=0-? 
+    }
+  }
+  (b.def as MapDef & { heightfield?: unknown }).heightfield = { n, heights };
+}
+
+// ---------------------------------------------------------------------------
+// Structures
+// ---------------------------------------------------------------------------
+
+function cathedral(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  // Nave
+  addBuilding(b, {
+    x: cx, z: cz, w: 20, d: 42, floors: 1, floorHeight: 9, wallMat: 'stoneBrick', trimMat: 'marble',
+    doors: [[0, 8, 3], [0, 12, 3], [2, 9, 3]], interiorDividers: false, parapet: false,
+  });
+  // Bell tower
+  addBuilding(b, {
+    x: cx, z: cz - 27, w: 10, d: 10, floors: 3, floorHeight: 4.6, wallMat: 'stoneBrick', trimMat: 'marble',
+    doors: [[0, 3.5, 2]], roofAccess: true, interiorDividers: false,
+  });
+  b.cyl(cx, gy + 17.5, cz - 27, 3.4, 3, 'roofTile');
+  b.sphere(cx, gy + 19.6, cz - 27, 1.6, 'gold');
+  // Buttresses
+  for (let i = -1; i <= 1; i += 2) {
+    for (let j = 0; j < 3; j++) {
+      b.box(cx + i * 11.4, gy + 3, cz - 12 + j * 12, 1.6, 6, 1.6, 'stoneBrick');
+    }
+  }
+  b.loot(cx, gy + 0.4, cz + 8);
+  b.loot(cx - 5, gy + 0.4, cz - 6);
+}
+
+function fountain(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  b.cyl(cx, gy + 0.5, cz, 5, 1, 'stoneBrick');
+  b.cyl(cx, gy + 1.3, cz, 1.6, 1.8, 'marble');
+  b.sphere(cx, gy + 2.8, cz, 1, 'marble');
+  b.chest(cx + 7, gy + 0.3, cz + 5, 'standard');
+}
+
+function townHouse(b: WorldBuilder, cx: number, cz: number, doorSide: 0 | 1 | 2 | 3): void {
+  const mats: Array<'plaster' | 'plasterOld' | 'stoneBrick' | 'woodDark'> = ['plaster', 'plasterOld', 'stoneBrick', 'woodDark'];
+  const mat = mats[Math.abs((cx * 7 + cz * 13) >> 2) % 4]!;
+  addBuilding(b, {
+    x: cx, z: cz, w: 13, d: 15, floors: 2, wallMat: mat, trimMat: 'woodDark', roofMat: 'roofTile',
+    doors: [[doorSide, 5, 1.9]],
+  });
+  const gy = terrainH(cx, cz);
+  b.loot(cx + 3, gy + 0.4, cz + 3);
+}
+
+function shopHouse(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  addBuilding(b, {
+    x: cx, z: cz, w: 16, d: 14, floors: 1, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
+    doors: [[0, 4, 2.6], [0, 11, 2.6]], interiorDividers: false,
+  });
+  // Awning
+  b.box(cx, gy + 3.1, cz + 7.6, 15, 0.2, 2.2, 'woodDark');
+  for (let i = 0; i < 3; i++) b.crate(cx - 5 + i * 5, gy + 0.2, cz + 9.5, 1);
+  b.chest(cx, gy + 0.3, cz - 3, 'standard');
+}
+
+function keepRuins(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  // Broken curtain walls
+  b.wallWithGaps(cx - 26, cz - 26, 52, 6, 1.6, 'x', 'stoneBrick', [[20, 6], [38, 8]]);
+  b.wallWithGaps(cx - 26, cz + 26, 52, 5, 1.6, 'x', 'stoneBrick', [[6, 7], [30, 9]]);
+  b.wallWithGaps(cx - 26, cz - 26, 52, 6, 1.6, 'z', 'stoneBrick', [[8, 5], [36, 10]]);
+  b.wallWithGaps(cx + 26, cz - 26, 52, 4.5, 1.6, 'z', 'stoneBrick', [[14, 8]]);
+  // Central donjon — broken tower with climbable interior stairs
+  addBuilding(b, {
+    x: cx, z: cz, w: 14, d: 14, floors: 2, floorHeight: 4.4, wallMat: 'stoneBrick', trimMat: 'stoneBrick',
+    doors: [[0, 5.5, 2.2]], roofAccess: true, interiorDividers: false,
+  });
+  // Rubble
+  const r = new Rng(99);
+  for (let i = 0; i < 14; i++) {
+    const a = r.angle();
+    const d = r.range(8, 24);
+    b.rock(cx + Math.cos(a) * d, cz + Math.sin(a) * d, terrainH(cx + Math.cos(a) * d, cz + Math.sin(a) * d), r.range(0.5, 1.6));
+  }
+  b.loot(cx + 4, gy + 0.4, cz + 4);
+  b.loot(cx - 12, gy + 0.4, cz - 10);
+}
+
+function barn(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  addBuilding(b, {
+    x: cx, z: cz, w: 18, d: 24, floors: 1, floorHeight: 6.5, wallMat: 'woodDark', trimMat: 'wood',
+    doors: [[0, 7, 3.4], [2, 7, 3.4]], interiorDividers: false, parapet: false,
+  });
+  for (let i = 0; i < 5; i++) b.crate(cx - 5 + (i % 3) * 5, gy + 0.2, cz - 6 + Math.floor(i / 3) * 4, 1.2);
+  b.loot(cx + 4, gy + 0.4, cz + 6);
+}
+
+function farmhouse(b: WorldBuilder, cx: number, cz: number): void {
+  addBuilding(b, {
+    x: cx, z: cz, w: 14, d: 12, floors: 2, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
+    doors: [[0, 6, 2]],
+  });
+  const gy = terrainH(cx, cz);
+  b.loot(cx - 3, gy + 0.4, cz + 2);
+}
+
+function silo(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  b.cyl(cx, gy + 6, cz, 3.4, 12, 'rust');
+  b.cyl(cx, gy + 12.4, cz, 3.8, 0.8, 'metalDark');
+  b.platform(cx - 3.4, cx + 3.4, cz - 3.4, cz + 3.4, gy + 12.8);
+  b.loot(cx + 4.5, gy + 0.4, cz);
+}
+
+function fences(b: WorldBuilder, rng: Rng, cx: number, cz: number, w: number, d: number): void {
+  for (let i = 0; i < 6; i++) {
+    const fx = cx - w / 2 + (i / 5) * w;
+    b.def.destructibles.push({
+      hp: 20, type: 'fence',
+      geo: { kind: 'box', x: fx, y: terrainH(fx, cz) + 0.6, z: cz - d / 2, sx: 2.4, sy: 1.2, sz: 0.18, yaw: 0, mat: 'wood' },
+    });
+  }
+  void rng;
+}
+
+function hayCarts(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
+  for (let i = 0; i < 3; i++) {
+    const hx = cx + rng.range(-14, 14);
+    const hz = cz + rng.range(-10, 14);
+    const gy = terrainH(hx, hz);
+    b.box(hx, gy + 0.9, hz, 3.4, 1.4, 2.6, 'wood');
+    b.sphere(hx, gy + 2.2, hz, 1.3, 'sandbag', { noCollide: true });
+  }
+}
+
+function bunker(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  b.box(cx, gy + 1.5, cz, 10, 3, 8, 'concrete');
+  b.platform(cx - 5, cx + 5, cz - 4, cz + 4, gy + 3);
+  b.wallWithGaps(cx - 5, cz - 4, 10, 3, 0.5, 'x', 'concrete', [[3.5, 2.4]]);
+  b.wallWithGaps(cx - 5, cz + 4, 10, 3, 0.5, 'x', 'concrete', []);
+  b.wallWithGaps(cx - 5, cz - 4, 8, 3, 0.5, 'z', 'concrete', []);
+  b.wallWithGaps(cx + 5, cz - 4, 8, 3, 0.5, 'z', 'concrete', []);
+  b.loot(cx, gy + 0.4, cz + 1);
+}
+
+function sandbagLine(b: WorldBuilder, cx: number, cz: number, len: number, yaw: number): void {
+  const segs = Math.floor(len / 2.2);
+  for (let i = 0; i < segs; i++) {
+    const off = (i - segs / 2) * 2.2;
+    const sx = cx + Math.cos(yaw) * off;
+    const sz = cz + Math.sin(yaw) * off;
+    b.box(sx, terrainH(sx, sz) + 0.55, sz, 2.2, 1.1, 0.9, 'sandbag', yaw);
+  }
+}
+
+function watchtower(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  for (const [lx, lz] of [[-1.6, -1.6], [1.6, -1.6], [-1.6, 1.6], [1.6, 1.6]] as const) {
+    b.box(cx + lx, gy + 5, cz + lz, 0.4, 10, 0.4, 'woodDark');
+  }
+  b.slab(cx, gy + 10.2, cz, 6, 6, 0.4, 'woodDark');
+  b.wallWithGaps(cx - 3, cz - 3, 6, 1.1, 0.25, 'x', 'woodDark', [], 0, gy + 10.4);
+  b.wallWithGaps(cx - 3, cz + 3, 6, 1.1, 0.25, 'x', 'woodDark', [], 0, gy + 10.4);
+  b.wallWithGaps(cx - 3, cz - 3, 6, 1.1, 0.25, 'z', 'woodDark', [], 0, gy + 10.4);
+  b.wallWithGaps(cx + 3, cz - 3, 6, 1.1, 0.25, 'z', 'woodDark', [], 0, gy + 10.4);
+  b.stairs(cx - 3.4, gy, cz - 2.4, 0, 17, 0.6, 0.62, 1.6, 'woodDark');
+  b.chest(cx, gy + 10.6, cz, 'vault');
+  b.loot(cx + 1.5, gy + 10.7, cz - 1.5);
+}
+
+function logCabins(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
+  for (let i = 0; i < 2; i++) {
+    const lx = cx + i * 22;
+    const lz = cz + (i % 2) * 14;
+    const gy = terrainH(lx, lz);
+    addBuilding(b, {
+      x: lx, z: lz, w: 10, d: 9, floors: 1, wallMat: 'woodDark', trimMat: 'wood',
+      doors: [[0, 4, 1.8]], interiorDividers: false, windows: false,
+    });
+    b.loot(lx + 2, gy + 0.4, lz + 2);
+  }
+  void rng;
+}
+
+function lumberPile(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  for (let i = 0; i < 8; i++) {
+    b.cyl(cx + rng.range(-3, 3), gy + 0.5 + Math.floor(i / 4) * 0.9, cz + rng.range(-2, 2), 0.42, 4, 'woodDark')
+      ;
+  }
+}
+
+function campfire(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    b.rock(cx + Math.cos(a) * 1.4, cz + Math.sin(a) * 1.4, gy, 0.4);
+  }
+  b.light(cx, gy + 1, cz, 0xff8a4f, 2.2, 18);
+}
+
+function tunnel(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  // Hill mass above tunnel
+  b.box(cx, gy + 9, cz, 46, 18, 30, 'rock');
+  // Bore
+  b.box(cx, gy + 2.2, cz, 40, 4.4, 7, 'stoneBrick', 0, { noCollide: true }); // visual arch hint
+  // Tunnel walls: two side walls + roof slab, open ends
+  b.wallWithGaps(cx - 20, cz - 3.5, 40, 4.4, 1, 'x', 'stoneBrick');
+  b.wallWithGaps(cx - 20, cz + 3.5, 40, 4.4, 1, 'x', 'stoneBrick');
+  b.slab(cx, gy + 4.6, cz, 42, 9, 0.8, 'stoneBrick');
+  b.light(cx - 8, gy + 3.6, cz, 0xffd9a0, 1.4, 16);
+  b.light(cx + 8, gy + 3.6, cz, 0xffd9a0, 1.4, 16);
+  b.loot(cx, gy + 0.4, cz);
+  b.crate(cx - 6, gy + 0.2, cz + 1.5, 1);
+}
+
+function chapel(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  addBuilding(b, {
+    x: cx, z: cz, w: 10, d: 16, floors: 1, floorHeight: 5.5, wallMat: 'stoneBrick', trimMat: 'marble',
+    doors: [[0, 4, 1.8]], interiorDividers: false, parapet: false,
+  });
+  b.cyl(cx, gy + 7.5, cz - 6, 1.4, 3, 'roofTile');
+  b.sphere(cx, gy + 9.6, cz - 6, 0.8, 'gold');
+  b.loot(cx, gy + 0.4, cz + 2);
+}
+
+function stoneBridge(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  b.slab(cx, gy + 3.4, cz, 8, 26, 0.8, 'stoneBrick');
+  b.wallWithGaps(cx - 4, cz - 13, 26, 1, 0.5, 'z', 'stoneBrick', [], 0, gy + 3.8);
+  b.wallWithGaps(cx + 4, cz - 13, 26, 1, 0.5, 'z', 'stoneBrick', [], 0, gy + 3.8);
+  // ramps
+  b.stairs(cx, gy, cz + 13, 0, 6, 0.57, 0.6, 8, 'stoneBrick');
+  b.stairs(cx, gy, cz - 13, 2, 6, 0.57, 0.6, 8, 'stoneBrick');
+  b.chest(cx, gy + 3.8, cz, 'standard');
+}
+
+function quarry(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  // Pit with terraced edges
+  b.box(cx, gy - 2.5, cz, 40, 5, 34, 'dirt');
+  b.platform(cx - 20, cx + 20, cz - 17, cz + 17, gy);
+  for (let i = 0; i < 10; i++) {
+    b.rock(cx + rng.range(-16, 16), cz + rng.range(-13, 13), gy - 4.6, rng.range(0.8, 2));
+  }
+  // ramp into pit
+  b.stairs(cx + 16, gy - 4.6, cz, 3, 8, 0.58, 0.7, 4, 'dirt');
+  b.chest(cx - 8, gy - 4.3, cz - 6, 'elite');
+  b.loot(cx + 6, gy - 4.2, cz + 8);
+}
+
+function shrine(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  b.box(cx, gy + 1, cz, 3, 2, 3, 'stoneBrick');
+  b.box(cx, gy + 2.4, cz, 3.6, 0.4, 3.6, 'marble');
+  b.loot(cx + 2, gy + 0.4, cz + 2);
+  b.crate(cx - 2.5, gy + 0.2, cz + 1, 0.9);
+}
+
+function waterMill(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  addBuilding(b, {
+    x: cx, z: cz, w: 12, d: 12, floors: 2, wallMat: 'stoneBrick', trimMat: 'woodDark', roofMat: 'roofTile',
+    doors: [[0, 5, 2]],
+  });
+  // Wheel
+  b.cyl(cx + 7.4, gy + 3, cz, 3, 1, 'woodDark', { segments: 12 });
+  b.loot(cx - 3, gy + 0.4, cz + 3);
+  b.chest(cx + 2, gy + 0.3, cz - 2, 'standard');
+}
+
+function orchard(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
+  for (let ix = 0; ix < 4; ix++) {
+    for (let iz = 0; iz < 4; iz++) {
+      const tx = cx - 18 + ix * 12;
+      const tz = cz - 18 + iz * 12;
+      b.tree({ x: tx, z: tz, y: terrainH(tx, tz), scale: rng.range(0.8, 1.1), variant: 'oak' });
+    }
+  }
+  b.crate(cx, terrainH(cx, cz) + 0.2, cz, 1.1);
+  b.loot(cx + 4, terrainH(cx + 4, cz) + 0.4, cz + 4);
+}
+
+function ruinsSpot(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2;
+    const h = 2 + (i % 3);
+    b.cyl(cx + Math.cos(a) * 5, gy + h / 2, cz + Math.sin(a) * 5, 0.8, h, 'marble');
+  }
+  b.chest(cx, gy + 0.3, cz, 'standard');
+}
+
+function crossroads(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  b.box(cx, gy + 0.06, cz, 30, 0.16, 30, 'dirt', 0, { floor: true });
+  // signpost
+  b.cyl(cx + 4, gy + 1.6, cz + 4, 0.14, 3.2, 'woodDark');
+  b.box(cx + 4, gy + 2.9, cz + 4.4, 1.6, 0.3, 0.08, 'wood');
+  b.crate(cx - 5, gy + 0.2, cz - 3, 1);
+  b.loot(cx + 2, gy + 0.4, cz - 5);
+}
+
+function crates(b: WorldBuilder, rng: Rng, cx: number, cz: number, count: number): void {
+  for (let i = 0; i < count; i++) {
+    const x = cx + rng.range(-6, 6);
+    const z = cz + rng.range(-6, 6);
+    b.crate(x, terrainH(x, z) + 0.2, z, rng.range(0.8, 1.3));
+  }
+}
+
+function well(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = terrainH(cx, cz);
+  b.cyl(cx, gy + 0.7, cz, 1.6, 1.4, 'stoneBrick');
+  b.box(cx - 1.2, gy + 2.4, cz, 0.2, 2.4, 0.2, 'woodDark');
+  b.box(cx + 1.2, gy + 2.4, cz, 0.2, 2.4, 0.2, 'woodDark');
+  b.box(cx, gy + 3.6, cz, 3, 0.3, 2.4, 'roofTile');
+}
