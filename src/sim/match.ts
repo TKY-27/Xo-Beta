@@ -11,7 +11,7 @@ import {
 } from '../core/balance';
 import { EventBus } from '../core/events';
 import { Rng, setGameSeed } from '../core/rng';
-import { CharBody, PhysicsWorld } from '../physics/physics';
+import { CharBody, PhysicsWorld, GROUPS as PHYS_GROUPS } from '../physics/physics';
 import { buildColliders } from '../world/builder';
 import { NavGraph } from '../world/nav';
 import type { MapDef, WaterVolume } from '../world/types';
@@ -47,18 +47,20 @@ export interface ChestEntity {
 
 export interface MatchEventsMap {
   shotFired: { actorId: number; weaponId: WeaponId; x: number; y: number; z: number; dry: boolean };
-  footstep: { actorId: number; x: number; y: number; z: number; running: boolean };
+  footstep: { actorId: number; x: number; y: number; z: number; running: boolean; surface: 'stone' | 'metal' | 'wood' | 'grass' | 'water' };
   muzzleFlash: { actorId: number; x: number; y: number; z: number; dx: number; dy: number; dz: number; weaponId: WeaponId };
   impact: { x: number; y: number; z: number; nx: number; ny: number; nz: number; material: string };
   tracer: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; color: number };
   ricochet: { x: number; y: number; z: number };
   glassBreak: { x: number; y: number; z: number };
   destructibleDestroyed: { id: number; x: number; y: number; z: number };
-  actorHit: { targetId: number; attackerId: number; damage: number; region: string; killed: boolean; headshot: boolean; weaponId: WeaponId };
+  actorHit: { targetId: number; attackerId: number; damage: number; region: string; killed: boolean; headshot: boolean; weaponId: WeaponId; shieldDamage: number };
+  shieldBroken: { actorId: number };
+  headshotFeedback: { attackerId: number };
   eliminated: { victimId: number; killerId: number; weaponId: WeaponId | null; headshot: boolean; storm: boolean; placement: number };
   itemSpawned: { itemId: number };
-  itemPickedUp: { itemId: number; actorId: number };
-  chestOpened: { chestId: number; kind: string; x: number; y: number; z: number };
+  itemPickedUp: { itemId: number; actorId: number; rare?: boolean };
+  chestOpened: { chestId: number; kind: string; tier: number; x: number; y: number; z: number };
   stormWaiting: { index: number; waitTime: number; targetRadius: number };
   stormShrinking: { index: number; shrinkTime: number };
   stormFinal: Record<string, never>;
@@ -259,7 +261,18 @@ export class Match {
   private movementEvents(): MovementEvents {
     return {
       onFootstep: (a, running) => {
-        this.events.emit('footstep', { actorId: a.id, x: a.body.position.x, y: a.body.position.y, z: a.body.position.z, running });
+        // Resolve ground material for audio (cheap downward ray at stride rate).
+        let surface: 'stone' | 'metal' | 'wood' | 'grass' | 'water' = 'stone';
+        const hit = this.phys.raycast(a.body.position.x, a.body.position.y + 0.4, a.body.position.z, 0, -1, 0, 1.6, PHYS_GROUPS.rayWorldOnly);
+        if (hit?.collider) {
+          const meta = this.phys.metaOf(hit.collider);
+          if (meta && meta.kind === 'world') {
+            const m = meta.material as string;
+            if (m === 'metal' || m === 'wood' || m === 'grass' || m === 'water') surface = m;
+            else if (m === 'dirt' || m === 'foliage') surface = 'grass';
+          }
+        }
+        this.events.emit('footstep', { actorId: a.id, x: a.body.position.x, y: a.body.position.y, z: a.body.position.z, running, surface });
       },
       onLand: (a, speed, dmg) => {
         this.events.emit('land', { actorId: a.id, impactSpeed: speed, fallDamage: dmg });
@@ -323,7 +336,11 @@ export class Match {
       onActorHit: (target, attacker, damage, region, weaponId, killed, headshot) => {
         this.events.emit('actorHit', {
           targetId: target.id, attackerId: attacker?.id ?? -1, damage, region, killed, headshot, weaponId,
+          shieldDamage: target.lastShieldDamage,
         });
+        if (headshot && attacker?.isPlayer && !killed) {
+          this.events.emit('headshotFeedback', { attackerId: attacker.id });
+        }
         if (target.healing) {
           target.healing = null;
           this.events.emit('healCancelled', { actorId: target.id });
@@ -333,6 +350,9 @@ export class Match {
         } else if (killed) {
           this.pendingEliminations.push({ victim: target, killer: null, weaponId, headshot, storm: false });
         }
+      },
+      onShieldBroken: (target) => {
+        this.events.emit('shieldBroken', { actorId: target.id });
       },
       onTracer: (x1, y1, z1, x2, y2, z2, color) => {
         this.events.emit('tracer', { x1, y1, z1, x2, y2, z2, color });
@@ -348,7 +368,7 @@ export class Match {
   private lootEvents(): LootEvents {
     return {
       onSpawn: (item) => this.events.emit('itemSpawned', { itemId: item.id }),
-      onPickup: (item, actor) => this.events.emit('itemPickedUp', { itemId: item.id, actorId: actor.id }),
+      onPickup: (item, actor) => this.events.emit('itemPickedUp', { itemId: item.id, actorId: actor.id, rare: item.kind === 'weapon' && (item.rarity === 'epic' || item.rarity === 'legendary') }),
     };
   }
 
@@ -566,7 +586,8 @@ export class Match {
     if (bestChest) {
       bestChest.opened = true;
       this.loot.openChest(bestChest.kind, bestChest.x, bestChest.y + 0.4, bestChest.z, this.rng);
-      this.events.emit('chestOpened', { chestId: bestChest.id, kind: bestChest.kind, x: bestChest.x, y: bestChest.y, z: bestChest.z });
+      const chestTier = bestChest.kind === 'vault' ? 2 : bestChest.kind === 'elite' ? 1 : 0;
+      this.events.emit('chestOpened', { chestId: bestChest.id, kind: bestChest.kind, tier: chestTier, x: bestChest.x, y: bestChest.y, z: bestChest.z });
       return;
     }
     const item = this.loot.nearestItem(p.x, p.y + 1, p.z, GAMEPLAY.interactionRange + 0.8, (it) => it.kind !== 'ammo');

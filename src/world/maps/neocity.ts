@@ -22,9 +22,26 @@ export function buildNeoCity(): MapDef {
     const c = i * 100;
     b.box(c, 0.06, 0, 14, 0.12, S, 'concreteDark', 0, { noCollide: true });
     b.box(0, 0.06, c, S, 0.12, 14, 'concreteDark', 0, { noCollide: true });
-    // sidewalks
+    // sidewalk slabs with expansion joints feel
     b.box(c, 0.1, 0, 20, 0.2, S, 'sidewalk', 0, { floor: true });
     b.box(0, 0.1, c, S, 0.2, 20, 'sidewalk', 0, { floor: true });
+    // road lane markings (dashed centerline both directions) — above road top (0.12)
+    for (let d = -S / 2 + 6; d < S / 2 - 6; d += 9) {
+      b.box(c, 0.132, d, 0.35, 0.02, 3.4, 'sidewalk', 0, { noCollide: true });
+      b.box(d, 0.132, c, 3.4, 0.02, 0.35, 'sidewalk', 0, { noCollide: true });
+    }
+    // crosswalks near each intersection
+    for (const s of [-1, 1]) {
+      for (let k = -6; k <= 6; k += 2.4) {
+        b.box(c + k * 0.28, 0.132, c + s * 11.5, 0.5, 0.02, 5.2, 'sidewalk', 0, { noCollide: true });
+        b.box(c + s * 11.5, 0.132, c + k * 0.28, 5.2, 0.02, 0.5, 'sidewalk', 0, { noCollide: true });
+      }
+    }
+    // manhole covers + storm drains for street credibility
+    for (let d = -S / 2 + 22; d < S / 2 - 22; d += 47) {
+      b.cyl(c + 4.2, 0.14, d + ((i + 2) % 3) * 13, 0.55, 0.04, 'metalDark');
+      b.cyl(d + ((i + 3) % 4) * 11, 0.14, c - 4.2, 0.55, 0.04, 'metalDark');
+    }
   }
 
   // ------------------------------------------------------------------
@@ -192,16 +209,24 @@ export function buildNeoCity(): MapDef {
     b.vehicle(cx, cz, 0.2, cyaw, rng.bool(0.3) ? 'van' : 'sedan', [0x27313d, 0x503030, 0x2e3a2f, 0x33384a][rng.int(0, 3)]!);
   }
 
-  // Street lamps along roads (intersections + mid-block)
+  // Street lamps along roads — dense enough that no street segment is dark.
   for (let i = -2; i <= 2; i++) {
     for (let j = -2; j <= 2; j++) {
       if (i === 0 && j === 0) continue;
-      b.lampPost(i * 100 + 12, j * 100 + 12, 0, 5.6, 0x9fd8ff, 3.4, 42);
-      b.lampPost(i * 100 - 12, j * 100 - 12, 0, 5.6, 0xffb98a, 2.6, 28);
-      b.lampPost(i * 100 + 12, j * 100 + 55, 0, 5.6, 0x9fd8ff, 2.6, 30);
-      b.lampPost(i * 100 + 55, j * 100 + 12, 0, 5.6, 0xffc9a0, 2.4, 28);
-      b.lampPost(i * 100 - 55, j * 100 - 12, 0, 5.6, 0x9fd8ff, 2.6, 30);
-      b.lampPost(i * 100 - 12, j * 100 - 55, 0, 5.6, 0xffc9a0, 2.4, 28);
+      const bx = i * 100;
+      const bz = j * 100;
+      // intersection corners
+      b.lampPost(bx + 12, bz + 12, 0, 5.6, 0x9fd8ff, 3.4, 42);
+      b.lampPost(bx - 12, bz - 12, 0, 5.6, 0xffb98a, 2.8, 30);
+      b.lampPost(bx + 12, bz + 55, 0, 5.6, 0x9fd8ff, 2.8, 32);
+      b.lampPost(bx + 55, bz + 12, 0, 5.6, 0xffc9a0, 2.8, 32);
+      b.lampPost(bx - 55, bz - 12, 0, 5.6, 0x9fd8ff, 2.8, 32);
+      b.lampPost(bx - 12, bz - 55, 0, 5.6, 0xffc9a0, 2.8, 32);
+      // mid-block fillers so streets stay readable between intersections
+      b.lampPost(bx + 12, bz + 33, 0, 5.4, 0xffd9a0, 2.4, 26);
+      b.lampPost(bx + 12, bz - 33, 0, 5.4, 0xffd9a0, 2.4, 26);
+      b.lampPost(bx + 33, bz + 12, 0, 5.4, 0xffd9a0, 2.4, 26);
+      b.lampPost(bx - 33, bz + 12, 0, 5.4, 0xffd9a0, 2.4, 26);
     }
   }
 
@@ -213,20 +238,32 @@ export function buildNeoCity(): MapDef {
   b.light(20, 9, -180, 0x9d6bff, 2.2, 42);
 
   litWindows(b, rng);
+  streetDressing(b, rng);
 
   return b.finish(
     {
       preset: 'night',
-      fogColor: 0x232e48,
-      fogDensity: 0.0026,
+      hdri: 'dikhololo_night_2k.hdr',
+      fogColor: 0x1c2438,
+      fogDensity: 0.0042,
       sunDirection: [-0.3, -1, -0.2],
       sunColor: 0x8fa4cc,
-      sunIntensity: 2.0,
+      sunIntensity: 2.3,
       ambientColor: 0xa8b8d8,
-      ambientIntensity: 2.4,
-      hemisphereSky: 0x7688b8,
-      hemisphereGround: 0x3a4050,
-      hemisphereIntensity: 2.1,
+      ambientIntensity: 0.62,
+      hemisphereSky: 0x4a5878,
+      hemisphereGround: 0x3c4254,
+      hemisphereIntensity: 1.35,
+      exposure: 1.35,
+      envIntensity: 0.55,
+      backgroundBlurriness: 0.06,
+      backgroundIntensity: 0.9,
+      grade: {
+        vignette: 0.38,
+        saturation: 1.12,
+        contrast: 1.05,
+        lift: [0.002, 0.004, 0.01],
+      },
     },
     { from: [-330, -80], to: [330, 60] },
   );
@@ -413,34 +450,173 @@ function billboardSpot(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 /**
- * Scatters emissive "lit windows" over large building facades — sells the
- * night-city look without adding real lights.
+ * Scatters dense emissive window grids over building facades — the core of
+ * the night-city look. Windows are laid out floor-by-floor with per-window
+ * variety (warm/cool/off), plus occasional full-lit floors and storefront
+ * glow strips at street level. Pure decoration (noCollide).
  */
 function litWindows(b: WorldBuilder, rng: Rng): void {
-  const facadeMats: MatKey[] = ['facadeA', 'facadeB', 'facadeC'];
+  const facadeMats: MatKey[] = ['facadeA', 'facadeB', 'facadeC', 'plasterOld'];
   const warmMats: MatKey[] = ['neonOrange', 'neonCyan', 'neonBlue'];
+  const geo = b.def.geo;
+  const pushWindow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, mat: MatKey) =>
+    geo.push({ kind: 'box', x, y, z, sx, sy, sz, yaw: 0, mat, noCollide: true });
+
   for (const g of b.def.geo) {
     if (g.kind !== 'box') continue;
     if (!facadeMats.includes(g.mat)) continue;
-    const minDim = Math.min(g.sx, g.sz);
-    if (minDim < 10 || g.sy < 7) continue;
-    // Windows on the two largest faces
-    const faces: Array<{ axis: 'x' | 'z'; sign: number }> = g.sx >= g.sz
-      ? [{ axis: 'z', sign: 1 }, { axis: 'z', sign: -1 }]
-      : [{ axis: 'x', sign: 1 }, { axis: 'x', sign: -1 }];
+    const minSpan = Math.min(g.sx, g.sz);
+    if (minSpan < 9 || g.sy < 6) continue;
+    const faces: Array<{ axis: 'x' | 'z'; sign: number; span: number }> = g.sx >= g.sz
+      ? [{ axis: 'z', sign: 1, span: g.sx }, { axis: 'z', sign: -1, span: g.sx }]
+      : [{ axis: 'x', sign: 1, span: g.sz }, { axis: 'x', sign: -1, span: g.sz }];
+
+      const floors = Math.max(2, Math.floor((g.sy - 2) / 3));
     for (const face of faces) {
-      const count = Math.min(6, Math.floor((g.sx + g.sz) / 6));
-      for (let i = 0; i < count; i++) {
-        if (!rng.bool(0.65)) continue;
-        const along = rng.range(-0.35, 0.35);
-        const y = g.y + rng.range(-g.sy * 0.32, g.sy * 0.3);
-        const mat = warmMats[rng.int(0, warmMats.length - 1)]!;
-        const wx = face.axis === 'x' ? g.x + face.sign * (g.sx / 2 + 0.06) : g.x + along * g.sx;
-        const wz = face.axis === 'z' ? g.z + face.sign * (g.sz / 2 + 0.06) : g.z + along * g.sz;
-        const sx = face.axis === 'x' ? 0.05 : 0.9;
-        const sz = face.axis === 'z' ? 0.05 : 0.9;
-        b.def.geo.push({ kind: 'box', x: wx, y, z: wz, sx, sy: 0.55, sz, yaw: 0, mat, noCollide: true });
+      const span = face.span;
+      const colsF = Math.max(3, Math.floor((span - 4) / 2.7));
+      const step = (span - 3) / colsF;
+      // A couple of fully-lit "office" floors per building
+      const litFloors = new Set<number>();
+      if (rng.bool(0.5) && floors > 3) {
+        litFloors.add(rng.int(1, floors - 2));
+      }
+      for (let f = 0; f < floors; f++) {
+        const wy = g.y - g.sy / 2 + 1.9 + f * 3;
+        for (let cIdx = 0; cIdx < colsF; cIdx++) {
+          const along = -span / 2 + 1.5 + cIdx * step;
+          const roll = rng.next();
+          let on = roll < 0.52;
+          if (litFloors.has(f)) on = roll < 0.94;
+          if (!on) continue;
+          const mat = warmMats[rng.int(0, warmMats.length - 1)]!;
+          const wW = Math.min(1.15, step * 0.62);
+          const wH = 1.05 + rng.range(0, 0.5);
+          if (face.axis === 'x') {
+            pushWindow(g.x + face.sign * (g.sx / 2 + 0.07), wy, g.z + along, 0.07, wH, wW, mat);
+          } else {
+            pushWindow(g.x + along, wy, g.z + face.sign * (g.sz / 2 + 0.07), wW, wH, 0.07, mat);
+          }
+        }
+      }
+      // Street-level storefront band on one face
+      if (rng.bool(0.75)) {
+        const wy = g.y - g.sy / 2 + 1.35;
+        const bandLen = span * 0.62;
+        if (face.axis === 'x') {
+          pushWindow(g.x + face.sign * (g.sx / 2 + 0.09), wy, g.z, 0.1, 0.85, bandLen, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
+        } else {
+          pushWindow(g.x, wy, g.z + face.sign * (g.sz / 2 + 0.09), bandLen, 0.85, 0.1, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
+        }
       }
     }
   }
 }
+
+/**
+ * Street-level dressing: hanging cables between poles/buildings, neon
+ * blade signs, AC units and rooftop clutter, traffic signal boxes,
+ * barricades and debris piles. All noCollide decoration.
+ */
+function streetDressing(b: WorldBuilder, rng: Rng): void {
+  const S = 500;
+  // Cables across streets at intersections (catenary approximated by 3 sag segments)
+  const cableMat: MatKey = 'metalDark';
+  const addCable = (x1: number, z1: number, x2: number, z2: number, y: number, sag: number) => {
+    const segs = 5;
+    for (let i = 0; i < segs; i++) {
+      const t0 = i / segs;
+      const t1 = (i + 1) / segs;
+      const y0 = y - Math.sin(t0 * Math.PI) * sag;
+      const y1 = y - Math.sin(t1 * Math.PI) * sag;
+      const mx = x1 + ((x2 - x1) * (t0 + t1)) / 2;
+      const mz = z1 + ((z2 - z1) * (t0 + t1)) / 2;
+      const len = Math.hypot(x2 - x1, z2 - z1) / segs;
+      const yaw = Math.atan2(z1 - z2, x1 - x2);
+      b.box(mx, (y0 + y1) / 2, mz, len, 0.06, 0.06, cableMat, yaw, { noCollide: true });
+    }
+  };
+  for (let i = -2; i <= 2; i++) {
+    for (const j of [-1, 0, 1]) {
+      if (i === 0 && j === 0) continue;
+      const cx = i * 100;
+      const cz = j * 100;
+      if (rng.bool(0.7)) addCable(cx + 10, cz + 10, cx + 10, cz - 10, 5.35, 0.55);
+      if (rng.bool(0.7)) addCable(cx + 10, cz + 10, cx - 10, cz + 10, 5.35, 0.55);
+    }
+  }
+
+  // Neon blade signs near intersections on random corners
+  const signMats: MatKey[] = ['neonCyan', 'neonMagenta', 'neonGreen', 'neonBlue', 'neonOrange'];
+  for (let i = -2; i <= 2; i++) {
+    for (let j = -2; j <= 2; j++) {
+      if (i === 0 && j === 0) continue;
+      if (!rng.bool(0.65)) continue;
+      const sx = i * 100 + (rng.bool(0.5) ? 11.2 : -11.2);
+      const sz = j * 100 + rng.range(-8, 8);
+      const h = rng.range(4.2, 7.5);
+      const mat = signMats[rng.int(0, signMats.length - 1)]!;
+      // mounting bracket + vertical double-sided blade
+      b.box(sx, h, sz, 0.16, 0.16, 1.4, 'metalDark', 0, { noCollide: true });
+      b.box(sx + 0.14, h, sz, 0.22, 2.6, 1.05, mat, 0, { noCollide: true });
+      b.light(sx + 0.4, h, sz, NEON_HEX[mat] ?? 0x53e0ff, 1.4, 16);
+    }
+  }
+
+  // Rooftop clutter on flat-roofed mid buildings (AC units, vents, water tanks)
+  for (const g of b.def.geo) {
+    if (g.kind !== 'box') continue;
+    if (g.sy < 6.5 || g.sy > 20) continue;
+    const topY = g.y + g.sy / 2;
+    const units = rng.int(1, 3);
+    for (let u = 0; u < units; u++) {
+      const ux = g.x + rng.range(-g.sx * 0.32, g.sx * 0.32);
+      const uz = g.z + rng.range(-g.sz * 0.32, g.sz * 0.32);
+      const kind = rng.next();
+      if (kind < 0.45) {
+        // AC unit with fan grill
+        b.box(ux, topY + 0.55, uz, 1.7, 1.1, 1.7, 'metalDark', 0, { noCollide: true });
+        b.cyl(ux, topY + 1.16, uz, 0.55, 0.12, 'rust');
+      } else if (kind < 0.72) {
+        // vent pipe cluster
+        b.cyl(ux, topY + 0.7, uz, 0.28, 1.4, 'rust');
+        b.cyl(ux + 0.7, topY + 0.55, uz + 0.3, 0.2, 1.1, 'metalDark');
+      } else {
+        // water tank
+        b.cyl(ux, topY + 1.15, uz, 0.95, 2.3, 'rust');
+        b.box(ux, topY + 0.18, uz, 1.7, 0.36, 1.7, 'metalDark', 0, { noCollide: true });
+      }
+    }
+    // roof edge safety rail hints on taller structures
+    if (g.sy >= 10) {
+      const railMat: MatKey = 'metalDark';
+      b.box(g.x, topY + 0.42, g.z - g.sz / 2 + 0.15, g.sx - 0.6, 0.06, 0.06, railMat, 0, { noCollide: true });
+      b.box(g.x, topY + 0.42, g.z + g.sz / 2 - 0.15, g.sx - 0.6, 0.06, 0.06, railMat, 0, { noCollide: true });
+    }
+  }
+
+  // Barricades & construction corners scattered along roads
+  for (let k = 0; k < 26; k++) {
+    const onX = rng.bool(0.5);
+    const road = (rng.int(-2, 2)) * 100 + (rng.bool(0.5) ? 8.5 : -8.5);
+    const along = rng.range(-S / 2 + 30, S / 2 - 30);
+    const bx = onX ? road : along;
+    const bz = onX ? along : road;
+    const yaw = onX ? 0 : Math.PI / 2;
+    // striped barrier
+    b.box(bx, 0.55, bz, 2.4, 0.14, 0.34, 'sidewalk', yaw, { noCollide: true });
+    b.box(bx, 1.02, bz, 2.4, 0.24, 0.1, 'sidewalk', yaw, { noCollide: true });
+    for (const s of [-1, 1]) b.box(bx + s * (onX ? 1.0 : 0.0), 0.5, bz + s * (onX ? 0.0 : 1.0), 0.12, 1.0, 0.12, 'metalDark', 0, { noCollide: true });
+    // orange beacon light
+    b.light(bx, 1.25, bz, 0xff9040, 0.9, 9);
+    if (rng.bool(0.4)) {
+      // trash bags / debris pile beside it
+      b.sphere(bx + rng.range(-2, 2), 0.28, bz + rng.range(-2, 2), rng.range(0.3, 0.5), 'concreteDark', { noCollide: true });
+    }
+  }
+}
+
+const NEON_HEX: Partial<Record<MatKey, number>> = {
+  neonCyan: 0x53e0ff, neonMagenta: 0xff53c8, neonGreen: 0x54ff9f,
+  neonBlue: 0x5f8cff, neonOrange: 0xff9040,
+};

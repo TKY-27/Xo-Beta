@@ -31,7 +31,7 @@ interface Particle {
 }
 
 const MAX_TRACERS = 64;
-const MAX_FLASHES = 24;
+const MAX_FLASHES = 12;
 const MAX_PARTICLES = 512;
 
 export class VfxSystem {
@@ -226,6 +226,29 @@ export class VfxSystem {
         x + (Math.random() - 0.5) * 0.8, y + Math.random() * 1.6, z + (Math.random() - 0.5) * 0.8,
         (Math.random() - 0.5) * 1.4, 2.5 + Math.random() * 3.5, (Math.random() - 0.5) * 1.4,
         1.0 + Math.random() * 0.5, 0.07, color, -2, // negative gravity: rise
+      );
+    }
+  }
+
+  /** Shield-break: expanding cyan ring + energy shards. */
+  shieldBreakBurst(x: number, y: number, z: number): void {
+    const geo = new THREE.RingGeometry(0.55, 0.78, 32);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x6fd4ff, transparent: true, opacity: 0.85,
+      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x, y, z);
+    this.group.add(mesh);
+    this.shockwaves.push({ mesh, life: 0.45 });
+    for (let i = 0; i < 16; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 3.5 + Math.random() * 5;
+      this.spawnParticle(
+        x, y, z,
+        Math.cos(a) * sp, (Math.random() - 0.2) * 4, Math.sin(a) * sp,
+        0.7 + Math.random() * 0.4, 0.06, 0x8fdcff, 9,
       );
     }
   }

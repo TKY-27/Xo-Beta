@@ -1,7 +1,7 @@
 {
   "name": "xo-beta",
-  "version": "0.1.0",
-  "description": "Xo Beta — a browser-native single-player 3D battle royale FPS/TPS. 10 combatants, last one standing wins.",
+  "version": "0.2.0",
+  "description": "Xo Beta \u2014 a browser-native single-player 3D battle royale FPS/TPS. 10 combatants, last one standing wins.",
   "type": "module",
   "license": "MIT",
   "repository": {

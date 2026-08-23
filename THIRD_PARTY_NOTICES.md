@@ -1,73 +1,43 @@
 # Third-Party Notices
 
-Xo Beta includes the following third-party software. All are distributed under
-permissive licenses compatible with this project's MIT release.
+Xo Beta is released under the MIT license (see `LICENSE`). It redistributes
+third-party assets under the terms below. Full provenance and checksums:
+`docs/ASSET_MANIFEST.md`, `docs/ASSET_CHECKSUMS.txt`.
 
----
+## CC0 1.0 (Public Domain Dedication)
 
-## three.js
+The following projects publish their assets under
+[CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/):
 
-- **Version:** 0.185.1
-- **License:** MIT
-- **Source:** https://github.com/mrdoob/three.js
-- **Used for:** WebGL rendering, scene graph, post-processing.
+- **Poly Haven** — HDRI environment maps (`public/assets/sky/`)
+- **ambientCG** by Lennart Demets and contributors — PBR texture sets
+  (`public/assets/textures/`)
+- **Quaternius** — Universal Animation Library, Universal Base Characters
+  (Standard), Stylized Nature MegaKit (Standard) (`public/assets/models/characters/`,
+  `public/assets/models/nature/`) — https://www.patreon.com/quaternius
+- **Kenney NL** — Blaster Kit, Car Kit, Impact Sounds, Interface Sounds,
+  UI Audio, Sci-Fi Sounds (`public/assets/models/weapons/`,
+  `public/assets/models/vehicles/`, parts of `public/assets/audio/`) —
+  https://kenney.nl
 
-```
-The MIT License
+## CC-BY 3.0 (attribution required)
 
-Copyright © 2010-2026 three.js authors
+- **"Gunshot Sounds"** by Vincent "Tabasco" Sevedge
+  (https://opengameart.org/content/gunshot-sounds), licensed
+  [CC BY 3.0](http://creativecommons.org/licenses/by/3.0/).
+  Source file: `shotgun.wav`; shipped as
+  `public/assets/audio/guns/shotgun_a.wav` after loudness normalization.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+## Code dependencies
 
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
+- three.js — MIT License — https://threejs.org
+- @dimforge/rapier3d-compat — Apache-2.0 — https://rapier.rs
+- Build tooling (Vite, TypeScript, Vitest, Playwright, tsx,
+  license-checker-rseidelsohn) — see `package.json` for versions; each is
+  distributed under its own permissive license (MIT / Apache-2.0).
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-```
+## Attribution
 
-## Rapier3D (@dimforge/rapier3d-compat)
-
-- **Version:** 0.20.0
-- **License:** Apache-2.0
-- **Source:** https://github.com/dimforge/rapier
-- **Used for:** WASM physics (character controllers, colliders, queries).
-
-```
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
-
-A copy of the Apache-2.0 license text is available at the URL above and from
-https://www.apache.org/licenses/LICENSE-2.0.txt
-
-## Development-only tooling
-
-Build/test/QA tooling (Vite, TypeScript, Vitest, Playwright, license-checker)
-is used during development only and is not distributed with the game bundle;
-each is MIT/Apache-2.0 licensed by its respective authors.
-
----
-
-**Game assets:** every visual, audio and map asset shipped with Xo Beta is
-*original work generated procedurally at runtime by this codebase* — there are
-no third-party art or sound assets of any kind. See `docs/ASSET_MANIFEST.md`.
+For the MIT OSS release this notices file constitutes the required
+attribution for the CC-BY 3.0 asset listed above. It must be preserved in
+any redistribution of this repository or of a build produced from it.

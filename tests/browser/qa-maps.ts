@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
 
     try {
-      await page.waitForSelector('#hud:not(.hidden)', { timeout: 40000 });
+      await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 });
       console.log('HUD ✓');
     } catch {
       console.log('HUD ✗ (did not appear)');

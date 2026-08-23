@@ -8,6 +8,7 @@ import { emptyCommand, type InputCommand } from '../sim/input';
 import type { ActorController } from '../sim/match';
 import type { Actor } from '../sim/actor';
 import { getSettings } from '../core/settings';
+import type { GamepadInput } from './gamepad';
 import type { EventBus } from '../core/events';
 
 interface MatchEventsForInput {
@@ -23,6 +24,8 @@ export class PlayerController implements ActorController {
   pitch = 0;
   enabled = false;
   locked = false;
+  /** Optional controller input merged into every command. */
+  gamepad: GamepadInput | null = null;
 
   /** Edge-triggered actions accumulated since last update. */
   private pendingJump = false;
@@ -139,10 +142,18 @@ export class PlayerController implements ActorController {
     const s = getSettings();
     const b = s.bindings;
 
-    // Look
+    // Look — mouse first, then right-stick deltas
+    let lookDx = this.lookDx;
+    let lookDy = this.lookDy;
+    if (this.gamepad) {
+      const padLook = this.gamepad.consumeLook();
+      const padScale = s.padLookSens * 11.5 * dt * 60 * 0.016 * (actor.wpn.adsAmount > 0.5 ? 0.55 : 1);
+      lookDx += padLook.dx * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
+      lookDy += padLook.dy * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
+    }
     const sens = s.sensitivity * 0.0023 * (actor.wpn.adsAmount > 0.5 ? s.adsSensitivity : 1);
-    this.yaw -= this.lookDx * sens;
-    this.pitch -= this.lookDy * sens * (s.invertY ? -1 : 1);
+    this.yaw -= lookDx * sens;
+    this.pitch -= lookDy * sens * (s.invertY ? -1 : 1);
     const lim = Math.PI / 2 - 0.02;
     this.pitch = Math.max(-lim, Math.min(lim, this.pitch));
     this.yaw = ((this.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
@@ -195,9 +206,10 @@ export class PlayerController implements ActorController {
     cmd.slotRequest = this.slotRequest;
     this.slotRequest = null;
 
+    if (this.gamepad) this.gamepad.applyTo(cmd, dt, actor.wpn.adsAmount);
+
     cmd.yaw = this.yaw;
     cmd.pitch = this.pitch;
-    void dt;
     return cmd;
   }
 }

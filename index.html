@@ -24,13 +24,13 @@
     <div class="menu-backdrop"></div>
     <div class="menu-content">
       <h1 class="logo big">XO<span>BETA</span></h1>
-      <p class="tagline">Single-player battle royale · 10 combatants · last one standing</p>
+      <p class="tagline" data-i18n="menu.tagline">Single-player battle royale · 10 combatants · last one standing</p>
       <nav class="menu-buttons">
-        <button id="btn-play" class="btn primary">PLAY</button>
-        <button id="btn-settings" class="btn">SETTINGS</button>
-        <button id="btn-credits" class="btn">CREDITS</button>
+        <button id="btn-play" class="btn primary" data-i18n="common.play">PLAY</button>
+        <button id="btn-settings" class="btn" data-i18n="common.settings">SETTINGS</button>
+        <button id="btn-credits" class="btn" data-i18n="common.credits">CREDITS</button>
       </nav>
-      <p class="hint">Desktop keyboard &amp; mouse required · Click PLAY to lock the cursor</p>
+      <p class="hint" data-i18n="menu.hint" style="margin-top:1.6rem;">Desktop keyboard &amp; mouse required · Click PLAY to lock the cursor</p>
     </div>
   </div>
 
@@ -38,13 +38,13 @@
   <div id="play-menu" class="screen hidden">
     <div class="menu-backdrop"></div>
     <div class="menu-content wide">
-      <h2>SELECT ARENA</h2>
+      <h2 data-i18n="menu.selectArena">SELECT ARENA</h2>
       <div id="map-list" class="map-list"></div>
-      <h2>BOT DIFFICULTY</h2>
+      <h2 data-i18n="menu.difficulty">BOT DIFFICULTY</h2>
       <div id="difficulty-list" class="difficulty-list"></div>
       <div class="menu-row">
-        <button id="btn-play-start" class="btn primary">START MATCH</button>
-        <button id="btn-play-back" class="btn">BACK</button>
+        <button id="btn-play-start" class="btn primary" data-i18n="common.startMatch">START MATCH</button>
+        <button id="btn-play-back" class="btn" data-i18n="common.back">BACK</button>
       </div>
     </div>
   </div>
@@ -53,15 +53,15 @@
   <div id="settings-menu" class="screen hidden">
     <div class="menu-backdrop"></div>
     <div class="menu-content wide scrollable">
-      <h2>SETTINGS</h2>
+      <h2 data-i18n="common.settings">SETTINGS</h2>
       <div class="settings-columns">
-        <section id="settings-controls"><h3>Controls</h3></section>
-        <section id="settings-graphics"><h3>Graphics</h3></section>
-        <section id="settings-audio"><h3>Audio</h3></section>
-        <section id="settings-gameplay"><h3>Gameplay</h3></section>
+        <section id="settings-controls"><h3 data-i18n="set.controls">CONTROLS</h3></section>
+        <section id="settings-graphics"><h3 data-i18n="set.graphics">GRAPHICS</h3></section>
+        <section id="settings-audio"><h3 data-i18n="set.audio">AUDIO</h3></section>
+        <section id="settings-gameplay"><h3 data-i18n="set.gameplay">GAMEPLAY &amp; ACCESSIBILITY</h3></section>
       </div>
       <div class="menu-row">
-        <button id="btn-settings-back" class="btn">BACK</button>
+        <button id="btn-settings-back" class="btn" data-i18n="common.back">BACK</button>
       </div>
     </div>
   </div>
@@ -70,15 +70,14 @@
   <div id="credits-menu" class="screen hidden">
     <div class="menu-backdrop"></div>
     <div class="menu-content">
-      <h2>CREDITS</h2>
+      <h2 data-i18n="common.credits">CREDITS</h2>
       <div class="credits-body">
-        <p><strong>Xo Beta</strong> — an original open-source browser battle royale.</p>
-        <p>Design, engineering, art direction, procedural audio &amp; music:<br/>the Xo Beta contributors.</p>
-        <p>Built with Three.js (MIT) and Rapier physics (Apache-2.0).<br/>All game assets are generated procedurally at runtime — original work, MIT licensed.</p>
-        <p class="dim">See THIRD_PARTY_NOTICES.md for dependency licenses.</p>
+        <p><strong>Xo Beta</strong></p>
+        <p data-i18n="credits.body">An original open-source battle royale built with Three.js and Rapier.</p>
+        <p class="dim">THIRD_PARTY_NOTICES.md · docs/ASSET_MANIFEST.md</p>
       </div>
       <div class="menu-row">
-        <button id="btn-credits-back" class="btn">BACK</button>
+        <button id="btn-credits-back" class="btn" data-i18n="common.back">BACK</button>
       </div>
     </div>
   </div>
@@ -87,11 +86,11 @@
   <div id="pause-menu" class="screen hidden">
     <div class="menu-backdrop dark"></div>
     <div class="menu-content">
-      <h2>PAUSED</h2>
+      <h2 data-i18n="menu.paused">PAUSED</h2>
       <nav class="menu-buttons">
-        <button id="btn-resume" class="btn primary">RESUME</button>
-        <button id="btn-pause-settings" class="btn">SETTINGS</button>
-        <button id="btn-quit" class="btn">RETURN TO MENU</button>
+        <button id="btn-resume" class="btn primary" data-i18n="common.resume">RESUME</button>
+        <button id="btn-pause-settings" class="btn" data-i18n="common.settings">SETTINGS</button>
+        <button id="btn-quit" class="btn" data-i18n="common.quit">RETURN TO MENU</button>
       </nav>
     </div>
   </div>
@@ -103,6 +102,9 @@
     <div id="vignette"></div>
     <div id="storm-vignette"></div>
 
+    <div id="minimap-frame"><canvas id="minimap" width="188" height="188"></canvas></div>
+    <div id="minimap-label" data-i18n="hud.tabFullMap">TAB — full map</div>
+
     <div id="hud-bottom-left">
       <div class="bars">
         <div class="bar shield"><div id="shield-fill"></div><span id="shield-text">100</span></div>
@@ -113,34 +115,52 @@
 
     <div id="hud-bottom-right">
       <div id="ammo-display"><span id="ammo-mag">0</span><span class="ammo-sep">/</span><span id="ammo-reserve">0</span></div>
-      <div id="weapon-name">FISTS</div>
+      <div id="weapon-name">UNARMED</div>
       <div id="inventory-slots"></div>
     </div>
 
     <div id="hud-top-right">
-      <div id="alive-counter"><span id="alive-count">10</span> ALIVE</div>
-      <div id="kill-counter"><span id="kills-count">0</span> ELIMS</div>
+      <div id="alive-counter"><span id="alive-count">10</span><em data-i18n="hud.alive">ALIVE</em></div>
+      <div id="kill-counter"><span id="kills-count">0</span><em data-i18n="hud.elims">ELIMS</em></div>
       <div id="storm-timer"></div>
     </div>
 
     <div id="killfeed"></div>
 
-    <canvas id="minimap" width="200" height="200"></canvas>
-    <div id="minimap-label">TAB — full map</div>
-
     <div id="interact-prompt" class="hidden"><kbd>E</kbd> <span id="interact-text"></span></div>
+
+    <div id="loot-panel" class="hidden">
+      <div class="lp-head"><span class="lp-name" id="lp-name"></span><span class="lp-type" id="lp-type"></span></div>
+      <div class="lp-rarity" id="lp-rarity"></div>
+      <div class="lp-meta"><span id="lp-meta"></span><span class="lp-key"><kbd id="lp-key">E</kbd></span></div>
+      <div class="lp-full hidden" id="lp-full" data-i18n="loot.inventoryFull">INVENTORY FULL — SWAP OR DROP</div>
+    </div>
+
+    <div id="damage-numbers"></div>
+    <div id="captions"></div>
 
     <div id="center-banner" class="hidden"></div>
     <div id="elim-banner" class="hidden"></div>
     <div id="storm-warning" class="hidden"></div>
 
     <div id="spectate-hud" class="hidden">
-      <div>SPECTATING <span id="spectate-name"></span></div>
-      <div class="dim">← → switch combatant · V camera · TAB map</div>
+      <div><span data-i18n="hud.spectating">SPECTATING</span> <span id="spectate-name"></span></div>
+      <div class="dim" data-i18n="hud.spectateHint">← → switch combatant · V camera · TAB map</div>
     </div>
 
     <div id="fps-counter" class="hidden"></div>
   </div>
+
+  <!-- Tactical map overlay -->
+  <div id="tac-map-overlay" class="hidden">
+    <div class="tac-inner">
+      <h2 data-i18n="tac.title">TACTICAL MAP</h2>
+      <canvas id="tac-map" width="720" height="720"></canvas>
+      <div class="tac-legend"><i data-i18n="tac.you">YOU</i> · <span data-i18n="tac.markerPlaced">MARKER PLACED</span></div>
+    </div>
+  </div>
+
+  <div id="victory-flare"></div>
 
   <!-- Results -->
   <div id="results-screen" class="screen hidden">
@@ -150,8 +170,8 @@
       <div id="results-subtitle"></div>
       <div id="results-grid"></div>
       <div class="menu-row">
-        <button id="btn-results-again" class="btn primary">PLAY AGAIN</button>
-        <button id="btn-results-menu" class="btn">MAIN MENU</button>
+        <button id="btn-results-again" class="btn primary" data-i18n="common.playAgain">PLAY AGAIN</button>
+        <button id="btn-results-menu" class="btn" data-i18n="common.mainMenu">MAIN MENU</button>
       </div>
     </div>
   </div>
@@ -162,8 +182,8 @@
     <div class="menu-content">
       <h1 class="logo">XO<span>BETA</span></h1>
       <div class="credits-body">
-        <p>Xo Beta is designed for <strong>desktop browsers with keyboard &amp; mouse</strong>.</p>
-        <p>Open this page on a desktop browser to play.</p>
+        <h2 data-i18n="notice.mobileTitle">DESKTOP REQUIRED</h2>
+        <p data-i18n="notice.mobileBody">Xo Beta is designed for desktop browsers with keyboard &amp; mouse.</p>
       </div>
     </div>
   </div>

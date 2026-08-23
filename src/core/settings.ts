@@ -1,6 +1,6 @@
 /** Persistent user settings with safe fallbacks when storage is unavailable. */
 
-export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra';
+export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra' | 'cinematic';
 export type CameraMode = 'fps' | 'tps';
 
 export interface KeyBindings {
@@ -35,7 +35,7 @@ export interface Settings {
   quality: QualityPreset;
   resolutionScale: number;
   shadows: boolean;
-  shadowQuality: 'low' | 'medium' | 'high';
+  shadowQuality: 'low' | 'medium' | 'high' | 'cinematic';
   postProcessing: boolean;
   bloom: boolean;
   reflections: boolean;
@@ -59,6 +59,19 @@ export interface Settings {
   crosshairDot: boolean;
   cameraShake: number;
   showFps: boolean;
+
+  // Accessibility & localization
+  lang: 'en' | 'ja';
+  damageNumbers: boolean;
+  colorVision: 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
+  reducedMotion: boolean;
+  captions: boolean;
+
+  // Gamepad
+  gamepadEnabled: boolean;
+  padLookSens: number;
+  padDeadzone: number;
+  vibration: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -93,6 +106,17 @@ export const DEFAULT_SETTINGS: Settings = {
   crosshairDot: true,
   cameraShake: 1.0,
   showFps: false,
+
+  lang: 'en',
+  damageNumbers: true,
+  colorVision: 'none',
+  reducedMotion: false,
+  captions: false,
+
+  gamepadEnabled: true,
+  padLookSens: 1.0,
+  padDeadzone: 0.15,
+  vibration: true,
 };
 
 const STORAGE_KEY = 'xo-beta-settings-v1';

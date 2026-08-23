@@ -68,10 +68,10 @@ Bot brains producing the same `InputCommand` as humans:
 Difficulty tiers scale reaction/error/tracking/movement-skill for non-elite bots only.
 
 ### `src/render`
-three.js presentation consuming simulation state read-only: instanced world geometry from `MapDef`, procedural characters (distinct silhouettes per identity, pose-blended animation states), first-person viewmodel with sway/bob/recoil/reload animation, pooled VFX (tracers, flashes, sparks, shockwaves, elimination wisps, grapple ropes), camera rig with FP/TPS modes + collision, and a composer (bloom/FXAA/output).
+three.js presentation consuming simulation state read-only: instanced world geometry from `MapDef`, skinned GLB combatants (Quaternius rigs + Universal Animation Library clips) with procedural costume attachments and an animation state machine, first-person viewmodel composed from CC0 weapon parts with sway/bob/recoil/reload/ADS choreography, pooled VFX (tracers, flashes, sparks, shockwaves, shield-break bursts, elimination wisps, grapple ropes), shader water and storm wall, HDRI image-based lighting, camera rig with FP/TPS modes + collision, and a composer (bloom/GTAO/SMAA-FXAA/output grading).
 
 ### `src/audio`, `src/ui`, `src/player`
-WebAudio synthesis for all sound (weapons, foley, UI, ambience, layered music states) with HRTF panning fed by camera position. DOM-based HUD/menus/minimap/results. Input layer translating keyboard/mouse into commands with pointer-lock handling and remappable bindings.
+Recorded sample playback (CC0/CC-BY packs — see docs/ASSET_MANIFEST.md) through WebAudio spatialization: HRTF panning, distance filtering, per-surface footsteps, zone ambience beds with underwater/indoor processing. Continuous music is intentionally absent from matches; lobby/result stings only. DOM-based HUD/menus/minimap/results. Input layer translating keyboard/mouse into commands with pointer-lock handling and remappable bindings.
 
 ## Key decisions
 

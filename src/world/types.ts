@@ -5,7 +5,8 @@ export type MatKey =
   | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld'
   | 'glass' | 'grass' | 'dirt' | 'rock' | 'roofTile' | 'gold'
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
-  | 'facadeA' | 'facadeB' | 'facadeC' | 'marble' | 'sandbag';
+  | 'facadeA' | 'facadeB' | 'facadeC' | 'marble' | 'sandbag'
+  | 'corrugated' | 'bricksOld' | 'facilityFloor';
 
 export interface GeoBox {
   kind: 'box';
@@ -102,8 +103,18 @@ export interface LightSpec {
   range: number;
 }
 
+export interface SkyGrade {
+  vignette?: number;
+  saturation?: number;
+  contrast?: number;
+  /** Shadow lift color (linear RGB offsets). */
+  lift?: [number, number, number];
+}
+
 export interface SkyConfig {
   preset: 'night' | 'overcast' | 'day';
+  /** Equirectangular HDRI file (public/assets/sky) used as background + IBL. */
+  hdri?: string;
   fogColor: number;
   fogDensity: number;
   sunDirection: [number, number, number];
@@ -114,6 +125,11 @@ export interface SkyConfig {
   hemisphereSky: number;
   hemisphereGround: number;
   hemisphereIntensity: number;
+  exposure?: number;
+  envIntensity?: number;
+  backgroundBlurriness?: number;
+  backgroundIntensity?: number;
+  grade?: SkyGrade;
 }
 
 export interface MapDef {

@@ -133,19 +133,32 @@ export function buildEdenFacility(): MapDef {
   scatterRocks(b, rng, 30, { minX: -245, maxX: 245, minZ: -245, maxZ: 245 },
     [{ x: -90, z: -20, r: 60 }, { x: 120, z: 40, r: 40 }, { x: 10, z: 30, r: 30 }], terrainH);
 
+  decorateEden(b, rng);
+
   return b.finish(
     {
       preset: 'day',
+      hdri: 'qwantani_puresky_2k.hdr',
       fogColor: 0xbfd6e4,
-      fogDensity: 0.0016,
+      fogDensity: 0.002,
       sunDirection: [0.45, -0.8, 0.35],
       sunColor: 0xfff2dd,
       sunIntensity: 3.4,
       ambientColor: 0xb6ccd8,
-      ambientIntensity: 1.55,
+      ambientIntensity: 0.55,
       hemisphereSky: 0xa8d4f0,
       hemisphereGround: 0x55663f,
       hemisphereIntensity: 1.45,
+      exposure: 1.12,
+      envIntensity: 1.15,
+      backgroundBlurriness: 0.02,
+      backgroundIntensity: 1.0,
+      grade: {
+        vignette: 0.28,
+        saturation: 1.08,
+        contrast: 1.03,
+        lift: [0.004, 0.004, 0.002],
+      },
     },
     { from: [-330, -140], to: [330, 130] },
   );
@@ -420,4 +433,119 @@ function watchRock(b: WorldBuilder, cx: number, cz: number): void {
   b.stairs(cx + 4.5, gy, cz, 3, 5, 0.6, 0.7, 2.2, 'rock');
   b.platform(cx - 2.5, cx + 2.5, cz - 2.5, cz + 2.5, gy + 3.2);
   b.chest(cx, gy + 3.5, cz, 'elite');
+}
+
+// ---------------------------------------------------------------------------
+// Environment dressing: facility conduits, paths, dock gear, camp life
+// ---------------------------------------------------------------------------
+
+function decorateEden(b: WorldBuilder, rng: Rng): void {
+  // Concrete service paths linking facility POIs
+  const path = (x1: number, z1: number, x2: number, z2: number) => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const steps = Math.max(2, Math.round(len / 7));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x1 + (x2 - x1) * t + Math.sin(t * 8.3) * 2.6;
+      const pz = z1 + (z2 - z1) * t + Math.cos(t * 6.7) * 2.4;
+      b.box(px, terrainH(px, pz) + 0.055, pz, 5.4, 0.09, 5.6, 'concreteDark', rng.range(-0.1, 0.1), { noCollide: true });
+    }
+  };
+  path(-95, -30, -55, 12);      // lab main → east wing
+  path(-95, -30, -110, 100);    // complex → dormitories
+  path(-110, 100, 10, 30);      // dorms → greenhouses
+  path(10, 30, 118, 42);        // greenhouses → dock
+  path(-95, -30, -170, -120);   // complex → water treatment
+  path(-60, -55, 10, -195);     // helipad → overlook
+  path(60, 175, 160, 150);      // cabin → ford
+
+  // Rooftop solar arrays + conduit runs on facility roofs
+  for (const g of [...b.def.geo]) {
+    if (g.kind !== 'box') continue;
+    const isFacility = g.mat === 'concrete' || g.mat === 'metal' || g.mat === 'facilityFloor';
+    if (!isFacility || g.sy < 4 || g.sx < 10 || g.sz < 8) continue;
+    const topY = g.y + g.sy / 2;
+    // solar panel bank
+    if (rng.bool(0.65)) {
+      const px = g.x + rng.range(-g.sx * 0.22, g.sx * 0.22);
+      const pz = g.z + rng.range(-g.sz * 0.22, g.sz * 0.22);
+      b.box(px, topY + 0.5, pz, 4.6, 0.14, 2.6, 'metal', rng.range(-0.15, 0.15), { noCollide: true });
+      b.box(px, topY + 0.62, pz, 4.4, 0.06, 2.4, 'neonBlue', rng.range(-0.15, 0.15), { noCollide: true });
+    }
+    // exterior conduit along one wall base
+    if (rng.bool(0.7)) {
+      b.box(g.x, g.y - g.sy / 2 + 0.35, g.z + g.sz / 2 + 0.18, g.sx * 0.86, 0.16, 0.14, 'rust', 0, { noCollide: true });
+    }
+    // AC condensers
+    if (rng.bool(0.6)) {
+      b.box(g.x + g.sx * 0.28, topY + 0.45, g.z - g.sz * 0.24, 1.6, 0.9, 1.6, 'metalDark', 0, { noCollide: true });
+      b.cyl(g.x + g.sx * 0.28, topY + 0.96, g.z - g.sz * 0.24, 0.5, 0.1, 'rust');
+    }
+  }
+
+  // Greenhouse interior growth: fern/flower beds handled by scatter; add vine posts
+  for (let i = 0; i < 10; i++) {
+    const gx = rng.range(-8, 34);
+    const gz = rng.range(18, 44);
+    const gy = terrainH(gx, gz);
+    b.cyl(gx, gy + 1.1, gz, 0.06, 2.2, 'metalDark');
+    b.sphere(gx, gy + 2.25, gz, rng.range(0.35, 0.6), 'rock', { noCollide: true });
+  }
+
+  // Dock gear: mooring posts, fish crates, lanterns
+  for (const [mx, mz] of [[112, 30], [124, 32], [130, 46], [116, 52]] as Array<[number, number]>) {
+    const gy = terrainH(mx, mz);
+    b.cyl(mx, gy + 0.42, mz, 0.19, 0.85, 'woodDark');
+    b.light(mx, gy + 1.35, mz, 0xffd9a0, 0.9, 11);
+  }
+  for (let i = 0; i < 5; i++) {
+    const cx2 = 108 + rng.range(-6, 16);
+    const cz2 = 36 + rng.range(-6, 12);
+    b.crate(cx2, terrainH(cx2, cz2) + 0.2, cz2, rng.range(0.7, 1));
+  }
+
+  // Meadow camp: tents (cloth wedges), fire ring, log seats
+  for (let i = 0; i < 3; i++) {
+    const tx = 222 + rng.range(-8, 8);
+    const tz = 96 + rng.range(-8, 8);
+    const gy = terrainH(tx, tz);
+    b.box(tx, gy + 0.85, tz, 3.2, 1.5, 2.6, 'roofTile', rng.range(-0.4, 0.4));
+    b.box(tx, gy + 1.62, tz, 3.4, 0.14, 2.8, 'woodDark', 0, { noCollide: true });
+  }
+  {
+    const fx = 225; const fz = 104;
+    const gy = terrainH(fx, fz);
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      b.rock(fx + Math.cos(a) * 1.3, fz + Math.sin(a) * 1.3, gy, 0.35);
+    }
+    b.light(fx, gy + 0.9, fz, 0xffa04f, 1.6, 13);
+  }
+
+  // Cliff overlook rails & antenna guy-wires feel
+  for (let i = 0; i < 3; i++) {
+    const ax = -18 + i * 14;
+    const az = -185 + rng.range(-4, 4);
+    const gy = terrainH(ax, az);
+    b.cyl(ax, gy + 2.6, az, 0.09, 5.2, 'metalDark');
+    b.light(ax, gy + 5.3, az, 0xff5f5f, 1.1, 9);
+  }
+
+  // Water treatment exterior pipes (big industrial runs)
+  {
+    const px = -170; const pz = -98;
+    const gy = terrainH(px, pz);
+    for (let i = 0; i < 4; i++) {
+      b.cyl(px - 9 + i * 6, gy + 1.6, pz, 0.55, 3.2, 'rust');
+    }
+    b.box(px, gy + 3.4, pz, 26, 0.5, 1.4, 'metalDark', 0, { noCollide: true });
+  }
+
+  // Warning stripes at underground entries
+  for (const [sx, sz] of [[-176, -114], [-164, -126]] as Array<[number, number]>) {
+    const gy = terrainH(sx, sz);
+    for (let i = 0; i < 4; i++) {
+      b.box(sx - 1.8 + i * 1.2, gy + 0.06, sz, 0.6, 0.05, 3.4, 'gold', 0, { noCollide: true });
+    }
+  }
 }
