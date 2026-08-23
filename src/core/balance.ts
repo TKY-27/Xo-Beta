@@ -283,14 +283,14 @@ export interface StormPhase {
 }
 
 export const STORM_PHASES: readonly StormPhase[] = [
-  { wait: 150, shrink: 65, radius: 195, dps: 1 },
-  { wait: 125, shrink: 60, radius: 128, dps: 1.5 },
-  { wait: 105, shrink: 55, radius: 80, dps: 2 },
-  { wait: 95, shrink: 50, radius: 48, dps: 3 },
-  { wait: 75, shrink: 40, radius: 26, dps: 5 },
-  { wait: 65, shrink: 35, radius: 12, dps: 8 },
-  { wait: 55, shrink: 30, radius: 3.5, dps: 10 },
-  { wait: 45, shrink: 25, radius: 0.5, dps: 12 },
+  { wait: 220, shrink: 65, radius: 195, dps: 1 },
+  { wait: 145, shrink: 60, radius: 128, dps: 1.5 },
+  { wait: 110, shrink: 55, radius: 80, dps: 2 },
+  { wait: 85, shrink: 50, radius: 48, dps: 3 },
+  { wait: 55, shrink: 40, radius: 26, dps: 5 },
+  { wait: 45, shrink: 35, radius: 12, dps: 8 },
+  { wait: 30, shrink: 30, radius: 3.5, dps: 10 },
+  { wait: 25, shrink: 25, radius: 0.5, dps: 12 },
 ];
 
 export const STORM_INITIAL_RADIUS = 340;

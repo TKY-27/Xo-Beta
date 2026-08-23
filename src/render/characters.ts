@@ -7,7 +7,7 @@
  */
 
 import * as THREE from 'three';
-import { AnimationAction, AnimationMixer, LoopRepeat, LoopOnce } from 'three';
+import { AnimationAction, AnimationMixer, LoopOnce } from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import type { Actor } from '../sim/actor';
 
@@ -340,7 +340,6 @@ export class CharacterFactory {
           actions['aim_up']!.setEffectiveWeight(wUp * aimWeight);
           actions['aim_down']!.setEffectiveWeight(wDown * aimWeight);
           if (speedH < 0.6) {
-            actions['aim_neutral']!.weight !== undefined; // keep playing
             actions['aim_neutral']!.play();
             actions['aim_up']!.play();
             actions['aim_down']!.play();
@@ -405,14 +404,6 @@ export function updateEliminationFx(rig: CharacterRig, dt: number): void {
 // ---------------------------------------------------------------------------
 // Legacy capsule fallback (used if GLB assets fail to load)
 // ---------------------------------------------------------------------------
-
-function limb(len: number, thick: number, mat: THREE.Material): THREE.Mesh {
-  const geo = new THREE.CapsuleGeometry(thick, len - thick * 2, 4, 8);
-  const m = new THREE.Mesh(geo, mat);
-  m.geometry.translate(0, -len / 2, 0);
-  m.castShadow = true;
-  return m;
-}
 
 function fallbackRig(
   group: THREE.Group,

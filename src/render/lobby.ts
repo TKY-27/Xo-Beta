@@ -8,12 +8,6 @@ import * as THREE from 'three';
 import { CharacterFactory, type CharacterRig } from './characters';
 import type { WeaponModelFactory } from './weaponModels';
 
-interface FakeActorBody {
-  position: { x: number; y: number; z: number };
-  velocity: { x: number; y: number; z: number };
-  grounded: boolean;
-}
-
 /** Minimal actor-shaped stub that drives the idle/aim pose. */
 function lobbyActor(pitch = 0): Parameters<NonNullable<CharacterRig['update']>>[0] {
   return {

@@ -87,7 +87,7 @@ export class GamepadInput {
 
     const s = getSettings();
     const dz = s.padDeadzone;
-    let rumble = 0;
+    const rumble = 0;
 
     // Movement (merge: keyboard wins on conflict)
     const mx = deadzone(pad.axes[0] ?? 0, dz);

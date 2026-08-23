@@ -55,7 +55,6 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       b.slab(x, y0 + 0.18, z, o.w, o.d, 0.35, floorMat);
     }
 
-    const wallY = y0 + fh / 2 + (f > 0 ? 0.18 : 0);
     const sillH = f === 0 ? 1.1 : 0.9;
 
     // Walls with gaps: sides 0:+z(front) 1:+x(right) 2:-z(back) 3:-x(left)

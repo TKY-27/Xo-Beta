@@ -282,7 +282,6 @@ export class CombatSystem {
       } else if (meta?.kind === 'destructible') {
         const d = this.destructibles.get(meta.id);
         if (d && d.alive) {
-          const destroyed = d.type === 'glass' ? true : d.hp <= p.damage * 2;
           d.hp -= p.damage;
           const gone = d.type === 'glass' || d.hp <= 0;
           if (gone) {

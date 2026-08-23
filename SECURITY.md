@@ -2,14 +2,18 @@
 
 ## Supported versions
 
-The latest `main` branch and the most recent release tag receive fixes.
+The latest `master` branch and the most recent release tag receive fixes.
 
 ## Scope
 
 Xo Beta is a fully client-side game:
 
 - No accounts, no personal data collection, no analytics.
-- No secrets are embedded in the bundle (verified by CI license/policy checks).
+- No runtime network calls: all assets ship with the build and nothing loads
+  from CDNs. A strict Content-Security-Policy (`public/_headers`) enforces
+  `default-src 'self'` in production.
+- No secrets are embedded in the repository or bundle — CI runs a pattern-based
+  secret scan on every push/PR (`npm run audit:secrets`).
 - The optional Cloudflare deployment serves static files only via Workers
   Static Assets; no privileged bindings are exposed.
 

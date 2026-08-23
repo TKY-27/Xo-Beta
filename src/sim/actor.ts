@@ -7,7 +7,6 @@ import type { BotPersonality, HitRegion } from '../core/balance';
 import { HEALTH_MAX, SHIELD_MAX } from '../core/balance';
 import type { CharBody } from '../physics/physics';
 import { Inventory } from './inventory';
-import type { InputCommand } from './input';
 
 export type MoveState =
   | 'ground' | 'air' | 'slide' | 'wallrun' | 'mantle'
