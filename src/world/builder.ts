@@ -219,7 +219,7 @@ export function buildColliders(def: MapDef, phys: PhysicsWorld): void {
 
 export function matToHint(mat: MatKey): 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage' {
   switch (mat) {
-    case 'metal': case 'metalDark': case 'rust': return 'metal';
+    case 'metal': case 'metalDark': case 'rust': case 'corrugated': return 'metal';
     case 'wood': case 'woodDark': return 'wood';
     case 'glass': return 'glass';
     case 'grass': case 'dirt': return 'dirt';

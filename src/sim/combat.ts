@@ -39,6 +39,7 @@ export interface CombatEvents {
   onShotFired(actor: Actor, weaponId: WeaponId, x: number, y: number, z: number): void;
   onImpact(x: number, y: number, z: number, nx: number, ny: number, nz: number, material: string, projectile: boolean): void;
   onActorHit(target: Actor, attacker: Actor | null, damage: number, region: string, weaponId: WeaponId, killed: boolean, headshot: boolean): void;
+  onShieldBroken?(target: Actor): void;
   onTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number): void;
   onRicochet(x: number, y: number, z: number): void;
   onGlassBreak(x: number, y: number, z: number): void;
@@ -363,6 +364,7 @@ export class CombatSystem {
       target.lastAttackerId = attacker.id;
     }
     this.events.onActorHit(target, attacker, dealt, region, p.weaponId, wasAlive && !target.alive, headshot);
+    if (wasAlive && target.alive && target.lastShieldBroken) this.events.onShieldBroken?.(target);
     void hx; void hy; void hz;
   }
 

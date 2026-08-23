@@ -1,29 +1,94 @@
 /**
- * Audio engine: fully procedural WebAudio synthesis (original work — no
- * external sound assets). Spatialized SFX via PannerNode, layered music
- * states, storm ambience. All gameplay sounds also emit perception events
- * through the match event bus (AI hearing never reads the audio graph).
+ * Audio engine v2: recorded sample playback (CC0/CC-BY — see
+ * docs/ASSET_MANIFEST.md) with WebAudio spatialization, distance filtering,
+* map-specific ambience beds and underwater processing. Continuous match
+ * music is intentionally absent — the soundscape carries immersion.
  */
 
 import type { EventBus } from '../core/events';
 import type { MatchEventsMap } from '../sim/match';
 import { getSettings } from '../core/settings';
+import { fetchAudio } from '../assets/assets';
+
+type BusName = 'sfx' | 'ui' | 'ambience' | 'music';
+
+interface PlayOpts {
+  x?: number;
+  y?: number;
+  z?: number;
+  vol?: number;
+  rate?: number;
+  bus?: BusName;
+  /** Lowpass cutoff for occlusion / distance muffling. */
+  lp?: number;
+  refDist?: number;
+  rolloff?: number;
+}
+
+const SAMPLES: Array<[string, string]> = [
+  ['gun/pistol_a', 'guns/pistol_a.wav'],
+  ['gun/pistol_b', 'guns/pistol_b.wav'],
+  ['gun/pistol_c', 'guns/pistol_c.wav'],
+  ['gun/smg_a', 'guns/smg_a.wav'],
+  ['gun/smg_b', 'guns/smg_b.wav'],
+  ['gun/ar_a', 'guns/ar_a.wav'],
+  ['gun/ar_b', 'guns/ar_b.wav'],
+  ['gun/shotgun_a', 'guns/shotgun_a.wav'],
+  ['gun/sniper_a', 'guns/sniper_a.wav'],
+  ['step/concrete_a', 'steps/footstep_concrete_000.wav'],
+  ['step/concrete_b', 'steps/footstep_concrete_001.wav'],
+  ['step/concrete_c', 'steps/footstep_concrete_003.wav'],
+  ['step/grass_a', 'steps/footstep_grass_000.wav'],
+  ['step/grass_b', 'steps/footstep_grass_002.wav'],
+  ['step/wood_a', 'steps/footstep_wood_000.wav'],
+  ['step/wood_b', 'steps/footstep_wood_002.wav'],
+  ['step/carpet_a', 'steps/footstep_carpet_000.wav'],
+  ['impact/glass_a', 'impacts/impactGlass_light_000.wav'],
+  ['impact/glass_b', 'impacts/impactGlass_medium_001.wav'],
+  ['impact/metal_a', 'impacts/impactMetal_light_000.wav'],
+  ['impact/metal_b', 'impacts/impactMetal_heavy_001.wav'],
+  ['impact/wood_a', 'impacts/impactWood_medium_000.wav'],
+  ['impact/wood_b', 'impacts/impactWood_heavy_001.wav'],
+  ['impact/stone_a', 'impacts/impactMining_000.wav'],
+  ['impact/stone_b', 'impacts/impactMining_001.wav'],
+  ['impact/soft_a', 'impacts/impactSoft_medium_000.wav'],
+  ['impact/plate_a', 'impacts/impactPlate_light_000.wav'],
+  ['boom/a', 'explosions/explosionCrunch_000.wav'],
+  ['boom/b', 'explosions/explosionCrunch_002.wav'],
+  ['boom/sub', 'explosions/lowFrequency_explosion_001.wav'],
+  ['water/splash_a', 'water/splash_05.wav'],
+  ['water/splash_b', 'water/splash_11.wav'],
+  ['mech/door_open', 'mech/doorOpen_001.wav'],
+  ['mech/door_close', 'mech/doorClose_001.wav'],
+  ['chest/open_a', 'chest/openchest.wav'],
+  ['shield/hit', 'lasers/laserSmall_0.wav'],
+  ['shield/break', 'lasers/forceField_001.wav'],
+  ['grapple/fire', 'lasers/thrusterFire.wav'],
+  ['ui/click', 'ui/click1.wav'],
+  ['ui/hover', 'ui/rollover2.wav'],
+  ['ui/back', 'ui/back_002.wav'],
+  ['ui/confirm', 'ui/confirmation_001.wav'],
+  ['ui/error', 'ui/error_001.wav'],
+  ['ui/drop', 'ui/drop_001.wav'],
+  ['pickup/item', 'ui/open_001.wav'],
+];
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
-  private sfxBus: GainNode | null = null;
-  private musicBus: GainNode | null = null;
-  private ambienceBus: GainNode | null = null;
-  private uiBus: GainNode | null = null;
-  private listenerReady = false;
+  private masterFilter: BiquadFilterNode | null = null;
+  private buses: Partial<Record<BusName, GainNode>> = {};
+  private buffers = new Map<string, AudioBuffer>();
   private noiseBuffer: AudioBuffer | null = null;
 
-  private musicState: 'none' | 'explore' | 'combat' | 'final' | 'victory' | 'defeat' = 'none';
-  private musicNodes: Array<OscillatorNode> = [];
+  // ambience beds
+  private beds: Map<string, { src: AudioBufferSourceNode; gain: GainNode }> = new Map();
+  private bedTargets: Map<string, number> = new Map();
+
+  private musicState: 'none' | 'lobby' | 'victory' | 'defeat' = 'none';
+  private musicNodes: OscillatorNode[] = [];
   private musicGain: GainNode | null = null;
-  private windSource: AudioBufferSourceNode | null = null;
-  private windGain: GainNode | null = null;
+  private musicTimer: number | null = null;
 
   init(): void {
     if (this.ctx) return;
@@ -32,23 +97,28 @@ export class AudioEngine {
     const ctx = this.ctx;
 
     this.master = ctx.createGain();
+    this.masterFilter = ctx.createBiquadFilter();
+    this.masterFilter.type = 'lowpass';
+    this.masterFilter.frequency.value = 20000; // open air default
+    for (const name of ['sfx', 'ui', 'ambience', 'music'] as BusName[]) {
+      const g = ctx.createGain();
+      g.connect(this.masterFilter);
+      this.buses[name] = g;
+    }
+    this.masterFilter.connect(this.master);
     this.master.connect(ctx.destination);
-    this.sfxBus = ctx.createGain();
-    this.musicBus = ctx.createGain();
-    this.ambienceBus = ctx.createGain();
-    this.uiBus = ctx.createGain();
-    for (const bus of [this.sfxBus, this.musicBus, this.ambienceBus, this.uiBus]) {
-      bus!.connect(this.master);
+
+    const len = ctx.sampleRate * 1.0;
+    this.noiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = this.noiseBuffer.getChannelData(0);
+    let s = 1234567;
+    for (let i = 0; i < len; i++) {
+      s = (s * 16807) % 2147483647;
+      d[i]! = ((s & 0xffff) / 0x8000 - 1) * 0.5;
     }
 
-    // Shared noise buffer
-    const len = ctx.sampleRate * 1.2;
-    this.noiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate);
-    const data = this.noiseBuffer.getChannelData(0);
-    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-
     this.applyVolumes();
-    this.listenerReady = true;
+    listenerRef = this;
   }
 
   resume(): void {
@@ -59,496 +129,501 @@ export class AudioEngine {
     if (!this.ctx || !this.master) return;
     const s = getSettings();
     this.master.gain.value = s.masterVolume;
-    this.sfxBus!.gain.value = s.sfxVolume;
-    this.musicBus!.gain.value = s.musicVolume * 0.55;
-    this.ambienceBus!.gain.value = s.ambienceVolume;
-    this.uiBus!.gain.value = s.uiVolume * 0.8;
+    this.buses.sfx!.gain.value = s.sfxVolume;
+    this.buses.music!.gain.value = s.musicVolume * 0.5;
+    this.buses.ambience!.gain.value = s.ambienceVolume;
+    this.buses.ui!.gain.value = s.uiVolume;
+  }
+
+  async loadSamples(onProgress?: (pct: number) => void): Promise<void> {
+    this.init();
+    let done = 0;
+    await Promise.all(
+      SAMPLES.map(async ([key, rel]) => {
+        try {
+          const raw = await fetchAudio(rel.trim());
+          const buf = await this.ctx!.decodeAudioData(raw);
+          this.buffers.set(key, buf);
+        } catch (err) {
+          console.warn('sample failed:', key, err);
+        }
+        done++;
+        onProgress?.(done / SAMPLES.length);
+      }),
+    );
   }
 
   private now(): number {
     return this.ctx!.currentTime;
   }
 
-  // -------------------------------------------------------------------------
-  // Low-level synth helpers
-  // -------------------------------------------------------------------------
+  /** Spatial one-shot buffer playback through a panner. */
+  play(key: string, opts: PlayOpts = {}): void {
+    const buf = this.buffers.get(key);
+    if (!buf || !this.ctx) return;
+    const bus = this.buses[opts.bus ?? 'sfx']!;
+    let node: AudioNode = bus;
 
-  private envGain(dest: AudioNode, attack: number, decay: number, peak: number, when = 0): GainNode {
-    const g = this.ctx!.createGain();
-    g.gain.setValueAtTime(0.0001, this.now() + when);
-    g.gain.linearRampToValueAtTime(peak, this.now() + when + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, this.now() + when + attack + decay);
-    g.connect(dest);
-    return g;
-  }
-
-  private osc(type: OscillatorType, freq: number, detuneCents = 0): OscillatorNode {
-    const o = this.ctx!.createOscillator();
-    o.type = type;
-    o.frequency.value = freq;
-    o.detune.value = detuneCents;
-    return o;
-  }
-
-  private noise(when = 0): AudioBufferSourceNode {
-    const src = this.ctx!.createBufferSource();
-    src.buffer = this.noiseBuffer!;
-    src.loop = true;
-    src.start(this.now() + when + Math.random() * 0.01);
-    return src;
-  }
-
-  private panner(x: number, y: number, z: number): PannerNode {
-    const p = this.ctx!.createPanner();
-    p.panningModel = 'HRTF';
-    p.distanceModel = 'exponential';
-    p.refDistance = 6;
-    p.rolloffFactor = 1.4;
-    if (this.listenerReady) {
-      const l = this.ctx!.listener;
-      if (l.positionX) {
-        l.positionX.value = 0; l.positionY.value = 2; l.positionZ.value = 0;
-        l.forwardX.value = 0; l.forwardY.value = 0; l.forwardZ.value = -1;
-        l.upX.value = 0; l.upY.value = 1; l.upZ.value = 0;
-      }
+    if (opts.lp !== undefined) {
+      const f = this.ctx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = Math.max(220, opts.lp);
+      f.connect(bus);
+      node = f;
     }
-    p.positionX.value = x - cameraCenter.x;
-    p.positionY.value = y;
-    p.positionZ.value = z - cameraCenter.z;
-    return p;
+
+    let out: AudioNode = node;
+    const hasPos = opts.x !== undefined;
+    if (hasPos) {
+      const p = this.ctx.createPanner();
+      p.panningModel = 'HRTF';
+      p.distanceModel = 'exponential';
+      p.refDistance = opts.refDist ?? 5;
+      p.rolloffFactor = opts.rolloff ?? 1.25;
+      p.positionX.value = opts.x!;
+      p.positionY.value = opts.y ?? 1.2;
+      p.positionZ.value = opts.z!;
+      p.connect(node);
+      out = p;
+    }
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = opts.rate ?? 1;
+    const g = this.ctx.createGain();
+    g.gain.value = opts.vol ?? 1;
+    g.connect(out);
+    src.connect(g);
+    src.start(this.now() + Math.random() * 0.012);
   }
-  /** Camera position fed each frame for relative panning. */
-  static setListenerPos(x: number, z: number): void {
+
+  /** Listener update (camera-relative panning). */
+  static setListener(x: number, y: number, z: number, fx: number, fz: number): void {
+    const inst = listenerRef;
+    if (!inst || !inst.ctx?.listener) return;
+    const l = inst.ctx.listener;
+    if (l.positionX) {
+      l.positionX.setTargetAtTime(0, inst.now(), 0.02);
+      l.positionY.setTargetAtTime(y - 2, inst.now(), 0.02);
+      l.positionZ.setTargetAtTime(0, inst.now(), 0.02);
+      l.forwardX.value = fx;
+      l.forwardY.value = 0;
+      l.forwardZ.value = fz;
+      l.upX.value = 0; l.upY.value = 1; l.upZ.value = 0;
+    }
     cameraCenter.x = x;
     cameraCenter.z = z;
   }
 
   // -------------------------------------------------------------------------
-  // Weapon / gameplay SFX
+  // Gameplay SFX
   // -------------------------------------------------------------------------
 
   gunshot(kind: string, x: number, y: number, z: number, dry = false): void {
     if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
     if (dry) {
-      const click = this.osc('square', 2400);
-      click.connect(this.envGain(pan, 0.001, 0.04, 0.25));
-      click.start();
-      click.stop(this.now() + 0.08);
+      this.play('ui/click', { x, y, z, vol: 0.35, rate: 1.8 });
       return;
     }
-
-    const when = 0;
-    switch (kind) {
-      case 'pistol': {
-        const o = this.osc('sawtooth', 190);
-        o.frequency.exponentialRampToValueAtTime(70, this.now() + 0.09);
-        o.connect(this.envGain(pan, 0.002, 0.1, 0.5));
-        o.start(); o.stop(this.now() + 0.14);
-        const n = this.noise();
-        const hp = this.ctx.createBiquadFilter();
-        hp.type = 'bandpass'; hp.frequency.value = 3200; hp.Q.value = 0.7;
-        n.connect(hp); hp.connect(this.envGain(pan, 0.001, 0.07, 0.5, when));
-        n.stop(this.now() + 0.12);
-        break;
-      }
-      case 'smg': {
-        const o = this.osc('square', 150);
-        o.frequency.exponentialRampToValueAtTime(60, this.now() + 0.06);
-        o.connect(this.envGain(pan, 0.001, 0.065, 0.42));
-        o.start(); o.stop(this.now() + 0.1);
-        const n = this.noise();
-        const bp = this.ctx.createBiquadFilter();
-        bp.type = 'bandpass'; bp.frequency.value = 4200;
-        n.connect(bp); bp.connect(this.envGain(pan, 0.001, 0.05, 0.4));
-        n.stop(this.now() + 0.09);
-        break;
-      }
-      case 'ar': {
-        const o = this.osc('sawtooth', 130);
-        o.frequency.exponentialRampToValueAtTime(52, this.now() + 0.11);
-        o.connect(this.envGain(pan, 0.002, 0.13, 0.55));
-        o.start(); o.stop(this.now() + 0.18);
-        const n = this.noise();
-        const lp = this.ctx.createBiquadFilter();
-        lp.type = 'lowpass'; lp.frequency.value = 2600;
-        n.connect(lp); lp.connect(this.envGain(pan, 0.001, 0.1, 0.55));
-        n.stop(this.now() + 0.15);
-        break;
-      }
-      case 'shotgun': {
-        const o = this.osc('sawtooth', 90);
-        o.frequency.exponentialRampToValueAtTime(34, this.now() + 0.22);
-        o.connect(this.envGain(pan, 0.003, 0.28, 0.85));
-        o.start(); o.stop(this.now() + 0.36);
-        const n = this.noise();
-        const lp = this.ctx.createBiquadFilter();
-        lp.type = 'lowpass'; lp.frequency.value = 1400;
-        n.connect(lp); lp.connect(this.envGain(pan, 0.002, 0.24, 0.8));
-        n.stop(this.now() + 0.32);
-        break;
-      }
-      case 'sniper': {
-        const o = this.osc('sawtooth', 110);
-        o.frequency.exponentialRampToValueAtTime(30, this.now() + 0.3);
-        o.connect(this.envGain(pan, 0.003, 0.38, 0.95));
-        o.start(); o.stop(this.now() + 0.48);
-        const n = this.noise();
-        const hp = this.ctx.createBiquadFilter();
-        hp.type = 'highpass'; hp.frequency.value = 900;
-        n.connect(hp); hp.connect(this.envGain(pan, 0.001, 0.3, 0.7));
-        n.stop(this.now() + 0.42);
-        break;
-      }
+    const table: Record<string, string[]> = {
+      pistol: ['gun/pistol_a', 'gun/pistol_b', 'gun/pistol_c'],
+      smg: ['gun/smg_a', 'gun/smg_b'],
+      ar: ['gun/ar_a', 'gun/ar_b'],
+      shotgun: ['gun/shotgun_a'],
+      sniper: ['gun/sniper_a'],
+    };
+    const keys = table[kind] ?? table.pistol!;
+    const key = keys[Math.floor(Math.random() * keys.length)]!;
+    const dist = Math.hypot(x - cameraCenter.x, z - cameraCenter.z);
+    const lp = Math.max(900, 18000 - dist * 90);
+    const nearVol = kind === 'pistol' && dist < 3 ? 0.55 : 1;
+    this.play(key, {
+      x, y, z,
+      vol: (kind === 'shotgun' || kind === 'sniper' ? 1.15 : 0.95) * nearVol,
+      rate: 0.94 + Math.random() * 0.12,
+      lp,
+      refDist: 7,
+    });
+    // low-end reinforcement for heavy weapons
+    if (kind === 'shotgun' || kind === 'sniper') {
+      this.play('boom/sub', { x, y, z, vol: 0.5, rate: 1.1 + Math.random() * 0.2 });
     }
   }
 
   impact(x: number, y: number, z: number, material: string): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const n = this.noise();
-    const f = this.ctx.createBiquadFilter();
-    if (material === 'metal') { f.type = 'bandpass'; f.frequency.value = 5200; f.Q.value = 2; }
-    else if (material === 'water') { f.type = 'lowpass'; f.frequency.value = 700; }
-    else if (material === 'wood') { f.type = 'bandpass'; f.frequency.value = 1600; f.Q.value = 1; }
-    else { f.type = 'bandpass'; f.frequency.value = 2400; f.Q.value = 0.8; }
-    n.connect(f);
-    f.connect(this.envGain(pan, 0.001, 0.07, material === 'water' ? 0.4 : 0.3));
-    n.stop(this.now() + 0.1);
+    const table: Record<string, string[]> = {
+      metal: ['impact/metal_a', 'impact/metal_b', 'impact/plate_a'],
+      glass: ['impact/glass_a', 'impact/glass_b'],
+      wood: ['impact/wood_a', 'impact/wood_b'],
+      water: ['water/splash_a'],
+      dirt: ['impact/soft_a'],
+      foliage: ['impact/soft_a'],
+    };
+    const keys = table[material] ?? ['impact/stone_a', 'impact/stone_b'];
+    this.play(keys[Math.floor(Math.random() * keys.length)]!, {
+      x, y, z,
+      vol: material === 'metal' ? 0.75 : 0.6,
+      rate: 0.9 + Math.random() * 0.22,
+      refDist: 3.5,
+    });
   }
 
   ricochet(x: number, y: number, z: number): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const o = this.osc('sine', 3400 + Math.random() * 1800);
-    o.frequency.exponentialRampToValueAtTime(600, this.now() + 0.14);
-    o.connect(this.envGain(pan, 0.001, 0.16, 0.22));
-    o.start(); o.stop(this.now() + 0.2);
+    this.play('impact/metal_a', { x, y, z, vol: 0.45, rate: 1.7 + Math.random() * 0.5, refDist: 3 });
   }
 
   glassBreak(x: number, y: number, z: number): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    for (let i = 0; i < 5; i++) {
-      const o = this.osc('triangle', 2600 + Math.random() * 3200);
-      o.connect(this.envGain(pan, 0.001, 0.12 + Math.random() * 0.1, 0.14, i * 0.02));
-      o.start(this.now() + i * 0.02);
-      o.stop(this.now() + 0.3);
-    }
-    const n = this.noise();
-    const hp = this.ctx.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 4000;
-    n.connect(hp);
-    hp.connect(this.envGain(pan, 0.001, 0.18, 0.25));
-    n.stop(this.now() + 0.24);
+    this.play('impact/glass_b', { x, y, z, vol: 1.05, rate: 0.9 + Math.random() * 0.2 });
+    this.play('impact/glass_a', { x, y, z, vol: 0.8, rate: 1.25 });
   }
 
   debrisCrack(x: number, y: number, z: number): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const n = this.noise();
-    const lp = this.ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 900;
-    n.connect(lp);
-    lp.connect(this.envGain(pan, 0.002, 0.2, 0.5));
-    n.stop(this.now() + 0.26);
+    this.play('impact/wood_b', { x, y, z, vol: 0.9, rate: 0.85 + Math.random() * 0.2 });
   }
 
-  footstep(x: number, y: number, z: number, running: boolean): void {
-    if (!this.ctx) return;
-    const vol = running ? 0.16 : 0.09;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const n = this.noise();
-    const lp = this.ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.value = 380 + Math.random() * 220;
-    n.connect(lp);
-    lp.connect(this.envGain(pan, 0.002, 0.07, vol));
-    n.stop(this.now() + 0.09);
+  footstep(x: number, y: number, z: number, running: boolean, surface: string): void {
+    const table: Record<string, string[]> = {
+      stone: ['step/concrete_a', 'step/concrete_b', 'step/concrete_c'],
+      metal: ['step/concrete_a', 'step/concrete_c'],
+      wood: ['step/wood_a', 'step/wood_b'],
+      grass: ['step/grass_a', 'step/grass_b'],
+      carpet: ['step/carpet_a'],
+      water: ['water/splash_a'],
+    };
+    const isSelf = Math.hypot(x - cameraCenter.x, z - cameraCenter.z) < 1.6;
+    const keys = (table[surface] ?? table.stone!).slice();
+    if (isSelf && surface === 'metal') keys.push('step/carpet_a');
+    const key = keys[Math.floor(Math.random() * keys.length)]!;
+    const vol = (running ? 0.62 : 0.38) * (isSelf ? 0.85 : 1);
+    const rate = surface === 'metal' ? 1.12 : 0.94 + Math.random() * 0.14;
+    this.play(key, { x, y, z, vol, rate, refDist: 3, lp: running ? undefined : 5200 });
   }
 
   jumpLand(x: number, y: number, z: number, hard: boolean): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const o = this.osc('sine', hard ? 90 : 130);
-    o.frequency.exponentialRampToValueAtTime(50, this.now() + (hard ? 0.16 : 0.08));
-    o.connect(this.envGain(pan, 0.002, hard ? 0.2 : 0.1, hard ? 0.45 : 0.2));
-    o.start(); o.stop(this.now() + 0.26);
+    this.footstep(x, y, z, true, 'stone');
+    this.play('impact/soft_a', { x, y, z, vol: hard ? 0.8 : 0.4, rate: 0.8 });
   }
 
-  whoosh(x: number, y: number, z: number, pitch = 1): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const n = this.noise();
+  whoosh(_x: number, _y: number, _z: number, pitch = 1): void {
+    if (!this.ctx || !this.noiseBuffer) return;
+    const n = this.ctx.createBufferSource();
+    n.buffer = this.noiseBuffer;
+    n.loop = true;
     const bp = this.ctx.createBiquadFilter();
     bp.type = 'bandpass';
-    bp.Q.value = 1.4;
-    bp.frequency.setValueAtTime(500 * pitch, this.now());
-    bp.frequency.exponentialRampToValueAtTime(2200 * pitch, this.now() + 0.16);
-    n.connect(bp);
-    bp.connect(this.envGain(pan, 0.01, 0.18, 0.3));
-    n.stop(this.now() + 0.24);
+    bp.Q.value = 1.3;
+    bp.frequency.setValueAtTime(420 * pitch, this.now());
+    bp.frequency.exponentialRampToValueAtTime(2100 * pitch, this.now() + 0.16);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, this.now());
+    g.gain.linearRampToValueAtTime(0.22, this.now() + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, this.now() + 0.24);
+    n.connect(bp); bp.connect(g); g.connect(this.buses.sfx!);
+    n.start(); n.stop(this.now() + 0.26);
   }
 
   grappleFire(x: number, y: number, z: number): void {
-    this.whoosh(x, y, z, 1.4);
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const o = this.osc('square', 800);
-    o.frequency.exponentialRampToValueAtTime(300, this.now() + 0.12);
-    o.connect(this.envGain(pan, 0.002, 0.13, 0.16));
-    o.start(); o.stop(this.now() + 0.17);
+    this.play('grapple/fire', { x, y, z, vol: 0.7, rate: 1.2 });
+    this.whoosh(x, y, z, 1.5);
   }
 
-  dashFx(x: number, y: number, z: number): void {
-    this.whoosh(x, y, z, 1.9);
+  dashFx(): void {
+    this.whoosh(cameraCenter.x, 1.5, cameraCenter.z, 1.9);
   }
 
   splashFx(x: number, y: number, z: number, heavy: boolean): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const n = this.noise();
-    const lp = this.ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.setValueAtTime(heavy ? 1200 : 800, this.now());
-    lp.frequency.exponentialRampToValueAtTime(300, this.now() + 0.35);
-    n.connect(lp);
-    lp.connect(this.envGain(pan, 0.005, heavy ? 0.5 : 0.3, heavy ? 0.55 : 0.3));
-    n.stop(this.now() + (heavy ? 0.6 : 0.4));
+    this.play(heavy ? 'water/splash_b' : 'water/splash_a', {
+      x, y, z, vol: heavy ? 1.0 : 0.65, rate: heavy ? 0.92 : 1.06 + Math.random() * 0.14,
+    });
   }
 
   healComplete(): void {
-    if (!this.ctx || !this.uiBus) return;
-    const g = this.envGain(this.uiBus, 0.02, 0.4, 0.3);
-    [523, 659, 784].forEach((f, i) => {
-      const o = this.osc('sine', f);
-      o.connect(g);
-      o.start(this.now() + i * 0.07);
-      o.stop(this.now() + 0.5);
-    });
+    this.play('ui/confirm', { bus: 'ui', vol: 0.8 });
   }
 
-  chestOpen(x: number, y: number, z: number): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const o = this.osc('triangle', 330);
-    o.frequency.linearRampToValueAtTime(520, this.now() + 0.25);
-    o.connect(this.envGain(pan, 0.01, 0.35, 0.3));
-    o.start(); o.stop(this.now() + 0.45);
-    const shimmer = this.osc('sine', 1560);
-    shimmer.connect(this.envGain(pan, 0.05, 0.5, 0.12));
-    shimmer.start(); shimmer.stop(this.now() + 0.6);
+  chestOpen(x: number, y: number, z: number, tier = 0): void {
+    this.play('mech/door_open', { x, y, z, vol: 0.7, rate: tier === 2 ? 0.82 : tier === 1 ? 0.95 : 1.08 });
+    window.setTimeout(() => {
+      this.play('chest/open_a', { x, y, z, vol: 0.95, rate: tier === 2 ? 0.88 : 1 });
+      this.play('impact/metal_b', { x, y, z, vol: 0.4, rate: 1.3 });
+    }, 260);
+    if (tier >= 1) {
+      window.setTimeout(() => this.play('shield/break', { x, y, z, vol: 0.35, rate: tier === 2 ? 0.9 : 1.1 }), 480);
+    }
   }
 
-  pickupUi(): void {
-    if (!this.ctx || !this.uiBus) return;
-    const o = this.osc('sine', 720);
-    o.frequency.setValueAtTime(720, this.now());
-    o.frequency.linearRampToValueAtTime(980, this.now() + 0.06);
-    o.connect(this.envGain(this.uiBus, 0.004, 0.1, 0.22));
-    o.start(); o.stop(this.now() + 0.14);
+  pickupUi(rare: boolean): void {
+    this.play(rare ? 'ui/confirm' : 'pickup/item', { bus: 'ui', vol: 0.75, rate: rare ? 1.05 : 1 });
   }
 
-  uiClick(): void {
-    if (!this.ctx || !this.uiBus) return;
-    const o = this.osc('triangle', 440);
-    o.connect(this.envGain(this.uiBus, 0.002, 0.06, 0.16));
-    o.start(); o.stop(this.now() + 0.08);
+  uiClick(kind: 'click' | 'hover' | 'back' | 'confirm' | 'error' = 'click'): void {
+    this.play(`ui/${kind}`, { bus: 'ui', vol: kind === 'hover' ? 0.32 : 0.6 });
   }
 
   eliminationFx(x: number, y: number, z: number): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const o = this.osc('sawtooth', 420);
-    o.frequency.exponentialRampToValueAtTime(80, this.now() + 0.5);
-    o.connect(this.envGain(pan, 0.01, 0.55, 0.3));
-    o.start(); o.stop(this.now() + 0.65);
+    this.play('boom/b', { x, y, z, vol: 0.5, rate: 1.4 });
+    this.play('shield/break', { x, y, z, vol: 0.5, rate: 1.25 });
   }
 
   reloadClick(emptyMag: boolean): void {
-    if (!this.ctx || !this.sfxBus) return;
-    const o = this.osc('square', emptyMag ? 200 : 340);
-    o.connect(this.envGain(this.sfxBus, 0.001, 0.05, emptyMag ? 0.2 : 0.14));
-    o.start(); o.stop(this.now() + 0.08);
+    this.play(emptyMag ? 'ui/error' : 'impact/metal_a', { bus: 'sfx', vol: emptyMag ? 0.4 : 0.3, rate: emptyMag ? 1.4 : 1.7 });
+  }
+
+  shieldHit(x: number, y: number, z: number): void {
+    this.play('shield/hit', { x, y, z, vol: 0.55, rate: 0.9 + Math.random() * 0.3 });
+  }
+
+  shieldBreakFx(x: number, y: number, z: number): void {
+    this.play('shield/break', { x, y, z, vol: 0.9, rate: 0.85 });
+    this.play('impact/glass_b', { x, y, z, vol: 0.7, rate: 0.8 });
+  }
+
+  headshotTick(): void {
+    this.play('ui/switch2', { bus: 'ui', vol: 0.5, rate: 1.6 });
   }
 
   explosionFx(x: number, y: number, z: number): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const o = this.osc('sawtooth', 60);
-    o.frequency.exponentialRampToValueAtTime(24, this.now() + 0.6);
-    o.connect(this.envGain(pan, 0.004, 0.75, 0.95));
-    o.start(); o.stop(this.now() + 0.9);
-    const n = this.noise();
-    const lp = this.ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.setValueAtTime(2400, this.now());
-    lp.frequency.exponentialRampToValueAtTime(180, this.now() + 0.6);
-    n.connect(lp);
-    lp.connect(this.envGain(pan, 0.002, 0.7, 0.8));
-    n.stop(this.now() + 0.85);
+    this.play('boom/a', { x, y, z, vol: 1.1, rate: 0.9 + Math.random() * 0.2 });
+    this.play('boom/sub', { x, y, z, vol: 0.8, rate: 0.95 });
   }
 
   poundImpact(x: number, y: number, z: number): void {
-    if (!this.ctx) return;
-    const pan = this.panner(x, y, z);
-    pan.connect(this.sfxBus!);
-    const o = this.osc('sine', 70);
-    o.frequency.exponentialRampToValueAtTime(30, this.now() + 0.3);
-    o.connect(this.envGain(pan, 0.003, 0.42, 0.85));
-    o.start(); o.stop(this.now() + 0.5);
+    this.play('boom/b', { x, y, z, vol: 0.9, rate: 0.8 });
+    this.play('boom/sub', { x, y, z, vol: 0.7, rate: 1.05 });
   }
 
-  stormTick(): void {
-    if (!this.ctx || !this.ambienceBus) return;
-    const o = this.osc('sine', 210);
-    o.connect(this.envGain(this.ambienceBus, 0.02, 0.5, 0.2));
-    o.start(); o.stop(this.now() + 0.6);
+  stormWarningSting(): void {
+    this.play('ui/switch12', { bus: 'ui', vol: 0.7, rate: 0.8 });
+    this.play('boom/sub', { vol: 0.35, bus: 'ui', rate: 0.7 });
+  }
+
+  doorSound(x: number, y: number, z: number, open: boolean): void {
+    this.play(open ? 'mech/door_open' : 'mech/door_close', { x, y, z, vol: 0.8, rate: 0.96 + Math.random() * 0.08 });
   }
 
   victoryFanfare(win: boolean): void {
-    if (!this.ctx || !this.musicBus) return;
-    const notes = win ? [392, 494, 587, 784] : [392, 330, 262, 196];
-    notes.forEach((f, i) => {
-      const o = this.osc('triangle', f);
-      o.connect(this.envGain(this.musicBus!, 0.03, 1.1, 0.3, i * 0.16));
-      o.start(this.now() + i * 0.16);
-      o.stop(this.now() + i * 0.16 + 1.3);
-    });
+    this.stopMusic();
+    if (!win) {
+      this.play('ui/error', { bus: 'music', vol: 0.6, rate: 0.7 });
+      return;
+    }
+    this.startMusic('victory');
   }
 
   // -------------------------------------------------------------------------
-  // Ambience (wind bed) + music states
+  // Ambience beds & zones
   // -------------------------------------------------------------------------
 
-  startAmbience(preset: string): void {
-    if (!this.ctx || !this.ambienceBus || this.windSource) return;
-    const n = this.noise();
-    const lp = this.ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.value = preset === 'night' ? 240 : preset === 'overcast' ? 380 : 300;
-    const gain = this.ctx.createGain();
-    gain.gain.value = 0.05;
-    n.connect(lp);
-    lp.connect(gain);
-    gain.connect(this.ambienceBus);
-    this.windSource = n;
-    this.windGain = gain;
+  startAmbience(preset: string, indoor: boolean): void {
+    this.init();
+    const wanted: string[] =
+      preset === 'night'
+        ? ['city_loop']
+        : preset === 'overcast'
+          ? ['wind_loop', 'birds_loop']
+          : ['birds_loop', 'river_loop'];
+    const files: Record<string, string> = {
+      city_loop: 'ambience/city_loop.wav',
+      wind_loop: 'ambience/wind_loop.wav',
+      birds_loop: 'ambience/birds_loop.wav',
+      river_loop: 'ambience/river_loop.wav',
+    };
+    for (const [key, file] of Object.entries(files)) {
+      if (!wanted.includes(key)) continue;
+      const raw = this.buffers.get(`bed/${key}`);
+      if (!raw) {
+        // decode lazily then retry once
+        fetchAudio(file).then((ab) => this.ctx!.decodeAudioData(ab)).then((buf) => {
+          this.buffers.set(`bed/${key}`, buf);
+          this.startAmbience(preset, indoor);
+        }).catch(() => undefined);
+        continue;
+      }
+      const existing = this.beds.get(key);
+      if (existing) continue;
+      const src = this.ctx!.createBufferSource();
+      src.buffer = raw;
+      src.loop = true;
+      const gain = this.ctx!.createGain();
+      gain.gain.value = 0;
+      const target = key === 'city_loop' ? 0.34 : key === 'wind_loop' ? 0.3 : key === 'birds_loop' ? 0.24 : 0.3;
+      gain.gain.setTargetAtTime(indoor ? target * 0.45 : target, this.now(), 1.2);
+      src.connect(gain);
+      gain.connect(this.buses.ambience!);
+      src.start();
+      this.beds.set(key, { src, gain });
+    }
+    // fade out beds no longer wanted
+    for (const [key, bed] of this.beds) {
+      if (!wanted.includes(key)) {
+        bed.gain.gain.setTargetAtTime(0, this.now(), 0.6);
+        window.setTimeout(() => { try { bed.src.stop(); } catch { /* stopped */ } }, 1600);
+        this.beds.delete(key);
+      } else {
+        const base = key === 'city_loop' ? 0.34 : key === 'wind_loop' ? 0.3 : key === 'birds_loop' ? 0.24 : 0.3;
+        bed.gain.gain.setTargetAtTime(indoor ? base * 0.45 : base, this.now(), 0.8);
+      }
+    }
   }
 
   stopAmbience(): void {
-    try { this.windSource?.stop(); } catch { /* already stopped */ }
-    this.windSource = null;
-    this.windGain = null;
+    for (const [, bed] of this.beds) {
+      bed.gain.gain.setTargetAtTime(0, this.now(), 0.3);
+      window.setTimeout(() => { try { bed.src.stop(); } catch { /* already */ } }, 900);
+    }
+    this.beds.clear();
   }
 
-  setStormNearby(near: boolean): void {
-    if (this.windGain && this.ctx) {
-      this.windGain.gain.setTargetAtTime(near ? 0.14 : 0.05, this.now(), 1.2);
+  /** Underwater / indoor acoustic state. */
+  setEnvironmentState(state: 'open' | 'underwater'): void {
+    if (!this.masterFilter) return;
+    const t = this.now();
+    if (state === 'underwater') {
+      this.masterFilter.frequency.setTargetAtTime(700, t, 0.18);
+    } else {
+      this.masterFilter.frequency.setTargetAtTime(19500, t, 0.3);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Music: lobby loop + result stings only
+  // -------------------------------------------------------------------------
 
   setMusicState(state: typeof this.musicState): void {
     if (state === this.musicState) return;
     this.musicState = state;
-    // Tear down previous layer
+    this.stopMusic();
+    if (state === 'lobby') this.startMusic('lobby');
+    if (state === 'victory') this.startMusic('victory');
+    if (state === 'defeat') this.play('ui/error', { bus: 'music', vol: 0.5, rate: 0.72 });
+  }
+
+  private stopMusic(): void {
+    if (this.musicTimer !== null) {
+      window.clearTimeout(this.musicTimer);
+      this.musicTimer = null;
+    }
     for (const o of this.musicNodes) {
-      try { o.stop(); } catch { /* already stopped */ }
+      try { o.stop(); } catch { /* stopped */ }
     }
     this.musicNodes = [];
     if (this.musicGain) {
       this.musicGain.gain.setTargetAtTime(0, this.now(), 0.4);
+      const g = this.musicGain;
+      window.setTimeout(() => { try { g.disconnect(); } catch { /* ok */ } }, 1500);
       this.musicGain = null;
     }
-    if (state === 'none' || !this.ctx || !this.musicBus) return;
+  }
 
+  private startMusic(state: 'lobby' | 'victory'): void {
+    if (!this.ctx || !this.buses.music) return;
     const gain = this.ctx.createGain();
     gain.gain.value = 0;
-    gain.gain.setTargetAtTime(state === 'combat' ? 0.34 : state === 'final' ? 0.42 : state === 'explore' ? 0.22 : 0.3, this.now(), 0.8);
-    gain.connect(this.musicBus);
+    gain.gain.setTargetAtTime(state === 'lobby' ? 0.16 : 0.3, this.now(), state === 'lobby' ? 1.4 : 0.15);
+    gain.connect(this.buses.music);
     this.musicGain = gain;
 
-    // Simple evolving pad + pulse patterns per state
-    const scales: Record<string, number[]> = {
-      explore: [220, 277, 330, 415],
-      combat: [174, 207, 233, 261],
-      final: [146, 155, 174, 185],
-      victory: [261, 329, 392, 523],
-      defeat: [196, 185, 164, 146],
-    };
-    const notes = scales[state]!;
-    const patternSpeed = state === 'combat' ? 0.24 : state === 'final' ? 0.3 : 0.62;
+    if (state === 'victory') {
+      const notes = [392, 494, 587, 784, 988];
+      notes.forEach((f, i) => {
+        const o = this.ctx!.createOscillator();
+        o.type = 'triangle';
+        o.frequency.value = f;
+        const og = this.ctx!.createGain();
+        og.gain.setValueAtTime(0.0001, this.now() + i * 0.14);
+        og.gain.linearRampToValueAtTime(0.28, this.now() + i * 0.14 + 0.04);
+        og.gain.exponentialRampToValueAtTime(0.0001, this.now() + i * 0.14 + 1.2);
+        o.connect(og); og.connect(gain);
+        o.start(this.now() + i * 0.14);
+        o.stop(this.now() + i * 0.14 + 1.3);
+        this.musicNodes.push(o);
+      });
+      return;
+    }
 
-    const padOsc = this.osc('sawtooth', notes[0]! / 2);
-    const padFilter = this.ctx.createBiquadFilter();
-    padFilter.type = 'lowpass';
-    padFilter.frequency.value = state === 'final' ? 480 : 700;
-    padOsc.connect(padFilter);
-    padFilter.connect(gain);
-    padOsc.start();
-    this.musicNodes.push(padOsc);
-
-    let step = 0;
-    const tickNote = () => {
-      if (this.musicState !== state || !this.ctx) return;
-      const f = notes[step % notes.length]!;
-      const o = this.osc(state === 'final' ? 'square' : 'triangle', f);
-      o.connect(this.envGain(gain, 0.01, patternSpeed * 1.6, 0.12));
-      o.start();
-      o.stop(this.now() + patternSpeed * 2);
-      step++;
-      window.setTimeout(tickNote, patternSpeed * 1000);
+    // Lobby: slow evolving pad (original)
+    const chords: number[][] = [
+      [220, 277.2, 329.6],
+      [196, 246.9, 293.7],
+      [174.6, 220, 261.6],
+      [164.8, 207.7, 246.9],
+    ];
+    let ci = 0;
+    const padStep = () => {
+      if (this.musicState !== 'lobby' || !this.ctx) return;
+      const chord = chords[ci % chords.length]!;
+      ci++;
+      const oscs: OscillatorNode[] = [];
+      chord.forEach((f, k) => {
+        const o = this.ctx!.createOscillator();
+        o.type = k === 0 ? 'sawtooth' : 'triangle';
+        o.frequency.value = f * (k === 0 ? 0.5 : 1);
+        o.detune.value = (Math.random() - 0.5) * 8;
+        const og = this.ctx!.createGain();
+        og.gain.setValueAtTime(0.0001, this.now());
+        og.gain.linearRampToValueAtTime(k === 0 ? 0.10 : 0.07, this.now() + 1.6);
+        og.gain.setTargetAtTime(0.0001, this.now() + 4.4, 1.2);
+        const lp = this.ctx!.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 900;
+        o.connect(lp); lp.connect(og); og.connect(gain);
+        o.start();
+        oscs.push(o);
+      });
+      this.musicNodes.push(...oscs);
+      window.setTimeout(() => {
+        for (const o of oscs) { try { o.stop(); } catch { /* ok */ } }
+      }, 8200);
+      this.musicTimer = window.setTimeout(padStep, 6200);
     };
-    tickNote();
+    padStep();
   }
 }
 
 const cameraCenter = { x: 0, z: 0 };
+let listenerRef: AudioEngine | null = null;
 
 /** Wire all match events to audio. */
 export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<MatchEventsMap>): () => void {
   const offs: Array<() => void> = [];
   const on = <K extends keyof MatchEventsMap>(k: K, fn: (p: MatchEventsMap[K]) => void) => offs.push(bus.on(k, fn));
 
-  on('shotFired', (e) => {
-    audio.gunshot(e.weaponId, e.x, e.y, e.z, e.dry);
-  });
+  on('shotFired', (e) => audio.gunshot(e.weaponId, e.x, e.y, e.z, e.dry));
   on('impact', (e) => audio.impact(e.x, e.y, e.z, e.material));
   on('ricochet', (e) => audio.ricochet(e.x, e.y, e.z));
   on('glassBreak', (e) => audio.glassBreak(e.x, e.y, e.z));
   on('destructibleDestroyed', (e) => audio.debrisCrack(e.x, e.y, e.z));
-  on('footstep', (e) => audio.footstep(e.x, e.y, e.z, e.running));
+  on('footstep', (e) => audio.footstep(e.x, e.y, e.z, e.running, e.surface));
   on('land', (e) => {
     const a = match.actors.find((x) => x.id === e.actorId);
     if (a) audio.jumpLand(a.body.position.x, a.body.position.y, a.body.position.z, e.fallDamage > 0 || e.impactSpeed > 20);
   });
   on('jump', () => audio.whoosh(cameraCenter.x, 2, cameraCenter.z, 1.2));
   on('slide', () => audio.whoosh(cameraCenter.x, 1, cameraCenter.z, 0.8));
-  on('dash', () => audio.dashFx(cameraCenter.x, 1.5, cameraCenter.z));
+  on('dash', () => audio.dashFx());
   on('grappleAttach', (e) => audio.grappleFire(e.x, e.y, e.z));
   on('splash', (e) => audio.splashFx(cameraCenter.x, 0, cameraCenter.z, e.heavy));
-  on('chestOpened', (e) => audio.chestOpen(e.x, e.y, e.z));
-  on('itemPickedUp', () => audio.pickupUi());
+  on('chestOpened', (e) => audio.chestOpen(e.x, e.y, e.z, e.tier ?? 0));
+  on('itemPickedUp', (e) => audio.pickupUi(e.rare ?? false));
   on('healDone', () => audio.healComplete());
   on('reloadStarted', (e) => audio.reloadClick(e.empty));
+  on('actorHit', (e) => {
+    if (e.shieldDamage > 0) {
+      const v = match.actors.find((a) => a.id === e.targetId);
+      if (v) audio.shieldHit(v.body.position.x, v.body.position.y, v.body.position.z);
+    }
+  });
+  on('shieldBroken', (e) => {
+    const v = match.actors.find((a) => a.id === e.actorId);
+    if (v) audio.shieldBreakFx(v.body.position.x, v.body.position.y, v.body.position.z);
+  });
+  on('headshotFeedback', () => audio.headshotTick());
   on('eliminated', (e) => {
     const v = match.actors.find((a) => a.id === e.victimId);
     if (v) audio.eliminationFx(v.body.position.x, v.body.position.y, v.body.position.z);
   });
   on('poundImpact', (e) => audio.poundImpact(e.x, e.y, e.z));
-  on('stormWaiting', () => audio.stormTick());
+  on('stormWaiting', () => audio.stormWarningSting());
 
   return () => offs.forEach((f) => f());
 }
@@ -556,5 +631,3 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
 interface MatchLike {
   actors: Array<{ id: number; body: { position: { x: number; y: number; z: number } } }>;
 }
-
-// attachAudio only reads ids/positions; the full Match type satisfies it structurally.

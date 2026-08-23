@@ -1,212 +1,222 @@
 /**
- * First-person viewmodel: weapon presentation (5 classes), arms, sway,
- * walking bob, recoil kick, ADS transition, reload sequences.
+ * First-person viewmodel: composed weapon models (CC0 Kenney blaster parts),
+ * arms, sway, inertia, walking bob, procedural recoil, ADS transition,
+ * sprint lowering, tactical/empty reload animation, bolt cycling.
  */
 
 import * as THREE from 'three';
-import { RARITY_COLORS, WEAPONS, type Rarity, type WeaponId } from '../core/balance';
+import { WEAPONS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
+import { WeaponModelFactory, type WeaponModel } from './weaponModels';
+
+const HIP_POS = new THREE.Vector3(0.185, -0.17, -0.06);
+const ADS_POS = new THREE.Vector3(0, -0.075, -0.14);
+const SPRINT_POS = new THREE.Vector3(0.12, -0.26, -0.1);
 
 export class ViewModel {
   readonly group = new THREE.Group();
-  private weaponGroups = new Map<string, THREE.Group>();
+  private factory: WeaponModelFactory;
+  private models = new Map<string, WeaponModel>();
   private armMat: THREE.MeshStandardMaterial;
-  private suitMat: THREE.MeshStandardMaterial;
-  private currentId: string | null = null;
+  private gloveMat: THREE.MeshStandardMaterial;
+  private currentId: WeaponId | null = null;
+  private currentModel: WeaponModel | null = null;
   private t = 0;
 
   // Animation state
   private swayX = 0;
   private swayY = 0;
+  private swayRoll = 0;
   private recoilZ = 0;
+  private recoilPitch = 0;
   private reloadT = 0;
-  private boltT = 0;
-  private magMesh: THREE.Object3D | null = null;
-  private slideMesh: THREE.Object3D | null = null;
+  private swapT = 0;
+  private adsSmooth = 0;
+  private sprintBlend = 0;
+  private lastSpeed = 0;
+  private muzzleFlashLight: THREE.PointLight;
 
-  constructor() {
-    this.armMat = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.6, metalness: 0.25 });
-    this.suitMat = new THREE.MeshStandardMaterial({
-      color: 0x15171a, emissive: 0x5fd0ff, emissiveIntensity: 0.7, roughness: 0.45, metalness: 0.35,
-    });
-    for (const id of ['pistol', 'smg', 'ar', 'shotgun', 'sniper'] as WeaponId[]) {
-      const g = this.buildWeapon(id);
-      this.weaponGroups.set(id, g);
-      g.visible = false;
-      this.group.add(g);
-    }
-    // Arms
-    const armR = new THREE.Mesh(new THREE.CapsuleGeometry(0.045, 0.34, 4, 8), this.armMat);
-    armR.position.set(0.16, -0.22, -0.18);
-    armR.rotation.x = 1.1;
-    const armL = new THREE.Mesh(new THREE.CapsuleGeometry(0.042, 0.3, 4, 8), this.armMat);
-    armL.position.set(-0.12, -0.24, -0.42);
-    armL.rotation.set(1.2, 0.35, 0);
-    const gloveR = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.11), this.suitMat);
-    gloveR.position.set(0.055, -0.13, -0.32);
-    const gloveL = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.085, 0.11), this.suitMat);
-    gloveL.position.set(-0.06, -0.16, -0.52);
-    this.group.add(armR, armL, gloveR, gloveL);
+  constructor(factory: WeaponModelFactory) {
+    this.factory = factory;
+    this.armMat = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.62, metalness: 0.22 });
+    this.gloveMat = new THREE.MeshStandardMaterial({ color: 0x191d22, roughness: 0.55, metalness: 0.3 });
+    this.buildArms();
+
+    this.muzzleFlashLight = new THREE.PointLight(0xffc878, 0, 7, 2);
+    this.group.add(this.muzzleFlashLight);
   }
 
-  private buildWeapon(id: WeaponId): THREE.Group {
-    const g = new THREE.Group();
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2b3036, roughness: 0.38, metalness: 0.78 });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x191c20, roughness: 0.5, metalness: 0.6 });
+  private buildArms(): void {
+    // Right arm (trigger hand)
+    const armR = new THREE.Mesh(new THREE.CapsuleGeometry(0.047, 0.3, 4, 10), this.armMat);
+    armR.position.set(0.175, -0.235, -0.16);
+    armR.rotation.set(1.25, -0.12, 0.1);
+    const gloveR = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.085, 0.115), this.gloveMat);
+    gloveR.position.set(0.055, -0.145, -0.31);
+    gloveR.rotation.x = 0.35;
+    // Left support arm
+    const armL = new THREE.Mesh(new THREE.CapsuleGeometry(0.044, 0.27, 4, 10), this.armMat);
+    armL.position.set(-0.135, -0.255, -0.4);
+    armL.rotation.set(1.32, 0.42, 0);
+    const gloveL = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.082, 0.11), this.gloveMat);
+    gloveL.position.set(-0.062, -0.185, -0.545);
+    gloveL.rotation.set(0.3, 0, -0.15);
+    // Forearm guard accent
+    const guardR = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.02, 0.14), this.gloveMat);
+    guardR.position.set(0.09, -0.19, -0.24);
+    guardR.rotation.x = 1.25;
+    for (const m of [armR, armL, gloveR, gloveL, guardR]) m.castShadow = false;
+    this.group.add(armR, armL, gloveR, gloveL, guardR);
+  }
 
-    const addBox = (w: number, h: number, d: number, x: number, y: number, z: number, mat = bodyMat) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-      m.position.set(x, y, z);
-      g.add(m);
-      return m;
-    };
-
-    if (id === 'pistol') {
-      this.slideMesh = addBox(0.07, 0.075, 0.3, 0, 0.02, -0.1);
-      addBox(0.065, 0.14, 0.09, 0, -0.08, 0.02, darkMat).name = 'mag';
-      addBox(0.05, 0.03, 0.05, 0, 0.065, -0.24, darkMat);
-    } else if (id === 'smg') {
-      addBox(0.08, 0.1, 0.44, 0, 0, -0.12);
-      this.slideMesh = addBox(0.06, 0.05, 0.24, 0, 0.065, -0.2, darkMat);
-      this.magMesh = addBox(0.055, 0.22, 0.08, 0, -0.16, -0.06, darkMat);
-      addBox(0.05, 0.05, 0.16, 0, 0.01, 0.16, darkMat); // stock
-    } else if (id === 'ar') {
-      addBox(0.075, 0.1, 0.56, 0, 0, -0.16);
-      addBox(0.05, 0.05, 0.3, 0, 0.005, -0.55, darkMat); // barrel
-      this.magMesh = addBox(0.06, 0.2, 0.1, 0, -0.15, -0.1, darkMat);
-      addBox(0.06, 0.09, 0.14, 0, -0.07, 0.14, darkMat); // grip
-      addBox(0.06, 0.06, 0.22, 0, 0.02, 0.26, darkMat); // stock
-      addBox(0.09, 0.03, 0.12, 0, 0.075, -0.14, darkMat); // rail
-    } else if (id === 'shotgun') {
-      addBox(0.08, 0.1, 0.6, 0, 0, -0.18);
-      addBox(0.055, 0.055, 0.4, 0, -0.065, -0.36, darkMat); // tube
-      addBox(0.07, 0.09, 0.16, 0, -0.03, 0.16, darkMat); // pump grip
-      addBox(0.07, 0.1, 0.2, 0, -0.02, 0.3, darkMat); // stock
-    } else {
-      // sniper
-      addBox(0.07, 0.095, 0.7, 0, 0, -0.22);
-      addBox(0.045, 0.045, 0.42, 0, 0.005, -0.72, darkMat); // long barrel
-      addBox(0.055, 0.055, 0.16, 0, 0.09, -0.28, darkMat); // scope tube
-      const lens = new THREE.Mesh(
-        new THREE.CircleGeometry(0.028, 10),
-        new THREE.MeshBasicMaterial({ color: 0x53b8ff }),
-      );
-      lens.position.set(0, 0.09, -0.365);
-      g.add(lens);
-      this.magMesh = addBox(0.055, 0.16, 0.09, 0, -0.13, -0.05, darkMat);
-      addBox(0.07, 0.1, 0.26, 0, -0.01, 0.3, darkMat); // stock
-      this.slideMesh = addBox(0.05, 0.04, 0.2, 0, 0.062, -0.1, darkMat); // bolt carrier
+  private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
+    const key = `${id}:${rarity}`;
+    let m = this.models.get(key);
+    if (!m) {
+      const built = this.factory.build(id, rarity);
+      if (!built) return null;
+      m = built;
+      // viewmodel render tuning: draw over world, no shadow casting
+      m.group.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) { mesh.castShadow = false; mesh.receiveShadow = false; }
+        const mat = mesh.material as THREE.Material | undefined;
+        if (mat && 'depthTest' in mat) { /* keep depth test; weapon clips handled by proximity */ }
+      });
+      m.group.visible = false;
+      this.models.set(key, m);
+      this.group.add(m.group);
     }
-
-    // Rarity accent strip (recolored per instance at runtime)
-    const strip = new THREE.Mesh(
-      new THREE.BoxGeometry(0.085, 0.02, 0.2),
-      new THREE.MeshStandardMaterial({ color: 0x101114, emissive: 0xffffff, emissiveIntensity: 0.9, roughness: 0.4 }),
-    );
-    strip.name = 'rarityStrip';
-    strip.position.set(0, 0.055, -0.02);
-    g.add(strip);
-
-    return g;
+    return m;
   }
 
   setWeapon(id: WeaponId | null, rarity: Rarity): void {
-    if (this.currentId) {
-      const prev = this.weaponGroups.get(this.currentId);
-      if (prev) prev.visible = false;
-    }
+    if (this.currentId === id) return;
+    if (this.currentModel) this.currentModel.group.visible = false;
     this.currentId = id;
-    if (!id) return;
-    const g = this.weaponGroups.get(id)!;
-    g.visible = true;
-    const strip = g.getObjectByName('rarityStrip') as THREE.Mesh | null;
-    if (strip) {
-      (strip.material as THREE.MeshStandardMaterial).emissive.setHex(RARITY_COLORS[rarity]);
+    this.currentModel = id ? this.modelFor(id, rarity) : null;
+    if (this.currentModel) this.currentModel.group.visible = true;
+    this.swapT = 0.32;
+  }
+
+  /** Muzzle flash light pulse at the barrel tip. */
+  muzzlePulse(strength: number): void {
+    this.muzzleFlashLight.intensity = 5 * strength;
+    if (this.currentModel) {
+      this.muzzleFlashLight.position.copy(this.currentModel.muzzle);
     }
-    this.magMesh = g.children.find((c) => c.name === 'mag') ?? null;
   }
 
   /** Per-frame presentation update driven by actor state. */
   update(actor: Actor | null, dt: number, lookDx: number, lookDy: number, movingSpeed: number): void {
     this.t += dt;
-    if (!actor || !this.currentId) {
+    this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
+    if (!actor || !this.currentId || !this.currentModel) {
       this.group.visible = false;
       return;
     }
     this.group.visible = true;
     const def = WEAPONS[actor.inv.selectedWeapon?.weaponId ?? 'pistol'];
-    const ads = actor.wpn.adsAmount;
+    const adsTarget = actor.wpn.adsAmount;
+    this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
+    const ads = this.adsSmooth;
 
-    // Sway from look input
-    this.swayX += (-lookDx * 0.0016 - this.swayX) * Math.min(1, dt * 9);
-    this.swayY += (-lookDy * 0.0014 - this.swayY) * Math.min(1, dt * 9);
+    // Sprint lowering when moving fast & not aiming
+    const sprinting = movingSpeed > 8.6 && !adsTarget;
+    this.sprintBlend += ((sprinting ? 1 : 0) - this.sprintBlend) * Math.min(1, dt * 7);
 
-    // Bob
+    // Sway from look input (inertia: weapon lags behind aim)
+    this.swayX += (-lookDx * 0.00095 - this.swayX) * Math.min(1, dt * 9);
+    this.swayY += (-lookDy * 0.00085 - this.swayY) * Math.min(1, dt * 9);
+    this.swayRoll += (-lookDx * 0.00045 - this.swayRoll) * Math.min(1, dt * 7);
+
+    // Walk bob (figure-8), suppressed while aiming
+    const speedDelta = Math.abs(movingSpeed - this.lastSpeed);
+    this.lastSpeed = movingSpeed;
     const bobAmp = movingSpeed > 0.5 ? Math.min(1, movingSpeed / 9.5) : 0;
-    const bobX = Math.sin(this.t * movingSpeed * 0.9) * 0.011 * bobAmp * (1 - ads * 0.85);
-    const bobY = Math.abs(Math.cos(this.t * movingSpeed * 0.9)) * 0.013 * bobAmp * (1 - ads * 0.85);
+    const bobFreq = Math.max(6, movingSpeed * 0.92);
+    const bobX = Math.sin(this.t * bobFreq) * 0.0105 * bobAmp * (1 - ads * 0.88);
+    const bobY = Math.abs(Math.cos(this.t * bobFreq)) * 0.0125 * bobAmp * (1 - ads * 0.88);
+    void speedDelta;
 
-    // Recoil recovery
-    this.recoilZ *= Math.exp(-9 * dt);
+    // Recoil recovery (spring)
+    this.recoilZ *= Math.exp(-8.5 * dt);
+    this.recoilPitch *= Math.exp(-7 * dt);
 
-    // Reload animation progress
+    // Swap-in dip
+    this.swapT = Math.max(0, this.swapT - dt);
+    const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
+
+    // Reload choreography
     const reloading = actor.wpn.reloadTimer > 0;
-    let reloadAnim = 0;
+    let reloadPitch = 0;
+    let reloadRoll = 0;
+    let reloadDrop = 0;
+    const mag = this.currentModel.mag;
     if (reloading) {
-      this.reloadT += dt;
       const phase = 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal;
-      reloadAnim = Math.sin(phase * Math.PI);
-      if (this.magMesh) {
-        // drop then insert magazine
-        const dropPhase = Math.min(1, phase * 2.2);
-        this.magMesh.position.y = (this.magMesh.userData.baseY ??= this.magMesh.position.y);
-        this.magMesh.position.y = this.magMesh.userData.baseY - dropPhase * 0.22 * (phase < 0.55 ? 1 : -1);
-        this.magMesh.visible = !(phase < 0.45 && actor.wpn.reloadingEmpty);
+      const curve = Math.sin(phase * Math.PI);
+      reloadPitch = curve * 0.55;
+      reloadRoll = curve * 0.38;
+      reloadDrop = curve * 0.055;
+      if (mag) {
+        if (mag.userData.baseY === undefined) mag.userData.baseY = mag.position.y;
+        const baseY = mag.userData.baseY as number;
+        const dropPhase = Math.min(1, phase * 2.4);
+        mag.position.y = baseY - dropPhase * 0.2 * (phase < 0.52 ? 1 : -1);
+        mag.visible = !(phase < 0.44 && actor.wpn.reloadingEmpty);
       }
     } else {
-      this.reloadT = 0;
-      if (this.magMesh) {
-        this.magMesh.visible = true;
-        if (this.magMesh.userData.baseY !== undefined) this.magMesh.position.y = this.magMesh.userData.baseY;
+      if (mag && mag.userData.baseY !== undefined) {
+        mag.visible = true;
+        mag.position.y = mag.userData.baseY;
       }
     }
 
-    // Bolt/pump cycling
+    // Bolt / pump cycling
+    const def2 = def;
     let boltAnim = 0;
-    if (actor.wpn.boltTimer > 0 && (def.fireMode === 'bolt' || def.fireMode === 'pump')) {
-      boltAnim = Math.sin((1 - actor.wpn.boltTimer / 0.9) * Math.PI);
+    if (actor.wpn.boltTimer > 0 && (def2.fireMode === 'bolt' || def2.fireMode === 'pump')) {
+      const total = def2.fireMode === 'pump' ? 0.9 : 0.9;
+      boltAnim = Math.sin((1 - actor.wpn.boltTimer / total) * Math.PI);
+    }
+    const bolt = this.currentModel.bolt;
+    if (bolt) {
+      if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
+      const dir = def2.fireMode === 'pump' ? -0.085 : 0.06;
+      bolt.position.z = (bolt.userData.baseZ as number) + boltAnim * dir;
     }
 
-    // ADS position lerp
-    const hipPos = { x: 0.17, y: -0.155, z: -0.05 };
-    const adsPos = { x: 0, y: def.id === 'sniper' ? -0.062 : -0.07, z: -0.12 };
-    const px = hipPos.x + (adsPos.x - hipPos.x) * ads;
-    const py = hipPos.y + (adsPos.y - hipPos.y) * ads;
-    const pz = hipPos.z + (adsPos.z - hipPos.z) * ads;
+    // Compose position: hip → ADS → sprint offsets
+    const px =
+      HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
+      (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
+      bobX + this.swayX;
+    const py =
+      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
+      (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
+      bobY + this.swayY - reloadDrop - swapDip;
+    const pz =
+      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
+      (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
+      this.recoilZ;
 
-    this.group.position.set(px + bobX + this.swayX, py + bobY + this.swayY, pz + this.recoilZ);
+    this.group.position.set(px, py, pz);
     this.group.rotation.set(
-      -this.swayY * 2 + reloadAnim * 0.5 + (reloading ? 0.15 : 0),
-      this.swayX * 2,
-      reloadAnim * 0.25,
+      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads),
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads),
+      reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4,
     );
-
-    // Slide/bolt visual offset
-    if (this.slideMesh) {
-      this.slideMesh.position.z = (this.slideMesh.userData.baseZ ??= this.slideMesh.position.z);
-      this.slideMesh.position.z = this.slideMesh.userData.baseZ + boltAnim * (def.fireMode === 'pump' ? 0.06 : 0.045);
-    }
   }
 
   kick(strength: number): void {
-    this.recoilZ += strength * 0.06;
+    this.recoilZ += strength * 0.055;
+    this.recoilPitch += strength * 0.03;
   }
 
   /** Muzzle world position for effects. */
-  muzzleWorld(camera: THREE.Camera): THREE.Vector3 {
-    const v = new THREE.Vector3(0, 0.02, -0.62);
-    v.applyMatrix4(this.group.matrixWorld);
-    void camera;
-    return v;
+  muzzleWorld(_camera: THREE.Camera): THREE.Vector3 {
+    const v = this.currentModel?.muzzle.clone() ?? new THREE.Vector3(0, 0.02, -0.62);
+    return this.group.localToWorld(v);
   }
 }

@@ -149,15 +149,23 @@ export class Actor {
     return HEALTH_MAX + SHIELD_MAX;
   }
 
-  /** Apply damage after regional multiplier. Shield absorbs first. Returns actual damage dealt. */
+  /** Apply damage after regional multiplier. Shield absorbs first.
+   * Returns total dealt; sets lastShieldDamage/lastShieldBroken for event plumbing. */
+  lastShieldDamage = 0;
+  lastShieldBroken = false;
+
   applyDamage(amount: number): number {
     let dmg = amount;
     let dealt = 0;
+    this.lastShieldDamage = 0;
+    this.lastShieldBroken = false;
     if (this.shield > 0) {
       const toShield = Math.min(this.shield, dmg);
       this.shield -= toShield;
       dmg -= toShield;
       dealt += toShield;
+      this.lastShieldDamage = toShield;
+      if (this.shield <= 0) this.lastShieldBroken = true;
     }
     if (dmg > 0) {
       const toHealth = Math.min(this.health, dmg);

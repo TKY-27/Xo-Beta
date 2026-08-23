@@ -5,7 +5,7 @@
  */
 
 import { WorldBuilder } from '../builder';
-import type { MapDef } from '../types';
+import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
 import { addBuilding, scatterRocks, scatterTrees } from './common';
 
@@ -142,19 +142,32 @@ export function buildOldFront(): MapDef {
   scatterRocks(b, rng, 25, { minX: -245, maxX: 245, minZ: -245, maxZ: 245 },
     [{ x: 20, z: -30, r: 70 }, { x: 110, z: 30, r: 60 }, { x: 150, z: 170, r: 50 }], terrainH);
 
+  decorateOldFront(b, rng);
+
   return b.finish(
     {
       preset: 'overcast',
+      hdri: 'kloofendal_overcast_puresky_2k.hdr',
       fogColor: 0x9aa5ae,
-      fogDensity: 0.003,
+      fogDensity: 0.0034,
       sunDirection: [-0.55, -0.75, 0.35],
       sunColor: 0xe8ded0,
       sunIntensity: 2.6,
       ambientColor: 0xaeb9c6,
-      ambientIntensity: 1.6,
+      ambientIntensity: 0.7,
       hemisphereSky: 0xc2cbd6,
       hemisphereGround: 0x6a685c,
       hemisphereIntensity: 1.5,
+      exposure: 1.02,
+      envIntensity: 1.05,
+      backgroundBlurriness: 0.12,
+      backgroundIntensity: 1.0,
+      grade: {
+        vignette: 0.34,
+        saturation: 0.98,
+        contrast: 1.1,
+        lift: [0.006, 0.005, 0.004],
+      },
     },
     { from: [-330, 120], to: [330, -110] },
   );
@@ -207,9 +220,17 @@ function cathedral(b: WorldBuilder, cx: number, cz: number): void {
 
 function fountain(b: WorldBuilder, cx: number, cz: number): void {
   const gy = terrainH(cx, cz);
-  b.cyl(cx, gy + 0.5, cz, 5, 1, 'stoneBrick');
-  b.cyl(cx, gy + 1.3, cz, 1.6, 1.8, 'marble');
-  b.sphere(cx, gy + 2.8, cz, 1, 'marble');
+  // Tiered stone fountain with real basin water
+  b.cyl(cx, gy + 0.42, cz, 5.2, 0.84, 'stoneBrick');
+  b.cyl(cx, gy + 0.78, cz, 4.5, 0.16, 'metalDark');           // water surface ring
+  b.def.water.push({ minX: cx - 4.3, maxX: cx + 4.3, minZ: cz - 4.3, maxZ: cz + 4.3, surfaceY: gy + 0.86, depth: 0.6 });
+  b.platform(cx - 5.2, cx + 5.2, cz - 5.2, cz + 5.2, gy + 0.84);
+  b.cyl(cx, gy + 1.35, cz, 1.15, 1.7, 'stoneBrick');           // pedestal
+  b.cyl(cx, gy + 2.25, cz, 1.7, 0.22, 'marble');               // upper bowl
+  b.cyl(cx, gy + 2.62, cz, 0.28, 0.75, 'marble');              // finial column
+  // water jet
+  b.def.geo.push({ kind: 'cyl', x: cx, y: gy + 3.15, z: cz, r: 0.16, h: 0.9, mat: 'glass', noCollide: true });
+  b.light(cx, gy + 3.4, cz, 0xbfe4ff, 0.7, 9);
   b.chest(cx + 7, gy + 0.3, cz + 5, 'standard');
 }
 
@@ -493,3 +514,118 @@ function well(b: WorldBuilder, cx: number, cz: number): void {
   b.box(cx + 1.2, gy + 2.4, cz, 0.2, 2.4, 0.2, 'woodDark');
   b.box(cx, gy + 3.6, cz, 3, 0.3, 2.4, 'roofTile');
 }
+
+// ---------------------------------------------------------------------------
+// Environment dressing: worn roads, lanterns, banners, window glow, clutter
+// ---------------------------------------------------------------------------
+
+function decorateOldFront(b: WorldBuilder, rng: Rng): void {
+  // Worn dirt roads linking the main POIs (follow terrain, purely visual)
+  const road = (x1: number, z1: number, x2: number, z2: number) => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const steps = Math.max(2, Math.round(len / 7));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x1 + (x2 - x1) * t + Math.sin(t * 9.1) * 3.4;
+      const pz = z1 + (z2 - z1) * t + Math.cos(t * 7.3) * 3.0;
+      b.box(px, terrainH(px, pz) + 0.055, pz, 6.6, 0.09, 6.8, 'dirt', rng.range(-0.12, 0.12), { noCollide: true });
+    }
+  };
+  road(20, -10, 110, 30);       // square → old town
+  road(20, -10, -150, -150);    // square → keep
+  road(-150, -150, -170, 60);   // keep → checkpoint
+  road(20, -10, 60, -120);      // square → shrine north
+  road(110, 30, 190, 60);       // old town → orchard
+  road(20, -10, -30, 210);      // square → mill
+  road(110, 30, 150, 170);      // old town → farmstead
+
+  // Iron lantern posts in inhabited areas (warm pools at dusk)
+  const lantern = (x: number, z: number) => {
+    const gy = terrainH(x, z);
+    b.cyl(x, gy + 1.35, z, 0.07, 2.7, 'metalDark');
+    b.box(x + 0.16, gy + 2.72, z, 0.34, 0.4, 0.34, 'metalDark', 0, { noCollide: true });
+    b.box(x + 0.16, gy + 2.66, z, 0.24, 0.26, 0.24, 'neonOrange', 0, { noCollide: true });
+    b.light(x + 0.16, gy + 2.55, z, 0xffc98a, 1.15, 13);
+  };
+  for (let i = 0; i < 6; i++) {
+    lantern(-6 + i * 11, -14);
+    lantern(i * 11 + 88, 22);
+    lantern(-24 + i * 9, 6);
+  }
+  lantern(96, 58); lantern(116, 58); lantern(20, -44); lantern(32, -40);
+  lantern(138, 158); lantern(168, 178); lantern(-170, 56); lantern(-160, 78);
+
+  // Heraldic banners on major facades (swaying cloth is faked with slight tilt)
+  const bannerCols: MatKey[] = ['roofTile', 'rust'];
+  const bannerAt = (x: number, y: number, z: number, yaw: number, col: MatKey) => {
+    b.box(x, y, z, 1.15, 3.1, 0.07, col, yaw, { noCollide: true });
+    b.box(x, y - 1.75, z, 1.25, 0.16, 0.09, 'gold', yaw, { noCollide: true });
+    b.box(x, y + 1.62, z, 1.35, 0.12, 0.1, 'woodDark', yaw, { noCollide: true });
+  };
+  bannerAt(20, terrainH(20, -33) + 6.2, -33.6, 0, bannerCols[0]!);
+  bannerAt(27, terrainH(28, -33) + 6.2, -33.6, 0, bannerCols[1]!);
+  bannerAt(100, terrainH(100, 39) + 4.6, 39.4, Math.PI, bannerCols[0]!);
+  bannerAt(116, terrainH(116, 39) + 4.6, 39.4, Math.PI, bannerCols[1]!);
+  bannerAt(-18, terrainH(-18, -21) + 4.4, -20.4, Math.PI, bannerCols[0]!);
+  bannerAt(58, terrainH(58, -21) + 4.4, -20.4, Math.PI, bannerCols[1]!);
+
+  // Warm evening windows on stone/plaster homes
+  const glowMats: MatKey[] = ['neonOrange', 'neonCyan'];
+  for (const g of [...b.def.geo]) {
+    if (g.kind !== 'box') continue;
+    const m = g.mat;
+    if (m !== 'plaster' && m !== 'plasterOld' && m !== 'stoneBrick') continue;
+    if (Math.min(g.sx, g.sz) < 8 || g.sy < 4.5 || g.sy > 10) continue;
+    for (const face of [{ axis: 'z' as const, sign: 1 }, { axis: 'z' as const, sign: -1 }]) {
+      const cols = Math.max(2, Math.floor((g.sx - 3) / 2.4));
+      const rows = Math.max(1, Math.floor((g.sy - 2) / 2.4));
+      for (let cIdx = 0; cIdx < cols; cIdx++) {
+        for (let rw = 0; rw < rows; rw++) {
+          if (!rng.bool(0.34)) continue;
+          const wx = g.x - g.sx / 2 + 1.6 + cIdx * ((g.sx - 3) / Math.max(1, cols - 1));
+          const wy = g.y - g.sy / 2 + 1.7 + rw * 2.3;
+          const wz = g.z + face.sign * (g.sz / 2 + 0.06);
+          b.def.geo.push({
+            kind: 'box', x: wx, y: wy, z: wz,
+            sx: 0.85, sy: 0.95, sz: 0.05, yaw: 0,
+            mat: glowMats[rng.int(0, 1)]!, noCollide: true,
+          });
+        }
+      }
+    }
+  }
+
+  // Storytelling clutter: barrels, firewood, wheelbarrows, clotheslines
+  const barrel = (x: number, z: number) => {
+    const gy = terrainH(x, z);
+    b.cyl(x, gy + 0.55, z, 0.52, 1.1, 'woodDark');
+    b.cyl(x, gy + 0.55, z, 0.54, 0.08, 'rust');
+  };
+  const firewood = (x: number, z: number) => {
+    const gy = terrainH(x, z);
+    for (let i = 0; i < 5; i++) b.cyl(x + (i % 3) * 0.5 - 0.5, gy + 0.24 + Math.floor(i / 3) * 0.46, z, 0.2, 2.2, 'wood');
+  };
+  barrel(30, -16); barrel(31.4, -17.2); barrel(102, 36); barrel(103.5, 37.4);
+  barrel(142, 160); barrel(-164, 64); barrel(94, 192); barrel(22, -48);
+  firewood(84, 16); firewood(126, 54); firewood(90, 186); firewood(-140, -136);
+
+  // Gravestones & hedges around chapel for lived-in feel
+  for (let i = 0; i < 8; i++) {
+    const gx = -60 + rng.range(-9, 9);
+    const gz = 130 + 8 + rng.range(-6, 8);
+    const gy = terrainH(gx, gz);
+    b.box(gx, gy + 0.45, gz, 0.7, 0.9, 0.16, 'stoneBrick', rng.range(-0.2, 0.2), { noCollide: true });
+  }
+
+  // Market stalls in Old Town square
+  const stall = (x: number, z: number, yaw: number) => {
+    const gy = terrainH(x, z);
+    b.box(x, gy + 1.05, z, 3.6, 0.16, 1.9, 'wood', yaw);
+    for (const s of [-1, 1]) b.box(x + Math.cos(yaw) * s * 1.7, gy + 0.53, z + Math.sin(yaw) * s * 1.7, 0.14, 1.05, 0.14, 'woodDark', 0, { noCollide: true });
+    b.box(x, gy + 2.35, z, 4.1, 0.12, 2.3, 'roofTile', yaw, { noCollide: true });
+    b.crate(x + 1.4, gy + 0.2, z + 1.6, 0.85);
+    b.loot(x - 1.2, gy + 1.35, z);
+  };
+  stall(100, 24, 0.2); stall(112, 26, 0.2); stall(106, 42, Math.PI / 2 + 0.15);
+}
+

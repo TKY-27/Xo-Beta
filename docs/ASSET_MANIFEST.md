@@ -1,28 +1,38 @@
 # Asset Manifest
 
-**Policy:** Xo Beta ships **zero third-party assets**. All visual, audio and
-map content is generated procedurally at runtime by this codebase and is
-original work distributed under the repository MIT license (see ADR-0003).
+**Policy:** Xo Beta combines original code-generated assets (repository MIT
+license) with redistributed third-party assets under permissive licenses —
+CC0 / Public Domain wherever possible, plus one fully-attributed CC-BY 3.0
+sound set. All redistributed files live under `public/assets/`; nothing loads
+from runtime CDNs. SHA-256 checksums for every redistributed file are listed
+in ASSET_CHECKSUMS.txt.
 
-| Asset class | Source | Provenance |
-| --- | --- | --- |
-| PBR material textures | Generated on `<canvas>` at runtime (`src/render/materials.ts`) | Original, this repo |
-| World geometry / maps | Data-driven builders (`src/world/maps/*.ts`) rendered via instanced primitives | Original, this repo |
-| Character models & animation | Procedural rigs + pose state machine (`src/render/characters.ts`) | Original, this repo |
-| Weapon viewmodels | Primitive assemblies (`src/render/viewmodel.ts`) | Original, this repo |
-| VFX (tracers, flashes, particles, shockwaves) | Pooled primitive systems (`src/render/vfx.ts`) | Original, this repo |
-| Sky gradients | Custom shader (`src/render/renderer.ts`) | Original, this repo |
-| Sound effects & music | WebAudio synthesis (`src/audio/audio.ts`) | Original, this repo |
-| Fonts / UI styling | System font stack + CSS (`src/ui/styles.css`) — no webfont downloads | Original, this repo |
+This manifest supersedes ADR-0003 (fully procedural assets) for the final
+presentation pass; the simulation-first architecture is unchanged.
 
-## If a third-party asset is ever introduced
+| Asset class | Local path | Source / author | License | Acquired | Modifications |
+| --- | --- | --- | --- | --- | --- |
+| HDRI skies (dikhololo_night, kloofendal_overcast_puresky, qwantani_puresky) | public/assets/sky/*.hdr | polyhaven.com — Poly Haven team | CC0 1.0 | 2026-08-22 | none |
+| PBR texture sets x21 (Concrete034, Concrete016, Concrete030, Asphalt012, PavingStones070, Metal052B, Metal049A, Rust005, CorrugatedSteel009, Planks009, Wood052, Bricks063, Bricks054, Plaster001, Plaster007, Grass001, Ground047, Rock034, RoofingTiles009, Marble014, Tiles053) | public/assets/textures/<set>/{color,normal,rough}.jpg | ambientcg.com — Lennart Demets / ambientCG contributors | CC0 1.0 | 2026-08-22 | renamed + re-encoded Color/NormalGL/Roughness maps to color.jpg/normal.jpg/rough.jpg; no pixel edits |
+| Combat rig animations (43 clips) | public/assets/models/characters/ual_standard.glb | quaternius.com Universal Animation Library — Quaternius | CC0 1.0 | 2026-08-22 | none |
+| Character bodies (Superhero male/female) + hair/skin textures | public/assets/models/characters/hero_*.{gltf,bin}, T_*.png | quaternius.com Universal Base Characters (Standard) — Quaternius | CC0 1.0 | 2026-08-22 | glTF buffer URIs + two broken texture URIs repaired to point at shipped files; costume pieces attached procedurally at runtime (original code) |
+| Nature kit trees/bushes/ferns/clover/rocks + bark/leaf textures | public/assets/models/nature/*.{gltf,bin,png} | quaternius.com Stylized Nature MegaKit (Standard subset) — Quaternius | CC0 1.0 | 2026-08-22 | instance transforms applied at runtime |
+| Blaster weapon parts | public/assets/models/weapons/*.glb | kenney.nl Blaster Kit — Kenney NL | CC0 1.0 | 2026-08-22 | composed per weapon class with procedural attachments/materials |
+| Vehicles | public/assets/models/vehicles/*.glb, Textures/colormap.png | kenney.nl Car Kit — Kenney NL | CC0 1.0 | 2026-08-22 | per-instance tint materials |
+| Footsteps + material impacts + UI/mech/explosion/laser SFX | public/assets/audio/{steps,impacts,ui,mech,explosions,lasers}/*.wav | kenney.nl Impact Sounds, Interface Sounds, UI Audio, Sci-Fi Sounds — Kenney NL | CC0 1.0 | 2026-08-22 | decoded OGG -> WAV PCM 16-bit 44.1 kHz (no DSP) |
+| Pistol / SMG / AR / sniper gunshots | public/assets/guns/pistol_*.wav, smg_*.wav, ar_*.wav, sniper_a.wav | opengameart.org/content/gunshots — kurt | CC0 1.0 | 2026-08-22 | sliced multi-shot recordings into single shots; normalized (dynaudnorm + limiter); trimmed tails |
+| Shotgun shot | public/assets/audio/guns/shotgun_a.wav | opengameart.org/content/gunshot-sounds — Vincent "Tabasco" Sevedge | CC-BY 3.0 | 2026-08-22 | loudness-normalized (dynaudnorm + compressor + limiter). ATTRIBUTION REQUIRED — see THIRD_PARTY_NOTICES.md |
+| Water splashes (5) | public/assets/audio/water/splash_*.wav | opengameart.org "40 CC0 water / splash / slime SFX" — rubberduck | CC0 1.0 | 2026-08-22 | OGG -> WAV |
+| Chest opening | public/assets/audio/chest/openchest.wav | opengameart.org/content/open-chest-sfx — Oiboo | CC0 1.0 | 2026-08-22 | loudness-normalized |
+| Ambience beds: birds_loop, wind_loop, river_loop | public/assets/audio/ambience/*.wav | opengameart.org/content/park-ambiences + ambient-bird-sounds — Thimras (wind/river), isaiah658 (birds) | CC0 1.0 | 2026-08-22 | excerpted into loopable segments, mono 32 kHz WAV |
+| City ambience bed: city_loop | public/assets/audio/ambience/city_loop.wav | opengameart.org "Scifi City - Ambient Loop" — TinyWorlds | CC0 1.0 | 2026-08-22 | mono 32 kHz WAV |
 
-1. It must carry a permissive license compatible with the MIT release
-   (CC0, public domain, MIT, BSD, Apache-2.0 preferred).
-2. Add a row here with: path, source URL, author, license, license URL,
-   date acquired, modifications made.
-3. Record the file checksum (`shasum -a 256 <file>`).
-4. Update `THIRD_PARTY_NOTICES.md` with any required attribution.
+## Verification
 
-Assets with unknown provenance, "personal use only", noncommercial or
-copyleft terms must not enter the distributable.
+1. Every file under `public/assets/{sky,textures,models,audio}` that is not
+   generated by this repo's build appears in ASSET_CHECKSUMS.txt.
+2. To re-verify a provenance claim, compare the recorded SHA-256 against the
+   source project's published archive.
+3. Runtime VFX, characters' procedural costumes, weapons assembly, water,
+   storm shaders and all UI remain original work licensed under the
+   repository MIT license.
