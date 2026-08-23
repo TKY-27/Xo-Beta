@@ -120,7 +120,7 @@ function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGeometry[
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh || !mesh.geometry) return;
-    let geo = mesh.geometry.clone();
+    const geo = mesh.geometry.clone();
     geo.applyMatrix4(mesh.matrixWorld);
     // Drop skinning attributes — static props don't need them.
     for (const attr of ['skinIndex', 'skinWeight'] as const) {

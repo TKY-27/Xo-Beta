@@ -123,7 +123,7 @@ export async function loadGltf(rel: string): Promise<GltfAsset> {
 }
 
 /** Fetch raw audio bytes (decode happens in the AudioEngine). */
-export async function loadAudioBytes(rel: string): Promise<AudioBuffer> {
+export async function loadAudioBytes(_rel: string): Promise<AudioBuffer> {
   throw Object.assign(new Error('use AudioEngine.loadSample'), { code: 'use-audio-engine' });
 }
 

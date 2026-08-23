@@ -33,9 +33,9 @@ authored binary assets ship with the project.
 
 ADR-0003 was partially superseded by the AAA finalization phase: the
 simulation remains fully code-generated, but presentation now ships
-redistributed CC0 (and one attributed CC-BY 3.0) asset packs for textures,
+redistributed CC0 (public-domain) asset packs for textures,
 HDRIs, character rigs/animations, weapon/vehicle models and sound effects.
 Provenance is fully tracked in `docs/ASSET_MANIFEST.md` +
-`docs/ASSET_CHECKSUMS.txt`; attribution lives in
+`docs/ASSET_CHECKSUMS.txt`; notices live in
 `THIRD_PARTY_NOTICES.md`. The MIT license of the repository applies to all
 original code; third-party assets keep their own licenses.

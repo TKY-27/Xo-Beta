@@ -253,7 +253,7 @@ export class MovementSystem {
     return def ?? 1;
   }
 
-  private handleJump(a: Actor, cmd: InputCommand): void {
+  private handleJump(a: Actor, _cmd: InputCommand): void {
     const b = a.body;
     const v = b.velocity;
     if (a.jumpBuffered <= 0) return;
@@ -519,7 +519,6 @@ export class MovementSystem {
     a.mantleTimer += dt;
     const t = Math.min(1, a.mantleTimer / MOVE.mantleDuration);
     const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    const p = a.body.position;
     const fx = a.mantleFrom.x + (a.mantleTo.x - a.mantleFrom.x) * ease;
     const fy = a.mantleFrom.y + (a.mantleTo.y - a.mantleFrom.y) * Math.min(1, ease * 1.35);
     const fz = a.mantleFrom.z + (a.mantleTo.z - a.mantleFrom.z) * ease;

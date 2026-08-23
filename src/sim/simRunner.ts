@@ -60,7 +60,7 @@ export async function runHeadlessMatch(opts: {
 
   let chestOpens = 0;
   let itemsPickedUp = 0;
-  let navFailures = 0;
+  const navFailures = 0;
   match.events.on('chestOpened', () => chestOpens++);
   match.events.on('itemPickedUp', () => itemsPickedUp++);
   match.events.on('eliminated', (e) => {

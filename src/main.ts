@@ -4,11 +4,11 @@
  */
 
 import * as THREE from 'three';
-import { loadMap, MAP_LIST, ensureWorldReady, type MapId } from './world';
+import { loadMap, MAP_LIST, ensureWorldReady } from './world';
 import { Match } from './sim/match';
 import { GROUPS as PHYS_GROUPS } from './physics/physics';
 import { BotController } from './ai/bot';
-import { SIM, type Difficulty, WEAPONS, RARITY_CSS, MOVE } from './core/balance';
+import { SIM, WEAPONS, RARITY_CSS, MOVE } from './core/balance';
 import { Rng } from './core/rng';
 import { onSettingsChanged, updateSettings, getSettings } from './core/settings';
 import { createMaterials, type MaterialLibrary } from './render/materials';
@@ -25,7 +25,7 @@ import { WeaponModelFactory } from './render/weaponModels';
 import { loadGltf } from './assets/assets';
 import { PlayerController } from './player/controller';
 import { Hud, Menus, type PlaySelection, type LootPanelInfo } from './ui/ui';
-import { t } from './core/i18n';
+import { t, initLang } from './core/i18n';
 import { GamepadInput } from './player/gamepad';
 import { AudioEngine, attachAudio } from './audio/audio';
 
@@ -62,8 +62,20 @@ let resultsShown = false;
 let spectateTargetId = -1;
 let lastWeaponKey: string | null = null;
 
-const WEAPON_KICK: Record<string, number> = { pistol: 0.7, smg: 0.45, ar: 0.8, shotgun: 2.2, sniper: 3 };
-const WEAPON_ICONS: Record<string, string> = { pistol: '⌐', smg: '⁝⁝', ar: '⟋', shotgun: '≡', sniper: '⌇' };
+const WEAPON_KICK: Record<string, number> = {
+  pistol: 0.7,
+  smg: 0.45,
+  ar: 0.8,
+  shotgun: 2.2,
+  sniper: 3,
+};
+const WEAPON_ICONS: Record<string, string> = {
+  pistol: '⌐',
+  smg: '⁝⁝',
+  ar: '⟋',
+  shotgun: '≡',
+  sniper: '⌇',
+};
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -80,6 +92,7 @@ async function setLoad(pct: number, status: string): Promise<void> {
 }
 
 async function boot(): Promise<void> {
+  initLang();
   if (isTouchOnlyDevice()) {
     $('loading-screen').classList.add('hidden');
     $('mobile-gate').classList.remove('hidden');
@@ -120,7 +133,8 @@ async function boot(): Promise<void> {
 
   menus = new Menus(MAP_LIST);
   menus.onUiSound = (kind) => audio.uiClick(kind);
-  menus.onPlayRequested = (sel) => void startMatch(sel, sharedMats, sharedProps, characterFactory, weaponFactory, lobby);
+  menus.onPlayRequested = (sel) =>
+    void startMatch(sel, sharedMats, sharedProps, characterFactory, weaponFactory, lobby);
   menus.onResumeRequested = resumeFromPause;
   menus.onQuitRequested = quitToMenu;
 
@@ -145,8 +159,7 @@ async function boot(): Promise<void> {
     if (document.hidden && live && !paused && live.match.phase !== 'results') openPause();
   });
   window.addEventListener('blur', () => {
-    if (live && !paused && live.match.phase !== 'results' &&
-        !menus.isAnyMenuOpen()) openPause();
+    if (live && !paused && live.match.phase !== 'results' && !menus.isAnyMenuOpen()) openPause();
   });
 
   function resumeFromPause(): void {
@@ -169,7 +182,14 @@ async function boot(): Promise<void> {
 // Match lifecycle
 // ---------------------------------------------------------------------------
 
-async function startMatch(sel: PlaySelection, sharedMats: MaterialLibrary, sharedProps: PropLibrary, charFactory: CharacterFactory, weaponFactory: WeaponModelFactory, lobby: LobbyScene): Promise<void> {
+async function startMatch(
+  sel: PlaySelection,
+  sharedMats: MaterialLibrary,
+  sharedProps: PropLibrary,
+  charFactory: CharacterFactory,
+  weaponFactory: WeaponModelFactory,
+  lobby: LobbyScene,
+): Promise<void> {
   teardownMatch();
   lobby.stop();
   menus.hideAll();
@@ -313,7 +333,17 @@ async function startMatch(sel: PlaySelection, sharedMats: MaterialLibrary, share
 
   attachAudio(match as never, audio, match.events);
 
-  live = { match, renderer, world, vfx, rig, viewmodel, rigs, player, mats: sharedMats };
+  live = {
+    match,
+    renderer,
+    world,
+    vfx,
+    rig,
+    viewmodel,
+    rigs,
+    player,
+    mats: sharedMats,
+  };
 
   wirePresentation(match, world, vfx, rigs, hud, viewmodel, rig);
 
@@ -327,7 +357,7 @@ async function startMatch(sel: PlaySelection, sharedMats: MaterialLibrary, share
     audio.init();
     audio.resume();
     audio.startAmbience(loaded.def.sky.preset, false);
-        hud.banner(t('banner.drop'), 5.5);
+    hud.banner(t('banner.drop'), 5.5);
     startLoop();
   }, 180);
 }
@@ -369,7 +399,7 @@ function cycleSpectate(dir: number): void {
   const targets = m.spectatorTargets();
   if (!targets.length) return;
   const idx = targets.findIndex((t) => t.id === spectateTargetId);
-  const next = targets[((idx + dir + targets.length * 2) % targets.length + targets.length) % targets.length]!;
+  const next = targets[(((idx + dir + targets.length * 2) % targets.length) + targets.length) % targets.length]!;
   spectateTargetId = next.id;
 }
 
@@ -410,7 +440,9 @@ function wirePresentation(
       const target = match.actors.find((a) => a.id === e.targetId);
       if (target) {
         hud.spawnDamageNumber(
-          target.body.position.x, target.body.position.y + 1.35, target.body.position.z,
+          target.body.position.x,
+          target.body.position.y + 1.35,
+          target.body.position.z,
           e.damage,
           e.killed ? 'kill' : e.headshot ? 'headshot' : e.shieldDamage > 0 ? 'shield' : 'normal',
         );
@@ -429,18 +461,23 @@ function wirePresentation(
     const victim = match.actors.find((a) => a.id === e.victimId);
     const killer = match.actors.find((a) => a.id === e.killerId);
     if (victim) {
-      vfx.eliminationWisp(victim.body.position.x, victim.body.position.y + 1, victim.body.position.z, victim.accentColor);
+      vfx.eliminationWisp(
+        victim.body.position.x,
+        victim.body.position.y + 1,
+        victim.body.position.z,
+        victim.accentColor,
+      );
     }
     hud.addKillfeed(
       killer?.name ?? null,
       victim?.name ?? '?',
-      e.weaponId ? WEAPON_ICONS[e.weaponId] ?? '' : '',
+      e.weaponId ? (WEAPON_ICONS[e.weaponId] ?? '') : '',
       e.headshot,
       e.storm,
     );
-        hud.caption(t('cap.elimination'), false);
+    hud.caption(t('cap.elimination'), false);
     if (killer?.isPlayer && victim) hud.elimination(`✕ ${victim.name}`);
-        if (victim?.isPlayer) hud.banner(t('banner.eliminatedYou'), 4);
+    if (victim?.isPlayer) hud.banner(t('banner.eliminatedYou'), 4);
   });
   match.events.on('shotFired', (e) => {
     if (e.actorId === match.player?.id && !e.dry && match.player) {
@@ -493,11 +530,7 @@ function wirePresentation(
 }
 
 /** Keep each combatant's hand-held weapon model in sync with their inventory. */
-function live_weaponWatcher(
-  rigs: Map<number, CharacterRig>,
-  match: Match,
-  weaponFactory: WeaponModelFactory,
-): void {
+function live_weaponWatcher(rigs: Map<number, CharacterRig>, match: Match, weaponFactory: WeaponModelFactory): void {
   const lastKey = new Map<number, string>();
   const interval = window.setInterval(() => {
     for (const a of match.actors) {
@@ -507,7 +540,10 @@ function live_weaponWatcher(
       const key = w ? `${w.weaponId}:${w.rarity}` : '';
       if ((lastKey.get(a.id) ?? null) === key) continue;
       lastKey.set(a.id, key);
-      if (!w) { rig.attachWeapon(null); continue; }
+      if (!w) {
+        rig.attachWeapon(null);
+        continue;
+      }
       const model = weaponFactory.build(w.weaponId, w.rarity);
       rig.attachWeapon(model?.group ?? null);
     }
@@ -588,48 +624,68 @@ function present(dtReal: number): void {
   if (!live) return;
   const { match: m, renderer, world, vfx, rig, viewmodel, rigs, player } = live;
 
-  // Debug/QA introspection hook (read-only).
-  (window as unknown as Record<string, unknown>).__xoState = {    phase: m.phase,
-    time: m.time,
-    aliveCount: m.aliveCount,
-    stormRadius: m.storm.radius,
-    items: m.loot.items.length,
-    scene: renderer.scene,
-    worldGroup: world.group,
-    sceneInfo: {
-      children: renderer.scene.children.length,
-      lights: renderer.scene.children.filter((c) => (c as THREE.Light).isLight).map((c) => ({
-        type: (c as THREE.Light).type,
-        intensity: (c as THREE.Light).intensity,
-        color: (c as THREE.Light).color.getHexString(),
-      })),
-      drawCalls: renderer.renderer.info.render.calls,
-      triangles: renderer.renderer.info.render.triangles,
-    },
-    actors: m.actors.filter((a) => a.alive).slice(0, 10).map((a) => ({
-      id: a.id, name: a.name,
-      x: +a.body.position.x.toFixed(1), y: +a.body.position.y.toFixed(1), z: +a.body.position.z.toFixed(1),
-      yaw: +a.yaw.toFixed(2), state: a.state,
-    })),
-    player: m.player ? {
-      x: +m.player.body.position.x.toFixed(1),
-      y: +m.player.body.position.y.toFixed(1),
-      z: +m.player.body.position.z.toFixed(1),
-      state: m.player.state,
-      grounded: m.player.body.grounded,
-      weapon: m.player.inv.selectedWeapon?.weaponId ?? null,
-      health: Math.round(m.player.health),
-    } : null,
-  };
+  // Debug/QA introspection hook (read-only). Development builds only —
+  // browser QA scripts run against the Vite dev server.
+  if (import.meta.env.DEV) {
+    (window as unknown as Record<string, unknown>).__xoState = {
+      phase: m.phase,
+      time: m.time,
+      aliveCount: m.aliveCount,
+      stormRadius: m.storm.radius,
+      items: m.loot.items.length,
+      scene: renderer.scene,
+      worldGroup: world.group,
+      sceneInfo: {
+        children: renderer.scene.children.length,
+        lights: renderer.scene.children
+          .filter((c) => (c as THREE.Light).isLight)
+          .map((c) => ({
+            type: (c as THREE.Light).type,
+            intensity: (c as THREE.Light).intensity,
+            color: (c as THREE.Light).color.getHexString(),
+          })),
+        drawCalls: renderer.renderer.info.render.calls,
+        triangles: renderer.renderer.info.render.triangles,
+      },
+      actors: m.actors
+        .filter((a) => a.alive)
+        .slice(0, 10)
+        .map((a) => ({
+          id: a.id,
+          name: a.name,
+          x: +a.body.position.x.toFixed(1),
+          y: +a.body.position.y.toFixed(1),
+          z: +a.body.position.z.toFixed(1),
+          yaw: +a.yaw.toFixed(2),
+          state: a.state,
+        })),
+      player: m.player
+        ? {
+            x: +m.player.body.position.x.toFixed(1),
+            y: +m.player.body.position.y.toFixed(1),
+            z: +m.player.body.position.z.toFixed(1),
+            state: m.player.state,
+            grounded: m.player.body.grounded,
+            weapon: m.player.inv.selectedWeapon?.weaponId ?? null,
+            health: Math.round(m.player.health),
+          }
+        : null,
+    };
+  }
 
-  // QA-only teleport hook (?qa=1) for screenshot navigation.
-  if (new URLSearchParams(location.search).has('qa')) {
+  // QA-only teleport hook (?qa=1) for screenshot navigation. Dev builds only.
+  if (import.meta.env.DEV && new URLSearchParams(location.search).has('qa')) {
     (window as unknown as Record<string, unknown>).__xoTeleport = (x: number, z: number, yaw = 0) => {
       const p = m.player;
       if (!p || !p.alive) return;
-      p.body.position.x = x; p.body.position.z = z;
-      p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
-      if (live) { live.player.resetLook(yaw, -0.12); }
+      p.body.position.x = x;
+      p.body.position.z = z;
+      p.body.velocity.x = 0;
+      p.body.velocity.y = 0;
+      p.body.velocity.z = 0;
+      if (live) {
+        live.player.resetLook(yaw, -0.12);
+      }
     };
   }
 
@@ -668,8 +724,15 @@ function present(dtReal: number): void {
   // Grapple ropes
   for (const a of m.actors) {
     if (a.grappleActive) {
-      vfx.setGrappleRope(a.id, a.body.position.x, a.body.position.y + 1.6, a.body.position.z,
-        a.grapplePoint.x, a.grapplePoint.y, a.grapplePoint.z);
+      vfx.setGrappleRope(
+        a.id,
+        a.body.position.x,
+        a.body.position.y + 1.6,
+        a.body.position.z,
+        a.grapplePoint.x,
+        a.grapplePoint.y,
+        a.grapplePoint.z,
+      );
     } else {
       vfx.hideGrappleRope(a.id);
     }
@@ -695,8 +758,7 @@ function present(dtReal: number): void {
     const eyeUnder = world.isEyeUnderwater(rig.camera.position);
     audio.setEnvironmentState(eyeUnder ? 'underwater' : 'open');
   }
-  renderer.followSunTarget(new THREE.Vector3(
-    m.player?.body.position.x ?? 0, 0, m.player?.body.position.z ?? 0));
+  renderer.followSunTarget(new THREE.Vector3(m.player?.body.position.x ?? 0, 0, m.player?.body.position.z ?? 0));
   renderer.followViewer(rig.camera.position);
 
   hud.syncPlayerState(m);
@@ -728,15 +790,19 @@ function findInteractInfo(m: Match): InteractInfo | null {
     if (c.opened) continue;
     const d = Math.hypot(c.x - pos.x, c.y - pos.y, c.z - pos.z);
     if (d < 3.4) {
-      const label = c.kind === 'vault' ? t('interact.openVault') : c.kind === 'elite' ? t('interact.openElite') : t('interact.openChest');
+      const label =
+        c.kind === 'vault'
+          ? t('interact.openVault')
+          : c.kind === 'elite'
+            ? t('interact.openElite')
+            : t('interact.openChest');
       return { prompt: label, loot: null };
     }
   }
   const item = m.loot.nearestItem(pos.x, pos.y + 1, pos.z, 4, (it) => it.kind !== 'ammo');
   if (!item) return null;
 
-  const invFull = p.inv.selectedWeapon !== null &&
-    item.kind === 'weapon' && p.inv.slots.every((s) => s !== null);
+  const invFull = p.inv.selectedWeapon !== null && item.kind === 'weapon' && p.inv.slots.every((s) => s !== null);
   if (item.kind === 'weapon' && item.weapon) {
     const def = WEAPONS[item.weapon.weaponId];
     const rarityText = t(`rarity.${item.weapon.rarity}` as never);
@@ -813,10 +879,14 @@ declare module './player/controller' {
 }
 
 Object.defineProperty(PlayerController.prototype, 'lookDxSmooth', {
-  value(this: { lookVelX?: number }) { return this.lookVelX ?? 0; },
+  value(this: { lookVelX?: number }) {
+    return this.lookVelX ?? 0;
+  },
 });
 Object.defineProperty(PlayerController.prototype, 'lookDySmooth', {
-  value(this: { lookVelY?: number }) { return this.lookVelY ?? 0; },
+  value(this: { lookVelY?: number }) {
+    return this.lookVelY ?? 0;
+  },
 });
 
 // ---------------------------------------------------------------------------

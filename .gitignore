@@ -5,3 +5,10 @@ qa/*.png
 .DS_Store
 .wrangler/
 coverage/
+
+# Secrets and local environment files (example templates stay tracked)
+.env
+.env.*
+!.env.example
+*.pem
+*.key

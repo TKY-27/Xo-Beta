@@ -1,7 +1,7 @@
 /**
- * Audio engine v2: recorded sample playback (CC0/CC-BY — see
+ * Audio engine v2: recorded sample playback (CC0 — see
  * docs/ASSET_MANIFEST.md) with WebAudio spatialization, distance filtering,
-* map-specific ambience beds and underwater processing. Continuous match
+ * map-specific ambience beds and underwater processing. Continuous match
  * music is intentionally absent — the soundscape carries immersion.
  */
 
@@ -74,6 +74,7 @@ const SAMPLES: Array<[string, string]> = [
 ];
 
 export class AudioEngine {
+  private static listenerInstance: AudioEngine | null = null;
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private masterFilter: BiquadFilterNode | null = null;
@@ -118,7 +119,7 @@ export class AudioEngine {
     }
 
     this.applyVolumes();
-    listenerRef = this;
+    AudioEngine.listenerInstance = this;
   }
 
   resume(): void {
@@ -199,7 +200,7 @@ export class AudioEngine {
 
   /** Listener update (camera-relative panning). */
   static setListener(x: number, y: number, z: number, fx: number, fz: number): void {
-    const inst = listenerRef;
+    const inst = AudioEngine.listenerInstance;
     if (!inst || !inst.ctx?.listener) return;
     const l = inst.ctx.listener;
     if (l.positionX) {
@@ -581,7 +582,6 @@ export class AudioEngine {
 }
 
 const cameraCenter = { x: 0, z: 0 };
-let listenerRef: AudioEngine | null = null;
 
 /** Wire all match events to audio. */
 export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<MatchEventsMap>): () => void {

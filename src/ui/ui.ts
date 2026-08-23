@@ -4,7 +4,7 @@
  */
 
 import {
-  RARITY_CSS, WEAPONS, type Difficulty, type Rarity, type WeaponId,
+  RARITY_CSS, WEAPONS, type Difficulty,
 } from '../core/balance';
 import { getSettings, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
 import { t, setLang, getLang, onLangChanged, type TextKey } from '../core/i18n';
@@ -154,14 +154,13 @@ export class Menus {
   // Settings
   // -------------------------------------------------------------------------
 
-  private row(labelText: string, inner: HTMLElement | string): HTMLElement {
+  private row(labelText: string, inner: HTMLElement): HTMLElement {
     const div = document.createElement('div');
     div.className = 'setting-row';
     const label = document.createElement('label');
     label.textContent = labelText;
     div.appendChild(label);
-    if (typeof inner === 'string') div.insertAdjacentHTML('beforeend', inner);
-    else div.appendChild(inner);
+    div.appendChild(inner);
     return div;
   }
 
@@ -264,7 +263,11 @@ export class Menus {
     )));
     gameplay.appendChild(this.row(t('set.reducedMotion'), this.checkbox(s.reducedMotion, (v) => updateSettings({ reducedMotion: v }))));
     gameplay.appendChild(this.row(t('set.camShake'), this.slider(0, 1.5, 0.1, s.cameraShake, (v) => updateSettings({ cameraShake: v }))));
-    gameplay.appendChild(this.row(t('set.crosshairColor'), `<input type="color" value="${s.crosshairColor}" data-setting="crosshairColor" />`));
+    const crosshairColor = document.createElement('input');
+    crosshairColor.type = 'color';
+    crosshairColor.value = s.crosshairColor;
+    crosshairColor.dataset.setting = 'crosshairColor';
+    gameplay.appendChild(this.row(t('set.crosshairColor'), crosshairColor));
     gameplay.appendChild(this.row(t('set.crosshairSize'), this.slider(4, 20, 1, s.crosshairSize, (v) => updateSettings({ crosshairSize: v }))));
     gameplay.appendChild(this.row(t('set.crosshairDot'), this.checkbox(s.crosshairDot, (v) => updateSettings({ crosshairDot: v }))));
     gameplay.appendChild(this.row(t('set.showFps'), this.checkbox(s.showFps, (v) => updateSettings({ showFps: v }))));
@@ -587,9 +590,26 @@ export class Hud {
     const feed = $('killfeed');
     const entry = document.createElement('div');
     entry.className = 'kf-entry';
-    const killerHtml = killer ? `<b class="killer">${killer}</b>` : `<b class="killer dim">${storm ? t('kill.storm') : '—'}</b>`;
-    const wpnHtml = weaponIcon ? `<span class="wpn">[${weaponIcon}]</span>` : '';
-    entry.innerHTML = `${killerHtml}${wpnHtml}${headshot ? '<span class="hs">✦</span>' : ''}<b class="victim">${victim}</b>`;
+    const killerEl = document.createElement('b');
+    killerEl.className = killer ? 'killer' : 'killer dim';
+    killerEl.textContent = killer ?? (storm ? t('kill.storm') : '—');
+    entry.appendChild(killerEl);
+    if (weaponIcon) {
+      const wpn = document.createElement('span');
+      wpn.className = 'wpn';
+      wpn.textContent = `[${weaponIcon}]`;
+      entry.appendChild(wpn);
+    }
+    if (headshot) {
+      const hs = document.createElement('span');
+      hs.className = 'hs';
+      hs.textContent = '✦';
+      entry.appendChild(hs);
+    }
+    const victimEl = document.createElement('b');
+    victimEl.className = 'victim';
+    victimEl.textContent = victim;
+    entry.appendChild(victimEl);
     feed.appendChild(entry);
     this.killfeedEntries.push({ el: entry, t: performance.now() });
     while (this.killfeedEntries.length > 6) {

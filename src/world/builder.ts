@@ -6,7 +6,7 @@
  * built by the render pass consuming the same specs.
  */
 
-import type { MapDef, MatKey, GeoSpec, ChestSpawn, LootSpawn } from './types';
+import type { MapDef, MatKey, ChestSpawn, LootSpawn } from './types';
 import { PhysicsWorld } from '../physics/physics';
 
 export class WorldBuilder {

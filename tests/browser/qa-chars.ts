@@ -45,7 +45,6 @@ async function main(): Promise<void> {
     const pool = actors.filter(a => Math.abs(a.x - me) > 2);
     if (!pool.length) continue;
     const target = pool[shot % pool.length]!;
-    const yaw = Math.atan2(target.x - 0, target.z - 0); // face world origin-ish
     await page.evaluate((t) => {
       const tp = (window as unknown as { __xoTeleport?: (x: number, z: number, yaw: number) => void }).__xoTeleport;
       if (tp) tp(t.x - 2.4, t.z - 1.6, t.yaw + Math.PI);

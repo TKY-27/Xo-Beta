@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Inventory, emptyAmmoPools, type WeaponInstance } from '../../src/sim/inventory';
+import { Inventory, type WeaponInstance } from '../../src/sim/inventory';
 import { WEAPONS } from '../../src/core/balance';
 
 function weapon(id: 'pistol' | 'smg' | 'ar' | 'shotgun' | 'sniper', rarity: WeaponInstance['rarity'] = 'common'): WeaponInstance {

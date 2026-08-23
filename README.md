@@ -2,7 +2,7 @@
 
 **A browser-native single-player 3D battle royale. Ten combatants drop onto a dense arena — one human, nine autonomous bots — and the last one standing wins.**
 
-Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, no gameplay servers. Presentation combines original code-generated systems with redistributed CC0 (and one attributed CC-BY) art and audio packs — see [docs/ASSET_MANIFEST.md](docs/ASSET_MANIFEST.md) for full provenance.
+Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, no gameplay servers. Presentation combines original code-generated systems with redistributed CC0 (public-domain) art and audio packs — see [docs/ASSET_MANIFEST.md](docs/ASSET_MANIFEST.md) for full provenance.
 
 ---
 
@@ -88,8 +88,7 @@ links; all content is data-driven from map definitions. See
 Code is released under the [MIT License](LICENSE). The presentation layer
 combines original code-generated systems (VFX, water, storm, UI, character
 costumes/assembly) with redistributed third-party art and audio packs under
-permissive licenses — CC0 / Public Domain wherever possible, plus one fully
-attributed CC-BY 3.0 gunshot recording. Full provenance, per-asset licenses,
+CC0 / Public Domain terms. Full provenance, per-asset licenses,
 acquisition dates and SHA-256 checksums are tracked in
 [docs/ASSET_MANIFEST.md](docs/ASSET_MANIFEST.md),
 [docs/ASSET_CHECKSUMS.txt](docs/ASSET_CHECKSUMS.txt) and

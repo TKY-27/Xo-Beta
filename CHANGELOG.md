@@ -7,11 +7,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com); versioning is
 ## [0.2.0] — 2026-08 · AAA finalization & immersion pass
 
 ### Added
-- Redistributed CC0/CC-BY asset pipeline with full provenance tracking
+- Redistributed CC0 asset pipeline with full provenance tracking
   (`docs/ASSET_MANIFEST.md`, `docs/ASSET_CHECKSUMS.txt`,
   `THIRD_PARTY_NOTICES.md`): ambientCG PBR texture sets, Poly Haven HDRIs,
   Quaternius character rigs + animation library and nature kit, Kenney
-  blaster/car kits, recorded sound effects (Kenney packs + OpenGameArt).
+  blaster/car kits, recorded sound effects (Kenney packs, OpenGameArt CC0,
+  Free Firearm Sound Library gunshots).
 - Skinned GLB combatants driven by the 43-clip Universal Animation Library:
   locomotion/jump/crouch/swim/death clips with speed-warped footfalls,
   upper-body aim layers (neutral/up/down), procedural costume attachments
@@ -59,6 +60,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com); versioning is
 ### Removed
 - Continuous in-match music layers (explore/combat/final) — replaced by
   location-reactive soundscapes per design brief.
+- Unverifiable-provenance gunshot samples — replaced with recorded shots from
+  the CC0 Free Firearm Sound Library (see `docs/ASSET_MANIFEST.md`).
+- Unused duplicate assets: `models/ual_standard.glb` (canonical copy lives in
+  `models/characters/`) and loose `models/vehicles/colormap.png` (the GLBs
+  reference `Textures/colormap.png`); unused candidate texture sets
+  (`facadeB`, `facadeC`, `metalFloor`).
+
+### Security
+- Strict Content-Security-Policy in production headers; debug introspection
+  hooks (`__xoState`, `?qa=1` teleport) are now dev-build only; kill feed
+  builds DOM via text APIs instead of HTML strings; CI gained a secret-scan
+  step and ESLint.
 
 ## [0.1.0] — 2026-08
 

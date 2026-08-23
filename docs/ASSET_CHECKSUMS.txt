@@ -1,4 +1,11 @@
-# Asset checksums (sha256), generated 2026-08-22
+# Asset checksums (SHA-256) — regenerated 2026-08-23
+#
+# Scope: every redistributed third-party production asset shipped under
+# public/assets/. Temporary source downloads (public/assets/tmp/) are not
+# part of the production tree and are not checksummed here. Provenance,
+# author, license, source URL and modification status for each file group:
+# see docs/ASSET_MANIFEST.md and THIRD_PARTY_NOTICES.md.
+# Paths below are relative to public/assets/.
 
 885669bd3b8aa6c7f21b225b1de235e0f37d2b594e048f7b8cc753c004eb9116  audio/ambience/birds_loop.wav
 8d462345a7c9fc9f72bca90128d15486cd583a500580bde89a2b878ad7bf96a0  audio/ambience/city_loop.wav
@@ -10,15 +17,15 @@ d21c06a26cbb29a09fa1b1231995402ce5758f078bcaa7c27026ead01500b7d8  audio/ambience
 e265eda0747e616d9b9816024daada65390cae93932c4f141478c6512addf2d6  audio/explosions/explosionCrunch_004.wav
 b9a94c7f60d4b25e21209628d90e91263f3f9f890e78ed5240c36d03c397f1e0  audio/explosions/laserLarge_000.wav
 6a9dd42eeff816296714eaf21e289f13fa0cca62923622c783c76f125ca1c562  audio/explosions/lowFrequency_explosion_001.wav
-662c713976b0d1a17fba257e82c2000717dca77516d2ffc1967e625f1d010da4  audio/guns/ar_a.wav
-a133bdf5377b2173e1fceee69b3bfc79c7990e346ce3fe8413508e2d6812702b  audio/guns/ar_b.wav
-fa474a9329b7cd34e2bd9e60fd234d8913feeaa4f655239f33fce1c4ee311637  audio/guns/pistol_a.wav
-e22a1bfc5dbb6f6163c9b00485f4eabd80af7353495704cbdef3bf076c22cd2a  audio/guns/pistol_b.wav
-5f638d2a4b53c0efec68624683485c551b951011b154d3b41a3a86aeb77217bf  audio/guns/pistol_c.wav
-a0f9ef5ebfbbbb2fc39cecb6f99268feebe36897a6bfd3ceff1e021a376db86b  audio/guns/shotgun_a.wav
-e03df51a276f6fbeaa1e12026d85f5de6cd2d948d091bafa71e388fd64919497  audio/guns/smg_a.wav
-5cf9c9441c03868a07e16e7573b04afd576ba0452c3064f2df7ac62a96d59c33  audio/guns/smg_b.wav
-73ca4b24c8a23fe47a84f654e7a003eae113e468a57bd2cb8cd950754c4496fd  audio/guns/sniper_a.wav
+54cdb946d8489521cdf7fa1e94dc67c32190efc9ff36d284d4f38d752ddd2ab6  audio/guns/ar_a.wav
+e1b2c146b830c9df88e7af417c35b6dcde780f8feef95a0680f26d231a340de1  audio/guns/ar_b.wav
+f2bc351fc5bd77b05c99cd0450e0b93543c7e8e144970230bd1961e8ada7db58  audio/guns/pistol_a.wav
+e87796c4f4aaccc111c56d844f6ca9cb9289e5fddadbe25e52f9ad59c49ad9d3  audio/guns/pistol_b.wav
+48062bb3a793b2cd79e41ff2a164fa6613cbd155571ef892b788711c4644ff36  audio/guns/pistol_c.wav
+6e418751045c3804dab0a82c13cdc1893825e4d0388a676b098e125d301797db  audio/guns/shotgun_a.wav
+e128f3b4b65d44b673de6e590b35cc7f3f7e1a4564e26425fa8bf423f26d34f8  audio/guns/smg_a.wav
+34cb118995ce722ed67f35964baa15fcc5ce9a67e5a685ce9f351e6773e25711  audio/guns/smg_b.wav
+df4366b0d2973e37717a5a26efaf0907761fc6afc4f784889f8a4ab140ada644  audio/guns/sniper_a.wav
 3df8bfa7690570c9a2e3f73f3df3bd27cf311f3da103f07c9467e1c03513a12e  audio/impacts/impactBell_heavy_000.wav
 f0e982611e97512fee5f777986b67e8b435434b601f94992ec044f7e89fb5acb  audio/impacts/impactGeneric_light_000.ogg
 945f8c0969d8e9efd3d9b975245e85180bbdf28081258ce7f0f95bd24f0f894f  audio/impacts/impactGeneric_light_000.wav
@@ -243,7 +250,6 @@ fac2d05a05f2d0d2098de59c09b58f42cc875c9caca4fd4c4bd57f3d36e7b12e  models/nature/
 209a27345707385a00de9ce6ab548ea238994f0a0721ed765aa4cdd25b7306fc  models/nature/Rocks_Desert_Diffuse.png
 b813696df6081f469a127092eb0ce45cc39d56f3ccc0699152bfcd3804810b48  models/nature/Rocks_Diffuse.png
 f3622a03a20c6696065cae9cbe391351be873508af190c2ebd1d420c055787a5  models/vehicles/Textures/colormap.png
-f3622a03a20c6696065cae9cbe391351be873508af190c2ebd1d420c055787a5  models/vehicles/colormap.png
 2973152df7699767692ce890b3a0845a11333a52a23aa74b86a12ed443254c1b  models/vehicles/delivery-flat.glb
 bd5c9d4c3b4bdd254a66b8426563a68b1487ae7a5076df3a2488e6ffed7be64f  models/vehicles/hatchback-sports.glb
 a617b880594f56239b7ac4cf6fd4d74ebdae3ba6c5d842e77c76a5906eff352a  models/vehicles/police.glb

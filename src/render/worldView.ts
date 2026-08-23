@@ -12,7 +12,7 @@ import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
 import { WeaponModelFactory } from './weaponModels';
 import type { Match } from '../sim/match';
-import { RARITY_COLORS, WEAPONS } from '../core/balance';
+import { RARITY_COLORS } from '../core/balance';
 
 const STORM_VERT = /* glsl */ `
   varying vec2 vUv;
@@ -660,10 +660,9 @@ export class WorldView {
     }
     root.add(inner);
 
-    // Rarity presentation: beam + ground ring + light scale with rarity
+    // Rarity presentation: beam + ground ring scale with rarity
     let beam: THREE.Mesh | undefined;
     let ring: THREE.Mesh | undefined;
-    let light: THREE.PointLight | undefined;
     if (item.kind === 'weapon' && rarityRank >= 1) {
       const beamH = 3.4 + rarityRank * 0.7;
       const beamGeo = new THREE.CylinderGeometry(0.16, 0.3, beamH, 12, 1, true);
