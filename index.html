@@ -5,6 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Xo Beta — a browser-native single-player 3D battle royale. 10 combatants, last one standing wins." />
   <title>Xo Beta</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/branding/favicon.svg" />
+  <link rel="apple-touch-icon" href="/assets/branding/apple-touch-icon.png" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Xo Beta" />
+  <meta property="og:title" content="Xo Beta — Browser-Native Battle Royale" />
+  <meta property="og:description" content="A single-player 3D battle royale in your browser. 10 combatants, shrinking storm, last one standing wins." />
+  <meta property="og:image" content="/assets/branding/og-card.jpg" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Xo Beta — Browser-Native Battle Royale" />
+  <meta name="twitter:description" content="A single-player 3D battle royale in your browser. 10 combatants, shrinking storm, last one standing wins." />
+  <meta name="twitter:image" content="/assets/branding/og-card.jpg" />
+  <meta name="theme-color" content="#0a1420" />
   <link rel="stylesheet" href="/src/ui/styles.css" />
 </head>
 <body>
@@ -14,83 +26,95 @@
   <div id="loading-screen" class="screen">
     <div class="loading-inner">
       <h1 class="logo">XO<span>BETA</span></h1>
+    </div>
+    <div class="loading-foot">
       <div class="loading-bar"><div id="loading-fill"></div></div>
       <div id="loading-status">Booting…</div>
     </div>
   </div>
 
-  <!-- Main menu -->
+  <!-- Main menu: character-first, nav rail left -->
   <div id="main-menu" class="screen hidden">
-    <div class="menu-backdrop"></div>
-    <div class="menu-content">
-      <h1 class="logo big">XO<span>BETA</span></h1>
+    <div class="menu-shade left"></div>
+    <header class="brand">
+      <h1 class="logo">XO<span>BETA</span></h1>
       <p class="tagline" data-i18n="menu.tagline">Single-player battle royale · 10 combatants · last one standing</p>
-      <nav class="menu-buttons">
-        <button id="btn-play" class="btn primary" data-i18n="common.play">PLAY</button>
-        <button id="btn-settings" class="btn" data-i18n="common.settings">SETTINGS</button>
-        <button id="btn-credits" class="btn" data-i18n="common.credits">CREDITS</button>
-      </nav>
+    </header>
+    <nav class="menu-rail">
+      <button id="btn-play" class="btn-play" data-i18n="common.play">PLAY</button>
+      <button id="btn-settings" class="btn-quiet" data-i18n="common.settings">SETTINGS</button>
+      <button id="btn-credits" class="btn-quiet" data-i18n="common.credits">CREDITS</button>
+    </nav>
+    <footer class="menu-foot">
       <p class="hint" data-i18n="menu.hint">Desktop keyboard &amp; mouse required · Click PLAY to lock the cursor</p>
-    </div>
+    </footer>
   </div>
 
-  <!-- Play flow: map + difficulty -->
+  <!-- Play flow: authored map browser -->
   <div id="play-menu" class="screen hidden">
-    <div class="menu-backdrop"></div>
-    <div class="menu-content wide">
+    <div class="menu-shade full"></div>
+    <header class="screen-head">
+      <button id="btn-play-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
       <h2 data-i18n="menu.selectArena">SELECT ARENA</h2>
+    </header>
+    <div class="play-body">
       <div id="map-list" class="map-list"></div>
-      <h2 data-i18n="menu.difficulty">BOT DIFFICULTY</h2>
-      <div id="difficulty-list" class="difficulty-list"></div>
-      <div class="menu-row">
-        <button id="btn-play-start" class="btn primary" data-i18n="common.startMatch">START MATCH</button>
-        <button id="btn-play-back" class="btn" data-i18n="common.back">BACK</button>
+      <div class="play-side">
+        <div id="difficulty-block">
+          <h3 data-i18n="menu.difficulty">BOT DIFFICULTY</h3>
+          <div id="difficulty-list" class="difficulty-list"></div>
+        </div>
+        <button id="btn-play-start" class="btn-play deploy" data-i18n="common.startMatch">START MATCH</button>
       </div>
     </div>
   </div>
 
-  <!-- Settings -->
+  <!-- Settings: category rail + single pane -->
   <div id="settings-menu" class="screen hidden">
-    <div class="menu-backdrop"></div>
-    <div class="menu-content wide scrollable">
+    <div class="menu-shade full"></div>
+    <header class="screen-head">
+      <button id="btn-settings-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
       <h2 data-i18n="common.settings">SETTINGS</h2>
-      <div class="settings-columns">
-        <section id="settings-controls"><h3 data-i18n="set.controls">CONTROLS</h3></section>
-        <section id="settings-graphics"><h3 data-i18n="set.graphics">GRAPHICS</h3></section>
-        <section id="settings-audio"><h3 data-i18n="set.audio">AUDIO</h3></section>
-        <section id="settings-gameplay"><h3 data-i18n="set.gameplay">GAMEPLAY &amp; ACCESSIBILITY</h3></section>
-      </div>
-      <div class="menu-row">
-        <button id="btn-settings-back" class="btn" data-i18n="common.back">BACK</button>
+    </header>
+    <div class="settings-body">
+      <nav id="settings-rail" class="settings-rail">
+        <button class="rail-btn selected" data-pane="settings-controls" data-i18n="set.controls">CONTROLS</button>
+        <button class="rail-btn" data-pane="settings-graphics" data-i18n="set.graphics">GRAPHICS</button>
+        <button class="rail-btn" data-pane="settings-audio" data-i18n="set.audio">AUDIO</button>
+        <button class="rail-btn" data-pane="settings-gameplay" data-i18n="set.gameplay">GAMEPLAY &amp; ACCESSIBILITY</button>
+      </nav>
+      <div class="settings-panes">
+        <section id="settings-controls" class="settings-pane selected"></section>
+        <section id="settings-graphics" class="settings-pane"></section>
+        <section id="settings-audio" class="settings-pane"></section>
+        <section id="settings-gameplay" class="settings-pane"></section>
       </div>
     </div>
   </div>
 
   <!-- Credits -->
   <div id="credits-menu" class="screen hidden">
-    <div class="menu-backdrop"></div>
-    <div class="menu-content">
+    <div class="menu-shade full"></div>
+    <header class="screen-head">
+      <button id="btn-credits-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
       <h2 data-i18n="common.credits">CREDITS</h2>
-      <div class="credits-body">
-        <p><strong>Xo Beta</strong></p>
-        <p data-i18n="credits.body">An original open-source battle royale built with Three.js and Rapier.</p>
-        <p class="dim">THIRD_PARTY_NOTICES.md · docs/ASSET_MANIFEST.md</p>
-      </div>
-      <div class="menu-row">
-        <button id="btn-credits-back" class="btn" data-i18n="common.back">BACK</button>
-      </div>
+    </header>
+    <div class="credits-body">
+      <p><strong>Xo Beta</strong></p>
+      <p data-i18n="credits.body">An original open-source battle royale built with Three.js and Rapier.</p>
+      <p class="dim">THIRD_PARTY_NOTICES.md · docs/ASSET_MANIFEST.md</p>
     </div>
   </div>
 
   <!-- Pause -->
   <div id="pause-menu" class="screen hidden">
-    <div class="menu-backdrop dark"></div>
-    <div class="menu-content">
+    <div class="menu-shade dark"></div>
+    <div class="pause-box">
       <h2 data-i18n="menu.paused">PAUSED</h2>
       <nav class="menu-buttons">
-        <button id="btn-resume" class="btn primary" data-i18n="common.resume">RESUME</button>
-        <button id="btn-pause-settings" class="btn" data-i18n="common.settings">SETTINGS</button>
-        <button id="btn-quit" class="btn" data-i18n="common.quit">RETURN TO MENU</button>
+        <button id="btn-resume" class="btn-play" data-i18n="common.resume">RESUME</button>
+        <button id="btn-pause-settings" class="btn-quiet" data-i18n="common.settings">SETTINGS</button>
+        <button id="btn-quit" class="btn-quiet" data-i18n="common.quit">RETURN TO MENU</button>
       </nav>
     </div>
   </div>
@@ -164,22 +188,22 @@
 
   <!-- Results -->
   <div id="results-screen" class="screen hidden">
-    <div class="menu-backdrop dark"></div>
-    <div class="menu-content">
+    <div class="menu-shade dark"></div>
+    <div class="results-box">
       <h1 id="results-title">VICTORY</h1>
       <div id="results-subtitle"></div>
       <div id="results-grid"></div>
       <div class="menu-row">
-        <button id="btn-results-again" class="btn primary" data-i18n="common.playAgain">PLAY AGAIN</button>
-        <button id="btn-results-menu" class="btn" data-i18n="common.mainMenu">MAIN MENU</button>
+        <button id="btn-results-again" class="btn-play" data-i18n="common.playAgain">PLAY AGAIN</button>
+        <button id="btn-results-menu" class="btn-quiet" data-i18n="common.mainMenu">MAIN MENU</button>
       </div>
     </div>
   </div>
 
   <!-- Mobile / unsupported notice -->
   <div id="mobile-gate" class="screen hidden">
-    <div class="menu-backdrop"></div>
-    <div class="menu-content">
+    <div class="menu-shade full"></div>
+    <div class="pause-box">
       <h1 class="logo">XO<span>BETA</span></h1>
       <div class="credits-body">
         <h2 data-i18n="notice.mobileTitle">DESKTOP REQUIRED</h2>

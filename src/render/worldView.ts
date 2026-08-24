@@ -7,6 +7,7 @@
  */
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { MapDef, MatKey } from '../world/types';
 import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
@@ -112,13 +113,6 @@ const WATER_FRAG = /* glsl */ `
   }
 `;
 
-interface ChestView {
-  group: THREE.Group;
-  lid: THREE.Object3D | null;
-  light: THREE.PointLight | null;
-  glowMat: THREE.MeshStandardMaterial[];
-}
-
 /**
  * Virtualized static-light system. Night maps define far more light sources
  * than can run as real-time PointLights; a fixed-size pool is reassigned to
@@ -173,8 +167,8 @@ class StaticLightPool {
 export class WorldView {
   readonly group = new THREE.Group();
   private destructibleMeshes = new Map<number, THREE.Object3D>();
-  private chestViews = new Map<number, ChestView>();
-  private lootViews = new Map<number, { root: THREE.Group; beam?: THREE.Mesh; ring?: THREE.Mesh; phase: number }>();
+  private chestMats = new Map<number, { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial }>();
+  private lootViews = new Map<number, { root: THREE.Group; inner: THREE.Object3D | null; beam?: THREE.Mesh; ring?: THREE.Mesh; phase: number }>();
   stormMesh!: THREE.Mesh;
   readonly transportGroup = new THREE.Group();
   private time = 0;
@@ -201,6 +195,7 @@ export class WorldView {
     props: PropLibrary,
   ) {
     this.weaponFactory = new WeaponModelFactory(props);
+    this.applyWetGround(def);
     this.buildStatic(def);
     this.buildScatter(def, props);
     this.buildVehicles(def, props);
@@ -210,6 +205,30 @@ export class WorldView {
       this.trackChests(match);
       this.buildStorm();
       this.buildTransport();
+    }
+  }
+
+  /**
+   * Rain-slicked street treatment for wet maps (NEO CITY): shared ground
+   * materials get lowered roughness + stronger env response. Materials are
+   * shared per-session, so this is re-applied per map load — only one map is
+   * ever resident.
+   */
+  private applyWetGround(def: MapDef): void {
+    const groundMats: MatKey[] = ['asphalt', 'sidewalk', 'concreteDark'];
+    for (const key of groundMats) {
+      const m = this.mats.get(key) as THREE.MeshStandardMaterial;
+      if (!m || !m.isMeshStandardMaterial) continue;
+      if (def.wetGround) {
+        if (m.userData.baseRoughness === undefined) m.userData.baseRoughness = m.roughness;
+        m.roughness = Math.min(0.42, (m.userData.baseRoughness as number) * 0.45);
+        m.envMapIntensity = 1.5;
+        m.needsUpdate = true;
+      } else if (m.userData.baseRoughness !== undefined) {
+        m.roughness = m.userData.baseRoughness as number;
+        m.envMapIntensity = 1;
+        m.needsUpdate = true;
+      }
     }
   }
 
@@ -280,11 +299,10 @@ export class WorldView {
     }
     for (const [key, matrices] of buckets) {
       if (!props.hasVariant(key)) continue;
-      for (const mesh of props.makeInstanced(key, matrices.length)) {
-        matrices.forEach((m, i) => mesh.setMatrixAt(i, m));
-        mesh.instanceMatrix.needsUpdate = true;
-        this.group.add(mesh);
-      }
+      // Trees skip shadow-casting on overcast maps: the low sun + heavy fog
+      // make their shadows invisible while the extra depth pass costs a full
+      // scene traversal of the dominant triangle budget.
+      this.addInstancedByGrid(key, matrices, props, 4096, def.sky.preset !== 'overcast');
     }
 
     // Undergrowth: bushes / ferns / clover / flowers near tree clusters
@@ -297,7 +315,7 @@ export class WorldView {
       return (s1 & 0x7fffffff) / 0x7fffffff;
     };
     for (const t of def.trees) {
-      const count = def.id === 'eden' ? 5 : 3;
+      const count = def.id === 'eden' ? 4 : 3;
       for (let i = 0; i < count; i++) {
         const a = rnd() * Math.PI * 2;
         const r = 1.6 + rnd() * 3.4;
@@ -313,12 +331,7 @@ export class WorldView {
     for (const key of undergrowthKeys) {
       const ms = underMatrices.get(key)!;
       if (!ms.length || !props.hasVariant(key)) continue;
-      for (const mesh of props.makeInstanced(key, ms.length)) {
-        ms.forEach((m, i) => mesh.setMatrixAt(i, m));
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.castShadow = false;
-        this.group.add(mesh);
-      }
+      this.addInstancedByGrid(key, ms, props, 4096, false);
     }
 
     // Rocks → Quaternius rock models
@@ -339,14 +352,10 @@ export class WorldView {
     });
     for (const [key, matrices] of rockBuckets) {
       if (!props.hasVariant(key)) continue;
-      for (const mesh of props.makeInstanced(key, matrices.length)) {
-        matrices.forEach((m, i) => mesh.setMatrixAt(i, m));
-        mesh.instanceMatrix.needsUpdate = true;
-        this.group.add(mesh);
-      }
+      this.addInstancedByGrid(key, matrices, props, 4096);
     }
 
-    // Lamps: authored street fixtures
+    // Lamps: authored street fixtures, instanced per part (draw-call budget)
     const poolGeo = new THREE.CircleGeometry(7, 20);
     poolGeo.rotateX(-Math.PI / 2);
     const poolTex = makeGlowTexture('rgba(255,235,190,', 128);
@@ -358,40 +367,94 @@ export class WorldView {
     const lensGeo = new THREE.PlaneGeometry(0.42, 0.2);
     lensGeo.rotateX(-Math.PI / 2.6);
     const poleMat = this.mats.get('metalDark');
+    const poles = new THREE.InstancedMesh(poleGeo, poleMat, maxLamps);
+    const arms = new THREE.InstancedMesh(armGeo, poleMat, maxLamps);
+    const heads = new THREE.InstancedMesh(headGeo, poleMat, maxLamps);
+    const lensInst = new THREE.InstancedMesh(lensGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), maxLamps);
+    const pools = new THREE.InstancedMesh(
+      poolGeo,
+      new THREE.MeshBasicMaterial({
+        map: poolTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.85,
+      }),
+      Math.min(maxLamps, 60),
+    );
+    pools.renderOrder = 1;
+    const headTilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0.18));
+    const idQ = new THREE.Quaternion();
+    const oneS = new THREE.Vector3(1, 1, 1);
+    let poolIdx = 0;
     for (let i = 0; i < maxLamps; i++) {
       const l = def.lamps[i]!;
-      const post = new THREE.Group();
-      const pole = new THREE.Mesh(poleGeo, poleMat);
-      pole.scale.set(1, l.h, 1);
-      pole.castShadow = true;
-      const arm = new THREE.Mesh(armGeo, poleMat);
-      arm.position.set(0.42, l.h - 0.06, 0);
-      const head = new THREE.Mesh(headGeo, poleMat);
-      head.position.set(0.78, l.h - 0.12, 0);
-      head.rotation.z = 0.18;
-      const lens = new THREE.Mesh(lensGeo, new THREE.MeshBasicMaterial({ color: l.color }));
-      lens.position.set(0.78, l.h - 0.21, 0);
-      lens.rotation.z = 0.18;
-      post.add(pole, arm, head, lens);
-      post.position.set(l.x, l.y, l.z);
-      this.group.add(post);
+      const m4 = new THREE.Matrix4();
+      m4.compose(new THREE.Vector3(l.x, l.y, l.z), idQ, new THREE.Vector3(1, l.h, 1));
+      poles.setMatrixAt(i, m4);
+      m4.compose(new THREE.Vector3(l.x + 0.42, l.y + l.h - 0.06, l.z), idQ, oneS);
+      arms.setMatrixAt(i, m4);
+      m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.12, l.z), headTilt, oneS);
+      heads.setMatrixAt(i, m4);
+      m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.21, l.z), headTilt, oneS);
+      lensInst.setMatrixAt(i, m4);
+      lensInst.setColorAt(i, new THREE.Color(l.color));
       // Real light comes from the shared pool; the fixture itself is emissive.
       this.lightPool.add(l.x + 0.78, l.y + l.h - 0.35, l.z, l.color, l.intensity * 1.35, l.range);
-      if (i < 60) {
-        const pool = new THREE.Mesh(poolGeo, new THREE.MeshBasicMaterial({
-          map: poolTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.85,
-        }));
-        pool.renderOrder = 1;
-        pool.position.set(l.x + 0.78, 0.07, l.z);
-        pool.scale.setScalar(0.9 + Math.min(0.5, l.range / 60));
-        this.group.add(pool);
+      if (poolIdx < pools.count) {
+        m4.compose(
+          new THREE.Vector3(l.x + 0.78, 0.07, l.z),
+          idQ,
+          new THREE.Vector3().setScalar(0.9 + Math.min(0.5, l.range / 60)),
+        );
+        pools.setMatrixAt(poolIdx, m4);
+        pools.setColorAt(poolIdx, new THREE.Color(l.color));
+        poolIdx++;
       }
     }
+    poles.instanceMatrix.needsUpdate = true;
+    arms.instanceMatrix.needsUpdate = true;
+    heads.instanceMatrix.needsUpdate = true;
+    lensInst.instanceMatrix.needsUpdate = true;
+    if (lensInst.instanceColor) lensInst.instanceColor.needsUpdate = true;
+    if (pools.instanceColor) pools.instanceColor.needsUpdate = true;
+    pools.instanceMatrix.needsUpdate = true;
+    poles.castShadow = true;
+    poles.receiveShadow = true;
+    this.group.add(poles, arms, heads, lensInst, pools);
 
     for (const l of def.lights) {
       this.lightPool.add(l.x, l.y, l.z, l.color, l.intensity, l.range);
     }
     this.group.add(this.lightPool.group);
+  }
+
+  /**
+   * Instance a scatter bucket split into a coarse world grid so three.js
+   * frustum culling can skip whole cells. One InstancedMesh per
+   * (variant, non-empty cell) — a few extra draws in exchange for rendering
+   * only the cells in view (vegetation dominates the triangle budget).
+   */
+  private addInstancedByGrid(
+    key: string,
+    matrices: THREE.Matrix4[],
+    props: PropLibrary,
+    cell = 80,
+    castShadow = true,
+  ): void {
+    const byCell = new Map<string, THREE.Matrix4[]>();
+    for (const m of matrices) {
+      const cx = Math.floor(m.elements[12]! / cell);
+      const cz = Math.floor(m.elements[14]! / cell);
+      const k = `${cx}:${cz}`;
+      let list = byCell.get(k);
+      if (!list) byCell.set(k, list = []);
+      list.push(m);
+    }
+    for (const [, list] of byCell) {
+      for (const mesh of props.makeInstanced(key, list.length)) {
+        list.forEach((m, i) => mesh.setMatrixAt(i, m));
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.castShadow = castShadow;
+        this.group.add(mesh);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -458,8 +521,8 @@ export class WorldView {
         side: THREE.DoubleSide,
         uniforms: {
           uTime: { value: 0 },
-          uDeepColor: { value: new THREE.Color(def.sky.preset === 'night' ? 0x0a1a2e : 0x14486b) },
-          uShallowColor: { value: new THREE.Color(def.sky.preset === 'night' ? 0x123248 : 0x2f7d9e) },
+          uDeepColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x0a1a2e : 0x14486b) },
+          uShallowColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x123248 : 0x2f7d9e) },
           uSkyColor: { value: new THREE.Color(def.sky.fogColor) },
           uSunDir: { value: new THREE.Vector3(...def.sky.sunDirection).normalize() },
           uSunColor: { value: new THREE.Color(def.sky.sunColor) },
@@ -487,7 +550,7 @@ export class WorldView {
       const g = d.geo;
       let mesh: THREE.Object3D;
       const matKey = ((g as unknown as { mat: MatKey }).mat ?? 'wood') as MatKey;
-      const material = this.mats.get(matKey).clone();
+      const material = this.mats.get(matKey);
       if (g.kind === 'box') {
         mesh = new THREE.Mesh(new THREE.BoxGeometry(g.sx, g.sy, g.sz), material);
         const yaw = (g as unknown as { yaw?: number }).yaw ?? 0;
@@ -518,89 +581,173 @@ export class WorldView {
   // Chests — tier-specific presentation with mechanical open animation
   // -------------------------------------------------------------------------
 
-  private chestBody(kind: string): ChestView {
-    const tier = kind === 'vault' ? 2 : kind === 'elite' ? 1 : 0;
-    const glowHex = kind === 'vault' ? 0xffb43a : kind === 'elite' ? 0xb06ce8 : 0x4f9fe8;
-    const bodyMat = new THREE.MeshStandardMaterial({ color: tier === 2 ? 0x2b2320 : tier === 1 ? 0x242430 : 0x27343c, roughness: 0.42, metalness: 0.72 });
-    const trimMat = new THREE.MeshStandardMaterial({
-      color: 0x111214, emissive: glowHex, emissiveIntensity: 1.5 + tier * 0.5, roughness: 0.35, metalness: 0.5,
-    });
-    const accentMat = trimMat.clone();
 
-    const g = new THREE.Group();
-    // Base with inset panel look
-    const base = new THREE.Mesh(new THREE.BoxGeometry(1.46, 0.68, 0.96), bodyMat);
-    base.position.y = 0.38;
-    base.castShadow = true;
-    base.receiveShadow = true;
-    const baseTrim = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.09, 1.02), trimMat);
-    baseTrim.position.y = 0.09;
-    const lid = new THREE.Group();
-    const lidBox = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.34, 0.99), bodyMat);
-    lidBox.position.y = 0.17;
-    lidBox.castShadow = true;
-    const lidTrimFront = new THREE.Mesh(new THREE.BoxGeometry(1.54, 0.12, 0.1), trimMat);
-    lidTrimFront.position.set(0, 0.17, -0.47);
-    const core = new THREE.Mesh(new THREE.SphereGeometry(0.13 + tier * 0.03, 10, 8), accentMat);
-    core.position.set(0, 0.17, 0.42);
-    lid.add(lidBox, lidTrimFront, core);
-    lid.name = 'lid';
-    lid.position.y = 0.72;
-    // corner brackets
-    for (const sx of [-1, 1]) {
-      for (const sz of [-1, 1]) {
-        const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.72, 0.12), trimMat);
-        bracket.position.set(sx * 0.67, 0.38, sz * 0.42);
-        g.add(bracket);
-      }
-    }
-    const lock = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.08, 10), accentMat);
-    lock.rotation.x = Math.PI / 2;
-    lock.position.set(0, 0.62, -0.5);
-    g.add(base, baseTrim, lid, lock);
-
-    // Tier halo ring above elite/vault chests
-    if (tier > 0) {
-      const halo = new THREE.Mesh(
-        new THREE.TorusGeometry(0.62 + tier * 0.1, 0.022 + tier * 0.008, 8, 40),
-        new THREE.MeshBasicMaterial({ color: glowHex, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }),
-      );
-      halo.rotation.x = Math.PI / 2;
-      halo.position.y = 1.55 + tier * 0.12;
-      halo.name = 'halo';
-      g.add(halo);
-    }
-    // No per-chest real-time light — emissive trim + halo carry the tier read
-    return { group: g, lid, light: null, glowMat: [trimMat, accentMat] };
-  }
+  /**
+   * Chest presentation — fully instanced per tier (~7 draws total vs ~11 per
+   * chest). Lid animation + halo fade run through per-instance matrices.
+   */
+  private chestInst: Array<{
+    body: THREE.InstancedMesh; trim: THREE.InstancedMesh; lock: THREE.InstancedMesh;
+    lidBody: THREE.InstancedMesh; lidTrim: THREE.InstancedMesh; core: THREE.InstancedMesh;
+    halo: THREE.InstancedMesh | null;
+    mats: { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial };
+  } | null> = [null, null, null];
+  private chestSlots = new Map<number, {
+    tier: number; idx: number; pos: THREE.Vector3; yaw: number; lidAngle: number; opened: boolean; haloScale: number;
+  }>();
 
   private trackChests(match: Match): void {
+    const counts = [0, 0, 0];
+    for (const c of match.chests) counts[c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0]!++;
+    for (let tier = 0; tier < 3; tier++) {
+      if (this.chestInst[tier] || counts[tier] === 0) continue;
+      const glowHex = tier === 2 ? 0xffb43a : tier === 1 ? 0xb06ce8 : 0x4f9fe8;
+      let cached = this.chestMats.get(tier);
+      if (!cached) {
+        const trimMat = new THREE.MeshStandardMaterial({
+          color: 0x111214, emissive: glowHex, emissiveIntensity: 1.5 + tier * 0.5, roughness: 0.35, metalness: 0.5,
+        });
+        const accentMat = trimMat.clone();
+        const bodyMat = new THREE.MeshStandardMaterial({
+          color: tier === 2 ? 0x2b2320 : tier === 1 ? 0x242430 : 0x27343c, roughness: 0.42, metalness: 0.72,
+        });
+        for (const m of [trimMat, accentMat, bodyMat]) (m.userData as { shared?: boolean }).shared = true;
+        cached = { body: bodyMat, trim: trimMat, accent: accentMat };
+        this.chestMats.set(tier, cached);
+      }
+      const n = counts[tier]!;
+      // static base (body) — lid pivot at (0,0.72,0), children baked relative
+      const baseGeo = new THREE.BoxGeometry(1.46, 0.68, 0.96);
+      baseGeo.translate(0, 0.38, 0);
+      // static trim: base skirt + 4 corner brackets, merged
+      const skirt = new THREE.BoxGeometry(1.52, 0.09, 1.02);
+      skirt.translate(0, 0.09, 0);
+      const brackets: THREE.BufferGeometry[] = [];
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+        const b = new THREE.BoxGeometry(0.12, 0.72, 0.12);
+        b.translate(sx * 0.67, 0.38, sz * 0.42);
+        brackets.push(b);
+      }
+      const trimGeo = mergeGeometries([skirt, ...brackets])!;
+      // lock cylinder (static, accent)
+      const lockGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.08, 10);
+      lockGeo.rotateX(Math.PI / 2);
+      lockGeo.translate(0, 0.62, -0.5);
+      // lid parts — translated relative to the lid pivot (0, 0.72, 0)
+      const lidBodyGeo = new THREE.BoxGeometry(1.5, 0.34, 0.99);
+      lidBodyGeo.translate(0, 0.17, 0);
+      const lidTrimGeo = new THREE.BoxGeometry(1.54, 0.12, 0.1);
+      lidTrimGeo.translate(0, 0.17, -0.47);
+      const coreGeo = new THREE.SphereGeometry(0.13 + tier * 0.03, 10, 8);
+      coreGeo.translate(0, 0.17, 0.42);
+      const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, shadow: boolean) => {
+        const im = new THREE.InstancedMesh(geo, mat, n);
+        im.castShadow = shadow;
+        im.receiveShadow = shadow;
+        im.frustumCulled = false;
+        this.group.add(im);
+        return im;
+      };
+      let halo: THREE.InstancedMesh | null = null;
+      if (tier > 0) {
+        const haloGeo = new THREE.TorusGeometry(0.62 + tier * 0.1, 0.022 + tier * 0.008, 8, 40);
+        haloGeo.rotateX(Math.PI / 2);
+        haloGeo.translate(0, 1.55 + tier * 0.12, 0);
+        halo = mk(haloGeo, new THREE.MeshBasicMaterial({
+          color: glowHex, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false,
+        }), false);
+        halo.renderOrder = 2;
+      }
+      this.chestInst[tier] = {
+        body: mk(baseGeo, cached.body, true),
+        trim: mk(trimGeo, cached.trim, false),
+        lock: mk(lockGeo, cached.accent, false),
+        lidBody: mk(lidBodyGeo, cached.body, true),
+        lidTrim: mk(lidTrimGeo, cached.trim, false),
+        core: mk(coreGeo, cached.accent, false),
+        halo,
+        mats: cached,
+      };
+    }
+    let nextIdx: number[] = [0, 0, 0];
     for (const c of match.chests) {
-      const view = this.chestBody(c.kind);
-      view.group.position.set(c.x, c.y, c.z);
-      view.group.rotation.y = Math.abs(Math.round((c.x * 13.7 + c.z * 7.3))) * 0.61 % (Math.PI * 2);
-      this.chestViews.set(c.id, view);
-      this.group.add(view.group);
+      if (this.chestSlots.has(c.id)) continue;
+      const tier = c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0;
+      const idx = nextIdx[tier]!;
+      nextIdx[tier] = idx + 1;
+      this.chestSlots.set(c.id, {
+        tier, idx,
+        pos: new THREE.Vector3(c.x, c.y, c.z),
+        yaw: Math.abs(Math.round((c.x * 13.7 + c.z * 7.3))) * 0.61 % (Math.PI * 2),
+        lidAngle: 0, opened: false, haloScale: 1,
+      });
+    }
+    // write static transforms once (base/trim/lock/halo base matrices)
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const one = new THREE.Vector3(1, 1, 1);
+    for (const [, s] of this.chestSlots) {
+      const inst = this.chestInst[s.tier]!;
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw);
+      m4.compose(s.pos, q, one);
+      inst.body.setMatrixAt(s.idx, m4);
+      inst.trim.setMatrixAt(s.idx, m4);
+      inst.lock.setMatrixAt(s.idx, m4);
+      if (inst.halo) inst.halo.setMatrixAt(s.idx, m4);
+    }
+    for (let tier = 0; tier < 3; tier++) {
+      const inst = this.chestInst[tier];
+      if (!inst) continue;
+      for (const im of [inst.body, inst.trim, inst.lock, inst.lidBody, inst.lidTrim, inst.core, ...(inst.halo ? [inst.halo] : [])]) {
+        im.instanceMatrix.needsUpdate = true;
+        im.count = nextIdx[tier]!;
+      }
     }
   }
 
   syncChests(match: Match): void {
+    const m4 = new THREE.Matrix4();
+    const qy = new THREE.Quaternion();
+    const qx = new THREE.Quaternion();
+    const pivot = new THREE.Vector3(0, 0.72, 0);
+    const one = new THREE.Vector3(1, 1, 1);
+    const zero = new THREE.Vector3(0.0001, 0.0001, 0.0001);
+    const pulseByTier = [false, false, false];
     for (const c of match.chests) {
-      const view = this.chestViews.get(c.id);
-      if (!view) continue;
+      const s = this.chestSlots.get(c.id);
+      if (!s) continue;
+      const inst = this.chestInst[s.tier]!;
       const targetLid = -Math.min(1, c.openT * 1.6) * 1.85;
-      if (view.lid) view.lid.rotation.x += (targetLid - view.lid.rotation.x) * 0.14;
-      const pulse = 1 + Math.sin(this.time * 2.6 + c.x) * 0.12;
-      if (!c.opened) {
-        for (const m of view.glowMat) m.emissiveIntensity = (1.5 + pulse * 0.6);
-      } else {
-        for (const m of view.glowMat) m.emissiveIntensity *= Math.exp(-this.timeDelta() * 1.4);
-        const halo = view.group.getObjectByName('halo');
-        if (halo) {
-          const hm = (halo as THREE.Mesh).material as THREE.MeshBasicMaterial;
-          hm.opacity = Math.max(0, hm.opacity - 0.02);
-        }
+      s.lidAngle += (targetLid - s.lidAngle) * 0.14;
+      s.opened = c.opened;
+      if (!c.opened) pulseByTier[s.tier] = true;
+      qy.setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw);
+      // lid: chest transform · translate(pivot) · rotateX(angle)
+      m4.compose(s.pos, qy, one);
+      const lidM = m4.clone().multiply(new THREE.Matrix4().makeTranslation(pivot.x, pivot.y, pivot.z));
+      qx.setFromAxisAngle(new THREE.Vector3(1, 0, 0), s.lidAngle);
+      lidM.multiply(new THREE.Matrix4().makeRotationFromQuaternion(qx));
+      inst.lidBody.setMatrixAt(s.idx, lidM);
+      inst.lidTrim.setMatrixAt(s.idx, lidM);
+      inst.core.setMatrixAt(s.idx, lidM);
+      // halo shrinks away once opened
+      if (inst.halo) {
+        s.haloScale = Math.max(0, s.haloScale - this.timeDelta() * (s.opened ? 1.4 : 0));
+        m4.compose(s.pos, qy, s.haloScale < 1 ? new THREE.Vector3().setScalar(Math.max(0.0001, s.haloScale)) : one);
+        inst.halo.setMatrixAt(s.idx, m4);
       }
+    }
+    for (let tier = 0; tier < 3; tier++) {
+      const inst = this.chestInst[tier];
+      if (!inst) continue;
+      inst.lidBody.instanceMatrix.needsUpdate = true;
+      inst.lidTrim.instanceMatrix.needsUpdate = true;
+      inst.core.instanceMatrix.needsUpdate = true;
+      if (inst.halo) inst.halo.instanceMatrix.needsUpdate = true;
+      const pulse = 1 + Math.sin(this.time * 2.6) * 0.12;
+      const e = pulseByTier[tier] ? 1.5 + pulse * 0.6 : inst.mats.trim.emissiveIntensity * Math.exp(-this.timeDelta() * 1.4);
+      inst.mats.trim.emissiveIntensity = e;
+      inst.mats.accent.emissiveIntensity = e;
     }
   }
 
@@ -610,55 +757,58 @@ export class WorldView {
   }
 
   // -------------------------------------------------------------------------
-  // Loot presentation: floating items, rarity beams, ground rings
+  // Loot presentation: floating items, rarity beams, ground rings.
+  // Ammo/heals render through shared instanced pools (draw-call budget);
+  // weapons keep individual models with rarity beams (distance-culled).
   // -------------------------------------------------------------------------
 
-  private lootViewFor(item: import('../sim/loot').WorldItem): { root: THREE.Group; beam?: THREE.Mesh; ring?: THREE.Mesh } {
+  private lootInst: Partial<Record<'ammo' | 'med' | 'shield', THREE.InstancedMesh>> = {};
+
+  private lootInstMesh(kind: 'ammo' | 'med' | 'shield'): THREE.InstancedMesh {
+    const existing = this.lootInst[kind];
+    if (existing) return existing;
+    const cap = 128;
+    let mesh: THREE.InstancedMesh;
+    if (kind === 'ammo') {
+      const box = new THREE.BoxGeometry(0.42, 0.3, 0.3);
+      const stripe = new THREE.BoxGeometry(0.44, 0.06, 0.32);
+      stripe.translate(0, 0.12, 0);
+      const geo = mergeGeometries([box, stripe], true)!;
+      mesh = new THREE.InstancedMesh(geo, [lootMats.ammoBox, lootMats.ammoStripe], cap);
+    } else {
+      const box = new THREE.BoxGeometry(0.48, 0.34, 0.34);
+      const c1 = new THREE.BoxGeometry(0.3, 0.08, 0.02);
+      c1.translate(0, 0.05, 0.18);
+      const c2 = new THREE.BoxGeometry(0.08, 0.02, 0.3);
+      c2.translate(0, 0.05, 0.18);
+      const glow = new THREE.SphereGeometry(0.05, 8, 6);
+      glow.translate(0, 0.24, 0);
+      const geo = mergeGeometries([box, c1, c2, glow], true)!;
+      const mats = kind === 'med'
+        ? [lootMats.medBox, lootMats.crossMed, lootMats.crossMed, lootMats.glowMed]
+        : [lootMats.shieldBox, lootMats.crossShield, lootMats.crossShield, lootMats.glowShield];
+      mesh = new THREE.InstancedMesh(geo, mats, cap);
+    }
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.count = 0;
+    mesh.frustumCulled = false;
+    this.lootInst[kind] = mesh;
+    this.group.add(mesh);
+    return mesh;
+  }
+
+  private lootViewFor(item: import('../sim/loot').WorldItem): { root: THREE.Group; inner: THREE.Object3D | null; beam?: THREE.Mesh; ring?: THREE.Mesh } {
     const root = new THREE.Group();
     const rarityRank = ['common', 'uncommon', 'rare', 'epic', 'legendary'].indexOf(item.rarity);
     const glowHex = RARITY_COLORS[item.rarity];
 
+    // Weapons only — consumables render through the shared instanced pools.
     let inner: THREE.Object3D | null = null;
     if (item.kind === 'weapon' && item.weapon) {
       const wm = this.weaponFactory.buildWorldScale(item.weapon.weaponId, item.rarity);
       if (wm) inner = wm.group;
     }
-    if (!inner) {
-      const g = new THREE.Group();
-      if (item.kind === 'ammo') {
-        const box = new THREE.Mesh(
-          new THREE.BoxGeometry(0.42, 0.3, 0.3),
-          new THREE.MeshStandardMaterial({ color: 0x4a5038, roughness: 0.7, metalness: 0.2 }),
-        );
-        const stripe = new THREE.Mesh(
-          new THREE.BoxGeometry(0.44, 0.06, 0.32),
-          new THREE.MeshStandardMaterial({ color: 0x101114, emissive: 0xd8c86a, emissiveIntensity: 0.8 }),
-        );
-        stripe.position.y = 0.12;
-        g.add(box, stripe);
-      } else {
-        const isMed = item.heal?.itemId === 'medkit';
-        const box = new THREE.Mesh(
-          new THREE.BoxGeometry(0.48, 0.34, 0.34),
-          new THREE.MeshStandardMaterial({
-            color: isMed ? 0xe8ecef : 0x244a66, roughness: 0.5, metalness: 0.3,
-            emissive: isMed ? 0x882030 : 0x10406a, emissiveIntensity: 0.5,
-          }),
-        );
-        const crossMat = new THREE.MeshBasicMaterial({ color: isMed ? 0xff5f6d : 0x53d8ff });
-        const c1 = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.08, 0.02), crossMat);
-        c1.position.set(0, 0.05, 0.18);
-        const c2 = c1.clone(); c2.rotation.z = Math.PI / 2;
-        const glow = new THREE.Mesh(
-          new THREE.SphereGeometry(0.05, 8, 6),
-          new THREE.MeshBasicMaterial({ color: isMed ? 0xff8088 : 0x53d8ff }),
-        );
-        glow.position.y = 0.24;
-        g.add(box, c1, c2, glow);
-      }
-      inner = g;
-    }
-    root.add(inner);
+    if (inner) root.add(inner);
 
     // Rarity presentation: beam + ground ring scale with rarity
     let beam: THREE.Mesh | undefined;
@@ -679,13 +829,23 @@ export class WorldView {
       ring.renderOrder = 2;
       root.add(beam, ring);
     }
-    return { root, beam, ring };
+    return { root, inner, beam, ring };
   }
 
   syncLoot(match: Match): void {
     const seen = new Set<number>();
+    const farSqr = 48 * 48;
+    const instBuckets: Record<'ammo' | 'med' | 'shield', Array<{ x: number; y: number; z: number; spin: number }>> = {
+      ammo: [], med: [], shield: [],
+    };
     for (const item of match.loot.items) {
       seen.add(item.id);
+      const bob = Math.sin(this.time * 2.1 + item.id * 1.7) * 0.09 + 0.62;
+      if (item.kind !== 'weapon') {
+        const key = item.kind === 'ammo' ? 'ammo' : item.heal?.itemId === 'medkit' ? 'med' : 'shield';
+        instBuckets[key]!.push({ x: item.x, y: item.y + bob, z: item.z, spin: this.time * (item.kind === 'heal' ? 0.8 : 0.55) + item.id });
+        continue;
+      }
       let view = this.lootViews.get(item.id);
       if (!view) {
         view = { ...this.lootViewFor(item), phase: Math.random() * Math.PI * 2 };
@@ -693,8 +853,11 @@ export class WorldView {
         this.lootViews.set(item.id, view);
         this.group.add(view.root);
       }
-      const bob = Math.sin(this.time * 2.1 + view.phase) * 0.09 + 0.62;
-      const spin = this.time * (item.kind === 'heal' ? 0.8 : 0.55) + view.phase;
+      // Distance-cull the item model; rarity beams stay visible as far cues.
+      const dx = item.x - this.viewPos.x;
+      const dz = item.z - this.viewPos.z;
+      if (view.inner) view.inner.visible = dx * dx + dz * dz < farSqr;
+      const spin = this.time * 0.55 + view.phase;
       view.root.rotation.y = spin;
       const pulse = 1 + Math.sin(this.time * 3.4 + view.phase) * 0.14;
       const beam = view.beam;
@@ -709,6 +872,24 @@ export class WorldView {
         ring.position.y = 0.06 + bob * 0.1;
       }
       view.root.position.y = item.y + bob;
+    }
+    // Flush consumable loot into the shared instanced pools.
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const one = new THREE.Vector3(1, 1, 1);
+    for (const key of ['ammo', 'med', 'shield'] as const) {
+      const mesh = this.lootInst[key] ?? this.lootInstMesh(key);
+      const items = instBuckets[key]!;
+      const n = Math.min(items.length, mesh.instanceMatrix.count);
+      for (let i = 0; i < n; i++) {
+        const it = items[i]!;
+        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), it.spin);
+        m4.compose(new THREE.Vector3(it.x, it.y, it.z), q, one);
+        mesh.setMatrixAt(i, m4);
+      }
+      mesh.count = n;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.visible = n > 0;
     }
     for (const [id, view] of this.lootViews) {
       if (!seen.has(id)) {
@@ -837,9 +1018,10 @@ export class WorldView {
     if (match.phase === 'transport') {
       this.transportGroup.visible = true;
       this.transportGroup.position.set(match.transportPos.x, match.transportPos.y, match.transportPos.z);
+      // Model's long axis is +X; align it with the flight direction.
       this.transportGroup.rotation.y = Math.atan2(
+        -(match.transportTo[1] - match.transportFrom[1]),
         match.transportTo[0] - match.transportFrom[0],
-        match.transportTo[1] - match.transportFrom[1],
       );
       const blink = Math.sin(this.time * 5.2) > 0.2 ? 1 : 0.15;
       this.transportGroup.traverse((o) => {
@@ -864,6 +1046,23 @@ function makeBeamMaterial(color: number, baseOpacity: number): THREE.MeshBasicMa
   return mat;
 }
 
+/** Shared ground-loot materials (one instance per look — draw-call/GC budget). */
+const lootMats = {
+  ammoBox: new THREE.MeshStandardMaterial({ color: 0x4a5038, roughness: 0.7, metalness: 0.2 }),
+  ammoStripe: new THREE.MeshStandardMaterial({ color: 0x101114, emissive: 0xd8c86a, emissiveIntensity: 0.8 }),
+  medBox: new THREE.MeshStandardMaterial({
+    color: 0xe8ecef, roughness: 0.5, metalness: 0.3, emissive: 0x882030, emissiveIntensity: 0.5,
+  }),
+  shieldBox: new THREE.MeshStandardMaterial({
+    color: 0x244a66, roughness: 0.5, metalness: 0.3, emissive: 0x10406a, emissiveIntensity: 0.5,
+  }),
+  crossMed: new THREE.MeshBasicMaterial({ color: 0xff5f6d }),
+  crossShield: new THREE.MeshBasicMaterial({ color: 0x53d8ff }),
+  glowMed: new THREE.MeshBasicMaterial({ color: 0xff8088 }),
+  glowShield: new THREE.MeshBasicMaterial({ color: 0x53d8ff }),
+};
+for (const m of Object.values(lootMats)) (m.userData as { shared?: boolean }).shared = true;
+
 /** Shared radial-gradient canvas texture (lamp pools etc.). */
 export function makeGlowTexture(rgbPrefix: string, size: number): THREE.CanvasTexture {
   const c = document.createElement('canvas');
@@ -885,8 +1084,8 @@ function disposeObject(root: THREE.Object3D): void {
     if (mesh.isMesh) {
       mesh.geometry?.dispose();
       const mat = mesh.material;
-      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-      else mat?.dispose();
+      if (Array.isArray(mat)) mat.forEach((m) => { if (!(m.userData as { shared?: boolean }).shared) m.dispose(); });
+      else if (mat && !(mat.userData as { shared?: boolean }).shared) mat.dispose();
     }
   });
 }

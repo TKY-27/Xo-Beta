@@ -100,12 +100,15 @@ export class LobbyScene {
     }
 
     // Key + fill lights
-    const key = new THREE.SpotLight(0xeaf4ff, 260, 30, Math.PI / 5, 0.45, 1.8);
-    key.position.set(3.2, 7.4, 4.2);
+    const key = new THREE.SpotLight(0xeaf4ff, 420, 34, Math.PI / 4.6, 0.42, 1.7);
+    key.position.set(3.4, 7.6, 4.6);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
     scene.add(key, key.target);
-    const fill = new THREE.HemisphereLight(0x33465e, 0x0b0e14, 0.85);
+    const rim = new THREE.SpotLight(0x9fd8ff, 130, 26, Math.PI / 3.4, 0.6, 1.9);
+    rim.position.set(-4.6, 5.2, -3.4);
+    scene.add(rim, rim.target);
+    const fill = new THREE.HemisphereLight(0x33465e, 0x0b0e14, 1.0);
     scene.add(fill);
 
     // Combatant display: character + held weapon
@@ -142,14 +145,15 @@ export class LobbyScene {
       this.rig!.group.rotation.y = Math.sin(this.t * 0.22) * 0.55;
       this.rig!.update?.(actor, now / 1000, dt);
 
+      // Character framed right-of-center; nav rail owns the left edge.
       if (!this.reduced && this.camera) {
-        const a = this.t * 0.11;
-        const r = 5.4;
-        this.camera.position.set(Math.sin(a) * r, 1.72 + Math.sin(this.t * 0.31) * 0.16, Math.cos(a) * r + 0.6);
-        this.camera.lookAt(0, 1.06, 0);
+        const a = this.t * 0.1;
+        const r = 5.2;
+        this.camera.position.set(Math.sin(a) * r - 1.15, 1.74 + Math.sin(this.t * 0.31) * 0.15, Math.cos(a) * r + 0.9);
+        this.camera.lookAt(-1.35, 1.04, 0);
       } else if (this.camera) {
-        this.camera.position.set(2.6, 1.68, 4.4);
-        this.camera.lookAt(0, 1.06, 0);
+        this.camera.position.set(1.6, 1.7, 4.9);
+        this.camera.lookAt(-1.35, 1.04, 0);
       }
 
       renderer.render(scene, this.camera!);

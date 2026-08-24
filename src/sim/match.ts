@@ -441,7 +441,7 @@ export class Match {
       a.body.teleport(this.transportPos.x, this.transportPos.y, this.transportPos.z);
       const forced = t >= 1;
       if (cmd.jumpPressed || forced) {
-        a.body.teleport(this.transportPos.x, this.transportPos.y - 3, this.transportPos.z);
+        a.body.teleport(this.transportPos.x, this.transportPos.y - MATCH.transportHangOffset, this.transportPos.z);
         a.body.velocity.x = 0; a.body.velocity.y = -6; a.body.velocity.z = 0;
         this.movement.beginFreefall(a);
         this.events.emit('transportJumped', { actorId: a.id });
@@ -532,7 +532,7 @@ export class Match {
     const w = a.inv.selectedWeapon;
     if (!w) return;
     const p = a.body.position;
-    const fwd = { x: Math.sin(a.yaw), z: Math.cos(a.yaw) };
+    const fwd = { x: -Math.sin(a.yaw), z: -Math.cos(a.yaw) };
     this.cancelReload(a);
     a.inv.removeSlot(a.inv.selected);
     this.loot.spawnWeapon(p.x + fwd.x * 1.4, p.y + 1.2, p.z + fwd.z * 1.4, w, this.rng, false);

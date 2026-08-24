@@ -283,6 +283,9 @@ export class CharacterFactory {
       baseMats: baseMats,
       dissolving: 0,
       update(a: Actor, t: number, dt: number) {
+        // Face aim heading. GLB base characters are authored facing +Z;
+        // sim yaw 0 faces -Z, hence the PI offset.
+        rig.group.rotation.y = a.yaw + Math.PI;
         if (!a.alive) {
           // death clip once, then dissolve handled externally
           if (!actions['death']!.isRunning() && rig.dissolving === 0) {

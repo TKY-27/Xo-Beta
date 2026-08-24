@@ -28,10 +28,12 @@ const TILE_DENSITY: Record<string, number> = {
 /** Tints applied on top of base color maps (white = untouched). */
 const TINTS: Partial<Record<MatKey, number>> = {
   grass: 0xb9c4a9,
+  wood: 0x857d6e,
+  woodDark: 0x6e675c,
   rust: 0xcfc0b6,
   plasterOld: 0xd8d2c6,
   concreteDark: 0x8d9096,
-  facadeA: 0x9fb2c4,
+  facadeA: 0x7e92a8,
   facadeB: 0xffffff,
   facadeC: 0xbfc6cc,
 };
@@ -200,9 +202,12 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('facadeC', std('facadeC', 'corrugated', { metalness: 0.35 }));
   mats.set('sandbag', new THREE.MeshStandardMaterial({ color: 0x9c8b62, roughness: 0.98 }));
   mats.set('gold', new THREE.MeshStandardMaterial({ color: 0xd8b45a, roughness: 0.32, metalness: 0.95 }));
-  mats.set('glass', new THREE.MeshPhysicalMaterial({
-    color: 0x9fc8dd, roughness: 0.08, metalness: 0, transparent: true, opacity: 0.32,
-    transmission: 0.6, thickness: 0.2, envMapIntensity: 1.4,
+  // NOTE: plain alpha-blend glass. MeshPhysicalMaterial.transmission forces
+  // three.js to re-render the whole scene into a refraction buffer every
+  // frame (~14ms on the reference GPU) — never worth it at game scale.
+  mats.set('glass', new THREE.MeshStandardMaterial({
+    color: 0x9fc8dd, roughness: 0.08, metalness: 0.1, transparent: true, opacity: 0.34,
+    envMapIntensity: 1.4, depthWrite: false,
   }));
 
   // Neon emissive accents
@@ -215,6 +220,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('neonOrange', neon(0xff9040, 2.4));
   mats.set('neonGreen', neon(0x54ff9f, 2.6));
   mats.set('neonBlue', neon(0x5f8cff, 2.6));
+  mats.set('windowWarm', neon(0xffd9a0, 3.4));
 
   return {
     get(key: MatKey): THREE.Material {

@@ -49,6 +49,7 @@ export class Menus {
     this.unsubs.push(onLangChanged(() => {
       hydrateStatic();
       this.buildPlayMenu();
+      this.buildSettings();
     }));
   }
 
@@ -111,17 +112,34 @@ export class Menus {
   private buildPlayMenu(): void {
     const list = $('map-list');
     list.innerHTML = '';
+    const accents: Record<string, string> = {
+      neocity: 'var(--map-neocity)',
+      oldfront: 'var(--map-oldfront)',
+      eden: 'var(--map-eden)',
+    };
     for (const m of this.maps) {
       const card = document.createElement('button');
       card.className = 'map-card' + (m.id === this.selectedMap ? ' selected' : '');
+      card.style.setProperty('--mc-accent', accents[m.id] ?? 'var(--accent)');
+      const art = document.createElement('div');
+      art.className = 'mc-art';
+      art.style.backgroundImage = `url('/assets/maps/${m.id}.jpg')`;
+      const scrim = document.createElement('div');
+      scrim.className = 'mc-scrim';
+      const body = document.createElement('div');
+      body.className = 'mc-body';
       const nameEl = document.createElement('h3');
       const descEl = document.createElement('p');
+      const check = document.createElement('span');
+      check.className = 'mc-check';
+      check.textContent = '✓';
       const render = () => {
         nameEl.textContent = m.nameKey ? t(m.nameKey as TextKey) : m.name;
         descEl.textContent = m.descKey ? t(m.descKey as TextKey) : m.description;
       };
       render();
-      card.append(nameEl, descEl);
+      body.append(nameEl, descEl);
+      card.append(art, scrim, body, check);
       card.addEventListener('click', () => {
         this.selectedMap = m.id;
         list.querySelectorAll('.map-card').forEach((c) => c.classList.remove('selected'));
@@ -194,6 +212,11 @@ export class Menus {
 
   private buildSettings(): void {
     const s = getSettings();
+    // Idempotent: cleared and rebuilt (also on language change).
+    for (const id of ['settings-controls', 'settings-graphics', 'settings-audio', 'settings-gameplay']) {
+      $(id).innerHTML = '';
+    }
+    this.bindSettingsRail();
 
     // Controls
     const controls = $('settings-controls');
@@ -283,6 +306,26 @@ export class Menus {
     h.textContent = text.toUpperCase();
     h.style.cssText = 'margin-top:1rem;';
     return h;
+  }
+
+  /** Category rail: show one settings pane at a time. */
+  private bindSettingsRail(): void {
+    const rail = document.getElementById('settings-rail');
+    if (!rail || rail.dataset.bound === '1') {
+      // Still refresh selected names on the buttons after a language switch
+      return;
+    }
+    rail.dataset.bound = '1';
+    const buttons = [...rail.querySelectorAll<HTMLButtonElement>('.rail-btn')];
+    for (const btn of buttons) {
+      btn.addEventListener('click', () => {
+        for (const b of buttons) b.classList.toggle('selected', b === btn);
+        for (const pane of document.querySelectorAll('.settings-pane')) {
+          pane.classList.toggle('selected', pane.id === btn.dataset.pane);
+        }
+        this.onUiSound?.('click');
+      });
+    }
   }
 
   private keybindRows: Array<{ code: keyof KeyBindings; el: HTMLElement }> = [];
@@ -459,6 +502,12 @@ export class Hud {
     const p = match.player;
     if (!p) return;
 
+    // Dynamic crosshair: expands with fire bloom, tightens while aiming
+    const bloom = p.wpn.bloom;
+    const ads = p.wpn.adsAmount;
+    const gap = Math.round(getSettings().crosshairSize * 0.7 + bloom * 240 * (1 - ads * 0.72));
+    $('crosshair').style.setProperty('--ch-gap', `${gap}px`);
+
     $('health-fill').style.width = `${p.health}%`;
     $('shield-fill').style.width = `${p.shield}%`;
     $('health-text').textContent = String(Math.ceil(p.health));
@@ -470,6 +519,9 @@ export class Hud {
       $('ammo-mag').textContent = String(w.ammoInMag);
       $('ammo-reserve').textContent = String(p.inv.ammo[def.ammoType]);
       $('weapon-name').textContent = t(`wpn.${w.weaponId}` as TextKey).toUpperCase();
+      const ammoEl = $('ammo-display');
+      ammoEl.classList.toggle('low', w.ammoInMag === 0);
+      ammoEl.classList.toggle('warn', w.ammoInMag > 0 && w.ammoInMag / def.magSize <= 0.25);
     } else {
       $('ammo-mag').textContent = '—';
       $('ammo-reserve').textContent = '';
@@ -531,6 +583,11 @@ export class Hud {
     else if (st.state === 'waiting') stEl.textContent = `${t('hud.stormClosesIn')} ${formatTime(st.timer)}`;
     else if (st.state === 'shrinking') stEl.textContent = `${t('hud.stormShrinking')} — ${formatTime(st.timer)}`;
     else stEl.textContent = t('hud.finalCircle');
+    stEl.classList.toggle('urgent', st.state === 'shrinking');
+
+    // Critical health bar state
+    const hpBar = document.querySelector('.bar.health');
+    if (hpBar) hpBar.classList.toggle('critical', p.health <= 30 && p.health > 0);
 
     // Vignettes
     const vig = $('vignette');
@@ -630,6 +687,8 @@ export class Hud {
       return;
     }
     $('interact-text').textContent = text;
+    const kbd = el.querySelector('kbd');
+    if (kbd) kbd.textContent = prettyKey(getSettings().bindings.interact);
     el.classList.remove('hidden');
   }
 
@@ -822,7 +881,7 @@ export class Hud {
     if (me?.alive) {
       ctx.save();
       ctx.translate(toPx(me.body.position.x), toPx(me.body.position.z));
-      ctx.rotate(me.yaw);
+      ctx.rotate(-me.yaw - Math.PI / 2);
       ctx.fillStyle = '#5fd0ff';
       ctx.beginPath();
       ctx.moveTo(11, 0); ctx.lineTo(-7, 8); ctx.lineTo(-7, -8);
@@ -899,7 +958,7 @@ export class Hud {
     if (me) {
       ctx.save();
       ctx.translate(me.body.position.x, me.body.position.z);
-      ctx.rotate(me.yaw);
+      ctx.rotate(-me.yaw - Math.PI / 2);
       ctx.fillStyle = '#5fd0ff';
       ctx.beginPath();
       ctx.moveTo(10 / scale, 0);

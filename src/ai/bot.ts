@@ -196,9 +196,9 @@ export class BotController {
         cmd.jumpHeld = true;
         if (this.actor.dashCharges > 0 && this.rng.bool(0.5)) {
           cmd.dashPressed = true;
-          const yaw = cmd.yaw || this.actor.yaw;
-          cmd.moveX = Math.sin(yaw + Math.PI / 2) * 0.5;
-          cmd.moveZ = Math.cos(yaw + Math.PI / 2) * 0.5;
+          // Dash diagonally out of the wedge (local-space axes)
+          cmd.moveZ = 1;
+          cmd.moveX = this.rng.bool(0.5) ? 0.8 : -0.8;
         }
       }
     }
@@ -697,7 +697,7 @@ export class BotController {
     const threat = this.perception.mostConfidentMemory(4);
     if (threat && threat.confidence > 0.6) {
       // face threat while healing
-      cmd.yaw = Math.atan2(threat.x - a.body.position.x, threat.z - a.body.position.z);
+      cmd.yaw = Math.atan2(-(threat.x - a.body.position.x), -(threat.z - a.body.position.z));
     }
     if (a.healing) return;
     if (a.health < 97 && a.inv.findHeal('medkit')) {
@@ -858,7 +858,7 @@ export class BotController {
     }
     const tx = this.match.transportPos.x;
     const tz = this.match.transportPos.z;
-    cmd.yaw = Math.atan2(t.x - tx, t.z - tz);
+    cmd.yaw = Math.atan2(-(t.x - tx), -(t.z - tz));
     return cmd;
   }
 
@@ -904,7 +904,7 @@ export class BotController {
     const dx = t.x - p.x;
     const dz = t.z - p.z;
     const distH = Math.hypot(dx, dz);
-    cmd.yaw = Math.atan2(dx, dz);
+    cmd.yaw = Math.atan2(-dx, -dz);
     if (this.actor.state === 'glide') {
       // Manage the glide ratio so far targets are actually reachable:
       // flatten (or even hold altitude) when undershooting, dive when close.

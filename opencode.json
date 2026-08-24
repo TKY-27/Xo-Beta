@@ -1,0 +1,81 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openrouter/stealth/ox-alpha",
+  "default_agent": "build",
+  "share": "disabled",
+  "snapshot": true,
+  "provider": {
+    "openrouter": {
+      "options": {
+        "timeout": false,
+        "chunkTimeout": 180000
+      }
+    }
+  },
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "reserved": 20000
+  },
+  "watcher": {
+    "ignore": [
+      "node_modules/**",
+      "dist/**",
+      "coverage/**",
+      ".git/**",
+      ".vite/**"
+    ]
+  },
+  "lsp": true,
+  "permission": {
+    "*": "ask",
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow",
+      "*.pem": "deny",
+      "*.key": "deny",
+      "~/.local/share/opencode/auth.json": "deny",
+      "~/.ssh/**": "deny"
+    },
+    "edit": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "task": "allow",
+    "skill": "allow",
+    "lsp": "allow",
+    "question": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "doom_loop": "allow",
+    "external_directory": "deny",
+    "bash": {
+      "*": "ask",
+      "git *": "deny",
+      "command git *": "deny",
+      "env git *": "deny",
+      "/usr/bin/git *": "deny",
+      "/opt/homebrew/bin/git *": "deny",
+      "gh *": "deny",
+      "* .git/*": "deny",
+      "*.git/*": "deny",
+      "* .git": "deny",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git show*": "allow",
+      "git grep*": "allow",
+      "git rev-parse*": "allow",
+      "git ls-files*": "allow",
+      "git ls-tree*": "allow",
+      "git cat-file*": "allow",
+      "git reflog*": "allow",
+      "git describe*": "allow",
+      "git tag --list*": "allow",
+      "git branch --show-current*": "allow",
+      "git branch --list*": "allow",
+      "git remote -v*": "allow"
+    }
+  }
+}

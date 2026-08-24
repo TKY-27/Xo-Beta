@@ -89,7 +89,7 @@ export class GameRenderer {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.25;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(this.effectivePixelRatio());
 
     window.addEventListener('resize', () => this.resize());
   }
@@ -98,15 +98,31 @@ export class GameRenderer {
     const settings = getSettings();
     const w = window.innerWidth;
     const h = window.innerHeight;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * settings.resolutionScale);
+    const pr = this.effectivePixelRatio() * settings.resolutionScale;
+    this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
-    this.composer?.setSize(w * settings.resolutionScale, h * settings.resolutionScale);
-    if (this.fxaaPass) {
-      (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(
-        1 / (w * settings.resolutionScale),
-        1 / (h * settings.resolutionScale),
-      );
+    if (this.composer) {
+      // EffectComposer caches the pixel ratio at construction — keep it in
+      // sync or its render targets silently keep the stale resolution.
+      this.composer.setPixelRatio(pr);
+      this.composer.setSize(w, h);
     }
+    if (this.fxaaPass) {
+      (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(1 / (w * pr), 1 / (h * pr));
+    }
+  }
+
+  /**
+   * Quality-gated device-pixel-ratio cap. Full native retina (dpr 2) with the
+   * complete PBR+post pipeline exceeds the fill budget of reference GPUs at
+   * 60fps; every shipped title renders internally below native. 'cinematic'
+   * keeps native resolution; interactive presets render at a crisp
+   * supersampled-but-bounded scale (browser upscales; SMAA catches edges).
+   */
+  private effectivePixelRatio(): number {
+    const q = getSettings().quality;
+    const cap = q === 'cinematic' ? 2 : q === 'ultra' ? 1.2 : q === 'high' ? 1.05 : 1;
+    return Math.min(window.devicePixelRatio, cap);
   }
 
   /**
@@ -118,7 +134,18 @@ export class GameRenderer {
     if (this.pmrem) this.disposeEnvironment();
     this.pmrem = new THREE.PMREMGenerator(this.renderer);
 
-    if (sky.hdri) {
+    if (sky.preset === 'bluehour') {
+      // Authored competitive blue-hour city sky: bright enough to fight in,
+      // deep blue gradient with a glowing horizon. Also drives IBL.
+      const tex = makeBlueHourSkyTexture();
+      this.envRenderTarget?.dispose();
+      this.envRenderTarget = this.pmrem.fromEquirectangular(tex);
+      this.scene.environment = this.envRenderTarget.texture;
+      this.scene.environmentIntensity = sky.envIntensity ?? 0.9;
+      this.scene.background = tex;
+      this.scene.backgroundIntensity = sky.backgroundIntensity ?? 1.0;
+      this.scene.backgroundBlurriness = sky.backgroundBlurriness ?? 0;
+    } else if (sky.hdri) {
       try {
         const equirect = await loadHdri(sky.hdri);
         this.envRenderTarget?.dispose();
@@ -171,8 +198,8 @@ export class GameRenderer {
 
   private setupGradientSky(sky: SkyConfig): void {
     const geo = new THREE.SphereGeometry(800, 24, 16);
-    const top = new THREE.Color(sky.preset === 'night' ? 0x0b1022 : sky.preset === 'overcast' ? 0x9fb0bd : 0x8fc4e8);
-    const bottom = new THREE.Color(sky.preset === 'night' ? 0x141a2e : sky.preset === 'overcast' ? 0xc4cdd5 : 0xd8ecf6);
+    const top = new THREE.Color(sky.preset === 'night' ? 0x0b1022 : sky.preset === 'bluehour' ? 0x050b1c : sky.preset === 'overcast' ? 0x9fb0bd : 0x8fc4e8);
+    const bottom = new THREE.Color(sky.preset === 'night' ? 0x141a2e : sky.preset === 'bluehour' ? 0x24406e : sky.preset === 'overcast' ? 0xc4cdd5 : 0xd8ecf6);
     const mat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
@@ -209,9 +236,10 @@ export class GameRenderer {
   buildComposer(camera: THREE.Camera): void {
     this.composer?.dispose();
     const settings = getSettings();
-    const w = Math.max(8, window.innerWidth * settings.resolutionScale);
-    const h = Math.max(8, window.innerHeight * settings.resolutionScale);
+    const w = Math.max(8, window.innerWidth);
+    const h = Math.max(8, window.innerHeight);
     this.composer = new EffectComposer(this.renderer);
+    this.composer.setPixelRatio(this.effectivePixelRatio() * settings.resolutionScale);
     this.composer.setSize(w, h);
 
     this.renderPass = new RenderPass(this.scene, camera);
@@ -226,10 +254,17 @@ export class GameRenderer {
         distanceExponent: 1.4,
         thickness: 1,
         scale: 1.1,
-        samples: cinematic ? 24 : 14,
+        samples: cinematic ? 24 : 12,
         screenSpaceRadius: false,
       });
       this.gtaoPass.output = GTAOPass.OUTPUT.Default;
+      // AO is a low-frequency effect — render its depth/normal + compute at
+      // half resolution and let the composite bilinearly upsample. ~4x cheaper
+      // with no visible difference at gameplay camera distances.
+      if (!cinematic) {
+        const origSetSize = this.gtaoPass.setSize.bind(this.gtaoPass);
+        this.gtaoPass.setSize = (w: number, h: number) => origSetSize(Math.max(8, Math.round(w / 2)), Math.max(8, Math.round(h / 2)));
+      }
       this.composer.addPass(this.gtaoPass);
     } else if (!wantAO && this.gtaoPass) {
       this.gtaoPass.dispose();
@@ -338,9 +373,71 @@ export class GameRenderer {
   }
 }
 
-/** Authored night-sky backdrop: deep gradient, stars, subtle milky band. */
-function makeNightSkyTexture(): THREE.CanvasTexture {
+/**
+ * Authored blue-hour city sky (equirect): deep zenith blue, luminous cyan
+ * horizon with a warm sodium band, high cirrus streaks and sparse stars.
+ * Bright enough for readable night combat while clearly reading as night.
+ */
+function makeBlueHourSkyTexture(): THREE.CanvasTexture {
   const w = 1024;
+  const h = 512;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d')!;
+  // Vertical gradient: deep night zenith → luminous blue horizon → dark below
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0.0, '#050b1c');
+  grad.addColorStop(0.26, '#0b1c3e');
+  grad.addColorStop(0.4, '#16305f');
+  grad.addColorStop(0.47, '#2a4f88');
+  grad.addColorStop(0.5, '#4f7fb4');
+  grad.addColorStop(0.525, '#8fb2d4');
+  grad.addColorStop(0.55, '#c8a878'); // thin warm sodium band at the horizon
+  grad.addColorStop(0.58, '#2c3450');
+  grad.addColorStop(0.72, '#10141f');
+  grad.addColorStop(1.0, '#090b11');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  // Stars: dense near zenith, fading toward the horizon glow
+  let seed = 90210;
+  const rnd = () => {
+    seed = (seed * 16807) % 2147483647;
+    return (seed & 0x7fffffff) / 0x7fffffff;
+  };
+  for (let i = 0; i < 420; i++) {
+    const x = rnd() * w;
+    const y = rnd() * h * 0.42;
+    const fade = 1 - y / (h * 0.42);
+    const a = (0.2 + rnd() * 0.6) * fade * fade;
+    ctx.fillStyle = `rgba(215,228,252,${a.toFixed(3)})`;
+    ctx.beginPath();
+    ctx.arc(x, y, rnd() < 0.08 ? rnd() * 1.1 + 0.5 : rnd() * 0.6 + 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Distant city glow patches along the horizon (wrap-safe)
+  for (let i = 0; i < 10; i++) {
+    const x = rnd() * w;
+    const rw = 50 + rnd() * 130;
+    const g3 = ctx.createRadialGradient(x, h * 0.53, 3, x, h * 0.53, rw);
+    g3.addColorStop(0, 'rgba(255,190,120,0.22)');
+    g3.addColorStop(1, 'rgba(255,190,120,0)');
+    ctx.fillStyle = g3;
+    ctx.fillRect(x - rw, h * 0.53 - rw, rw * 2, rw * 2);
+    ctx.fillRect(x - rw + w, h * 0.53 - rw, rw * 2, rw * 2);
+    ctx.fillRect(x - rw - w, h * 0.53 - rw, rw * 2, rw * 2);
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Authored night-sky backdrop: deep gradient, stars, subtle milky band. */
+function makeNightSkyTexture(): THREE.CanvasTexture {  const w = 1024;
   const h = 1024;
   const c = document.createElement('canvas');
   c.width = w;
@@ -353,7 +450,7 @@ function makeNightSkyTexture(): THREE.CanvasTexture {
   grad.addColorStop(1.0, '#232c44');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
-  // faint galactic band
+  // faint galactic band (drawn twice for seamless equirect wrap)
   ctx.save();
   ctx.translate(w / 2, h * 0.42);
   ctx.rotate(-0.35);
@@ -363,6 +460,8 @@ function makeNightSkyTexture(): THREE.CanvasTexture {
   band.addColorStop(1, 'rgba(120,150,220,0)');
   ctx.fillStyle = band;
   ctx.fillRect(-w, -140, w * 2, 280);
+  ctx.fillRect(-w * 1.5, -140, w * 2, 280);
+  ctx.fillRect(w * 0.5, -140, w * 2, 280);
   ctx.restore();
   // stars
   let seed = 1337;

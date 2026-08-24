@@ -152,6 +152,14 @@ const en = {
   'notice.mobileBody': 'Xo Beta is designed for desktop browsers with keyboard & mouse. Open this page on a desktop browser to play.',
   'notice.loadFailed': 'Failed to load — please reload the page.',
   'notice.loading': 'Loading…',
+  'load.preparing': 'Preparing systems…',
+  'load.assets': 'Streaming assets…',
+  'load.materials': 'Compiling materials…',
+  'load.warming': 'Warming up…',
+  'load.ready': 'Ready',
+  'load.map': 'Loading {name}…',
+  'load.deploying': 'Deploying combatants…',
+  'load.final': 'Final checks…',
 
   // Credits
   'credits.body': 'An original open-source battle royale built with Three.js and Rapier. Third-party art & audio assets are CC0 or permissively licensed — full provenance in docs/ASSET_MANIFEST.md.',
@@ -310,6 +318,14 @@ const ja: Partial<Dict> = {
   'notice.mobileBody': 'Xo Betaはキーボードとマウスのあるデスクトップブラウザ向けに設計されています。お手数ですが、デスクトップで開いてください。',
   'notice.loadFailed': '読み込みに失敗しました — ページを再読み込みしてください。',
   'notice.loading': '読み込み中…',
+  'load.preparing': 'システムを準備中…',
+  'load.assets': 'アセットを読み込み中…',
+  'load.materials': 'マテリアルをコンパイル中…',
+  'load.warming': 'ウォームアップ中…',
+  'load.ready': '準備完了',
+  'load.map': '{name}を読み込み中…',
+  'load.deploying': '戦闘員を配置中…',
+  'load.final': '最終確認中…',
 
   'credits.body': 'Three.js と Rapier を用いたオリジナルのオープンソース バトルロイヤル。サードパーティの美術・音声アセットはCC0または寛容なライセンスで提供されています（詳細は docs/ASSET_MANIFEST.md）。',
 

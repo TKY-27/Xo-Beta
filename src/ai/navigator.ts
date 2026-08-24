@@ -109,7 +109,7 @@ export class BotNavigator {
     }
 
     // Face + move toward waypoint
-    const targetYaw = Math.atan2(dx, dz);
+    const targetYaw = Math.atan2(-dx, -dz);
     cmd.yaw = targetYaw;
     cmd.pitch = clamp(-Math.atan2(dy + 1.2, Math.max(distH, 0.5)), -1.2, 1.2);
     cmd.moveZ = 1;

@@ -1,0 +1,5 @@
+default launching
+default launched
+default page
+default goto done
+default {"draws":19246500,"seconds":2,"mpxPerSec":13829.8,"renderer":"WebKit WebGL"}

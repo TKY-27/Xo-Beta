@@ -6,9 +6,12 @@
 import * as THREE from 'three';
 import type { Actor } from '../sim/actor';
 import { getSettings } from '../core/settings';
-import { MOVE } from '../core/balance';
+import { MATCH, MOVE } from '../core/balance';
 
 const CAPSULE_CENTER_OFFSET = MOVE.capsuleHalfHeight + MOVE.capsuleRadius + 0.04;
+
+/** Vertical distance from transport center to the drop-rig hang position. */
+const TRANSPORT_HANG_OFFSET = MATCH.transportHangOffset;
 
 export interface PhysicsQuery {
   raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number): { dist: number } | null;
@@ -22,6 +25,8 @@ export class CameraRig {
   private baseFov = 80;
   private tpsDistance = 4.6;
   private currentAds = 0;
+  private blendFrom: THREE.Vector3 | null = null;
+  private blendT = 1;
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 0.08, 900);
@@ -83,9 +88,9 @@ export class CameraRig {
     this.smoothEye += ((eyeH - this.smoothEye)) * Math.min(1, dt * 12);
 
     const dir = new THREE.Vector3(
-      Math.sin(yaw) * Math.cos(pitch),
+      -Math.sin(yaw) * Math.cos(pitch),
       Math.sin(pitch),
-      Math.cos(yaw) * Math.cos(pitch),
+      -Math.cos(yaw) * Math.cos(pitch),
     );
 
     if (this.mode === 'fps') {
@@ -106,6 +111,14 @@ export class CameraRig {
       this.camera.position.y += shY;
       this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shY * 0.4, yaw + shX * 0.4, 0, 'YXZ'));
     }
+
+    // Smooth transport→gameplay handoff
+    if (this.blendT < 1 && this.blendFrom) {
+      this.blendT = Math.min(1, this.blendT + dt / 0.7);
+      const k = this.blendT * this.blendT * (3 - 2 * this.blendT);
+      this.camera.position.lerpVectors(this.blendFrom, this.camera.position, k);
+      if (this.blendT >= 1) this.blendFrom = null;
+    }
   }
   private smoothEye = MOVE.eyeHeight;
   private clockT = 0;
@@ -122,14 +135,55 @@ export class CameraRig {
     const yaw = target.yaw;
     const pitch = target.pitch;
     const dir = new THREE.Vector3(
-      Math.sin(yaw) * Math.cos(pitch),
+      -Math.sin(yaw) * Math.cos(pitch),
       Math.sin(pitch),
-      Math.cos(yaw) * Math.cos(pitch),
+      -Math.cos(yaw) * Math.cos(pitch),
     );
     const pivot = new THREE.Vector3(p.x, p.y + CAPSULE_CENTER_OFFSET + 0.3, p.z);
     const back = dir.clone().multiplyScalar(-1);
     this.camera.position.copy(pivot).addScaledVector(back, 5);
     this.camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
     void dt;
+  }
+
+  /**
+   * Transport-phase presentation. FP: the player rides the drop rig under the
+   * hull with free look. TPS: slow cinematic orbit framing the transport
+   * against the map below.
+   */
+  updateTransport(
+    pos: { x: number; y: number; z: number },
+    slot: { x: number; y: number; z: number },
+    playerYaw: number,
+    playerPitch: number,
+    t: number,
+    dt: number,
+  ): void {
+    this.smoothEye = MOVE.eyeHeight;
+    const hangY = pos.y - TRANSPORT_HANG_OFFSET + slot.y;
+    if (this.mode === 'fps') {
+      // Eye at the hang slot; slight sway from flight turbulence
+      const swayX = Math.sin(t * 1.7) * 0.06 + Math.sin(t * 0.53) * 0.1;
+      const swayY = Math.sin(t * 1.13) * 0.05;
+      this.camera.position.set(pos.x + slot.x + swayX, hangY + 1.6 + swayY, pos.z + slot.z);
+      this.camera.quaternion.setFromEuler(new THREE.Euler(playerPitch * 0.7, playerYaw, 0, 'YXZ'));
+    } else {
+      // Slow orbit around the transport, slightly above, transport centered
+      const a = t * 0.08 + Math.PI * 0.35;
+      const r = 24;
+      this.camera.position.set(
+        pos.x + Math.sin(a) * r,
+        pos.y + 6.5 + Math.sin(t * 0.11) * 1.2,
+        pos.z + Math.cos(a) * r,
+      );
+      this.camera.lookAt(pos.x, pos.y - 2.2, pos.z);
+    }
+    void dt;
+  }
+
+  /** Begin blending the camera back to gameplay after the transport jump. */
+  beginGameplayBlend(from: THREE.Vector3): void {
+    this.blendFrom = from.clone();
+    this.blendT = 0;
   }
 }

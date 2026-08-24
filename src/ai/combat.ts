@@ -90,7 +90,7 @@ export class BotCombat {
       dy += 0.5 * 26 * def.dropGravity * tof * tof;
     }
 
-    const wantYaw = Math.atan2(dx, dz) + this.errX * (0.5 + dist / 80);
+    const wantYaw = Math.atan2(-dx, -dz) + this.errX * (0.5 + dist / 80);
     const wantPitch = clamp(Math.atan2(dy, Math.hypot(dx, dz)) + this.errY * (0.5 + dist / 80), -1.45, 1.45);
 
     // Rotate aim toward desired with limited speed

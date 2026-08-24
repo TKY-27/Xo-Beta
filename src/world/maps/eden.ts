@@ -212,7 +212,19 @@ function atriumLink(b: WorldBuilder, cx: number, cz: number): void {
   b.slab(cx, gy + 0.2, cz, 10, 26, 0.35, 'concreteDark');
   b.glassPane(cx - 5, gy + 2.4, cz, 26, 4.4, 'z');
   b.glassPane(cx + 5, gy + 2.4, cz, 26, 4.4, 'z');
+  // Structural mullions: the roof must visibly land on something, especially
+  // at distance where the glass panes fade into the fog.
+  for (let i = 0; i < 5; i++) {
+    const z = cz - 13 + i * 6.5;
+    b.box(cx - 4.7, gy + 2.4, z, 0.38, 4.8, 0.38, 'metalDark');
+    b.box(cx + 4.7, gy + 2.4, z, 0.38, 4.8, 0.38, 'metalDark');
+  }
   b.slab(cx, gy + 4.8, cz, 10.6, 26.6, 0.4, 'metalDark');
+  // Roof edge trim — breaks the bright slab silhouette into a framed roof.
+  b.box(cx, gy + 5.1, cz - 13.3, 11, 0.42, 0.55, 'metalDark');
+  b.box(cx, gy + 5.1, cz + 13.3, 11, 0.42, 0.55, 'metalDark');
+  b.box(cx - 5.3, gy + 5.1, cz, 0.55, 0.42, 26.6, 'metalDark');
+  b.box(cx + 5.3, gy + 5.1, cz, 0.55, 0.42, 26.6, 'metalDark');
   b.platform(cx - 5, cx + 5, cz - 13, cz + 13, gy + 0.4);
   b.light(cx, gy + 4, cz, 0xcfe8ff, 1.4, 20);
 }

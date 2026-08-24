@@ -5,7 +5,7 @@ import { createServer } from 'vite';
 async function main(): Promise<void> {
   const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
   await server.listen();
-  const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] });
+  const browser = await chromium.launch({ args: ['--use-angle=metal', '--enable-gpu'] });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message.slice(0, 200)));

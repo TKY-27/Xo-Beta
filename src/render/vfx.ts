@@ -8,7 +8,7 @@
 import * as THREE from 'three';
 
 interface Tracer {
-  mesh: THREE.Mesh;
+  slot: number;
   life: number;
   maxLife: number;
 }
@@ -37,6 +37,8 @@ const MAX_PARTICLES = 512;
 export class VfxSystem {
   readonly group = new THREE.Group();
   private tracers: Tracer[] = [];
+  private tracerMesh: THREE.InstancedMesh;
+  private tracerDirty = false;
   private flashes: Flash[] = [];
   private particles: Particle[] = [];
   private particleMeshes: THREE.InstancedMesh[] = [];
@@ -45,15 +47,23 @@ export class VfxSystem {
   private time = 0;
 
   constructor() {
-    // Tracer pool: thin stretched boxes
+    // Tracer pool: ONE instanced mesh, per-instance color fade (additive)
     const tracerGeo = new THREE.BoxGeometry(0.03, 0.03, 1);
     tracerGeo.translate(0, 0, -0.5);
+    this.tracerMesh = new THREE.InstancedMesh(
+      tracerGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }),
+      MAX_TRACERS,
+    );
+    this.tracerMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.tracerMesh.frustumCulled = false;
+    this.tracerMesh.count = 0;
+    this.group.add(this.tracerMesh);
     for (let i = 0; i < MAX_TRACERS; i++) {
-      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
-      const mesh = new THREE.Mesh(tracerGeo, mat);
-      mesh.visible = false;
-      this.group.add(mesh);
-      this.tracers.push({ mesh, life: 0, maxLife: 1 });
+      this.tracers.push({ slot: i, life: 0, maxLife: 1 });
     }
 
     // Muzzle flash pool
@@ -103,14 +113,16 @@ export class VfxSystem {
     const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
     const len = Math.hypot(dx, dy, dz);
     if (len < 0.5) return;
-    tracer.mesh.position.set(x1, y1, z1);
-    tracer.mesh.lookAt(x2, y2, z2);
-    tracer.mesh.scale.set(1, 1, len);
-    (tracer.mesh.material as THREE.MeshBasicMaterial).color.setHex(color);
-    (tracer.mesh.material as THREE.MeshBasicMaterial).opacity = 0.85;
-    tracer.mesh.visible = true;
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion().setFromRotationMatrix(
+      new THREE.Matrix4().lookAt(new THREE.Vector3(x1, y1, z1), new THREE.Vector3(x2, y2, z2), new THREE.Vector3(0, 1, 0)),
+    );
+    m.compose(new THREE.Vector3(x1, y1, z1), q, new THREE.Vector3(1, 1, len));
+    this.tracerMesh.setMatrixAt(tracer.slot, m);
+    this.tracerMesh.setColorAt(tracer.slot, new THREE.Color(color));
     tracer.life = 0.09;
     tracer.maxLife = 0.09;
+    this.tracerDirty = true;
   }
 
   muzzleFlash(x: number, y: number, z: number, dx: number, dy: number, dz: number, scale = 1): void {
@@ -294,13 +306,22 @@ export class VfxSystem {
   update(dt: number, cameraPos: THREE.Vector3): void {
     this.time += dt;
 
+    let liveTracers = 0;
+    const fadeColor = new THREE.Color();
     for (const t of this.tracers) {
       if (t.life > 0) {
         t.life -= dt;
         const k = Math.max(0, t.life / t.maxLife);
-        (t.mesh.material as THREE.MeshBasicMaterial).opacity = k * 0.85;
-        if (t.life <= 0) t.mesh.visible = false;
+        this.tracerMesh.getColorAt(t.slot, fadeColor);
+        this.tracerMesh.setColorAt(t.slot, fadeColor.multiplyScalar(k > 0 ? 0.82 + 0.18 * k : 0));
+        liveTracers++;
       }
+    }
+    if (liveTracers > 0 || this.tracerDirty) {
+      this.tracerMesh.count = MAX_TRACERS;
+      this.tracerMesh.instanceMatrix.needsUpdate = true;
+      if (this.tracerMesh.instanceColor) this.tracerMesh.instanceColor.needsUpdate = true;
+      this.tracerDirty = liveTracers > 0;
     }
 
     for (const f of this.flashes) {

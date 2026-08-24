@@ -60,8 +60,8 @@ export class Perception {
 
     const p = this.self.body.position;
     const eyeY = p.y + 2.05;
-    const fwdX = Math.sin(this.self.yaw);
-    const fwdZ = Math.cos(this.self.yaw);
+    const fwdX = -Math.sin(this.self.yaw);
+    const fwdZ = -Math.cos(this.self.yaw);
     const cosFov = Math.cos(VISION_FOV / 2);
 
     for (const other of actors) {
