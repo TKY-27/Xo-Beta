@@ -25,13 +25,24 @@ export interface MovementEvents {
   onSplash(actor: Actor, heavy: boolean): void;
 }
 
-const FWD = { x: 0, z: 1 };
+const FWD = { x: 0, z: -1 };
 
-/** CharBody.position is the capsule CENTER; surfaces are at feet level. */
+/**
+ * CharBody.position is the capsule CENTER; surfaces are at feet level.
+ */
 export const CAPSULE_CENTER_OFFSET = MOVE.capsuleHalfHeight + MOVE.capsuleRadius + 0.04;
 
+/**
+ * Yaw convention matches the render camera (three.js Euler YXZ): forward =
+ * (-sin yaw, -cos yaw) so yaw 0 faces -Z. The right axis is (cos, -sin).
+ */
 function yawDir(yaw: number): { x: number; z: number } {
-  return { x: Math.sin(yaw), z: Math.cos(yaw) };
+  return { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+}
+
+/** Local right axis for a facing produced by yawDir. */
+function rightOf(fwd: { x: number; z: number }): { x: number; z: number } {
+  return { x: -fwd.z, z: fwd.x };
 }
 
 export class MovementSystem {
@@ -174,7 +185,7 @@ export class MovementSystem {
 
     // Wish direction
     const fwd = yawDir(cmd.yaw);
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = rightOf(fwd);
     let wx = fwd.x * cmd.moveZ + right.x * cmd.moveX;
     let wz = fwd.z * cmd.moveZ + right.z * cmd.moveX;
     const wl = Math.hypot(wx, wz);
@@ -296,7 +307,7 @@ export class MovementSystem {
     const b = a.body;
     const v = b.velocity;
     const fwd = yawDir(cmd.yaw);
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = rightOf(fwd);
     let dx = fwd.x * cmd.moveZ + right.x * cmd.moveX;
     let dz = fwd.z * cmd.moveZ + right.z * cmd.moveX;
     const l = Math.hypot(dx, dz);
@@ -351,7 +362,7 @@ export class MovementSystem {
 
     // Steering: limited lateral influence
     const fwd = yawDir(cmd.yaw);
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = rightOf(fwd);
     const steer = (right.x * cmd.moveX + fwd.x * cmd.moveZ * 0.25) * 6 * dt;
     v.x += steer * a.slideDirZ;
     v.z += -steer * a.slideDirX;
@@ -385,7 +396,7 @@ export class MovementSystem {
   private probeWall(a: Actor, side: number): { nx: number; nz: number; dist: number } | null {
     const p = a.body.position;
     const fwd = yawDir(a.yaw);
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = rightOf(fwd);
     const rx = right.x * side, rz = right.z * side;
     const hit = this.phys.raycast(p.x, p.y + 1.2, p.z, rx, 0, rz, 0.95);
     if (!hit) return null;
@@ -652,7 +663,7 @@ export class MovementSystem {
     const p = b.position;
 
     const fwd = yawDir(cmd.yaw);
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = rightOf(fwd);
     let wx = fwd.x * cmd.moveZ + right.x * cmd.moveX;
     let wz = fwd.z * cmd.moveZ + right.z * cmd.moveX;
     const wl = Math.hypot(wx, wz);
@@ -732,7 +743,7 @@ export class MovementSystem {
 
     // Horizontal steering
     const fwd = yawDir(cmd.yaw);
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = rightOf(fwd);
     const steerX = fwd.x * cmd.moveZ + right.x * cmd.moveX;
     const steerZ = fwd.z * cmd.moveZ + right.z * cmd.moveX;
     v.x += steerX * 26 * dt;
@@ -782,7 +793,7 @@ export class MovementSystem {
     const diveExtra = Math.max(0, -cmd.pitch) * 14;
     v.y += (-(MATCH.glideFallSpeed + diveExtra) - v.y) * Math.min(1, dt * 3);
     const fwd = yawDir(cmd.yaw);
-    const right = { x: fwd.z, z: -fwd.x };
+    const right = rightOf(fwd);
     const targetVx = fwd.x * MATCH.glideForwardSpeed + right.x * cmd.moveX * 8;
     const targetVz = fwd.z * MATCH.glideForwardSpeed + right.z * cmd.moveX * 8;
     v.x += (targetVx - v.x) * Math.min(1, dt * 2.4);
@@ -851,7 +862,7 @@ export class MovementSystem {
 
   lookDir(a: Actor): { x: number; y: number; z: number } {
     const cp = Math.cos(a.pitch);
-    return { x: Math.sin(a.yaw) * cp, y: Math.sin(a.pitch), z: Math.cos(a.yaw) * cp };
+    return { x: -Math.sin(a.yaw) * cp, y: Math.sin(a.pitch), z: -Math.cos(a.yaw) * cp };
   }
 
   /** Called when actor lands from any state transition detected externally. */

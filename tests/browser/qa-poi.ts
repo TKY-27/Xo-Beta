@@ -54,15 +54,19 @@ async function main(): Promise<void> {
   if (map !== 'neocity') await page.click(`#map-list .map-card:nth-child(${['neocity','oldfront','eden'].indexOf(map)+1})`);
   await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
   await page.waitForSelector('#hud:not(.hidden)', { timeout: 60000 });
-  // skip through transport quickly
-  for (let i = 0; i < 40; i++) {
-    await page.waitForTimeout(1500);
+  // jump from transport, then wait for live + grounded.
+  // NOTE: after clicking a map card, Playwright keyboard events stop reaching
+  // the game (focus/pointer-lock quirk) — dispatch through the page instead.
+  for (let i = 0; i < 90; i++) {
+    await page.waitForTimeout(1200);
     const st = await Promise.race([
-      page.evaluate('window.__xoState ? window.__xoState.player : null') as Promise<null | { grounded?: boolean }>,
+      page.evaluate('window.__xoState ? { grounded: window.__xoState.player && window.__xoState.player.grounded, phase: window.__xoState.phase } : null') as Promise<null | { grounded?: boolean; phase?: string }>,
       new Promise<null>((r) => setTimeout(() => r(null), 4000)),
     ]);
-    if (st?.grounded) break;
+    if (st?.phase === 'live' && st.grounded) break;
+    await page.evaluate('window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space" })); window.dispatchEvent(new KeyboardEvent("keyup", { code: "Space" }))');
   }
+  await page.waitForTimeout(2500);
   const pois = POIS[map] ?? [];
   for (const poi of pois) {
     await page.evaluate((p) => {

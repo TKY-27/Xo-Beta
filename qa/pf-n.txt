@@ -1,0 +1,8 @@
+page.evaluate: SyntaxError: Unexpected token '!'
+    at eval (<anonymous>)
+    at UtilityScript.evaluate (<anonymous>:311:30)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+    at measure (/Users/anag2bgod/Xo-Beta/tests/browser/qa-perf2.ts:67:26)
+    at async main (/Users/anag2bgod/Xo-Beta/tests/browser/qa-perf2.ts:136:19) {
+  log: []
+}

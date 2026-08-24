@@ -1,0 +1,8 @@
+neocity/ultra: {"avgFps":1,"p95Fps":1,"simMs":3.49,"presentMs":5.5,"drawsPerFrame":1538,"mtrisPerFrame":1.36}
+errors: 0 []
+ta/tests/browser/qa-perf2.ts:32:24)
+    at measure (/Users/anag2bgod/Xo-Beta/tests/browser/qa-perf2.ts:34:22)
+    at async main (/Users/anag2bgod/Xo-Beta/tests/browser/qa-perf2.ts:124:19) {
+  log: [],
+  name: 'Error'
+}

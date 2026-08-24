@@ -1,0 +1,11 @@
+page.evaluate: TypeError: Cannot read properties of null (reading 'isPerspectiveCamera')
+    at Raycaster.setFromCamera (http://localhost:5199/node_modules/.vite/deps/chunk-2BUXAFR3.js?v=0344bb32:29282:16)
+    at eval (eval at evaluate (:311:30), <anonymous>:4:9)
+    at eval (eval at evaluate (:311:30), <anonymous>:21:5)
+    at eval (<anonymous>)
+    at UtilityScript.evaluate (<anonymous>:311:30)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+    at evalSoft (/Users/anag2bgod/Xo-Beta/tests/browser/probe-wall.ts:36:24)
+    at main (/Users/anag2bgod/Xo-Beta/tests/browser/probe-wall.ts:46:21) {
+  log: []
+}

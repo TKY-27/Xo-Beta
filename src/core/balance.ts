@@ -303,6 +303,8 @@ export const MATCH = {
   combatantCount: 10,
   transportAltitude: 120,
   transportSpeed: 26,
+  /** Drop-rig hang distance below the transport center (hull radius ≈ 3.4). */
+  transportHangOffset: 5.6,
   freefallDiveSpeed: 52,
   glideFallSpeed: 7.5,
   glideForwardSpeed: 21,

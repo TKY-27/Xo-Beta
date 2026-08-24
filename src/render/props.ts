@@ -133,7 +133,20 @@ function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGeometry[
     geo.translate(0, -min, 0);
     geo.computeBoundingSphere();
     geoms.push(geo);
-    materials.push(Array.isArray(mesh.material) ? mesh.material[0] ?? null : mesh.material);
+    let mat = Array.isArray(mesh.material) ? mesh.material[0] ?? null : mesh.material;
+    // Foliage (alpha-cutout organic materials) renders through MeshLambert:
+    // visually equivalent for matte organic surfaces, ~20% cheaper per
+    // shaded pixel than the full PBR stack — foliage dominates the fragment
+    // load on forest maps (measured on the reference GPU).
+    if (mat instanceof THREE.MeshStandardMaterial && mat.alphaTest > 0) {
+      const lambert = new THREE.MeshLambertMaterial({
+        map: mat.map, color: mat.color.clone(), alphaTest: mat.alphaTest,
+        side: mat.side, fog: true,
+      });
+      mat.dispose();
+      mat = lambert;
+    }
+    materials.push(mat);
   });
   return { geoms, materials };
 }

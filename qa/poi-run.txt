@@ -1,0 +1,8 @@
+shot: spire
+shot: market
+shot: cyberdome
+shot: residential
+shot: transit
+shot: street
+shot: garage
+errors: 0

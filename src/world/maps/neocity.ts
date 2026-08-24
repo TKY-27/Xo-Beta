@@ -75,9 +75,9 @@ export function buildNeoCity(): MapDef {
   // POI: NEON MARKET (NE quadrant)
   // ------------------------------------------------------------------
   b.poi('Neon Market', 120, 120, 60);
-  addBuilding(b, { x: 105, z: 105, w: 30, d: 18, floors: 2, wallMat: 'facadeB', doors: [[0, 6, 2.6], [0, 20, 2.6], [2, 12, 2.6]], interiorDividers: false });
+  addBuilding(b, { x: 105, z: 105, w: 30, d: 18, floors: 2, wallMat: 'facadeA', doors: [[0, 6, 2.6], [0, 20, 2.6], [2, 12, 2.6]], interiorDividers: false });
   addBuilding(b, { x: 145, z: 108, w: 18, d: 16, floors: 3, wallMat: 'facadeC', doors: [[3, 6, 2.2]] });
-  addBuilding(b, { x: 112, z: 142, w: 24, d: 14, floors: 1, wallMat: 'plaster', doors: [[1, 5, 2.4], [3, 5, 2.4]], interiorDividers: false });
+  addBuilding(b, { x: 112, z: 142, w: 24, d: 14, floors: 1, wallMat: 'facadeA', doors: [[1, 5, 2.4], [3, 5, 2.4]], interiorDividers: false });
   // Market stalls
   for (let i = 0; i < 6; i++) {
     const sx = 122 + (i % 3) * 12;
@@ -120,10 +120,10 @@ export function buildNeoCity(): MapDef {
   // POI: RESIDENTIAL BLOCKS (SW)
   // ------------------------------------------------------------------
   b.poi('Resident Blocks', -120, -120, 65);
-  addBuilding(b, { x: -135, z: -105, w: 20, d: 16, floors: 3, wallMat: 'facadeB', doors: [[0, 8, 2.2], [1, 6, 2.2]] });
+  addBuilding(b, { x: -135, z: -105, w: 20, d: 16, floors: 3, wallMat: 'facadeA', doors: [[0, 8, 2.2], [1, 6, 2.2]] });
   addBuilding(b, { x: -105, z: -108, w: 18, d: 18, floors: 2, wallMat: 'facadeC', doors: [[0, 7, 2.2], [3, 7, 2.2]] });
   addBuilding(b, { x: -132, z: -138, w: 22, d: 18, floors: 4, wallMat: 'facadeA', doors: [[0, 9, 2.4]], roofAccess: true });
-  addBuilding(b, { x: -102, z: -136, w: 16, d: 14, floors: 2, wallMat: 'plaster', doors: [[0, 6, 2.2], [2, 6, 2.2]] });
+  addBuilding(b, { x: -102, z: -136, w: 16, d: 14, floors: 2, wallMat: 'facadeA', doors: [[0, 6, 2.2], [2, 6, 2.2]] });
   courtyardProps(b, rng, -118, -122);
   b.chest(-112, 0.3, -120, 'standard');
   b.chest(-134, 11.2, -140, 'elite');
@@ -166,7 +166,7 @@ export function buildNeoCity(): MapDef {
   // ------------------------------------------------------------------
   b.poi('Sky Gardens', 20, -180, 45);
   addBuilding(b, { x: 8, z: -185, w: 26, d: 20, floors: 2, wallMat: 'facadeC', doors: [[0, 10, 2.6], [2, 10, 2.6]], roofAccess: true });
-  addBuilding(b, { x: 42, z: -178, w: 18, d: 16, floors: 3, wallMat: 'facadeB', doors: [[3, 6, 2.2]] });
+  addBuilding(b, { x: 42, z: -178, w: 18, d: 16, floors: 3, wallMat: 'facadeA', doors: [[3, 6, 2.2]] });
   // Garden planters on first roof
   for (let i = 0; i < 4; i++) {
     b.box(0 + (i % 2) * 14 - 7, 7.6, -190 + Math.floor(i / 2) * 10, 5, 0.8, 3, 'concrete');
@@ -237,41 +237,107 @@ export function buildNeoCity(): MapDef {
   b.light(-160, 6, 0, 0xffa04f, 2.0, 40);
   b.light(20, 9, -180, 0x9d6bff, 2.2, 42);
 
+  streetwallFiller(b, rng);
   litWindows(b, rng);
   streetDressing(b, rng);
 
   return b.finish(
     {
-      preset: 'night',
-      hdri: 'dikhololo_night_2k.hdr',
-      fogColor: 0x1c2438,
-      fogDensity: 0.0042,
-      sunDirection: [-0.3, -1, -0.2],
-      sunColor: 0x8fa4cc,
-      sunIntensity: 2.3,
-      ambientColor: 0xa8b8d8,
-      ambientIntensity: 0.62,
-      hemisphereSky: 0x4a5878,
-      hemisphereGround: 0x3c4254,
-      hemisphereIntensity: 1.35,
-      exposure: 1.35,
-      envIntensity: 0.55,
-      backgroundBlurriness: 0.06,
-      backgroundIntensity: 0.9,
+      preset: 'bluehour',
+      // Bright blue-hour: authored sky provides both backdrop and IBL, so
+      // combat stays readable while everything still reads as night.
+      fogColor: 0x33456a,
+      fogDensity: 0.0032,
+      sunDirection: [-0.45, -0.75, -0.3],
+      sunColor: 0xa8c0e8,
+      sunIntensity: 2.6,
+      ambientColor: 0x93a9d4,
+      ambientIntensity: 0.92,
+      hemisphereSky: 0x5f7cb8,
+      hemisphereGround: 0x2e3646,
+      hemisphereIntensity: 1.7,
+      exposure: 1.22,
+      envIntensity: 0.95,
+      backgroundIntensity: 1.0,
       grade: {
-        vignette: 0.38,
-        saturation: 1.12,
+        vignette: 0.34,
+        saturation: 1.1,
         contrast: 1.05,
-        lift: [0.002, 0.004, 0.01],
+        lift: [0.004, 0.008, 0.018],
       },
     },
     { from: [-330, -80], to: [330, 60] },
+    { wetGround: true },
   );
 }
 
 // ---------------------------------------------------------------------------
 // Local structure helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Streetwall filler: mid-rise blocks lining the street grid in every cell
+ * not occupied by a POI. Turns the road grid into a real city — continuous
+ * facades, lit windows, occasional towers for skyline variety. Blocks are
+ * enterable (street-facing doors) so they add combat routes, not just
+ * backdrops.
+ */
+function streetwallFiller(b: WorldBuilder, rng: Rng): void {
+  const pois = b.def.pois;
+  const tooClose = (x: number, z: number, margin: number): boolean =>
+    pois.some((p) => Math.hypot(p.x - x, p.z - z) < p.radius + margin);
+
+  const facades: MatKey[] = ['facadeA', 'facadeC', 'facadeA'];
+  // Grid cells between the -200..200 roads; cell centers at ±50 offsets.
+  for (let gx = -2; gx <= 1; gx++) {
+    for (let gz = -2; gz <= 1; gz++) {
+      const cx = gx * 100 + 50;
+      const cz = gz * 100 + 50;
+      if (tooClose(cx, cz, 26)) continue;
+
+      // 2–3 blocks per cell on a loose 2x2 sub-grid with jitter
+      const subSpots: Array<[number, number]> = [
+        [cx - 17, cz - 17], [cx + 16, cz - 15],
+        [cx - 15, cz + 17], [cx + 17, cz + 15],
+      ];
+      const count = rng.int(2, 3);
+      const picks = new Set<number>();
+      while (picks.size < count) picks.add(rng.int(0, 3));
+      for (const idx of picks) {
+        const [bx, bz] = subSpots[idx]!;
+        const jx = bx + rng.range(-4, 4);
+        const jz = bz + rng.range(-4, 4);
+        if (tooClose(jx, jz, 12)) continue;
+        const tower = rng.bool(0.28);
+        const w = tower ? rng.range(15, 20) : rng.range(16, 26);
+        const d = tower ? rng.range(15, 20) : rng.range(14, 22);
+        const floors = tower ? rng.int(6, 9) : rng.int(2, 5);
+        const mat = facades[rng.int(0, facades.length - 1)]!;
+        // Doors face the nearest street (cell edge)
+        const doorSide = (jx - cx > 8 ? 1 : jx - cx < -8 ? 3 : jz - cz > 8 ? 0 : 2) as 0 | 1 | 2 | 3;
+        const doorOff = w / 2 - 4;
+        addBuilding(b, {
+          x: jx, z: jz, w, d, floors, wallMat: mat,
+          doors: [[doorSide, doorOff, 2.2], [doorSide, -doorOff, 2.2]],
+          interiorDividers: rng.bool(0.6),
+          roofAccess: tower && rng.bool(0.5),
+        });
+        if (tower) {
+          // Rooftop beacon on tall blocks
+          b.light(jx, floors * 3.6 + 2.2, jz, rng.bool(0.5) ? 0xff5a5a : 0x5fd0ff, 1.2, 14);
+        }
+      }
+      // Alley props between blocks
+      if (rng.bool(0.7)) {
+        const ax = cx + rng.range(-24, 24);
+        const az = cz + rng.range(-24, 24);
+        b.crate(ax, 0.2, az, rng.range(0.8, 1.3));
+        if (rng.bool(0.5)) b.crate(ax + 1.6, 0.2, az + 1.2, rng.range(0.7, 1.1));
+        b.loot(ax - 1.4, 0.4, az + 0.6);
+      }
+    }
+  }
+}
 
 function rampTo(b: WorldBuilder, cx: number, cz: number, startR: number, topY: number, yaw: number): void {
   const steps = 14;
@@ -327,7 +393,7 @@ function underpassStation(b: WorldBuilder, cx: number, cz: number): void {
 function kioskRow(b: WorldBuilder, cx: number, cz: number): void {
   for (let i = 0; i < 3; i++) {
     const kx = cx + i * 9;
-    b.box(kx, 1.5, cz, 5, 3, 4, 'facadeB');
+    b.box(kx, 1.5, cz, 5, 3, 4, 'facadeA');
     b.platform(kx - 2.5, kx + 2.5, cz - 2, cz + 2, 3.05);
     b.box(kx, 3.3, cz, 5.6, 0.3, 4.6, 'neonOrange', 0, { noCollide: true });
     b.loot(kx, 0.4, cz + 3);
@@ -457,7 +523,7 @@ function billboardSpot(b: WorldBuilder, cx: number, cz: number): void {
  */
 function litWindows(b: WorldBuilder, rng: Rng): void {
   const facadeMats: MatKey[] = ['facadeA', 'facadeB', 'facadeC', 'plasterOld'];
-  const warmMats: MatKey[] = ['neonOrange', 'neonCyan', 'neonBlue'];
+  const warmMats: MatKey[] = ['windowWarm', 'windowWarm', 'windowWarm', 'neonCyan', 'neonBlue', 'neonOrange'];
   const geo = b.def.geo;
   const pushWindow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, mat: MatKey) =>
     geo.push({ kind: 'box', x, y, z, sx, sy, sz, yaw: 0, mat, noCollide: true });
@@ -465,33 +531,34 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
   for (const g of b.def.geo) {
     if (g.kind !== 'box') continue;
     if (!facadeMats.includes(g.mat)) continue;
-    const minSpan = Math.min(g.sx, g.sz);
-    if (minSpan < 9 || g.sy < 6) continue;
+    
+    // Walls are emitted per-floor as segmented boxes (wallWithGaps); min dim
+    // is the wall thickness — eligibility uses the LONG horizontal axis.
+    const longSpan = Math.max(g.sx, g.sz);
+    if (longSpan < 1.1 || g.sy < 2.2) continue;
     const faces: Array<{ axis: 'x' | 'z'; sign: number; span: number }> = g.sx >= g.sz
       ? [{ axis: 'z', sign: 1, span: g.sx }, { axis: 'z', sign: -1, span: g.sx }]
       : [{ axis: 'x', sign: 1, span: g.sz }, { axis: 'x', sign: -1, span: g.sz }];
 
-      const floors = Math.max(2, Math.floor((g.sy - 2) / 3));
+      const rows = Math.max(1, Math.floor((g.sy - 1.1) / 2.6));
+      const rowH = g.sy / (rows + 0.6);
     for (const face of faces) {
       const span = face.span;
-      const colsF = Math.max(3, Math.floor((span - 4) / 2.7));
-      const step = (span - 3) / colsF;
-      // A couple of fully-lit "office" floors per building
-      const litFloors = new Set<number>();
-      if (rng.bool(0.5) && floors > 3) {
-        litFloors.add(rng.int(1, floors - 2));
-      }
-      for (let f = 0; f < floors; f++) {
-        const wy = g.y - g.sy / 2 + 1.9 + f * 3;
+      const colsF = Math.max(1, Math.floor(span / 2.1));
+      const step = span / colsF;
+      // A fully-lit "office" row now and then
+      const litRow = rng.bool(0.18) ? rng.int(0, rows - 1) : -1;
+      for (let f = 0; f < rows; f++) {
+        const wy = g.y - g.sy / 2 + rowH * (f + 0.75);
         for (let cIdx = 0; cIdx < colsF; cIdx++) {
-          const along = -span / 2 + 1.5 + cIdx * step;
+          const along = -span / 2 + step * (cIdx + 0.5);
           const roll = rng.next();
-          let on = roll < 0.52;
-          if (litFloors.has(f)) on = roll < 0.94;
+          let on = roll < 0.55;
+          if (f === litRow) on = roll < 0.94;
           if (!on) continue;
           const mat = warmMats[rng.int(0, warmMats.length - 1)]!;
           const wW = Math.min(1.15, step * 0.62);
-          const wH = 1.05 + rng.range(0, 0.5);
+          const wH = Math.min(1.3, rowH * 0.55);
           if (face.axis === 'x') {
             pushWindow(g.x + face.sign * (g.sx / 2 + 0.07), wy, g.z + along, 0.07, wH, wW, mat);
           } else {
@@ -499,8 +566,8 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
           }
         }
       }
-      // Street-level storefront band on one face
-      if (rng.bool(0.75)) {
+      // Street-level storefront band on one face (ground-adjacent walls only)
+      if (g.y - g.sy / 2 < 1.4 && rng.bool(0.6)) {
         const wy = g.y - g.sy / 2 + 1.35;
         const bandLen = span * 0.62;
         if (face.axis === 'x') {

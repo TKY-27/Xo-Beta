@@ -176,9 +176,10 @@ export class WorldBuilder {
     this.platform(minX, maxX, minZ, maxZ, surfaceY, true);
   }
 
-  finish(sky: MapDef['sky'], transportRoute: MapDef['transportRoute']): MapDef {
+  finish(sky: MapDef['sky'], transportRoute: MapDef['transportRoute'], opts: { wetGround?: boolean } = {}): MapDef {
     this.def.sky = sky;
     this.def.transportRoute = transportRoute;
+    if (opts.wetGround) this.def.wetGround = true;
     return this.def;
   }
 }

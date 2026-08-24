@@ -8,7 +8,9 @@ import { loadMap, MAP_LIST, ensureWorldReady } from './world';
 import { Match } from './sim/match';
 import { GROUPS as PHYS_GROUPS } from './physics/physics';
 import { BotController } from './ai/bot';
-import { SIM, WEAPONS, RARITY_CSS, MOVE } from './core/balance';
+import { MATCH, MOVE, RARITY_CSS, SIM, WEAPONS } from './core/balance';
+import { CAPSULE_CENTER_OFFSET } from './sim/movement';
+import type { Actor } from './sim/actor';
 import { Rng } from './core/rng';
 import { onSettingsChanged, updateSettings, getSettings } from './core/settings';
 import { createMaterials, type MaterialLibrary } from './render/materials';
@@ -58,8 +60,11 @@ let paused = false;
 let loopRunning = false;
 let accumulator = 0;
 let lastTime = 0;
+/** Dev-only frame-cost EMAs (ms) surfaced via __xoState.perf for QA profiling. */
+const perfStats = { simMs: 0, presentMs: 0 };
 let resultsShown = false;
 let spectateTargetId = -1;
+let wasInTransport = false;
 let lastWeaponKey: string | null = null;
 
 const WEAPON_KICK: Record<string, number> = {
@@ -102,9 +107,9 @@ async function boot(): Promise<void> {
   hud = new Hud();
   audio = new AudioEngine();
 
-  await setLoad(0.08, 'Preparing systems…');
+  await setLoad(0.08, t('load.preparing'));
   await ensureWorldReady();
-  await setLoad(0.3, 'Streaming assets…');
+  await setLoad(0.3, t('load.assets'));
   await preloadAll((pct, label) => {
     $('loading-fill').style.width = `${Math.round((0.3 + pct * 0.55) * 100)}%`;
     $('loading-status').textContent = label;
@@ -112,7 +117,7 @@ async function boot(): Promise<void> {
   await audio.loadSamples();
   const sharedProps = new PropLibrary();
   await sharedProps.load();
-  await setLoad(0.9, 'Compiling materials…');
+  await setLoad(0.9, t('load.materials'));
   const sharedMats = await createMaterials();
   const characterFactory = new CharacterFactory();
   const weaponFactory = new WeaponModelFactory(sharedProps);
@@ -129,7 +134,7 @@ async function boot(): Promise<void> {
   const lobby = new LobbyScene();
   lobby.start($canvas(), characterFactory, weaponFactory);
 
-  await setLoad(0.6, 'Warming up…');
+  await setLoad(0.6, t('load.warming'));
 
   menus = new Menus(MAP_LIST);
   menus.onUiSound = (kind) => audio.uiClick(kind);
@@ -138,7 +143,7 @@ async function boot(): Promise<void> {
   menus.onResumeRequested = resumeFromPause;
   menus.onQuitRequested = quitToMenu;
 
-  await setLoad(1, 'Ready');
+  await setLoad(1, t('load.ready'));
   window.setTimeout(() => $('loading-screen').classList.add('hidden'), 240);
 
   // Audio unlock on first gesture (browser autoplay policy)
@@ -194,7 +199,7 @@ async function startMatch(
   lobby.stop();
   menus.hideAll();
   $('loading-screen').classList.remove('hidden');
-  await setLoad(0.15, `Loading ${MAP_LIST.find((m) => m.id === sel.map)?.name ?? sel.map}…`);
+  await setLoad(0.15, t('load.map', { name: t(`map.${sel.map}.name` as never) }));
 
   const loaded = loadMap(sel.map);
   const match = new Match({
@@ -204,7 +209,7 @@ async function startMatch(
     withPlayer: true,
   });
   match.populateInitialLoot();
-  await setLoad(0.55, 'Deploying combatants…');
+  await setLoad(0.55, t('load.deploying'));
 
   // Presentation stack
   const canvas = $canvas();
@@ -290,9 +295,9 @@ async function startMatch(
   function placePingAtAim(): void {
     if (!match.player?.alive || hud.isTacMapOpen()) return;
     const p = match.player.body.position;
-    const dirX = Math.sin(match.player.yaw) * Math.cos(match.player.pitch);
+    const dirX = -Math.sin(match.player.yaw) * Math.cos(match.player.pitch);
     const dirY = Math.sin(match.player.pitch);
-    const dirZ = Math.cos(match.player.yaw) * Math.cos(match.player.pitch);
+    const dirZ = -Math.cos(match.player.yaw) * Math.cos(match.player.pitch);
     const hit = match.phys.raycast(p.x, p.y + MOVE.eyeHeight, p.z, dirX, dirY, dirZ, 260, PHYS_GROUPS.rayWorldOnly);
     if (hit) {
       hud.tacMarker = { x: hit.point.x, z: hit.point.z };
@@ -302,7 +307,11 @@ async function startMatch(
   disposers.push(() => tacCanvas?.removeEventListener('click', onTacClick));
   for (const actor of match.actors) {
     if (actor.isPlayer) {
-      player.resetLook(actor.yaw, 0);
+      // Open the transport shot facing along the flight line, city below.
+      const fdx = match.transportTo[0] - match.transportFrom[0];
+      const fdz = match.transportTo[1] - match.transportFrom[1];
+      const fl = Math.hypot(fdx, fdz) || 1;
+      player.resetLook(Math.atan2(-fdx / fl, -fdz / fl), -0.38);
       match.controllers.set(actor.id, player);
     } else if (actor.personality) {
       match.controllers.set(
@@ -347,7 +356,7 @@ async function startMatch(
 
   wirePresentation(match, world, vfx, rigs, hud, viewmodel, rig);
 
-  await setLoad(0.85, 'Final checks…');
+  await setLoad(0.85, t('load.final'));
   window.setTimeout(() => {
     $('loading-screen').classList.add('hidden');
     hud.show(true);
@@ -437,6 +446,7 @@ function wirePresentation(
   match.events.on('actorHit', (e) => {
     if (e.attackerId === match.player?.id) {
       hud.hitmarker(e.headshot);
+      if (!e.headshot) audio.play('ui/click', { bus: 'ui', vol: 0.2, rate: 2.1 });
       const target = match.actors.find((a) => a.id === e.targetId);
       if (target) {
         hud.spawnDamageNumber(
@@ -482,9 +492,10 @@ function wirePresentation(
   match.events.on('shotFired', (e) => {
     if (e.actorId === match.player?.id && !e.dry && match.player) {
       const a = match.player;
-      const dirX = Math.sin(a.yaw);
-      const dirZ = Math.cos(a.yaw);
-      vfx.shellCasing(a.body.position.x - dirZ * 0.3, a.eyeY - 0.3, a.body.position.z - dirX * 0.3, dirZ, -dirX);
+      // Eject toward the camera-right side, slightly back
+      const rx = Math.cos(a.yaw);
+      const rz = -Math.sin(a.yaw);
+      vfx.shellCasing(a.body.position.x + rx * 0.32, a.eyeY - 0.28, a.body.position.z + rz * 0.32, rx * 2.1, rz * 2.1);
     }
   });
   match.events.on('poundImpact', (e) => {
@@ -593,11 +604,13 @@ function frame(now: number): void {
   if (!paused) {
     accumulator += dtReal;
     let steps = 0;
+    const simT0 = performance.now();
     while (accumulator >= SIM.fixedDt && steps < 8) {
       m.fixedUpdate(SIM.fixedDt);
       accumulator -= SIM.fixedDt;
       steps++;
     }
+    perfStats.simMs = perfStats.simMs * 0.9 + (performance.now() - simT0) * 0.1;
     musicTimer -= dtReal;
     if (musicTimer <= 0) {
       musicTimer = 2;
@@ -605,7 +618,9 @@ function frame(now: number): void {
     }
   }
 
+  const presT0 = performance.now();
   present(dtReal);
+  perfStats.presentMs = perfStats.presentMs * 0.9 + (performance.now() - presT0) * 0.1;
 }
 
 function updateMusicState(m: Match): void {
@@ -634,7 +649,16 @@ function present(dtReal: number): void {
       stormRadius: m.storm.radius,
       items: m.loot.items.length,
       scene: renderer.scene,
+      cameraMode: rig.mode,
+      camera: rig.camera,
+      viewmodel: viewmodel.group,
+      THREE,
+      perf: {
+        simMs: +perfStats.simMs.toFixed(2),
+        presentMs: +perfStats.presentMs.toFixed(2),
+      },
       worldGroup: world.group,
+      threeRenderer: renderer.renderer,
       sceneInfo: {
         children: renderer.scene.children.length,
         lights: renderer.scene.children
@@ -678,18 +702,56 @@ function present(dtReal: number): void {
     (window as unknown as Record<string, unknown>).__xoTeleport = (x: number, z: number, yaw = 0) => {
       const p = m.player;
       if (!p || !p.alive) return;
-      p.body.position.x = x;
-      p.body.position.z = z;
+      // Snap to the surface so the capsule never spawns inside terrain.
+      const surf = m.phys.surfaceAt(x, z, 400, 500);
+      if (surf !== null) {
+        p.body.teleport(x, surf + CAPSULE_CENTER_OFFSET + 0.05, z);
+      } else {
+        p.body.position.x = x;
+        p.body.position.z = z;
+      }
       p.body.velocity.x = 0;
       p.body.velocity.y = 0;
       p.body.velocity.z = 0;
-      if (live) {
+      if (live && p.state !== 'swim') {
+        if (p.state === 'freefall' || p.state === 'glide') p.state = 'ground';
         live.player.resetLook(yaw, -0.12);
       }
+    };
+    // QA stress hook: ring all living bots tightly around the player to
+    // force maximum concurrent AI/combat/VFX load. Dev builds only.
+    (window as unknown as Record<string, unknown>).__xoStress = () => {
+      const p = m.player;
+      if (!p) return;
+      const alive = m.actors.filter((a) => a.alive && !a.isPlayer);
+      alive.forEach((a, i) => {
+        const ang = (i / Math.max(1, alive.length)) * Math.PI * 2;
+        const x = p.body.position.x + Math.cos(ang) * 18;
+        const z = p.body.position.z + Math.sin(ang) * 18;
+        const surf = m.phys.surfaceAt(x, z, 400, 500);
+        if (surf !== null) a.body.teleport(x, surf + 1.1, z);
+        else { a.body.position.x = x; a.body.position.z = z; }
+        a.body.velocity.x = 0; a.body.velocity.y = 0; a.body.velocity.z = 0;
+      });
     };
   }
 
   const spectating = !m.player?.alive && m.phase !== 'results';
+  const playerAboard = !!m.player && m.player.state !== 'freefall' && m.player.state !== 'glide';
+  const inTransport = m.phase === 'transport' && !spectating && playerAboard;
+  // Drop-rig slots: combatants hang in a row beneath the hull, spread along
+  // the flight axis. The player rides the front slot with the line of
+  // combatants receding behind them.
+  const flightDx = m.transportTo[0] - m.transportFrom[0];
+  const flightDz = m.transportTo[1] - m.transportFrom[1];
+  const flightL = Math.hypot(flightDx, flightDz) || 1;
+  const dirX = flightDx / flightL;
+  const dirZ = flightDz / flightL;
+  const slotOffset = (index: number): { x: number; z: number; y: number } => {
+    const k = (4.5 - index) * 1.32;
+    return { x: dirX * k, z: dirZ * k, y: (index % 2) * 0.24 };
+  };
+  const slotOf = (a: Actor): { x: number; z: number; y: number } => slotOffset(Math.max(0, m.actors.indexOf(a)));
   if (spectating) {
     const targets = m.spectatorTargets();
     const target = targets.find((t) => t.id === spectateTargetId) ?? targets[0];
@@ -698,13 +760,27 @@ function present(dtReal: number): void {
       rig.updateSpectate(target, dtReal);
       hud.showSpectate(target.name);
     }
+  } else if (inTransport && m.player) {
+    const slot = slotOf(m.player);
+    rig.updateTransport(m.transportPos, slot, m.player.yaw, m.player.pitch, now() / 1000, dtReal);
+    hud.hideSpectate();
   } else if (m.player) {
+    if (wasInTransport) {
+      const slot = slotOf(m.player);
+      rig.beginGameplayBlend(new THREE.Vector3(
+        m.transportPos.x + slot.x,
+        m.transportPos.y - MATCH.transportHangOffset + slot.y + 1.6,
+        m.transportPos.z + slot.z,
+      ));
+    }
     rig.update(m.player, dtReal, m.phys, {});
     hud.hideSpectate();
   }
+  wasInTransport = inTransport && m.phase === 'transport';
   rig.tick(dtReal);
 
   // Characters
+  const freezeRigs = (window as unknown as { __xoFreezeRigs?: boolean }).__xoFreezeRigs === true;
   for (const a of m.actors) {
     const charRig = rigs.get(a.id);
     if (!charRig) continue;
@@ -713,11 +789,24 @@ function present(dtReal: number): void {
       continue;
     }
     charRig.group.visible = true;
-    charRig.group.position.set(a.body.position.x, a.body.position.y, a.body.position.z);
-    if (a.alive) {
-      charRig.update?.(a, now() / 1000, dtReal);
-    } else {
-      updateEliminationFx(charRig, dtReal);
+    if (!freezeRigs) {
+      // Combatants ride the drop rig beneath the transport hull until they jump.
+      const aboard = inTransport && a.state !== 'freefall' && a.state !== 'glide';
+      if (aboard) {
+        const slot = slotOf(a);
+        charRig.group.position.set(
+          m.transportPos.x + slot.x,
+          m.transportPos.y - MATCH.transportHangOffset + slot.y,
+          m.transportPos.z + slot.z,
+        );
+      } else {
+        charRig.group.position.set(a.body.position.x, a.body.position.y, a.body.position.z);
+      }
+      if (a.alive) {
+        charRig.update?.(a, now() / 1000, dtReal);
+      } else {
+        updateEliminationFx(charRig, dtReal);
+      }
     }
   }
 
@@ -895,5 +984,5 @@ Object.defineProperty(PlayerController.prototype, 'lookDySmooth', {
 
 void boot().catch((err) => {
   console.error('Xo Beta failed to boot:', err);
-  $('loading-status').textContent = 'Failed to load — please reload the page.';
+  $('loading-status').textContent = t('notice.loadFailed');
 });

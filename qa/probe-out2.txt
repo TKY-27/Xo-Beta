@@ -1,0 +1,5 @@
+metal launching
+metal launched
+metal page
+metal goto done
+metal {"draws":148850,"seconds":2,"mpxPerSec":107,"renderer":"WebKit WebGL"}

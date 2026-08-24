@@ -418,7 +418,7 @@ export class AudioEngine {
   startAmbience(preset: string, indoor: boolean): void {
     this.init();
     const wanted: string[] =
-      preset === 'night'
+      preset === 'night' || preset === 'bluehour'
         ? ['city_loop']
         : preset === 'overcast'
           ? ['wind_loop', 'birds_loop']

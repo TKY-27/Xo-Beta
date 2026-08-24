@@ -5,6 +5,7 @@ export type MatKey =
   | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld'
   | 'glass' | 'grass' | 'dirt' | 'rock' | 'roofTile' | 'gold'
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
+  | 'windowWarm'
   | 'facadeA' | 'facadeB' | 'facadeC' | 'marble' | 'sandbag'
   | 'corrugated' | 'bricksOld' | 'facilityFloor';
 
@@ -112,7 +113,7 @@ export interface SkyGrade {
 }
 
 export interface SkyConfig {
-  preset: 'night' | 'overcast' | 'day';
+  preset: 'night' | 'bluehour' | 'overcast' | 'day';
   /** Equirectangular HDRI file (public/assets/sky) used as background + IBL. */
   hdri?: string;
   fogColor: number;
@@ -155,6 +156,8 @@ export interface MapDef {
   platforms: PlatformRect[];
   /** Suggested drop-route band across the map for the transport. */
   transportRoute: { from: [number, number]; to: [number, number] };
+  /** Rain-slicked streets: ground materials get reflective wet treatment. */
+  wetGround?: boolean;
 }
 
 export interface PlatformRect {
