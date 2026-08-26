@@ -55,11 +55,13 @@ describe('rarity system', () => {
     }
   });
 
-  it('floor loot weights sum to 100 and legendary is rarest', () => {
-    const sum = FLOOR_RARITY_WEIGHTS.reduce((a, b) => a + b, 0);
+  it('floor loot weights sum to 100 with epic/legendary excluded', () => {
+    const sum = FLOOR_RARITY_WEIGHTS.reduce<number>((a, b) => a + b, 0);
     expect(sum).toBe(100);
-    expect(FLOOR_RARITY_WEIGHTS[4]).toBeLessThan(FLOOR_RARITY_WEIGHTS[3]!);
-    expect(FLOOR_RARITY_WEIGHTS[0]).toBe(40);
+    expect(FLOOR_RARITY_WEIGHTS[0]).toBe(46);
+    // Epic and Legendary must never spawn as random floor loot.
+    expect(FLOOR_RARITY_WEIGHTS[3]).toBe(0);
+    expect(FLOOR_RARITY_WEIGHTS[4]).toBe(0);
   });
 });
 
@@ -120,6 +122,21 @@ describe('storm schedule', () => {
 });
 
 describe('movement config sanity', () => {
+  it('uses a readable asymmetric jump arc with a small sprint boost', () => {
+    const riseGravity = MOVE.gravity * MOVE.jumpRiseGravityScale;
+    const fallGravity = MOVE.gravity * MOVE.fallGravityScale;
+    const apexSeconds = MOVE.jumpVel / riseGravity;
+    const apexHeight = (MOVE.jumpVel * MOVE.jumpVel) / (2 * riseGravity);
+    const totalAirTime = apexSeconds + Math.sqrt((2 * apexHeight) / fallGravity);
+
+    expect(apexHeight).toBeGreaterThan(1.7);
+    expect(apexHeight).toBeLessThan(2.1);
+    expect(totalAirTime).toBeGreaterThan(0.7);
+    expect(totalAirTime).toBeLessThan(0.85);
+    expect(MOVE.sprintJumpMultiplier).toBeGreaterThan(1);
+    expect(MOVE.sprintJumpMultiplier).toBeLessThanOrEqual(1.1);
+  });
+
   it('double jump enabled with two charges', () => {
     expect(MOVE.maxJumps).toBe(2);
   });

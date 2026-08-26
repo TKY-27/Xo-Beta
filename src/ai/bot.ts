@@ -123,12 +123,15 @@ export class BotController {
     const earlyFactor = this.match.time < 90 ? 0.5 : this.match.time < 130 ? 0.75 : 1;
     this.perception.updateVision(dt, this.match.actors, losFn(this.match), this.params.awareness, earlyFactor);
 
-    // Drop phase steering
-    if (this.match.phase === 'transport') {
-      return this.transportCommand(cmd);
-    }
+    // Airborne actors steer their own descent regardless of the global
+    // transport phase — an early jumper never re-enters transport logic.
     if (a.state === 'freefall' || a.state === 'glide') {
       return this.dropSteer(cmd);
+    }
+    // Drop phase steering — `deployed` actors (landed early jumpers) run
+    // normal ground AI even while the ride is still in the air.
+    if (this.match.phase === 'transport' && !a.deployed) {
+      return this.transportCommand(cmd);
     }
 
     // Decision cadence
@@ -401,7 +404,7 @@ export class BotController {
     const p = a.body.position;
     // Nearby valuable items (skip blacklisted + big height gaps + things we
     // cannot actually store — prevents pick/drop ping-pong churn).
-    const item = this.match.loot.nearestItem(p.x, p.y + 1, p.z, radius, (it) => {
+    const item = this.match.loot.nearestItem(p.x, p.y, p.z, radius, (it) => {
       if (this.lootBlacklist.has(it.id)) return false;
       if (Math.abs(it.y - p.y) > 5) return false;
       if (it.kind === 'weapon') {
@@ -414,9 +417,9 @@ export class BotController {
       }
       return !a.inv.findHeal(it.heal!.itemId) && a.inv.canStore({ kind: 'heal', itemId: it.heal!.itemId, count: it.heal!.count });
     });
-    if (item) return { x: item.x, y: item.y, z: item.z, kind: 'item', item };
 
-    // Unopened chest within range
+    // Unopened chest within range — chests stay competitive against scattered
+    // floor items so bots actually engage the chest loot pipeline.
     let bestChest = null as null | { x: number; y: number; z: number; chestId: number };
     let bestD = radius + 6;
     for (const c of this.match.chests) {
@@ -429,7 +432,11 @@ export class BotController {
         bestChest = { x: c.x, y: c.y, z: c.z, chestId: c.id };
       }
     }
-    if (bestChest) return { ...bestChest, kind: 'chest' };
+    if (bestChest) {
+      const itemD = item ? Math.hypot(item.x - p.x, item.z - p.z) : Infinity;
+      if (!item || bestD < Math.min(18, itemD - 4)) return { ...bestChest, kind: 'chest' };
+    }
+    if (item) return { x: item.x, y: item.y, z: item.z, kind: 'item', item };
     return null;
   }
 
@@ -531,10 +538,11 @@ export class BotController {
       return;
     }
 
-    // Unarmed or dry: fighting is pointless — disengage toward loot.
+    // Unarmed or dry: try switching to any usable weapon first; if none,
+    // close in and punch — fists are a real option, not a disengage.
     const w = a.inv.selectedWeapon;
-    if (!w || (w.ammoInMag === 0 && a.inv.ammo[WEAPONS[w.weaponId].ammoType] === 0)) {
-      // Try switching to any usable weapon first
+    const dryW = w && w.ammoInMag === 0 && a.inv.ammo[WEAPONS[w.weaponId].ammoType] === 0;
+    if (!w || dryW) {
       let switched = false;
       for (let i = 0; i < a.inv.slots.length; i++) {
         const s = a.inv.slots[i];
@@ -545,8 +553,19 @@ export class BotController {
         }
       }
       if (!switched) {
-        this.mode = 'loot';
-        this.refreshGoal();
+        // Melee: charge the target and punch when within reach.
+        if (!a.inv.isMeleeSelected) {
+          a.inv.selectMelee();
+          return;
+        }
+        const dx = t.body.position.x - a.body.position.x;
+        const dz = t.body.position.z - a.body.position.z;
+        const distH = Math.hypot(dx, dz);
+        cmd.yaw = Math.atan2(-dx, -dz);
+        cmd.pitch = 0;
+        cmd.moveZ = distH > 1.6 ? 1 : 0.2;
+        cmd.sprint = distH > 4;
+        cmd.fireHeld = true;
         return;
       }
     }
@@ -783,7 +802,7 @@ export class BotController {
       }
     }
 
-    if (dist < 2.2 && heightDiff < 3.5) {
+    if (dist < 2.8 && heightDiff < 3.5) {
       cmd.interactPressed = true;
       this.targetItem = null;
       this.targetChestId = -1;
@@ -940,7 +959,7 @@ function losFn(m: Match) {
 function losBlockedPoint(m: Match, a: Actor, t: Actor): boolean {
   return m.phys.losBlocked(
     a.body.position.x, a.eyeY, a.body.position.z,
-    t.body.position.x, t.body.position.y + 1.3, t.body.position.z,
+    t.body.position.x, t.eyeY - 0.25, t.body.position.z,
   );
 }
 

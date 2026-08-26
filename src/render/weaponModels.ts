@@ -6,7 +6,7 @@
  */
 
 import * as THREE from 'three';
-import { RARITY_COLORS, type Rarity, type WeaponId } from '../core/balance';
+import { RARITY_COLORS, RARITIES, type Rarity, type WeaponId } from '../core/balance';
 import { PropLibrary } from './props';
 
 export interface WeaponModel {
@@ -19,6 +19,23 @@ export interface WeaponModel {
   bolt: THREE.Object3D | null;
   /** Accent meshes whose emissive follows rarity. */
   accents: THREE.MeshStandardMaterial[];
+}
+
+const ALL_RARITIES = RARITIES;
+
+/** Lightweight instance clone: shares geometries + materials with the archetype. */
+function cloneWeaponModel(tmpl: WeaponModel): WeaponModel {
+  const group = tmpl.group.clone(true);
+  const mag = group.getObjectByName('mag') ?? null;
+  const bolt = group.getObjectByName('bolt') ?? null;
+  const muzzleObj = group.getObjectByName('muzzle');
+  return {
+    group,
+    muzzle: muzzleObj ? muzzleObj.position.clone() : tmpl.muzzle.clone(),
+    mag: tmpl.mag ? mag : null,
+    bolt: tmpl.bolt ? bolt : null,
+    accents: tmpl.accents,
+  };
 }
 
 interface ClassRecipe {
@@ -43,13 +60,42 @@ const RARITY_RANK: Record<Rarity, number> = {
 };
 
 export class WeaponModelFactory {
+  /** Prebuilt archetype per `weaponId:rarity`. Clones share geometry+materials. */
+  private templates = new Map<string, WeaponModel>();
+
   constructor(private props: PropLibrary) {}
 
   /**
    * Compose a weapon. `rarity` drives attachment extras + accent glow.
-   * The returned model is a unique instance (safe to mutate/animate).
+   * Returns a lightweight clone of a cached archetype: geometries and
+   * materials are shared, so repeated builds (loot spawns, bot swaps) never
+   * re-create GPU resources or trigger shader compilation mid-match.
    */
   build(weaponId: WeaponId, rarity: Rarity): WeaponModel | null {
+    const key = `${weaponId}:${rarity}`;
+    let tmpl = this.templates.get(key);
+    if (tmpl === undefined) {
+      const built = this.buildUnique(weaponId, rarity);
+      if (!built) return null;
+      this.templates.set(key, built);
+      tmpl = built;
+    }
+    return cloneWeaponModel(tmpl);
+  }
+
+  /** Build every archetype up front (call during the loading screen). */
+  prewarmAll(): void {
+    for (const id of Object.keys(RECIPES) as WeaponId[]) {
+      for (const rarity of ALL_RARITIES) {
+        const key = `${id}:${rarity}`;
+        if (this.templates.has(key)) continue;
+        const built = this.buildUnique(id, rarity);
+        if (built) this.templates.set(key, built);
+      }
+    }
+  }
+
+  private buildUnique(weaponId: WeaponId, rarity: Rarity): WeaponModel | null {
     const recipe = RECIPES[weaponId];
     if (!recipe) return null;
     const base = this.props.cloneTemplate(`weapon/${recipe.base}`);
@@ -72,6 +118,7 @@ export class WeaponModelFactory {
       if (!mesh.isMesh || !mesh.material) return;
       const src = Array.isArray(mesh.material) ? mesh.material[0]! : mesh.material;
       const m = src.clone() as THREE.MeshStandardMaterial;
+      delete m.userData.externalShared;
       m.color.multiplyScalar(0.55);
       m.metalness = Math.min(1, m.metalness + 0.25);
       m.roughness = Math.max(0.32, m.roughness * 0.8);
@@ -114,8 +161,11 @@ export class WeaponModelFactory {
     // Attachments unlock with rarity
     const at = recipe.attach ?? {};
     let muzzleZ = -recipe.length;
-    if (at.silencer && rank >= 1 && this.props.cloneTemplate(`weapon/${at.silencer}`)) {
-      const part = this.props.cloneTemplate(`weapon/${at.silencer}`)!;
+    const silencerPart = at.silencer && rank >= 1
+      ? this.props.cloneTemplate(`weapon/${at.silencer}`)
+      : null;
+    if (silencerPart) {
+      const part = silencerPart;
       normalizePart(part);
       const pb = new THREE.Box3().setFromObject(part);
       const psz = pb.getSize(new THREE.Vector3());
@@ -126,8 +176,11 @@ export class WeaponModelFactory {
       group.add(part);
       muzzleZ -= psz.z * ps * 0.8;
     }
-    if (at.scope && rank >= 2 && this.props.cloneTemplate(`weapon/${at.scope}`)) {
-      const part = this.props.cloneTemplate(`weapon/${at.scope}`)!;
+    const scopePart = at.scope && rank >= 2
+      ? this.props.cloneTemplate(`weapon/${at.scope}`)
+      : null;
+    if (scopePart) {
+      const part = scopePart;
       normalizePart(part);
       const pb = new THREE.Box3().setFromObject(part);
       const psz = pb.getSize(new THREE.Vector3());
@@ -137,8 +190,11 @@ export class WeaponModelFactory {
       part.position.set(off[0], off[1] + psz.y * ps * 0.5, off[2]);
       group.add(part);
     }
-    if (at.clip && rank >= 2 && this.props.cloneTemplate(`weapon/${at.clip}`)) {
-      const part = this.props.cloneTemplate(`weapon/${at.clip}`)!;
+    const clipPart = at.clip && rank >= 2
+      ? this.props.cloneTemplate(`weapon/${at.clip}`)
+      : null;
+    if (clipPart) {
+      const part = clipPart;
       normalizePart(part);
       part.name = 'mag';
       const pb = new THREE.Box3().setFromObject(part);
@@ -176,6 +232,15 @@ export class WeaponModelFactory {
     group.add(boltMesh);
     bolt = boltMesh;
 
+    group.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (!mesh.geometry.userData.externalShared) mesh.geometry.userData.weaponFactoryOwned = true;
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of materials) {
+        if (!material.userData.externalShared) material.userData.weaponFactoryOwned = true;
+      }
+    });
     return { group, muzzle: muzzle.position.clone(), mag, bolt, accents };
   }
 
@@ -185,6 +250,25 @@ export class WeaponModelFactory {
     if (m) m.group.scale.multiplyScalar(2.1);
     return m;
   }
+
+  dispose(): void {
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    for (const template of this.templates.values()) {
+      template.group.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        if (mesh.geometry.userData.weaponFactoryOwned) geometries.add(mesh.geometry);
+        const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const material of list) {
+          if (material.userData.weaponFactoryOwned) materials.add(material);
+        }
+      });
+    }
+    for (const material of materials) material.dispose();
+    for (const geometry of geometries) geometry.dispose();
+    this.templates.clear();
+  }
 }
 
 function normalizePart(part: THREE.Object3D): void {
@@ -193,6 +277,7 @@ function normalizePart(part: THREE.Object3D): void {
     if (!mesh.isMesh || !mesh.material) return;
     const src = Array.isArray(mesh.material) ? mesh.material[0]! : mesh.material;
     const m = src.clone() as THREE.MeshStandardMaterial;
+    delete m.userData.externalShared;
     m.color.multiplyScalar(0.7);
     m.metalness = Math.min(1, m.metalness + 0.3);
     m.roughness = Math.max(0.3, m.roughness * 0.85);

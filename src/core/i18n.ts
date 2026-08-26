@@ -23,8 +23,9 @@ const en = {
   'menu.tagline': 'Single-player battle royale · 10 combatants · last one standing',
   'menu.hint': 'Desktop keyboard & mouse required · Click PLAY to lock the cursor',
   'menu.selectArena': 'SELECT ARENA',
+  'menu.practice': 'PRACTICE MODE',
   'menu.difficulty': 'BOT DIFFICULTY',
-  'menu.paused': 'PAUSED',
+  'menu.paused': 'MENU',
   'map.neocity.name': 'NEO CITY',
   'map.neocity.desc': 'Rain-slicked neon streets, rooftops and an underground transit hub.',
   'map.oldfront.name': 'OLD FRONT',
@@ -86,6 +87,15 @@ const en = {
   'set.language': 'Language',
   'set.cameraMode': 'Camera mode',
   'cam.fps': 'First person', 'cam.tps': 'Third person',
+  'onb.welcome': 'WELCOME TO XO BETA',
+  'onb.chooseLanguage': 'Choose your language',
+  'onb.chooseView': 'Choose your default view',
+  'onb.viewNote': 'This only sets your default view. Change it any time in Settings or with {camera}.',
+  'onb.langEn': 'English',
+  'onb.langJa': '日本語',
+  'onb.step': 'Step {n} of 2',
+  'set.rerunOnboarding': 'First-run setup',
+  'set.rerunOnboardingHint': 'Run the welcome screens again',
   'set.crosshairColor': 'Crosshair color',
   'set.crosshairSize': 'Crosshair size',
   'set.crosshairDot': 'Center dot',
@@ -103,9 +113,10 @@ const en = {
   'hud.finalCircle': 'FINAL CIRCLE',
   'hud.unarmed': 'UNARMED',
   'hud.spectating': 'SPECTATING',
-  'hud.spectateHint': '← → switch combatant · V camera · TAB map',
-  'hud.tabFullMap': 'TAB — full map',
-  'banner.drop': 'SPACE — JUMP FROM TRANSPORT · FIGHT TO BE THE LAST ONE STANDING',
+  'hud.spectateHint': '{prev} {next} switch combatant · {camera} camera · {map} map',
+  'hud.tabFullMap': '{map} — full map',
+  'banner.drop': '{jump} — JUMP FROM TRANSPORT · FIGHT TO BE THE LAST ONE STANDING',
+  'banner.jumpUnlocked': 'DROP ZONE AHEAD — {jump} TO JUMP',
   'banner.lastStanding': 'LAST ONE STANDING WINS',
   'banner.eliminatedYou': 'YOU WERE ELIMINATED — SPECTATING',
   'heal.medkit': 'Applying Med Kit…',
@@ -124,6 +135,10 @@ const en = {
   'loot.type.weapon': 'WEAPON',
   'loot.type.heal': 'MEDICAL',
   'loot.type.ammo': 'AMMO',
+  'ammo.light': 'LIGHT AMMO',
+  'ammo.medium': 'MEDIUM AMMO',
+  'ammo.shells': 'SHELLS',
+  'ammo.heavy': 'HEAVY AMMO',
   'loot.inventoryFull': 'INVENTORY FULL — SWAP OR DROP',
   'rarity.common': 'Common',
   'rarity.uncommon': 'Uncommon',
@@ -182,7 +197,7 @@ const en = {
 
 type Dict = typeof en;
 
-const ja: Partial<Dict> = {
+const ja: Dict = {
   'common.back': '戻る',
   'common.play': 'プレイ',
   'common.settings': '設定',
@@ -198,8 +213,9 @@ const ja: Partial<Dict> = {
   'menu.tagline': 'シングルプレイヤー・バトルロイヤル · 10人の戦闘員 · 最後の一人が勝者',
   'menu.hint': 'デスクトップのキーボードとマウスが必要です · 「プレイ」をクリックしてカーソルを固定',
   'menu.selectArena': 'アリーナ選択',
+  'menu.practice': '練習モード',
   'menu.difficulty': 'ボット難易度',
-  'menu.paused': '一時停止',
+  'menu.paused': 'メニュー',
   'map.neocity.name': 'ネオシティ',
   'map.neocity.desc': '雨に濡れたネオン街、屋上、そして地下駅。夜の都市で戦う。',
   'map.oldfront.name': 'オールドフロント',
@@ -257,6 +273,15 @@ const ja: Partial<Dict> = {
   'set.language': '言語',
   'set.cameraMode': 'カメラモード',
   'cam.fps': '一人称', 'cam.tps': '三人称',
+  'onb.welcome': 'XO BETA へようこそ',
+  'onb.chooseLanguage': '言語を選択してください',
+  'onb.chooseView': 'デフォルトの視点を選択してください',
+  'onb.viewNote': 'これは初期視点の設定です。設定画面または {camera} でいつでも変更できます。',
+  'onb.langEn': 'English',
+  'onb.langJa': '日本語',
+  'onb.step': 'ステップ {n} / 2',
+  'set.rerunOnboarding': '初回セットアップ',
+  'set.rerunOnboardingHint': 'ようこそ画面をもう一度表示する',
   'set.crosshairColor': 'クロスヘアの色',
   'set.crosshairSize': 'クロスヘアのサイズ',
   'set.crosshairDot': '中央ドット',
@@ -273,9 +298,10 @@ const ja: Partial<Dict> = {
   'hud.finalCircle': '最終サークル',
   'hud.unarmed': '非武装',
   'hud.spectating': '観戦中',
-  'hud.spectateHint': '← → 選択切替 · V 視点 · TAB マップ',
-  'hud.tabFullMap': 'TAB — 全体マップ',
-  'banner.drop': 'SPACE — 輸送機から降りろ · 最後の一人になれ',
+  'hud.spectateHint': '{prev} {next} 選択切替 · {camera} 視点 · {map} マップ',
+  'hud.tabFullMap': '{map} — 全体マップ',
+  'banner.drop': '{jump} — 輸送機から降りろ · 最後の一人になれ',
+  'banner.jumpUnlocked': '降下地点が近づいた — {jump}で降りる',
   'banner.lastStanding': '最後の一人が勝者',
   'banner.eliminatedYou': '撃墜されました — 観戦中',
   'heal.medkit': 'メディキット使用中…',
@@ -293,7 +319,11 @@ const ja: Partial<Dict> = {
   'loot.type.weapon': '武器',
   'loot.type.heal': '医療',
   'loot.type.ammo': '弾薬',
-  'loot.inventoryFull': 'インベントリ満杯 — 入れ替えるにはE',
+  'ammo.light': '小口径弾',
+  'ammo.medium': '中口径弾',
+  'ammo.shells': 'ショットシェル',
+  'ammo.heavy': '大口径弾',
+  'loot.inventoryFull': 'インベントリ満杯 — 入れ替えるか捨てる',
   'rarity.common': 'コモン',
   'rarity.uncommon': 'アンコモン',
   'rarity.rare': 'レア',
@@ -343,7 +373,64 @@ const ja: Partial<Dict> = {
   'wpn.sniper': 'スナイパーライフル',
 };
 
-const dicts: Record<Lang, Partial<Dict>> = { en, ja };
+// Keep every locale exact and complete at compile time. Adding an English key
+// without its Japanese counterpart is therefore a type error, not a runtime
+// fallback that can escape into the shipped UI.
+const dicts: Record<Lang, Dict> = { en, ja };
+
+const POI_JA: Readonly<Record<string, string>> = {
+  // Neo City
+  'Spire Plaza': 'スパイア広場',
+  'Neon Market': 'ネオンマーケット',
+  Cyberdome: 'サイバードーム',
+  'Resident Blocks': '住宅街',
+  'Transit Hub': '交通ハブ',
+  'Industrial Yard': '工業ヤード',
+  'Sky Gardens': 'スカイガーデン',
+  'East Kiosks': '東キオスク街',
+  'West Alley': '西路地',
+  'South Garage': '南ガレージ',
+  'North Plaza': '北広場',
+  'Server Bunker': 'サーバーバンカー',
+  'Fountain Court': '噴水広場',
+  'Freight Depot': '貨物基地',
+  Overpass: '高架道路',
+  'Cooling Yard': '冷却ヤード',
+  'Old Billboard': '古い看板',
+
+  // Old Front
+  'Cathedral Square': '大聖堂広場',
+  'Old Town': '旧市街',
+  'The Keep': '城塞跡',
+  Farmstead: '農場',
+  Checkpoint: '検問所',
+  'Forest Camp': '森林キャンプ',
+  'Hill Tunnel': '丘陵トンネル',
+  Chapel: '礼拝堂',
+  Bridge: '橋',
+  Quarry: '採石場',
+  'Roadside Shrine': '道端の祠',
+  'Water Mill': '水車小屋',
+  Orchard: '果樹園',
+  'Broken Column': '崩れた柱',
+  Crossroads: '交差路',
+
+  // Eden Facility
+  'Research Complex': '研究区画',
+  Dormitories: '居住棟',
+  'Water Treatment': '水処理施設',
+  'Lakeside Dock': '湖畔ドック',
+  'Cliff Overlook': '崖の展望台',
+  Greenhouses: '温室群',
+  'Generator Yard': '発電ヤード',
+  'Test Field': '実験場',
+  'Ranger Cabin': '管理小屋',
+  'South Ford': '南の浅瀬',
+  'Boulder Field': '巨岩地帯',
+  'East Meadow': '東の草原',
+  'Pump House': 'ポンプ棟',
+  'Watch Rock': '見張り岩',
+};
 
 let currentLang: Lang = 'en';
 const listeners: Array<(l: Lang) => void> = [];
@@ -390,3 +477,13 @@ export function t(key: keyof Dict, vars?: Record<string, string | number>): stri
 }
 
 export type TextKey = keyof Dict;
+
+/** Runtime guard for declarative HTML keys, which TypeScript cannot inspect. */
+export function isTextKey(key: string): key is TextKey {
+  return Object.prototype.hasOwnProperty.call(en, key);
+}
+
+/** Localize stable authored POI names without leaking UI concerns into maps. */
+export function localizePoiName(name: string, lang: Lang = currentLang): string {
+  return lang === 'ja' ? POI_JA[name] ?? name : name;
+}

@@ -65,7 +65,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com); versioning is
 - Unused duplicate assets: `models/ual_standard.glb` (canonical copy lives in
   `models/characters/`) and loose `models/vehicles/colormap.png` (the GLBs
   reference `Textures/colormap.png`); unused candidate texture sets
-  (`facadeB`, `facadeC`, `metalFloor`).
+  (`facadeB`, `facadeC`, `metalFloor`). The final production-asset sweep also
+  removed 147 unreferenced audio/model pack members while preserving every
+  runtime file and shared GLB dependency recorded by the checksum audit.
 
 ### Security
 - Strict Content-Security-Policy in production headers; debug introspection

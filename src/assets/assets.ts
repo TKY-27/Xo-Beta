@@ -23,6 +23,12 @@ export interface GltfAsset {
 
 export type ProgressFn = (pct: number, label: string) => void;
 
+/** HDRIs that are both shipped and required during the shared boot preload. */
+export const PRELOAD_HDRIS = [
+  'kloofendal_overcast_puresky_2k.hdr',
+  'qwantani_puresky_2k.hdr',
+] as const;
+
 interface LoadState {
   textures: Map<string, THREE.Texture>;
   textureSets: Map<string, TextureSet>;
@@ -94,6 +100,11 @@ export async function loadTextureSet(dir: string): Promise<TextureSet> {
   return set;
 }
 
+/** Sync access to an already-preloaded texture set (null before preload). */
+export function peekTextureSet(dir: string): TextureSet | null {
+  return state.textureSets.get(dir) ?? null;
+}
+
 /** Load an HDRI (.hdr) as equirectangular float texture. */
 export async function loadHdri(name: string): Promise<THREE.Texture> {
   const cached = state.hdrs.get(name);
@@ -104,6 +115,47 @@ export async function loadHdri(name: string): Promise<THREE.Texture> {
   tex.mapping = THREE.EquirectangularReflectionMapping;
   state.hdrs.set(name, tex);
   return tex;
+}
+
+/** Clone an HDR equirect with per-channel peaks clamped, taming baked sun
+ * discs so the backdrop cannot blow out through bloom. The original texture
+ * stays full-range for PMREM image-based lighting. */
+export function clampHdriPeaks(tex: THREE.Texture, max = 5): THREE.Texture {
+  const img = tex.image as { data: Float32Array | Uint16Array; width: number; height: number };
+  const src = img.data;
+  const px = img.width * img.height;
+  const stride = src.length / px;
+  const halfFloat = tex.type === THREE.HalfFloatType;
+  const data: Float32Array | Uint16Array = halfFloat
+    ? new Uint16Array(src.length)
+    : new Float32Array(src.length);
+  const read = (index: number): number => {
+    const value = src[index] ?? 0;
+    return halfFloat ? THREE.DataUtils.fromHalfFloat(value) : value;
+  };
+  const write = (index: number, value: number): void => {
+    data[index] = halfFloat ? THREE.DataUtils.toHalfFloat(value) : value;
+  };
+  for (let p = 0; p < px; p++) {
+    for (let c = 0; c < 3; c++) {
+      const index = p * stride + c;
+      write(index, Math.min(max, read(index)));
+    }
+    if (stride > 3) {
+      const alphaIndex = p * stride + 3;
+      write(alphaIndex, read(alphaIndex));
+    }
+  }
+  const out = new THREE.DataTexture(data, img.width, img.height, tex.format as THREE.PixelFormat, tex.type);
+  out.mapping = tex.mapping;
+  out.colorSpace = tex.colorSpace;
+  out.magFilter = tex.magFilter;
+  out.minFilter = tex.minFilter;
+  out.wrapS = tex.wrapS;
+  out.wrapT = tex.wrapT;
+  out.flipY = tex.flipY;
+  out.needsUpdate = true;
+  return out;
 }
 
 /** Load a GLB/GLTF; returns scene + embedded animation clips. */
@@ -161,7 +213,7 @@ export async function preloadAll(onProgress: ProgressFn): Promise<void> {
   }
 
   // HDRIs (one per map preset)
-  for (const h of ['dikhololo_night_2k.hdr', 'kloofendal_overcast_puresky_2k.hdr', 'qwantani_puresky_2k.hdr']) {
+  for (const h of PRELOAD_HDRIS) {
     tasks.push({ label: `Lighting · ${h.replace('.hdr', '')}`, run: () => loadHdri(h).then(() => undefined) });
   }
 

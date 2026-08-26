@@ -1,6 +1,0 @@
-a-normal: 47fps (21.2ms, n=149)
-b-worldHidden: 117fps (8.6ms, n=149)
-c-transparentHidden: 46fps (21.5ms, n=149)
-d-shadowsOff: 44fps (23ms, n=136)
-e-charsHidden: 44fps (22.8ms, n=149)
-done

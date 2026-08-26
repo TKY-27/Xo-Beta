@@ -8,10 +8,11 @@
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import type { MapDef, MatKey } from '../world/types';
+import { VEHICLE_SCALE, type MapDef, type MatKey } from '../world/types';
 import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
 import { WeaponModelFactory } from './weaponModels';
+import { buildVista, type VistaHandle } from './vista';
 import type { Match } from '../sim/match';
 import { RARITY_COLORS } from '../core/balance';
 
@@ -39,8 +40,10 @@ const STORM_FRAG = /* glsl */ `
   }
 
   void main() {
-    // vertical fade: strong at eye level, fading at top
-    float vertFade = smoothstep(0.95, 0.25, vUv.y) * smoothstep(0.02, 0.12, vUv.y);
+    // vertical fade: solid at eye level, fading toward the top rim
+    float vertFade = smoothstep(1.0, 0.3, vUv.y) * smoothstep(0.0, 0.06, vUv.y);
+    // large-scale wall presence (slow drifting murk so it reads as a volume)
+    float murk = sin(vUv.x * 24.0 + uTime * 0.35 + sin(vUv.y * 9.0 + uTime * 0.2) * 1.4) * 0.5 + 0.5;
     // scrolling energy bands (two directions)
     float band = sin(vUv.x * 90.0 - uTime * 2.2 + sin(vUv.y * 22.0)) * 0.5 + 0.5;
     band *= 0.55 + 0.45 * sin(vUv.y * 34.0 - uTime * 1.4);
@@ -50,7 +53,9 @@ const STORM_FRAG = /* glsl */ `
     float crackle = step(0.82, n) * (0.6 + 0.4 * sin(uTime * 22.0));
     float energy = band * (0.35 + crackle);
     vec3 col = mix(uColorB, uColorA, clamp(energy * 1.5, 0.0, 1.0));
-    float alpha = vertFade * (0.16 + energy * 0.30) * uIntensity;
+    col = mix(col, uColorB * 0.85, murk * 0.35);
+    // readable translucent wall: solid purple body + energetic highlights
+    float alpha = vertFade * (0.27 + murk * 0.08 + energy * 0.24) * uIntensity;
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -94,17 +99,18 @@ const WATER_FRAG = /* glsl */ `
     vec3 v = normalize(cameraPosition - vWPos);
     float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
 
-    // sun glint (blinn)
+    // sun glint (blinn) — tight lobe, modest gain so grazing water never
+    // blows out to a white sheet
     vec3 h = normalize(uSunDir + v);
-    float spec = pow(max(dot(n, h), 0.0), 240.0);
+    float spec = pow(max(dot(n, h), 0.0), 900.0);
 
     // ripple sparkle bands
     float ripple = sin(vWPos.x * 2.4 + uTime * 1.8) * sin(vWPos.z * 2.1 - uTime * 1.3);
-    float sparkle = smoothstep(0.86, 1.0, ripple) * 0.5;
+    float sparkle = smoothstep(0.88, 1.0, ripple) * 0.22;
 
     vec3 base = mix(uShallowColor, uDeepColor, clamp(fres, 0.0, 1.0) * 0.85);
     vec3 sky = mix(base, uSkyColor, fres * 0.85);
-    vec3 col = sky + uSunColor * spec * 2.2 + uSkyColor * sparkle;
+    vec3 col = sky + uSunColor * spec * 0.22 + uSkyColor * sparkle;
 
     float alpha = mix(0.86, 0.97, fres);
     // shoreline foam: brighten near plane edges (uv-based via world bounds passed as uniforms)
@@ -165,6 +171,10 @@ class StaticLightPool {
 }
 
 export class WorldView {
+  static beamGeos = new Map<number, THREE.CylinderGeometry>();
+  static beamMats = new Map<number, THREE.Material>();
+  static ringGeo: THREE.RingGeometry | null = null;
+  static ringMats = new Map<number, THREE.MeshBasicMaterial>();
   readonly group = new THREE.Group();
   private destructibleMeshes = new Map<number, THREE.Object3D>();
   private chestMats = new Map<number, { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial }>();
@@ -177,6 +187,8 @@ export class WorldView {
   private weaponFactory: WeaponModelFactory;
   private lightPool = new StaticLightPool(22);
   private viewPos = new THREE.Vector3();
+  /** Beyond-bounds landscape + boundary barrier (see vista.ts). */
+  readonly vista: VistaHandle;
 
   static async create(
     def: MapDef,
@@ -197,6 +209,8 @@ export class WorldView {
     this.weaponFactory = new WeaponModelFactory(props);
     this.applyWetGround(def);
     this.buildStatic(def);
+    this.vista = buildVista(def, mats);
+    this.group.add(this.vista.group);
     this.buildScatter(def, props);
     this.buildVehicles(def, props);
     this.buildWater(def);
@@ -204,7 +218,8 @@ export class WorldView {
       this.trackDestructibles(match, props);
       this.trackChests(match);
       this.buildStorm();
-      this.buildTransport();
+      // No dropship in practice mode (spawn is already on the ground).
+      if (!match.practice) this.buildTransport();
     }
   }
 
@@ -221,8 +236,10 @@ export class WorldView {
       if (!m || !m.isMeshStandardMaterial) continue;
       if (def.wetGround) {
         if (m.userData.baseRoughness === undefined) m.userData.baseRoughness = m.roughness;
-        m.roughness = Math.min(0.42, (m.userData.baseRoughness as number) * 0.45);
-        m.envMapIntensity = 1.5;
+        // Subtle rain sheen only — full mirror-smooth ground turns the whole
+        // map into a bright env mirror ("frozen lake") and drowns the albedo.
+        m.roughness = Math.min(0.58, (m.userData.baseRoughness as number) * 0.62);
+        m.envMapIntensity = 0.85;
         m.needsUpdate = true;
       } else if (m.userData.baseRoughness !== undefined) {
         m.roughness = m.userData.baseRoughness as number;
@@ -239,6 +256,7 @@ export class WorldView {
   private buildStatic(def: MapDef): void {
     const byKind = new Map<string, Map<MatKey, THREE.Matrix4[]>>();
     for (const g of def.geo) {
+      if (g.noRender) continue;
       const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), g.kind === 'box' ? g.yaw : 0);
       let scale: THREE.Vector3;
       if (g.kind === 'box') scale = new THREE.Vector3(g.sx, g.sy, g.sz);
@@ -302,7 +320,10 @@ export class WorldView {
       // Trees skip shadow-casting on overcast maps: the low sun + heavy fog
       // make their shadows invisible while the extra depth pass costs a full
       // scene traversal of the dominant triangle budget.
-      this.addInstancedByGrid(key, matrices, props, 4096, def.sky.preset !== 'overcast');
+      const isTree = key.startsWith('tree/') || key === 'palm';
+      const isSoft = key.startsWith('fern') || key.startsWith('clover') || key.startsWith('bush');
+      const tint = def.id === 'oldfront' ? (isTree ? moorTint : isSoft ? moorTintSoft : undefined) : undefined;
+      this.addInstancedByGrid(key, matrices, props, 4096, def.sky.preset !== 'overcast', tint);
     }
 
     // Undergrowth: bushes / ferns / clover / flowers near tree clusters
@@ -315,7 +336,7 @@ export class WorldView {
       return (s1 & 0x7fffffff) / 0x7fffffff;
     };
     for (const t of def.trees) {
-      const count = def.id === 'eden' ? 4 : 3;
+      const count = def.id === 'eden' ? 6 : 3;
       for (let i = 0; i < count; i++) {
         const a = rnd() * Math.PI * 2;
         const r = 1.6 + rnd() * 3.4;
@@ -326,6 +347,73 @@ export class WorldView {
         const s = 0.55 + rnd() * 0.65;
         const yaw = rnd() * Math.PI * 2;
         underMatrices.get(key)!.push(scatterMatrix(x, t.y + 0.02, z, s, yaw));
+      }
+    }
+    for (const key of undergrowthKeys) {
+      // Shoreline vegetation (reeds/sedges) + rock-adjacent bushes, driven by
+      // the heightfield so plants hug real water edges. Skipped on flat maps
+      // and tiny water features like fountains.
+      if (!underMatrices.has(key)) underMatrices.set(key, []);
+    }
+    if (def.terrainHeight && def.id !== 'neocity') {
+      const shoreKeys = ['fern/1', 'clover/1', 'fern/1', 'bush/common'];
+      const smp = def.terrainHeight;
+      for (const w of def.water) {
+        const spanX = w.maxX - w.minX;
+        const spanZ = w.maxZ - w.minZ;
+        if (spanX < 20 && spanZ < 20) continue;
+        const perim = 2 * (spanX + spanZ);
+        const n = Math.max(24, Math.min(140, Math.round(perim * 0.55)));
+        for (let i = 0; i < n; i++) {
+          // Walk the rect perimeter with outward jitter 0.5–7 m.
+          const t = rnd() * perim;
+          let x: number, z: number;
+          if (t < spanX) { x = w.minX + t; z = w.minZ; }
+          else if (t < spanX + spanZ) { x = w.maxX; z = w.minZ + (t - spanX); }
+          else if (t < 2 * spanX + spanZ) { x = w.minX + (t - spanX - spanZ); z = w.maxZ; }
+          else { x = w.minX; z = w.minZ + (t - 2 * spanX - spanZ); }
+          const side = rnd() < 0.5 ? 1 : -1;
+          const horiz = rnd() < 0.5;
+          x += (horiz ? 0 : side) * (0.5 + rnd() * 6.5);
+          z += (horiz ? side : 0) * (0.5 + rnd() * 6.5);
+          const y = smp(x, z);
+          // Keep plants in the beach band around the waterline.
+          if (y > w.surfaceY + 0.3 || y < w.surfaceY - 0.9) continue;
+          const key2 = shoreKeys[Math.floor(rnd() * shoreKeys.length)]!;
+          const s = 0.6 + rnd() * 0.7;
+          underMatrices.get(key2)!.push(scatterMatrix(x, y + 0.02, z, s, rnd() * Math.PI * 2));
+        }
+      }
+      // Bushes tucked against boulders.
+      for (const r of def.rocks) {
+        if (rnd() > 0.55) continue;
+        const a = rnd() * Math.PI * 2;
+        const d = r.scale * 0.9 + 0.6 + rnd() * 1.4;
+        const x = r.x + Math.cos(a) * d;
+        const z = r.z + Math.sin(a) * d;
+        const y = def.terrainHeight ? def.terrainHeight(x, z) : r.y;
+        const key3 = rnd() < 0.6 ? 'bush/common' : 'fern/1';
+        underMatrices.get(key3)!.push(scatterMatrix(x, y + 0.02, z, 0.55 + rnd() * 0.6, rnd() * Math.PI * 2));
+      }
+      // Meadow tufts: break up the open lawn so fields don't read as empty carpet.
+      const tuftCount = def.id === 'eden' ? 420 : def.id === 'oldfront' ? 520 : 0;
+      const facilityCores = def.id === 'eden'
+        ? [{ x: -90, z: -20, r: 46 }, { x: 120, z: 40, r: 34 }]
+        : [];
+      for (let i = 0; i < tuftCount; i++) {
+        const x = (rnd() * 2 - 1) * 244;
+        const z = (rnd() * 2 - 1) * 244;
+        if (facilityCores.some((c) => Math.hypot(x - c.x, z - c.z) < c.r)) continue;
+        let inWater = false;
+        for (const w of def.water) {
+          if (x > w.minX - 2 && x < w.maxX + 2 && z > w.minZ - 2 && z < w.maxZ + 2) { inWater = true; break; }
+        }
+        if (inWater) continue;
+        const y = smp(x, z);
+        if (y < -1.5) continue;
+        const r3 = rnd();
+        const keyT = r3 < 0.45 ? 'clover/1' : r3 < 0.8 ? 'fern/1' : 'bush/common';
+        underMatrices.get(keyT)!.push(scatterMatrix(x, y + 0.02, z, 0.5 + rnd() * 0.75, rnd() * Math.PI * 2));
       }
     }
     for (const key of undergrowthKeys) {
@@ -399,7 +487,7 @@ export class WorldView {
       this.lightPool.add(l.x + 0.78, l.y + l.h - 0.35, l.z, l.color, l.intensity * 1.35, l.range);
       if (poolIdx < pools.count) {
         m4.compose(
-          new THREE.Vector3(l.x + 0.78, 0.07, l.z),
+          new THREE.Vector3(l.x + 0.78, l.y + 0.07, l.z),
           idQ,
           new THREE.Vector3().setScalar(0.9 + Math.min(0.5, l.range / 60)),
         );
@@ -437,6 +525,7 @@ export class WorldView {
     props: PropLibrary,
     cell = 80,
     castShadow = true,
+    tint?: (m: THREE.Material) => void,
   ): void {
     const byCell = new Map<string, THREE.Matrix4[]>();
     for (const m of matrices) {
@@ -447,8 +536,26 @@ export class WorldView {
       if (!list) byCell.set(k, list = []);
       list.push(m);
     }
+    const tintCache = new Map<THREE.Material, THREE.Material>();
     for (const [, list] of byCell) {
       for (const mesh of props.makeInstanced(key, list.length)) {
+        if (tint) {
+          // Clone + tint once per source material per call; the PropLibrary's
+          // shared materials must never be mutated (they outlive the match).
+          const srcMat = mesh.material;
+          if (!tintCache.has(srcMat as THREE.Material)) {
+            const arr = Array.isArray(srcMat) ? srcMat : [srcMat];
+            const cloned = arr.map((mm) => {
+              const c = mm.clone();
+              delete c.userData.externalShared;
+              tint(c);
+              return c;
+            });
+            tintCache.set(srcMat as THREE.Material,
+              (Array.isArray(srcMat) ? cloned : cloned[0]!) as THREE.Material);
+          }
+          mesh.material = tintCache.get(srcMat as THREE.Material)!;
+        }
         list.forEach((m, i) => mesh.setMatrixAt(i, m));
         mesh.instanceMatrix.needsUpdate = true;
         mesh.castShadow = castShadow;
@@ -480,6 +587,7 @@ export class WorldView {
         if (!mesh.isMesh || !mesh.material) return;
         const src = Array.isArray(mesh.material) ? mesh.material[0]! : mesh.material;
         const m = src.clone() as THREE.MeshStandardMaterial;
+        delete m.userData.externalShared;
         if (m.map && !v.explodable) m.color.copy(new THREE.Color(1, 1, 1));
         if (v.variant === 'wrecked') {
           m.color.multiply(tint).multiplyScalar(0.32);
@@ -494,14 +602,12 @@ export class WorldView {
         mesh.receiveShadow = true;
       });
       const g = new THREE.Group();
+      const vs = VEHICLE_SCALE[key] ?? 1.5;
+      tmpl.scale.setScalar(vs);
       g.add(tmpl);
-      g.position.set(v.x, v.y, v.z);
+      // Keep the same slight wheel-sink as authored (GLB base sits at -0.3).
+      g.position.set(v.x, v.y + 0.3 * (vs - 1), v.z);
       g.rotation.y = v.yaw;
-      // Wrecked cars get a smoke wisp marker (light handled by sim events)
-      if (v.variant !== 'wrecked') {
-        const glassTint = new THREE.MeshPhysicalMaterial({ visible: false });
-        void glassTint;
-      }
       this.group.add(g);
     }
   }
@@ -523,7 +629,7 @@ export class WorldView {
           uTime: { value: 0 },
           uDeepColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x0a1a2e : 0x14486b) },
           uShallowColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x123248 : 0x2f7d9e) },
-          uSkyColor: { value: new THREE.Color(def.sky.fogColor) },
+          uSkyColor: { value: new THREE.Color(def.sky.preset === 'day' ? 0x8fb6cc : def.sky.fogColor) },
           uSunDir: { value: new THREE.Vector3(...def.sky.sunDirection).normalize() },
           uSunColor: { value: new THREE.Color(def.sky.sunColor) },
         },
@@ -553,10 +659,12 @@ export class WorldView {
       const material = this.mats.get(matKey);
       if (g.kind === 'box') {
         mesh = new THREE.Mesh(new THREE.BoxGeometry(g.sx, g.sy, g.sz), material);
+        mesh.position.set(g.x, g.y, g.z);
         const yaw = (g as unknown as { yaw?: number }).yaw ?? 0;
         mesh.rotation.y = yaw;
       } else {
         mesh = new THREE.Mesh(new THREE.CylinderGeometry(g.r ?? 0.5, g.r ?? 0.5, g.h ?? 1, 10), material);
+        mesh.position.set(g.x, g.y, g.z);
       }
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -571,6 +679,8 @@ export class WorldView {
         const mesh = this.destructibleMeshes.get(d.id);
         if (mesh) {
           this.group.remove(mesh);
+          const rendered = mesh as THREE.Mesh;
+          rendered.geometry?.dispose();
           this.destructibleMeshes.delete(d.id);
         }
       }
@@ -605,11 +715,13 @@ export class WorldView {
       let cached = this.chestMats.get(tier);
       if (!cached) {
         const trimMat = new THREE.MeshStandardMaterial({
-          color: 0x111214, emissive: glowHex, emissiveIntensity: 1.5 + tier * 0.5, roughness: 0.35, metalness: 0.5,
+          color: 0x111214, emissive: glowHex, emissiveIntensity: 0.85 + tier * 0.35, roughness: 0.35, metalness: 0.5,
         });
         const accentMat = trimMat.clone();
+        // Weathered supply-crate bodies (olive standard / gunmetal elite /
+        // dark vault) instead of glossy toy-plastic blue.
         const bodyMat = new THREE.MeshStandardMaterial({
-          color: tier === 2 ? 0x2b2320 : tier === 1 ? 0x242430 : 0x27343c, roughness: 0.42, metalness: 0.72,
+          color: tier === 2 ? 0x2b2320 : tier === 1 ? 0x2c2c34 : 0x46503e, roughness: 0.62, metalness: 0.38,
         });
         for (const m of [trimMat, accentMat, bodyMat]) (m.userData as { shared?: boolean }).shared = true;
         cached = { body: bodyMat, trim: trimMat, accent: accentMat };
@@ -669,7 +781,7 @@ export class WorldView {
         mats: cached,
       };
     }
-    let nextIdx: number[] = [0, 0, 0];
+    const nextIdx: number[] = [0, 0, 0];
     for (const c of match.chests) {
       if (this.chestSlots.has(c.id)) continue;
       const tier = c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0;
@@ -694,6 +806,10 @@ export class WorldView {
       inst.trim.setMatrixAt(s.idx, m4);
       inst.lock.setMatrixAt(s.idx, m4);
       if (inst.halo) inst.halo.setMatrixAt(s.idx, m4);
+      const lidM = m4.clone().multiply(new THREE.Matrix4().makeTranslation(0, 0.72, 0));
+      inst.lidBody.setMatrixAt(s.idx, lidM);
+      inst.lidTrim.setMatrixAt(s.idx, lidM);
+      inst.core.setMatrixAt(s.idx, lidM);
     }
     for (let tier = 0; tier < 3; tier++) {
       const inst = this.chestInst[tier];
@@ -711,7 +827,6 @@ export class WorldView {
     const qx = new THREE.Quaternion();
     const pivot = new THREE.Vector3(0, 0.72, 0);
     const one = new THREE.Vector3(1, 1, 1);
-    const zero = new THREE.Vector3(0.0001, 0.0001, 0.0001);
     const pulseByTier = [false, false, false];
     for (const c of match.chests) {
       const s = this.chestSlots.get(c.id);
@@ -810,22 +925,45 @@ export class WorldView {
     }
     if (inner) root.add(inner);
 
-    // Rarity presentation: beam + ground ring scale with rarity
+    // Rarity presentation: beam + ground ring scale with rarity.
+    // Geometry/material caches are shared — creating these per spawn caused
+    // measurable interaction-frame spikes when chests opened mid-match.
     let beam: THREE.Mesh | undefined;
     let ring: THREE.Mesh | undefined;
     if (item.kind === 'weapon' && rarityRank >= 1) {
       const beamH = 3.4 + rarityRank * 0.7;
-      const beamGeo = new THREE.CylinderGeometry(0.16, 0.3, beamH, 12, 1, true);
-      beamGeo.translate(0, beamH / 2, 0);
-      beam = new THREE.Mesh(beamGeo, makeBeamMaterial(glowHex, 0.16 + rarityRank * 0.05));
+      let beamGeo = WorldView.beamGeos.get(beamH);
+      if (!beamGeo) {
+        beamGeo = new THREE.CylinderGeometry(0.16, 0.3, beamH, 12, 1, true);
+        beamGeo.translate(0, beamH / 2, 0);
+        beamGeo.userData.externalShared = true;
+        WorldView.beamGeos.set(beamH, beamGeo);
+      }
+      let beamMat = WorldView.beamMats.get(glowHex);
+      if (!beamMat) {
+        beamMat = makeBeamMaterial(glowHex, 0.16 + rarityRank * 0.05);
+        WorldView.beamMats.set(glowHex, beamMat);
+      }
+      beam = new THREE.Mesh(beamGeo, beamMat);
       beam.position.y = 0.1;
       beam.renderOrder = 2;
-      const ringGeo = new THREE.RingGeometry(0.42, 0.58, 28);
-      ringGeo.rotateX(-Math.PI / 2);
-      ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
-        color: glowHex, transparent: true, opacity: 0.5 + rarityRank * 0.08,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-      }));
+      let ringGeo = WorldView.ringGeo;
+      if (!ringGeo) {
+        ringGeo = new THREE.RingGeometry(0.42, 0.58, 28);
+        ringGeo.rotateX(-Math.PI / 2);
+        ringGeo.userData.externalShared = true;
+        WorldView.ringGeo = ringGeo;
+      }
+      let ringMat = WorldView.ringMats.get(glowHex);
+      if (!ringMat) {
+        ringMat = new THREE.MeshBasicMaterial({
+          color: glowHex, transparent: true, opacity: 0.5 + rarityRank * 0.08,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        });
+        ringMat.userData.externalShared = true;
+        WorldView.ringMats.set(glowHex, ringMat);
+      }
+      ring = new THREE.Mesh(ringGeo, ringMat);
       ring.renderOrder = 2;
       root.add(beam, ring);
     }
@@ -840,10 +978,10 @@ export class WorldView {
     };
     for (const item of match.loot.items) {
       seen.add(item.id);
-      const bob = Math.sin(this.time * 2.1 + item.id * 1.7) * 0.09 + 0.62;
+      const bob = Math.sin(this.time * 2.1 + item.id * 1.7) * 0.05 + 0.42;
       if (item.kind !== 'weapon') {
         const key = item.kind === 'ammo' ? 'ammo' : item.heal?.itemId === 'medkit' ? 'med' : 'shield';
-        instBuckets[key]!.push({ x: item.x, y: item.y + bob, z: item.z, spin: this.time * (item.kind === 'heal' ? 0.8 : 0.55) + item.id });
+        instBuckets[key]!.push({ x: item.x, y: item.y + bob, z: item.z, spin: item.yaw });
         continue;
       }
       let view = this.lootViews.get(item.id);
@@ -857,14 +995,14 @@ export class WorldView {
       const dx = item.x - this.viewPos.x;
       const dz = item.z - this.viewPos.z;
       if (view.inner) view.inner.visible = dx * dx + dz * dz < farSqr;
-      const spin = this.time * 0.55 + view.phase;
-      view.root.rotation.y = spin;
+      // Fixed believable orientation — floor loot never spins.
+      view.root.rotation.y = item.yaw;
       const pulse = 1 + Math.sin(this.time * 3.4 + view.phase) * 0.14;
       const beam = view.beam;
       if (beam) {
         (beam.material as THREE.MeshBasicMaterial).opacity =
           (parseFloat(((beam.material as THREE.MeshBasicMaterial).userData.baseOpacity ?? '0.2')) ) * (0.8 + pulse * 0.35);
-        beam.rotation.y = -spin * 0.5;
+        beam.rotation.y = -this.time * 0.3;
       }
       const ring = view.ring;
       if (ring) {
@@ -877,14 +1015,16 @@ export class WorldView {
     const m4 = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const one = new THREE.Vector3(1, 1, 1);
+    const pos = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
     for (const key of ['ammo', 'med', 'shield'] as const) {
       const mesh = this.lootInst[key] ?? this.lootInstMesh(key);
       const items = instBuckets[key]!;
       const n = Math.min(items.length, mesh.instanceMatrix.count);
       for (let i = 0; i < n; i++) {
         const it = items[i]!;
-        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), it.spin);
-        m4.compose(new THREE.Vector3(it.x, it.y, it.z), q, one);
+        q.setFromAxisAngle(up, it.spin);
+        m4.compose(pos.set(it.x, it.y, it.z), q, one);
         mesh.setMatrixAt(i, m4);
       }
       mesh.count = n;
@@ -893,7 +1033,6 @@ export class WorldView {
     }
     for (const [id, view] of this.lootViews) {
       if (!seen.has(id)) {
-        disposeObject(view.root);
         this.group.remove(view.root);
         this.lootViews.delete(id);
       }
@@ -912,12 +1051,12 @@ export class WorldView {
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       uniforms: {
         uTime: { value: 0 },
         uIntensity: { value: 1 },
-        uColorA: { value: new THREE.Color(0x9fd4ff) },
-        uColorB: { value: new THREE.Color(0x3a6fd4) },
+        uColorA: { value: new THREE.Color(0xd2b4ff) },
+        uColorB: { value: new THREE.Color(0x5426bd) },
       },
     });
     this.stormMesh = new THREE.Mesh(geo, mat);
@@ -938,22 +1077,15 @@ export class WorldView {
       this.stormMesh.visible = false;
       return;
     }
+    // The wall stays visible from anywhere with line of sight — players must
+    // always be able to read the enclosing boundary, not discover it at 30 m.
     const distOutside = match.storm.distanceOutside(me.body.position.x, me.body.position.z);
-    let proximity: number;
-    if (distOutside >= 0) proximity = 1;
-    else {
-      const d = -distOutside;
-      proximity = Math.max(0, Math.min(1, 1 - (d - 4) / 34));
-    }
-    if (proximity <= 0.01) {
-      this.stormMesh.visible = false;
-      return;
-    }
+    const closeness = distOutside >= 0 ? 1 : Math.max(0, Math.min(1, 1 + distOutside / 60));
     this.stormMesh.visible = true;
     this.stormMesh.position.x = match.storm.centerX;
     this.stormMesh.position.z = match.storm.centerZ;
     this.stormMesh.scale.set(match.storm.radius, 1, match.storm.radius);
-    mat.uniforms['uIntensity']!.value = Math.min(1.25, proximity * (0.9 + Math.sin(this.time * 1.4) * 0.12));
+    mat.uniforms['uIntensity']!.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
   }
 
   private buildTransport(): void {
@@ -1006,6 +1138,7 @@ export class WorldView {
   update(dt: number, match: Match): void {
     this.lastFrameTime = this.time;
     this.time += dt;
+    this.vista.update(this.viewPos, this.time);
     this.lightPool.update(dt, this.viewPos);
     this.animateWater(this.time);
     this.syncLoot(match);
@@ -1035,6 +1168,70 @@ export class WorldView {
       this.transportGroup.visible = false;
     }
   }
+
+  /** Release only resources owned by this match view. Shared libraries and
+   * weapon archetypes use explicit ownership markers/lifetimes. */
+  dispose(): void {
+    this.vista.dispose();
+    this.group.remove(this.vista.group);
+    this.weaponFactory.dispose();
+
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const textures = new Set<THREE.Texture>();
+    this.group.traverse((object) => {
+      const asMesh = object as THREE.Mesh;
+      const asLine = object as THREE.Line;
+      if (!asMesh.isMesh && !asLine.isLine) return;
+      const renderable = object as THREE.Mesh;
+      const geometry = renderable.geometry;
+      if (geometry && !geometry.userData.externalShared && !geometry.userData.weaponFactoryOwned) {
+        geometries.add(geometry);
+      }
+      const material = renderable.material;
+      const list = Array.isArray(material) ? material : material ? [material] : [];
+      for (const mat of list) {
+        if (!mat.userData.externalShared && !mat.userData.weaponFactoryOwned) materials.add(mat);
+        const map = (mat as THREE.Material & { map?: THREE.Texture | null }).map;
+        if (map?.userData.worldViewOwned) textures.add(map);
+      }
+    });
+    for (const texture of textures) texture.dispose();
+    for (const material of materials) material.dispose();
+    for (const geometry of geometries) geometry.dispose();
+    this.destructibleMeshes.clear();
+    this.chestMats.clear();
+    this.chestSlots.clear();
+    this.lootViews.clear();
+    this.group.clear();
+  }
+}
+
+/** Pull bright GLTF canopy greens down to the overcast moor palette. */
+function moorTint(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  // Only tint foliage-ish (green) materials; leave trunks/bark alone.
+  const c = std.color;
+  if (c.g > c.r && c.g > c.b) {
+    c.lerp(new THREE.Color(0x6e7452), 0.62).multiplyScalar(0.9);
+  } else if (std.map && c.r > 0.85 && c.g > 0.85 && c.b > 0.85) {
+    // Green lives in the albedo texture (ferns/clover) — multiply toward moor.
+    c.setRGB(0.78, 0.82, 0.66);
+  }
+  if (std.roughness !== undefined) std.roughness = Math.min(1, std.roughness + 0.05);
+}
+
+/** Gentle moor pass for ground foliage — keeps tufts readable, not black blobs. */
+function moorTintSoft(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  const c = std.color;
+  if (c.g > c.r && c.g > c.b) {
+    c.lerp(new THREE.Color(0x8a905e), 0.3);
+  } else if (std.map && c.r > 0.85 && c.g > 0.85 && c.b > 0.85) {
+    c.setRGB(1.22, 1.28, 1.1);
+  }
 }
 
 function makeBeamMaterial(color: number, baseOpacity: number): THREE.MeshBasicMaterial {
@@ -1043,6 +1240,7 @@ function makeBeamMaterial(color: number, baseOpacity: number): THREE.MeshBasicMa
     depthWrite: false, side: THREE.DoubleSide,
   });
   (mat.userData as { baseOpacity?: string }).baseOpacity = String(baseOpacity);
+  mat.userData.externalShared = true;
   return mat;
 }
 
@@ -1061,7 +1259,10 @@ const lootMats = {
   glowMed: new THREE.MeshBasicMaterial({ color: 0xff8088 }),
   glowShield: new THREE.MeshBasicMaterial({ color: 0x53d8ff }),
 };
-for (const m of Object.values(lootMats)) (m.userData as { shared?: boolean }).shared = true;
+for (const m of Object.values(lootMats)) {
+  (m.userData as { shared?: boolean }).shared = true;
+  m.userData.externalShared = true;
+}
 
 /** Shared radial-gradient canvas texture (lamp pools etc.). */
 export function makeGlowTexture(rgbPrefix: string, size: number): THREE.CanvasTexture {
@@ -1075,17 +1276,6 @@ export function makeGlowTexture(rgbPrefix: string, size: number): THREE.CanvasTe
   ctx.fillRect(0, 0, size, size);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.userData.worldViewOwned = true;
   return tex;
-}
-
-function disposeObject(root: THREE.Object3D): void {
-  root.traverse((o) => {
-    const mesh = o as THREE.Mesh;
-    if (mesh.isMesh) {
-      mesh.geometry?.dispose();
-      const mat = mesh.material;
-      if (Array.isArray(mat)) mat.forEach((m) => { if (!(m.userData as { shared?: boolean }).shared) m.dispose(); });
-      else if (mat && !(mat.userData as { shared?: boolean }).shared) mat.dispose();
-    }
-  });
 }

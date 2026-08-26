@@ -21,6 +21,7 @@ export interface GamepadCallbacks {
   onMapToggle(): void;
   onPauseRequest(): void;
   onSlotRequest(slot: number): void;
+  onMeleePress(): void;
   onPingPress(): void;
   onCrouchPress?(): void;
 }
@@ -89,6 +90,12 @@ export class GamepadInput {
     const dz = s.padDeadzone;
     const rumble = 0;
 
+    // Right stick is sampled in the same tick as the command so aiming has no
+    // extra frame of latency. PlayerController consumes these normalized
+    // deltas after applyTo returns and applies sensitivity/invert-Y.
+    this.lookX = deadzone(pad.axes[2] ?? 0, dz);
+    this.lookY = deadzone(pad.axes[3] ?? 0, dz);
+
     // Movement (merge: keyboard wins on conflict)
     const mx = deadzone(pad.axes[0] ?? 0, dz);
     const mz = -deadzone(pad.axes[1] ?? 0, dz);
@@ -105,20 +112,30 @@ export class GamepadInput {
     void adsScale;
 
     // Face buttons
+    cmd.jumpHeld ||= this.pressed(pad, BUTTON.A);
     if (this.edge(pad, BUTTON.A)) { cmd.jumpPressed = true; this.cb.onJumpPress(); }
-    if (this.edge(pad, BUTTON.B)) this.cb.onCrouchPress?.();
-    if (this.edge(pad, BUTTON.X)) this.cb.onReloadPress();
-    if (this.edge(pad, BUTTON.Y)) this.cb.onInteractPress();
+    cmd.crouchHeld ||= this.pressed(pad, BUTTON.B);
+    if (this.edge(pad, BUTTON.B)) { cmd.crouchPressed = true; this.cb.onCrouchPress?.(); }
+    if (this.edge(pad, BUTTON.X)) { cmd.reloadPressed = true; this.cb.onReloadPress(); }
+    if (this.edge(pad, BUTTON.Y)) { cmd.interactPressed = true; this.cb.onInteractPress(); }
 
-    // Bumpers
-    if (this.edge(pad, BUTTON.LB)) this.cb.onMedkitPress();
-    if (this.edge(pad, BUTTON.RB)) this.cb.onShieldPress();
+    // Bumpers: alone = heal items, both together = switch to fists.
+    const lbDown = !!pad.buttons[BUTTON.LB]?.pressed;
+    const rbDown = !!pad.buttons[BUTTON.RB]?.pressed;
+    if (this.edge(pad, BUTTON.LB)) {
+      if (rbDown) { cmd.meleePressed = true; this.cb.onMeleePress(); }
+      else { cmd.medkitPressed = true; this.cb.onMedkitPress(); }
+    }
+    if (this.edge(pad, BUTTON.RB)) {
+      if (lbDown) { cmd.meleePressed = true; this.cb.onMeleePress(); }
+      else { cmd.shieldPressed = true; this.cb.onShieldPress(); }
+    }
 
     // D-pad
-    if (this.edge(pad, BUTTON.DPAD_UP)) this.cb.onGrapplePress();
-    if (this.edge(pad, BUTTON.DPAD_DOWN)) this.cb.onPoundPress();
-    if (this.edge(pad, BUTTON.DPAD_LEFT)) this.cb.onDropWeaponPress();
-    if (this.edge(pad, BUTTON.DPAD_RIGHT)) this.cb.onDashPress();
+    if (this.edge(pad, BUTTON.DPAD_UP)) { cmd.grapplePressed = true; this.cb.onGrapplePress(); }
+    if (this.edge(pad, BUTTON.DPAD_DOWN)) { cmd.poundPressed = true; this.cb.onPoundPress(); }
+    if (this.edge(pad, BUTTON.DPAD_LEFT)) { cmd.dropWeaponPressed = true; this.cb.onDropWeaponPress(); }
+    if (this.edge(pad, BUTTON.DPAD_RIGHT)) { cmd.dashPressed = true; this.cb.onDashPress(); }
 
     // System
     if (this.edge(pad, BUTTON.START)) this.cb.onPauseRequest();
@@ -145,4 +162,3 @@ export class GamepadInput {
     } catch { /* unsupported */ }
   }
 }
-

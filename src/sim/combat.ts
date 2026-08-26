@@ -4,7 +4,7 @@
  */
 
 import {
-  RARITY_MODS, WEAPONS, HIT_REGION_MULT,
+  MELEE, MOVE, RARITY_MODS, WEAPONS, HIT_REGION_MULT,
   type Rarity, type WeaponId,
 } from '../core/balance';
 import type { Actor } from './actor';
@@ -44,6 +44,8 @@ export interface CombatEvents {
   onRicochet(x: number, y: number, z: number): void;
   onGlassBreak(x: number, y: number, z: number): void;
   onDestructibleDamaged(id: number, x: number, y: number, z: number, destroyed: boolean): void;
+  onMeleeSwing(actor: Actor, x: number, y: number, z: number): void;
+  onMeleeHit(target: Actor, attacker: Actor, damage: number, killed: boolean, headshot: boolean): void;
 }
 
 interface DestructibleRef {
@@ -118,13 +120,7 @@ export class CombatSystem {
 
     // Direction with recoil + spread
     const baseDir = aimDirOverride ?? this.movement.lookDir(a);
-    const mods = RARITY_MODS[w.rarity];
-    const speedH = Math.hypot(a.body.velocity.x, a.body.velocity.z);
-    const airPenalty = a.body.grounded ? 1 : 1.8;
-    const movePenalty = 1 + Math.min(1.2, speedH / MOVE_REF_SPEED) * 0.8;
-    const crouchBonus = a.crouched ? 0.72 : 1;
-    const spreadBase = (rt.adsAmount > 0.6 ? def.spreadAds : def.spreadHip) * mods.spreadMult;
-    const spread = (spreadBase + rt.bloom) * movePenalty * airPenalty * crouchBonus;
+    const spread = this.currentSpread(a);
 
     const eyeY = a.eyeY;
     const px = a.body.position.x;
@@ -134,7 +130,7 @@ export class CombatSystem {
       const dir = coneSample(baseDir, spread);
       const proj = this.alloc();
       if (!proj) break;
-      const speed = def.projectileSpeed * mods.projSpeedMult * (p === 0 ? 1 : 0.96 + ((p * 37) % 10) * 0.008);
+      const speed = def.projectileSpeed * RARITY_MODS[w.rarity].projSpeedMult * (p === 0 ? 1 : 0.96 + ((p * 37) % 10) * 0.008);
       proj.active = true;
       proj.ownerId = a.id;
       proj.weaponId = w.weaponId;
@@ -160,13 +156,60 @@ export class CombatSystem {
     }
 
     // Recoil & bloom
-    const rMod = mods.recoilMult;
+    const rMod = RARITY_MODS[w.rarity].recoilMult;
     rt.recoilPitch += def.recoilKick * rMod * (0.85 + gameNext() * 0.3);
     rt.recoilYaw += (gameNext() - 0.5) * def.recoilKick * 0.7 * rMod;
     rt.bloom = Math.min(def.bloomMax, rt.bloom + def.bloomPerShot);
 
     this.events.onMuzzleFlash(a, w.weaponId);
     this.events.onShotFired(a, w.weaponId, px, eyeY, pz);
+    return true;
+  }
+
+  /** Attempt a punch with the permanent fists pseudo-weapon. */
+  tryMelee(a: Actor, dt: number, actors: readonly Actor[]): boolean {
+    if (!a.alive || a.healing) return false;
+    const rt = a.wpn;
+    if (rt.swapTimer > 0) return false;
+    rt.fireCooldown -= dt;
+    if (rt.fireCooldown > 0) return false;
+    rt.fireCooldown = 60 / MELEE.rpm;
+    rt.lastShotTime = 0;
+    a.punchTimer = 0.32;
+
+    const fwd = this.movement.lookDir(a);
+    const px = a.body.position.x;
+    const py = a.body.position.y;
+    const pz = a.body.position.z;
+    this.events.onMeleeSwing(a, px, py, pz);
+
+    for (const t of actors) {
+      if (t === a || !t.alive) continue;
+      const dx = t.body.position.x - px;
+      const dy = t.body.position.y - py;
+      const dz = t.body.position.z - pz;
+      const distH = Math.hypot(dx, dz);
+      const reach = MELEE.range + MOVE.capsuleRadius;
+      if (distH > reach || Math.abs(dy) > 1.7) continue;
+      const invLen = 1 / Math.max(1e-6, Math.hypot(dx, dy, dz));
+      const dot = (dx * fwd.x + dy * fwd.y + dz * fwd.z) * invLen;
+      if (dot < MELEE.arcCos) continue;
+
+      const hitY = a.eyeY + Math.tan(a.pitch) * distH;
+      const headshot = hitY > t.body.position.y + 1.45 && dot > 0.86;
+      const dmg = headshot ? Math.round(MELEE.damage * MELEE.headMult) : MELEE.damage;
+      const wasAlive = t.alive;
+      const dealt = t.applyDamage(dmg);
+      a.stats.damageDealt += dealt;
+      if (headshot) a.stats.headshots++;
+      t.lastDamageTime = 0;
+      t.lastAttackerId = a.id;
+      // Shove: light knockback along punch direction.
+      t.body.velocity.x += fwd.x * MELEE.knockback;
+      t.body.velocity.z += fwd.z * MELEE.knockback;
+      this.events.onMeleeHit(t, a, dealt, wasAlive && !t.alive, headshot);
+      break;
+    }
     return true;
   }
 
@@ -189,12 +232,16 @@ export class CombatSystem {
     const rt = a.wpn;
     if (rt.boltTimer > 0) rt.boltTimer -= dt;
     if (rt.lastShotTime < 90) rt.lastShotTime += dt;
+    if (a.punchTimer > 0) a.punchTimer = Math.max(0, a.punchTimer - dt);
 
     // Bloom decay
     const w = a.inv.selectedWeapon;
     if (w) {
       const def = WEAPONS[w.weaponId];
       rt.bloom = Math.max(0, rt.bloom - def.bloomDecay * dt);
+      rt.currentSpread = this.currentSpread(a);
+    } else {
+      rt.currentSpread = 0;
     }
 
     // Recoil recovery (view returns toward original aim)
@@ -227,6 +274,25 @@ export class CombatSystem {
       }
     }
     if (rt.swapTimer > 0) rt.swapTimer -= dt;
+  }
+
+  /**
+   * Live cone half-angle (radians) for the actor's next shot. Shared by the
+   * firing path and per-tick weapon updates so UI reticles can mirror the
+   * simulation's actual dispersion.
+   */
+  currentSpread(a: Actor): number {
+    const w = a.inv.selectedWeapon;
+    if (!w) return 0;
+    const def = WEAPONS[w.weaponId];
+    const rt = a.wpn;
+    const mods = RARITY_MODS[w.rarity];
+    const speedH = Math.hypot(a.body.velocity.x, a.body.velocity.z);
+    const airPenalty = a.body.grounded ? 1 : 1.8;
+    const movePenalty = 1 + Math.min(1.2, speedH / MOVE_REF_SPEED) * 0.8;
+    const crouchBonus = a.crouched ? 0.72 : 1;
+    const spreadBase = (rt.adsAmount > 0.6 ? def.spreadAds : def.spreadHip) * mods.spreadMult;
+    return (spreadBase + rt.bloom) * movePenalty * airPenalty * crouchBonus;
   }
 
   // -------------------------------------------------------------------------

@@ -30,19 +30,24 @@ Thanks for your interest in improving Xo Beta!
 ## Workflow
 
 1. Fork & create a branch from `master`.
-2. `npm install`.
+2. Install the Node.js version declared in `package.json`, then run `npm ci`.
 3. Make focused changes; match existing TypeScript style (strict mode is on);
    `npm run lint` must pass.
 4. Verify:
    ```bash
    npm run typecheck
    npm run lint         # eslint
-   npm run test          # unit + integration suites
-   npm run build         # must pass before merge
+   npm run test           # unit + integration suites
+   npm run audit:assets   # asset ledger + checksums
+   npm run audit:secrets  # lightweight source scan
+   npm run audit:licenses
+   npm run build          # must pass before merge
    ```
 5. For gameplay/balance changes: run headless sims and note match duration,
    kill distribution and storm deaths before/after.
 6. For visual changes: attach screenshots from `tests/browser/qa-maps.ts`.
+7. For deployment changes: run `npm run cloudflare:dry-run`; this validates
+   the upload manifest without deploying.
 
 ## Commit style
 

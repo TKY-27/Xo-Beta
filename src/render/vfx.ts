@@ -11,12 +11,16 @@ interface Tracer {
   slot: number;
   life: number;
   maxLife: number;
+  color: number;
 }
 
 interface Flash {
   sprite: THREE.Sprite;
   light: THREE.PointLight;
   life: number;
+  maxLife: number;
+  /** Star-petal texture variant (shotgun/sniper-class). */
+  star: boolean;
 }
 
 interface Particle {
@@ -33,6 +37,28 @@ interface Particle {
 const MAX_TRACERS = 64;
 const MAX_FLASHES = 12;
 const MAX_PARTICLES = 512;
+const MAX_SHOCKWAVES = 8;
+
+function finite(...values: number[]): boolean {
+  return values.every(Number.isFinite);
+}
+
+// Shared scratch objects — never allocate inside spawn/update paths.
+const _m4 = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _scl = new THREE.Vector3();
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+const _axis = new THREE.Vector3(0.3, 0.8, 0.2).normalize();
+const _up = new THREE.Vector3(0, 1, 0);
+const _col = new THREE.Color();
+const _lookM = new THREE.Matrix4();
+
+interface Shockwave {
+  mesh: THREE.Mesh;
+  life: number;
+  maxLife: number;
+}
 
 export class VfxSystem {
   readonly group = new THREE.Group();
@@ -43,10 +69,24 @@ export class VfxSystem {
   private particles: Particle[] = [];
   private particleMeshes: THREE.InstancedMesh[] = [];
   private ropes = new Map<number, { line: THREE.Line; points: number }>();
-  private shockwaves: Array<{ mesh: THREE.Mesh; life: number }> = [];
+  private shockwaves: Shockwave[] = [];
+  private shockwavePool: THREE.Mesh[] = [];
   private time = 0;
 
   constructor() {
+    // Pooled shockwave rings (pound + shield-break reuse these).
+    const ringGeo = new THREE.RingGeometry(0.8, 1.15, 32);
+    ringGeo.rotateX(-Math.PI / 2);
+    for (let i = 0; i < MAX_SHOCKWAVES; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xcfd8e2, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(ringGeo, mat);
+      mesh.visible = false;
+      this.group.add(mesh);
+      this.shockwavePool.push(mesh);
+    }
+
     // Tracer pool: ONE instanced mesh, per-instance color fade (additive)
     const tracerGeo = new THREE.BoxGeometry(0.03, 0.03, 1);
     tracerGeo.translate(0, 0, -0.5);
@@ -63,18 +103,23 @@ export class VfxSystem {
     this.tracerMesh.count = 0;
     this.group.add(this.tracerMesh);
     for (let i = 0; i < MAX_TRACERS; i++) {
-      this.tracers.push({ slot: i, life: 0, maxLife: 1 });
+      this.tracers.push({ slot: i, life: 0, maxLife: 1, color: 0xffffff });
     }
 
-    // Muzzle flash pool
-    const flashTex = this.makeFlashTexture();
-    const flashMat = new THREE.SpriteMaterial({ map: flashTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+    // Muzzle flash pool — two looks: compact core (pistol/SMG/AR) and
+    // wide petal star (shotgun/sniper).
+    const coreTex = this.makeFlashTexture(false);
+    const starTex = this.makeFlashTexture(true);
     for (let i = 0; i < MAX_FLASHES; i++) {
-      const sprite = new THREE.Sprite(flashMat.clone());
+      const mat = new THREE.SpriteMaterial({
+        map: i % 3 === 2 ? starTex : coreTex, transparent: true,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const sprite = new THREE.Sprite(mat);
       sprite.visible = false;
       const light = new THREE.PointLight(0xffc878, 0, 12, 2);
       this.group.add(sprite, light);
-      this.flashes.push({ sprite, light, life: 0 });
+      this.flashes.push({ sprite, light, life: 0, maxLife: 1, star: i % 3 === 2 });
     }
 
     // Particle pool via instanced quads (billboard-ish boxes)
@@ -95,7 +140,7 @@ export class VfxSystem {
     }
   }
 
-  private makeFlashTexture(): THREE.Texture {
+  private makeFlashTexture(star: boolean): THREE.Texture {
     const c = document.createElement('canvas');
     c.width = c.height = 64;
     const ctx = c.getContext('2d')!;
@@ -105,37 +150,62 @@ export class VfxSystem {
     grad.addColorStop(1, 'rgba(255,120,40,0)');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 64, 64);
+    if (star) {
+      // Petal rays for shotgun/sniper-class blasts.
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2 + 0.35;
+        const len = i % 2 === 0 ? 30 : 20;
+        const g2 = ctx.createLinearGradient(32, 32, 32 + Math.cos(a) * len, 32 + Math.sin(a) * len);
+        g2.addColorStop(0, 'rgba(255,220,150,0.95)');
+        g2.addColorStop(1, 'rgba(255,140,40,0)');
+        ctx.strokeStyle = g2;
+        ctx.lineWidth = i % 2 === 0 ? 7 : 4;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(32, 32);
+        ctx.lineTo(32 + Math.cos(a) * len, 32 + Math.sin(a) * len);
+        ctx.stroke();
+      }
+    }
     return new THREE.CanvasTexture(c);
   }
 
   spawnTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number): void {
+    if (!finite(x1, y1, z1, x2, y2, z2, color)) return;
     const tracer = this.tracers.find((t) => t.life <= 0) ?? this.tracers[0]!;
     const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
     const len = Math.hypot(dx, dy, dz);
     if (len < 0.5) return;
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion().setFromRotationMatrix(
-      new THREE.Matrix4().lookAt(new THREE.Vector3(x1, y1, z1), new THREE.Vector3(x2, y2, z2), new THREE.Vector3(0, 1, 0)),
-    );
-    m.compose(new THREE.Vector3(x1, y1, z1), q, new THREE.Vector3(1, 1, len));
-    this.tracerMesh.setMatrixAt(tracer.slot, m);
-    this.tracerMesh.setColorAt(tracer.slot, new THREE.Color(color));
+    _v1.set(x1, y1, z1);
+    _v2.set(x2, y2, z2);
+    _lookM.lookAt(_v1, _v2, _up);
+    _q.setFromRotationMatrix(_lookM);
+    _m4.compose(_v1, _q, _scl.set(1, 1, len));
+    this.tracerMesh.setMatrixAt(tracer.slot, _m4);
+    this.tracerMesh.setColorAt(tracer.slot, _col.setHex(color));
     tracer.life = 0.09;
     tracer.maxLife = 0.09;
+    tracer.color = color;
     this.tracerDirty = true;
   }
 
-  muzzleFlash(x: number, y: number, z: number, dx: number, dy: number, dz: number, scale = 1): void {
-    const f = this.flashes.find((fl) => fl.life <= 0) ?? this.flashes[0]!;
+  muzzleFlash(x: number, y: number, z: number, dx: number, dy: number, dz: number, scale = 1, heavy = false): void {
+    if (!finite(x, y, z, dx, dy, dz, scale) || scale <= 0) return;
+    // Prefer a star-texture flash for heavy weapon classes.
+    const f = this.flashes.find((fl) => fl.life <= 0 && fl.star === heavy)
+      ?? this.flashes.find((fl) => fl.life <= 0)
+      ?? this.flashes[0]!;
     f.sprite.position.set(x + dx * 0.5, y + dy * 0.5 - 0.06, z + dz * 0.5);
-    f.sprite.scale.setScalar(0.7 * scale + Math.random() * 0.25);
+    f.sprite.scale.setScalar((heavy ? 1.05 : 0.7) * scale + Math.random() * 0.25);
     f.sprite.material.rotation = Math.random() * Math.PI * 2;
     f.sprite.material.opacity = 1;
     f.sprite.visible = true;
     f.light.position.copy(f.sprite.position);
-    f.light.intensity = 6 * scale;
-    f.light.color.setHex(0xffc878);
-    f.life = 0.055;
+    f.light.intensity = (heavy ? 9 : 6) * scale;
+    f.light.color.setHex(heavy ? 0xffb060 : 0xffc878);
+    f.life = heavy ? 0.07 : 0.055;
+    f.maxLife = f.life;
   }
 
   impactSparks(x: number, y: number, z: number, nx: number, ny: number, nz: number, count = 7): void {
@@ -197,16 +267,36 @@ export class VfxSystem {
     );
   }
 
-  poundShockwave(x: number, y: number, z: number): void {
-    const geo = new THREE.RingGeometry(0.8, 1.15, 32);
-    geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xcfd8e2, transparent: true, opacity: 0.75, side: THREE.DoubleSide, depthWrite: false,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
+  /** Acquire a pooled ring mesh for an expanding shockwave. */
+  private spawnShockwave(x: number, y: number, z: number, life: number, color: number, additive: boolean): void {
+    if (!finite(x, y, z, life, color) || life <= 0) return;
+    let mesh = this.shockwavePool.find((m) => !m.visible);
+    let entry: Shockwave | undefined;
+    if (!mesh) {
+      // Recycle the effect closest to expiry. Never create two active records
+      // for one pooled mesh; competing updates caused flicker under bursts.
+      entry = this.shockwaves.reduce((oldest, current) => (
+        current.life < oldest.life ? current : oldest
+      ), this.shockwaves[0]!);
+      mesh = entry.mesh;
+    }
+    const mat = mesh.material as THREE.MeshBasicMaterial;
+    mat.color.setHex(color);
+    mat.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+    mat.needsUpdate = true;
     mesh.position.set(x, y + 0.15, z);
-    this.group.add(mesh);
-    this.shockwaves.push({ mesh, life: 0.5 });
+    mesh.scale.setScalar(1);
+    mesh.visible = true;
+    if (entry) {
+      entry.life = life;
+      entry.maxLife = life;
+    } else {
+      this.shockwaves.push({ mesh, life, maxLife: life });
+    }
+  }
+
+  poundShockwave(x: number, y: number, z: number): void {
+    this.spawnShockwave(x, y, z, 0.5, 0xcfd8e2, false);
     for (let i = 0; i < 14; i++) {
       const a = Math.random() * Math.PI * 2;
       this.spawnParticle(
@@ -244,16 +334,7 @@ export class VfxSystem {
 
   /** Shield-break: expanding cyan ring + energy shards. */
   shieldBreakBurst(x: number, y: number, z: number): void {
-    const geo = new THREE.RingGeometry(0.55, 0.78, 32);
-    geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0x6fd4ff, transparent: true, opacity: 0.85,
-      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, y, z);
-    this.group.add(mesh);
-    this.shockwaves.push({ mesh, life: 0.45 });
+    this.spawnShockwave(x, y - 0.15, z, 0.45, 0x6fd4ff, true);
     for (let i = 0; i < 16; i++) {
       const a = Math.random() * Math.PI * 2;
       const sp = 3.5 + Math.random() * 5;
@@ -266,6 +347,7 @@ export class VfxSystem {
   }
 
   setGrappleRope(actorId: number, ax: number, ay: number, az: number, bx: number, by: number, bz: number): void {
+    if (!finite(actorId, ax, ay, az, bx, by, bz)) return;
     let entry = this.ropes.get(actorId);
     if (!entry) {
       const geo = new THREE.BufferGeometry();
@@ -292,6 +374,7 @@ export class VfxSystem {
     vx: number, vy: number, vz: number,
     life: number, size: number, color: number, gravity: number,
   ): void {
+    if (!finite(x, y, z, vx, vy, vz, life, size, color, gravity) || life <= 0 || size <= 0) return;
     const p = this.particles.find((pp) => pp.life <= 0);
     if (!p) return;
     p.pos.set(x, y, z);
@@ -304,17 +387,28 @@ export class VfxSystem {
   }
 
   update(dt: number, cameraPos: THREE.Vector3): void {
-    this.time += dt;
+    if (!Number.isFinite(dt) || dt <= 0) return;
+    // A restored/background tab can report a very large frame. Capping the
+    // presentation step prevents a single hitch from flinging pooled effects.
+    const frameDt = Math.min(dt, 0.05);
+    this.time += frameDt;
 
     let liveTracers = 0;
-    const fadeColor = new THREE.Color();
     for (const t of this.tracers) {
       if (t.life > 0) {
-        t.life -= dt;
+        t.life -= frameDt;
         const k = Math.max(0, t.life / t.maxLife);
-        this.tracerMesh.getColorAt(t.slot, fadeColor);
-        this.tracerMesh.setColorAt(t.slot, fadeColor.multiplyScalar(k > 0 ? 0.82 + 0.18 * k : 0));
-        liveTracers++;
+        this.tracerMesh.setColorAt(
+          t.slot,
+          _col.setHex(t.color).multiplyScalar(k > 0 ? 0.82 + 0.18 * k : 0),
+        );
+        if (t.life <= 0) {
+          // Collapse expired tracers so no stale instance stays visible.
+          _m4.makeScale(0, 0, 0);
+          this.tracerMesh.setMatrixAt(t.slot, _m4);
+        } else {
+          liveTracers++;
+        }
       }
     }
     if (liveTracers > 0 || this.tracerDirty) {
@@ -326,9 +420,9 @@ export class VfxSystem {
 
     for (const f of this.flashes) {
       if (f.life > 0) {
-        f.life -= dt;
-        f.light.intensity *= Math.exp(-dt * 26);
-        f.sprite.material.opacity = Math.max(0, f.life / 0.055);
+        f.life -= frameDt;
+        f.light.intensity *= Math.exp(-frameDt * 26);
+        f.sprite.material.opacity = Math.max(0, Math.min(1, f.life / f.maxLife));
         if (f.life <= 0) {
           f.sprite.visible = false;
           f.light.intensity = 0;
@@ -336,50 +430,75 @@ export class VfxSystem {
       }
     }
 
-    // Particles: assign to instanced meshes by color bucket
+    // Particles: assign to instanced meshes round-robin; per-instance color.
     for (const inst of this.particleMeshes) {
       inst.count = 0;
       inst.visible = false;
     }
-    const m4 = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const scl = new THREE.Vector3();
     let bucket = 0;
     for (const p of this.particles) {
       if (p.life <= 0) continue;
-      p.life -= dt;
+      p.life -= frameDt;
       if (p.life <= 0) continue;
-      p.vel.y -= p.gravity * dt;
-      p.pos.addScaledVector(p.vel, dt);
+      p.vel.y -= p.gravity * frameDt;
+      p.pos.addScaledVector(p.vel, frameDt);
       const k = p.life / p.maxLife;
       const inst = this.particleMeshes[bucket % this.particleMeshes.length]!;
       bucket++;
       inst.visible = true;
       if (inst.count >= (inst.instanceMatrix.count ?? MAX_PARTICLES / 8)) continue;
       const fade = Math.min(1, k * 2.4);
-      scl.setScalar(p.size * (0.6 + fade * 0.4));
-      q.setFromAxisAngle(new THREE.Vector3(0.3, 0.8, 0.2).normalize(), this.time * 3 + p.pos.x);
-      m4.compose(p.pos, q, scl);
-      inst.setMatrixAt(inst.count++, m4);
-      (inst.material as THREE.MeshBasicMaterial).color.copy(p.color);
+      _scl.setScalar(p.size * (0.6 + fade * 0.4));
+      _q.setFromAxisAngle(_axis, this.time * 3 + p.pos.x);
+      _m4.compose(p.pos, _q, _scl);
+      inst.setMatrixAt(inst.count, _m4);
+      _col.copy(p.color).multiplyScalar(fade);
+      inst.setColorAt(inst.count, _col);
+      inst.count++;
     }
     for (const inst of this.particleMeshes) {
-      if (inst.count > 0) inst.instanceMatrix.needsUpdate = true;
+      if (inst.count > 0) {
+        inst.instanceMatrix.needsUpdate = true;
+        if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+      }
     }
     void cameraPos;
 
     // Shockwaves expand + fade
     for (let i = this.shockwaves.length - 1; i >= 0; i--) {
       const s = this.shockwaves[i]!;
-      s.life -= dt;
-      const t = 1 - s.life / 0.5;
+      s.life -= frameDt;
+      const t = 1 - Math.max(0, s.life) / s.maxLife;
       s.mesh.scale.setScalar(1 + t * 7);
       (s.mesh.material as THREE.MeshBasicMaterial).opacity = 0.75 * (1 - t);
       if (s.life <= 0) {
-        this.group.remove(s.mesh);
-        s.mesh.geometry.dispose();
+        s.mesh.visible = false;
+        (s.mesh.material as THREE.MeshBasicMaterial).opacity = 0;
         this.shockwaves.splice(i, 1);
       }
     }
+  }
+
+  dispose(): void {
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const textures = new Set<THREE.Texture>();
+    this.group.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (mesh.geometry) geometries.add(mesh.geometry);
+      const material = (object as THREE.Mesh | THREE.Sprite | THREE.Line).material;
+      const list = Array.isArray(material) ? material : material ? [material] : [];
+      for (const mat of list) {
+        materials.add(mat);
+        const map = (mat as THREE.Material & { map?: THREE.Texture | null }).map;
+        if (map) textures.add(map);
+      }
+    });
+    for (const texture of textures) texture.dispose();
+    for (const material of materials) material.dispose();
+    for (const geometry of geometries) geometry.dispose();
+    this.ropes.clear();
+    this.shockwaves.length = 0;
+    this.group.clear();
   }
 }

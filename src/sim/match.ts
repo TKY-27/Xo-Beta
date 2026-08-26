@@ -11,13 +11,23 @@ import {
 } from '../core/balance';
 import { EventBus } from '../core/events';
 import { Rng, setGameSeed } from '../core/rng';
-import { CharBody, PhysicsWorld, GROUPS as PHYS_GROUPS } from '../physics/physics';
-import { buildColliders } from '../world/builder';
+import {
+  CharBody,
+  feetYFromBodyCenter,
+  PhysicsWorld,
+  GROUPS as PHYS_GROUPS,
+} from '../physics/physics';
+import {
+  buildColliders,
+  filterInvalidCrates,
+  groundCrates,
+  resolveSupportedChests,
+} from '../world/builder';
 import { NavGraph } from '../world/nav';
 import type { MapDef, WaterVolume } from '../world/types';
 import { Actor } from './actor';
 import { emptyCommand, type InputCommand } from './input';
-import { MovementSystem, type MovementEvents } from './movement';
+import { MovementSystem, CAPSULE_CENTER_OFFSET, type MovementEvents } from './movement';
 import { CombatSystem, type CombatEvents } from './combat';
 import { LootSystem, type LootEvents } from './loot';
 import { Storm, type StormEvents } from './storm';
@@ -45,6 +55,26 @@ export interface ChestEntity {
   openT: number;
 }
 
+export type GroundSurface = 'stone' | 'metal' | 'wood' | 'grass' | 'water';
+
+/** Resolve the material directly under the soles, never under the capsule centre. */
+export function groundSurfaceForActor(phys: PhysicsWorld, actor: Actor): GroundSurface {
+  let surface: GroundSurface = 'stone';
+  const feetY = feetYFromBodyCenter(actor.body.position.y);
+  const hit = phys.raycast(actor.body.position.x, feetY + 0.55, actor.body.position.z,
+    0, -1, 0, 0.9, PHYS_GROUPS.rayWorldOnly);
+  if (!hit?.collider) return surface;
+  const meta = phys.metaOf(hit.collider);
+  if (!meta || meta.kind !== 'world') return surface;
+  const material = meta.material as string;
+  if (material === 'metal' || material === 'wood' || material === 'grass' || material === 'water') {
+    surface = material;
+  } else if (material === 'dirt' || material === 'foliage') {
+    surface = 'grass';
+  }
+  return surface;
+}
+
 export interface MatchEventsMap {
   shotFired: { actorId: number; weaponId: WeaponId; x: number; y: number; z: number; dry: boolean };
   footstep: { actorId: number; x: number; y: number; z: number; running: boolean; surface: 'stone' | 'metal' | 'wood' | 'grass' | 'water' };
@@ -54,7 +84,7 @@ export interface MatchEventsMap {
   ricochet: { x: number; y: number; z: number };
   glassBreak: { x: number; y: number; z: number };
   destructibleDestroyed: { id: number; x: number; y: number; z: number };
-  actorHit: { targetId: number; attackerId: number; damage: number; region: string; killed: boolean; headshot: boolean; weaponId: WeaponId; shieldDamage: number };
+  actorHit: { targetId: number; attackerId: number; damage: number; region: string; killed: boolean; headshot: boolean; weaponId: WeaponId | 'melee'; shieldDamage: number };
   shieldBroken: { actorId: number };
   headshotFeedback: { attackerId: number };
   eliminated: { victimId: number; killerId: number; weaponId: WeaponId | null; headshot: boolean; storm: boolean; placement: number };
@@ -68,7 +98,7 @@ export interface MatchEventsMap {
   healDone: { actorId: number; item: string };
   healCancelled: { actorId: number };
   jump: { actorId: number; kind: string };
-  land: { actorId: number; impactSpeed: number; fallDamage: number };
+  land: { actorId: number; impactSpeed: number; fallDamage: number; surface: 'stone' | 'metal' | 'wood' | 'grass' | 'water' };
   slide: { actorId: number };
   wallrunStart: { actorId: number };
   mantle: { actorId: number };
@@ -76,11 +106,16 @@ export interface MatchEventsMap {
   grappleAttach: { actorId: number; x: number; y: number; z: number };
   grappleRelease: { actorId: number };
   poundImpact: { actorId: number; x: number; y: number; z: number };
-  splash: { actorId: number; heavy: boolean };
+  splash: { actorId: number; x: number; y: number; z: number; heavy: boolean };
   transportJumped: { actorId: number };
+  /** Fired once when the transport crosses into the playable bounds and the
+   * jump gate unlocks. */
+  transportGateOpened: Record<string, never>;
   phaseChanged: { phase: MatchPhase };
   matchWon: { winnerId: number; winnerName: string };
   reloadStarted: { actorId: number; empty: boolean };
+  meleeSwing: { actorId: number; x: number; y: number; z: number; yaw: number };
+  meleeHit: { targetId: number; attackerId: number; damage: number; killed: boolean; headshot: boolean };
 }
 
 export interface MatchConfig {
@@ -88,6 +123,8 @@ export interface MatchConfig {
   seed: number;
   difficulty: Difficulty;
   withPlayer: boolean;
+  /** Solo exploration mode: no bots, no storm, no win condition. */
+  practice?: boolean;
 }
 
 export interface ActorController {
@@ -105,6 +142,7 @@ interface DestructibleInstance {
 
 export class Match {
   readonly events = new EventBus<MatchEventsMap>();
+  readonly seed: number;
   readonly rng: Rng;
   readonly phys: PhysicsWorld;
   readonly nav = new NavGraph();
@@ -114,6 +152,10 @@ export class Match {
   readonly storm: Storm;
   readonly mapDef: MapDef;
   readonly difficulty: Difficulty;
+  readonly practice: boolean;
+  practiceStart: { x: number; y: number; z: number; poi: string } | null = null;
+  /** QA-only input override applied to the player command (see fixedUpdate). */
+  qaInput: Partial<InputCommand> | null = null;
 
   actors: Actor[] = [];
   player: Actor | null = null;
@@ -127,6 +169,10 @@ export class Match {
   transportFrom: [number, number];
   transportTo: [number, number];
   transportDuration: number;
+  /** Match seconds after which the transport is inside the playable bounds
+   * and the jump gate unlocks (5 s with the default approach). */
+  transportEnterTime = 0;
+  private transportGateOpen = false;
   transportPos = { x: 0, y: MATCH.transportAltitude, z: 0 };
 
   chests: ChestEntity[] = [];
@@ -139,16 +185,35 @@ export class Match {
 
   private waterVolumes: WaterVolume[];
   private pendingEliminations: Array<{ victim: Actor; killer: Actor | null; weaponId: WeaponId | null; headshot: boolean; storm: boolean }> = [];
+  private processedEliminations = new Set<number>();
 
   constructor(cfg: MatchConfig) {
+    this.seed = cfg.seed;
     this.mapDef = cfg.mapDef;
     this.difficulty = cfg.difficulty;
+    this.practice = cfg.practice === true;
     this.rng = new Rng(cfg.seed);
     setGameSeed(cfg.seed ^ 0x5f3759df);
     this.phys = new PhysicsWorld();
 
     // Static world colliders
     buildColliders(this.mapDef, this.phys);
+    this.phys.flush();
+
+    // Loose props use the same finished geometry/heightfield as characters.
+    // Do this before adding chest/destructible colliders so probes can never
+    // ground an object on itself or on another loose pickup prop.
+    groundCrates(this.mapDef, this.phys);
+    filterInvalidCrates(this.mapDef);
+
+    // Authored chest heights are hints, not a second ground system. Resolve
+    // them against the finished physical world before adding their colliders,
+    // so the probe cannot hit the chest itself and every visible base is
+    // guaranteed to rest on the same surface actors collide with.
+    const supportedChests = resolveSupportedChests(this.mapDef, this.phys);
+    for (const chest of supportedChests) {
+      this.phys.addStaticBox(chest.x, chest.y + 0.4, chest.z, 0.55, 0.4, 0.38, 0, 'wood');
+    }
     this.phys.flush();
 
     this.waterVolumes = this.mapDef.water;
@@ -196,15 +261,22 @@ export class Match {
     this.transportTo = this.mapDef.transportRoute.to;
     const dist = Math.hypot(this.transportTo[0] - this.transportFrom[0], this.transportTo[1] - this.transportFrom[1]);
     this.transportDuration = dist / MATCH.transportSpeed;
+    this.transportEnterTime = this.computeTransportEnterTime();
 
     // Chest entities
     let cid = 1;
-    for (const c of this.mapDef.chests) {
+    for (const c of supportedChests) {
       this.chests.push({ id: cid++, kind: c.kind, x: c.x, y: c.y, z: c.z, opened: false, openT: 0 });
     }
 
     // Actors start aboard the transport
     this.spawnActors(cfg);
+
+    if (this.practice) {
+      // Solo exploration: already deployed on the ground, match never ends.
+      for (const a of this.actors) a.deployed = true;
+      this.phase = 'live';
+    }
 
     this.aliveCount = this.actors.length;
   }
@@ -223,7 +295,7 @@ export class Match {
       colors.push(0x5fd0ff);
       pers.push(null);
     }
-    const botCount = MATCH.combatantCount - (cfg.withPlayer ? 1 : 0);
+    const botCount = this.practice ? 0 : MATCH.combatantCount - (cfg.withPlayer ? 1 : 0);
     for (let i = 0; i < botCount; i++) {
       const p = roster[i % roster.length]!;
       names.push(p.name);
@@ -232,11 +304,34 @@ export class Match {
     }
 
     for (let i = 0; i < names.length; i++) {
-      const body = new CharBody(this.phys, i + 1, this.transportPos.x, this.transportPos.y, this.transportPos.z);
+      const sx = this.practice ? this.practiceSpawn().x : this.transportPos.x;
+      const sy = this.practice ? this.practiceSpawn().y : this.transportPos.y;
+      const sz = this.practice ? this.practiceSpawn().z : this.transportPos.z;
+      const body = new CharBody(this.phys, i + 1, sx, sy, sz);
       const actor = new Actor(names[i]!, i === 0 && cfg.withPlayer, body, colors[i]!, pers[i]);
       this.actors.push(actor);
       if (actor.isPlayer) this.player = actor;
     }
+  }
+
+  /** Seeded ground spawn used to vary practice exploration routes. */
+  private practiceSpawnCache: { x: number; y: number; z: number } | null = null;
+  private practiceSpawn(): { x: number; y: number; z: number } {
+    if (this.practiceSpawnCache) return this.practiceSpawnCache;
+    const poi = this.mapDef.pois.length > 0
+      ? this.mapDef.pois[this.rng.int(0, this.mapDef.pois.length - 1)]
+      : undefined;
+    const candidates = poi
+      ? this.nav.nodesWithin(poi.x, poi.z, poi.radius).filter((node) => !node.water)
+      : [];
+    const node = candidates.length > 0 ? this.rng.pick(candidates) : null;
+    const x = node?.x ?? poi?.x ?? 0;
+    const z = node?.z ?? poi?.z ?? 0;
+    const surf = node?.y ?? this.phys.surfaceAt(x, z, 300, 500) ?? 2;
+    const y = surf + CAPSULE_CENTER_OFFSET + 0.05;
+    this.practiceSpawnCache = { x, y, z };
+    this.practiceStart = { x, y, z, poi: poi?.name ?? 'Map centre' };
+    return this.practiceSpawnCache;
   }
 
   waterAt(x: number, y: number, z: number): WaterVolume | null {
@@ -262,20 +357,19 @@ export class Match {
     return {
       onFootstep: (a, running) => {
         // Resolve ground material for audio (cheap downward ray at stride rate).
-        let surface: 'stone' | 'metal' | 'wood' | 'grass' | 'water' = 'stone';
-        const hit = this.phys.raycast(a.body.position.x, a.body.position.y + 0.4, a.body.position.z, 0, -1, 0, 1.6, PHYS_GROUPS.rayWorldOnly);
-        if (hit?.collider) {
-          const meta = this.phys.metaOf(hit.collider);
-          if (meta && meta.kind === 'world') {
-            const m = meta.material as string;
-            if (m === 'metal' || m === 'wood' || m === 'grass' || m === 'water') surface = m;
-            else if (m === 'dirt' || m === 'foliage') surface = 'grass';
-          }
-        }
-        this.events.emit('footstep', { actorId: a.id, x: a.body.position.x, y: a.body.position.y, z: a.body.position.z, running, surface });
+        const surface = groundSurfaceForActor(this.phys, a);
+        this.events.emit('footstep', {
+          actorId: a.id,
+          x: a.body.position.x,
+          y: feetYFromBodyCenter(a.body.position.y),
+          z: a.body.position.z,
+          running,
+          surface,
+        });
       },
       onLand: (a, speed, dmg) => {
-        this.events.emit('land', { actorId: a.id, impactSpeed: speed, fallDamage: dmg });
+        const surface = groundSurfaceForActor(this.phys, a);
+        this.events.emit('land', { actorId: a.id, impactSpeed: speed, fallDamage: dmg, surface });
       },
       onJump: (a, kind) => this.events.emit('jump', { actorId: a.id, kind }),
       onSlide: (a) => this.events.emit('slide', { actorId: a.id }),
@@ -289,7 +383,14 @@ export class Match {
         this.poundAoE(a, x, y, z);
       },
       onDash: (a) => this.events.emit('dash', { actorId: a.id }),
-      onSplash: (a, heavy) => this.events.emit('splash', { actorId: a.id, heavy }),
+      onSplash: (a, heavy) =>
+        this.events.emit('splash', {
+          actorId: a.id,
+          x: a.body.position.x,
+          y: a.waterSurfaceY,
+          z: a.body.position.z,
+          heavy,
+        }),
     };
   }
 
@@ -362,6 +463,24 @@ export class Match {
       onDestructibleDamaged: (id, x, y, z, destroyed) => {
         if (destroyed) this.events.emit('destructibleDestroyed', { id, x, y, z });
       },
+      onMeleeSwing: (a, x, y, z) => {
+        this.events.emit('meleeSwing', { actorId: a.id, x, y, z, yaw: a.yaw });
+      },
+      onMeleeHit: (target, attacker, damage, killed, headshot) => {
+        this.events.emit('meleeHit', { targetId: target.id, attackerId: attacker.id, damage, killed, headshot });
+        this.events.emit('actorHit', {
+          targetId: target.id, attackerId: attacker.id, damage, region: headshot ? 'head' : 'chest',
+          killed, headshot, weaponId: 'melee',
+          shieldDamage: target.lastShieldDamage,
+        });
+        if (target.healing) {
+          target.healing = null;
+          this.events.emit('healCancelled', { actorId: target.id });
+        }
+        if (killed) {
+          this.pendingEliminations.push({ victim: target, killer: attacker, weaponId: null, headshot, storm: false });
+        }
+      },
     };
   }
 
@@ -396,6 +515,9 @@ export class Match {
       if (!a.alive) continue;
       const ctrl = this.controllers.get(a.id);
       const cmd = ctrl ? ctrl.updateCommand(a, dt) : emptyCommand();
+      // QA-harness override (browser automation cannot engage pointer lock,
+      // so it drives fire/ADS through here; null during normal play).
+      if (a.isPlayer && this.qaInput) Object.assign(cmd, this.qaInput);
       commands.set(a.id, cmd);
     }
 
@@ -416,7 +538,7 @@ export class Match {
 
     this.processEliminations();
 
-    if (this.phase !== 'transport') {
+    if (this.phase !== 'transport' && !this.practice) {
       this.storm.update(dt);
       this.applyStormDamage(dt);
     }
@@ -431,16 +553,25 @@ export class Match {
     this.transportPos.z = this.transportFrom[1] + (this.transportTo[1] - this.transportFrom[1]) * t;
     this.transportPos.y = MATCH.transportAltitude;
 
+    // Jump gate: disabled until the transport crosses into the playable
+    // bounds (exactly the first ~5 s of the approach).
+    if (!this.transportGateOpen && t * this.transportDuration >= this.transportEnterTime) {
+      this.transportGateOpen = true;
+      this.events.emit('transportGateOpened', {});
+    }
+
     let allOut = true;
     for (const a of this.actors) {
-      if (!a.alive || a.state === 'freefall' || a.state === 'glide') continue;
+      // `deployed` marks "has exited the transport" — a landed early jumper
+      // must never be re-captured by the ride.
+      if (!a.alive || a.deployed) continue;
       allOut = false;
       const cmd = commands.get(a.id)!;
       a.yaw = cmd.yaw;
       a.pitch = cmd.pitch;
       a.body.teleport(this.transportPos.x, this.transportPos.y, this.transportPos.z);
       const forced = t >= 1;
-      if (cmd.jumpPressed || forced) {
+      if ((cmd.jumpPressed && this.transportGateOpen) || forced) {
         a.body.teleport(this.transportPos.x, this.transportPos.y - MATCH.transportHangOffset, this.transportPos.z);
         a.body.velocity.x = 0; a.body.velocity.y = -6; a.body.velocity.z = 0;
         this.movement.beginFreefall(a);
@@ -448,7 +579,27 @@ export class Match {
       }
     }
 
+    // Everyone who has left the transport — airborne OR already landed —
+    // simulates immediately with the exact same rules as the drop/live
+    // phases. No actor ever waits on another actor, the route end, or the
+    // phase flip (a landed early jumper keeps full control while bots ride).
+    this.updateLive(dt, commands);
+
     if (allOut) this.setPhase('drop');
+  }
+
+  /** Match-time at which the transport path first crosses into playable
+   * bounds, derived from the route geometry so custom routes stay correct. */
+  private computeTransportEnterTime(): number {
+    const half = this.mapDef.size / 2;
+    const steps = 400;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const x = this.transportFrom[0] + (this.transportTo[0] - this.transportFrom[0]) * t;
+      const z = this.transportFrom[1] + (this.transportTo[1] - this.transportFrom[1]) * t;
+      if (Math.abs(x) <= half && Math.abs(z) <= half) return t * this.transportDuration;
+    }
+    return 0;
   }
 
   private setPhase(p: MatchPhase): void {
@@ -462,12 +613,17 @@ export class Match {
 
   private updateLive(dt: number, commands: Map<number, InputCommand>): void {
     if (this.phase === 'drop') {
-      const anyLanded = this.actors.some((a) => a.alive && a.deployed);
+      // "Landed" = exited the transport AND no longer in a flight state.
+      const anyLanded = this.actors.some((a) => a.alive && a.deployed &&
+        a.state !== 'freefall' && a.state !== 'glide');
       if (anyLanded) this.setPhase('live');
     }
 
     for (const a of this.actors) {
       if (!a.alive) continue;
+      // During the transport phase, actors still aboard are driven by
+      // updateTransport's ride loop — never by live simulation.
+      if (this.phase === 'transport' && !a.deployed) continue;
       const cmd = commands.get(a.id)!;
       a.stats.survivalTime += dt;
       if (a.lastDamageTime < 90) a.lastDamageTime += dt;
@@ -482,6 +638,11 @@ export class Match {
           a.wpn.swapTimer = this.swapTimeFor(a);
         }
       }
+      if (cmd.meleePressed) {
+        a.inv.selectMelee();
+        this.cancelReload(a);
+        a.wpn.swapTimer = 0.18;
+      }
       if (cmd.dropWeaponPressed) this.dropSelectedWeapon(a);
 
       this.updateHealing(a, cmd, dt);
@@ -492,6 +653,8 @@ export class Match {
         const def = WEAPONS[w.weaponId];
         const wantsFire = def.fireMode === 'auto' ? true : cmd.firePressed;
         if (wantsFire) this.combat.tryFire(a, dt);
+      } else if (!w && (cmd.fireHeld || cmd.firePressed)) {
+        this.combat.tryMelee(a, dt, this.actors);
       }
       if (cmd.reloadPressed && this.combat.tryReload(a)) {
         this.events.emit('reloadStarted', { actorId: a.id, empty: a.wpn.reloadingEmpty });
@@ -535,7 +698,8 @@ export class Match {
     const fwd = { x: -Math.sin(a.yaw), z: -Math.cos(a.yaw) };
     this.cancelReload(a);
     a.inv.removeSlot(a.inv.selected);
-    this.loot.spawnWeapon(p.x + fwd.x * 1.4, p.y + 1.2, p.z + fwd.z * 1.4, w, this.rng, false);
+    this.loot.spawnWeapon(p.x + fwd.x * 1.4, feetYFromBodyCenter(p.y) + 1.2,
+      p.z + fwd.z * 1.4, w, this.rng, false);
   }
 
   private updateHealing(a: Actor, cmd: InputCommand, dt: number): void {
@@ -572,12 +736,14 @@ export class Match {
 
   tryInteract(a: Actor): void {
     const p = a.body.position;
+    const feetY = p.y - CAPSULE_CENTER_OFFSET;
     let bestChest: ChestEntity | null = null;
     let bestCD = GAMEPLAY.interactionRange * GAMEPLAY.interactionRange;
     for (const c of this.chests) {
       if (c.opened) continue;
-      const dx = c.x - p.x, dy = c.y - (p.y + 1), dz = c.z - p.z;
-      const d = dx * dx + dy * dy + dz * dz;
+      const dx = c.x - p.x, dz = c.z - p.z;
+      if (Math.abs(c.y - feetY) > 2.8) continue;
+      const d = dx * dx + dz * dz;
       if (d < bestCD) {
         bestCD = d;
         bestChest = c;
@@ -585,18 +751,32 @@ export class Match {
     }
     if (bestChest) {
       bestChest.opened = true;
+      a.interactTimer = 0.6;
       this.loot.openChest(bestChest.kind, bestChest.x, bestChest.y + 0.4, bestChest.z, this.rng);
       const chestTier = bestChest.kind === 'vault' ? 2 : bestChest.kind === 'elite' ? 1 : 0;
       this.events.emit('chestOpened', { chestId: bestChest.id, kind: bestChest.kind, tier: chestTier, x: bestChest.x, y: bestChest.y, z: bestChest.z });
       return;
     }
-    const item = this.loot.nearestItem(p.x, p.y + 1, p.z, GAMEPLAY.interactionRange + 0.8, (it) => it.kind !== 'ammo');
+    const item = this.loot.nearestItem(p.x, p.y, p.z, GAMEPLAY.interactionRange + 0.8,
+      (it) => it.kind !== 'ammo');
     if (item) {
+      a.interactTimer = 0.5;
+      // Standard FPS behavior: interacting with your first floor weapon equips it
+      // immediately instead of leaving the actor on fists.
+      const hadWeapon = a.inv.slots.some((s) => s !== null && s.kind === 'weapon');
       const displaced = this.loot.pickup(item, a, !a.isPlayer);
       if (displaced && displaced.kind === 'weapon') {
-        this.loot.spawnWeapon(p.x, p.y + 1, p.z, displaced, this.rng, true);
+        this.loot.spawnWeapon(p.x, feetY + 1, p.z, displaced, this.rng, true);
       } else if (displaced && displaced.kind === 'heal') {
-        this.loot.spawnHeal(p.x, p.y + 1, p.z, displaced.itemId, displaced.count, this.rng, true);
+        this.loot.spawnHeal(p.x, feetY + 1, p.z, displaced.itemId, displaced.count, this.rng, true);
+      }
+      if (!hadWeapon) {
+        const idx = a.inv.slots.findIndex((s) => s !== null && s.kind === 'weapon');
+        if (idx >= 0) {
+          a.inv.select(idx);
+          this.cancelReload(a);
+          a.wpn.swapTimer = this.swapTimeFor(a);
+        }
       }
     }
   }
@@ -605,7 +785,7 @@ export class Match {
     const p = a.body.position;
     for (const it of [...this.loot.items]) {
       if (it.kind !== 'ammo') continue;
-      const dx = it.x - p.x, dy = it.y - (p.y + 1), dz = it.z - p.z;
+      const dx = it.x - p.x, dy = it.y - p.y, dz = it.z - p.z;
       if (dx * dx + dy * dy + dz * dz < GAMEPLAY.pickupRadius * GAMEPLAY.pickupRadius) {
         this.loot.pickup(it, a);
       }
@@ -631,6 +811,8 @@ export class Match {
       const e = this.pendingEliminations.shift()!;
       const victim = e.victim;
       if (victim.alive) continue;
+      if (this.processedEliminations.has(victim.id)) continue;
+      this.processedEliminations.add(victim.id);
       const aliveBefore = this.actors.filter((a) => a.alive).length + 1;
       victim.placement = aliveBefore;
       victim.deathTime = this.time;
@@ -662,6 +844,7 @@ export class Match {
   }
 
   private checkWin(): void {
+    if (this.practice) return;
     if (this.finished || this.phase === 'results') return;
     if (this.phase === 'transport' || this.phase === 'drop') return;
     const alive = this.actors.filter((a) => a.alive);
@@ -683,8 +866,30 @@ export class Match {
 
   /** Initial world loot scatter (call once after construction). */
   populateInitialLoot(): void {
+    const placedAt: Array<{ x: number; z: number }> = [];
+    const tooClose = (x: number, z: number): boolean => {
+      for (const p of placedAt) {
+        const dx = p.x - x;
+        const dz = p.z - z;
+        if (dx * dx + dz * dz < 1.69) return true; // < 1.3 m spacing
+      }
+      return false;
+    };
     for (const spawn of this.mapDef.loot) {
-      this.loot.spawnFloorLoot(spawn.x, spawn.y, spawn.z, spawn.bias, this.rng);
+      if (tooClose(spawn.x, spawn.z)) continue;
+      // Authored heights drift out of sync as maps are rebuilt — re-snap every
+      // authored spawn to the real surface so nothing floats or buries.
+      const node = this.nav.nearest(spawn.x, spawn.z, 14);
+      let y = spawn.y;
+      const refY = node ? Math.max(spawn.y, node.y) : spawn.y;
+      const surf = this.phys.surfaceAt(spawn.x, spawn.z, refY + 2.5, 7);
+      if (surf !== null && Math.abs(surf - refY) <= 2.6) {
+        y = surf + 0.02;
+      } else if (!node || Math.abs(spawn.y - node.y) > 2.6) {
+        continue; // stale authored height, no trustworthy surface — drop it
+      }
+      placedAt.push({ x: spawn.x, z: spawn.z });
+      this.loot.spawnFloorLoot(spawn.x, y, spawn.z, spawn.bias, this.rng);
     }
     // Density pass: distribute additional floor loot around POIs on the nav
     // graph so every match supports 10 combatants' equipment needs.
@@ -700,17 +905,32 @@ export class Match {
       const z = poi.z + Math.sin(ang) * rad;
       const node = this.nav.nearest(x, z, 18);
       if (!node || node.water) continue;
-      const bias = this.rng.weighted([46, 34, 20]) === 0 ? undefined : undefined;
-      void bias;
+      // Controlled randomness: never sit exactly on the nav lattice. Offset
+      // each item, then re-snap to the real surface so nothing floats or
+      // clips while still breaking up the grid read.
+      const ox = this.rng.range(-2.6, 2.6);
+      const oz = this.rng.range(-2.6, 2.6);
+      const ix = Math.max(-this.mapDef.size / 2 + 4, Math.min(this.mapDef.size / 2 - 4, node.x + ox));
+      const iz = Math.max(-this.mapDef.size / 2 + 4, Math.min(this.mapDef.size / 2 - 4, node.z + oz));
+      if (tooClose(ix, iz)) continue;
+      const surf = this.phys.surfaceAt(ix, iz, node.y + 3, 8);
+      if (surf === null) continue;
+      if (Math.abs(surf - node.y) > 1.6) continue; // slid off a ledge/wall — skip
+      placedAt.push({ x: ix, z: iz });
       const kindRoll = this.rng.weighted([50, 32, 18]);
       const bias2 = kindRoll === 0 ? 'weapon' : kindRoll === 1 ? 'ammo' : 'heal';
-      this.loot.spawnFloorLoot(node.x, node.y + 0.35, node.z, bias2 as 'weapon' | 'ammo' | 'heal', this.rng);
+      this.loot.spawnFloorLoot(ix, surf + 0.02, iz, bias2 as 'weapon' | 'ammo' | 'heal', this.rng);
       placed++;
     }
   }
 
   spectatorTargets(): Actor[] {
     return this.actors.filter((a) => a.alive);
+  }
+
+  dispose(): void {
+    this.controllers.clear();
+    this.phys.dispose();
   }
 }
 

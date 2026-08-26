@@ -25,11 +25,44 @@
   <!-- Loading -->
   <div id="loading-screen" class="screen">
     <div class="loading-inner">
-      <h1 class="logo">XO<span>BETA</span></h1>
+      <h1 class="logo">Xo<span> Beta</span></h1>
     </div>
     <div class="loading-foot">
       <div class="loading-bar"><div id="loading-fill"></div></div>
-      <div id="loading-status">Booting…</div>
+      <div id="loading-status" data-i18n="notice.loading">Loading…</div>
+    </div>
+  </div>
+
+  <!-- First-run onboarding: language → default view -->
+  <div id="onboarding-screen" class="screen hidden">
+    <div class="onb-inner">
+      <h1 class="logo onb-logo">Xo<span>&nbsp;Beta</span></h1>
+      <p id="onb-step" class="onb-step"></p>
+
+      <section id="onb-step-language" class="onb-card">
+        <h2 data-i18n="onb.chooseLanguage">Choose your language</h2>
+        <div class="onb-choices">
+          <button id="btn-onb-en" class="onb-choice">
+            <span class="onb-choice-title">English</span>
+          </button>
+          <button id="btn-onb-ja" class="onb-choice">
+            <span class="onb-choice-title jp">日本語</span>
+          </button>
+        </div>
+      </section>
+
+      <section id="onb-step-view" class="onb-card hidden">
+        <h2 data-i18n="onb.chooseView">Choose your default view</h2>
+        <div class="onb-choices">
+          <button id="btn-onb-fp" class="onb-choice">
+            <span class="onb-choice-title" data-i18n="cam.fps">First person</span>
+          </button>
+          <button id="btn-onb-tp" class="onb-choice">
+            <span class="onb-choice-title" data-i18n="cam.tps">Third person</span>
+          </button>
+        </div>
+        <p class="onb-note" data-i18n="onb.viewNote">This only sets your default view. You can change it at any time in Settings or with the V key.</p>
+      </section>
     </div>
   </div>
 
@@ -37,7 +70,7 @@
   <div id="main-menu" class="screen hidden">
     <div class="menu-shade left"></div>
     <header class="brand">
-      <h1 class="logo">XO<span>BETA</span></h1>
+      <h1 class="logo">Xo<span> Beta</span></h1>
       <p class="tagline" data-i18n="menu.tagline">Single-player battle royale · 10 combatants · last one standing</p>
     </header>
     <nav class="menu-rail">
@@ -65,6 +98,7 @@
           <div id="difficulty-list" class="difficulty-list"></div>
         </div>
         <button id="btn-play-start" class="btn-play deploy" data-i18n="common.startMatch">START MATCH</button>
+        <button id="btn-practice-start" class="btn-quiet practice" data-i18n="menu.practice">PRACTICE MODE</button>
       </div>
     </div>
   </div>
@@ -74,20 +108,20 @@
     <div class="menu-shade full"></div>
     <header class="screen-head">
       <button id="btn-settings-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
-      <h2 data-i18n="common.settings">SETTINGS</h2>
+      <h2 id="settings-title" data-i18n="common.settings">SETTINGS</h2>
     </header>
     <div class="settings-body">
-      <nav id="settings-rail" class="settings-rail">
-        <button class="rail-btn selected" data-pane="settings-controls" data-i18n="set.controls">CONTROLS</button>
-        <button class="rail-btn" data-pane="settings-graphics" data-i18n="set.graphics">GRAPHICS</button>
-        <button class="rail-btn" data-pane="settings-audio" data-i18n="set.audio">AUDIO</button>
-        <button class="rail-btn" data-pane="settings-gameplay" data-i18n="set.gameplay">GAMEPLAY &amp; ACCESSIBILITY</button>
+      <nav id="settings-rail" class="settings-rail" role="tablist" aria-labelledby="settings-title">
+        <button id="settings-tab-controls" class="rail-btn selected" role="tab" aria-selected="true" aria-controls="settings-controls" data-pane="settings-controls" data-i18n="set.controls">CONTROLS</button>
+        <button id="settings-tab-graphics" class="rail-btn" role="tab" aria-selected="false" aria-controls="settings-graphics" data-pane="settings-graphics" data-i18n="set.graphics">GRAPHICS</button>
+        <button id="settings-tab-audio" class="rail-btn" role="tab" aria-selected="false" aria-controls="settings-audio" data-pane="settings-audio" data-i18n="set.audio">AUDIO</button>
+        <button id="settings-tab-gameplay" class="rail-btn" role="tab" aria-selected="false" aria-controls="settings-gameplay" data-pane="settings-gameplay" data-i18n="set.gameplay">GAMEPLAY &amp; ACCESSIBILITY</button>
       </nav>
       <div class="settings-panes">
-        <section id="settings-controls" class="settings-pane selected"></section>
-        <section id="settings-graphics" class="settings-pane"></section>
-        <section id="settings-audio" class="settings-pane"></section>
-        <section id="settings-gameplay" class="settings-pane"></section>
+        <section id="settings-controls" class="settings-pane selected" role="tabpanel" aria-labelledby="settings-tab-controls" aria-hidden="false"></section>
+        <section id="settings-graphics" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-graphics" aria-hidden="true"></section>
+        <section id="settings-audio" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-audio" aria-hidden="true"></section>
+        <section id="settings-gameplay" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-gameplay" aria-hidden="true"></section>
       </div>
     </div>
   </div>
@@ -110,7 +144,7 @@
   <div id="pause-menu" class="screen hidden">
     <div class="menu-shade dark"></div>
     <div class="pause-box">
-      <h2 data-i18n="menu.paused">PAUSED</h2>
+      <h2 data-i18n="menu.paused">MENU</h2>
       <nav class="menu-buttons">
         <button id="btn-resume" class="btn-play" data-i18n="common.resume">RESUME</button>
         <button id="btn-pause-settings" class="btn-quiet" data-i18n="common.settings">SETTINGS</button>
@@ -121,13 +155,14 @@
 
   <!-- HUD -->
   <div id="hud" class="hidden">
-    <div id="crosshair"><span class="ch-t"></span><span class="ch-b"></span><span class="ch-l"></span><span class="ch-r"></span><span class="ch-dot"></span><span id="hitmarker"></span></div>
+    <div id="crosshair"><span class="ch-t"></span><span class="ch-b"></span><span class="ch-l"></span><span class="ch-r"></span><span class="ch-dot"></span><span id="ch-ring"></span><span id="hitmarker"></span></div>
+    <div id="scope-overlay"><div class="scope-hair scope-hair-h"></div><div class="scope-hair scope-hair-v"></div></div>
 
     <div id="vignette"></div>
     <div id="storm-vignette"></div>
 
     <div id="minimap-frame"><canvas id="minimap" width="188" height="188"></canvas></div>
-    <div id="minimap-label" data-i18n="hud.tabFullMap">TAB — full map</div>
+    <div id="minimap-label" data-i18n="hud.tabFullMap">M — full map</div>
 
     <div id="hud-bottom-left">
       <div class="bars">
@@ -169,7 +204,7 @@
 
     <div id="spectate-hud" class="hidden">
       <div><span data-i18n="hud.spectating">SPECTATING</span> <span id="spectate-name"></span></div>
-      <div class="dim" data-i18n="hud.spectateHint">← → switch combatant · V camera · TAB map</div>
+      <div class="dim" data-i18n="hud.spectateHint">← → switch combatant · V camera · M map</div>
     </div>
 
     <div id="fps-counter" class="hidden"></div>
@@ -204,7 +239,7 @@
   <div id="mobile-gate" class="screen hidden">
     <div class="menu-shade full"></div>
     <div class="pause-box">
-      <h1 class="logo">XO<span>BETA</span></h1>
+      <h1 class="logo">Xo<span> Beta</span></h1>
       <div class="credits-body">
         <h2 data-i18n="notice.mobileTitle">DESKTOP REQUIRED</h2>
         <p data-i18n="notice.mobileBody">Xo Beta is designed for desktop browsers with keyboard &amp; mouse.</p>

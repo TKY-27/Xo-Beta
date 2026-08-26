@@ -1,0 +1,27 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { isTextKey, localizePoiName } from '../../src/core/i18n';
+import { buildEdenFacility } from '../../src/world/maps/eden';
+import { buildNeoCity } from '../../src/world/maps/neocity';
+import { buildOldFront } from '../../src/world/maps/oldfront';
+
+describe('localization contract', () => {
+  it('defines every declarative data-i18n key used by the shipped HTML', () => {
+    const html = readFileSync(join(process.cwd(), 'index.html'), 'utf8');
+    const keys = [...html.matchAll(/data-i18n="([^"]+)"/g)].map((match) => match[1]!);
+
+    expect(keys.length).toBeGreaterThan(0);
+    for (const key of keys) expect(isTextKey(key), key).toBe(true);
+  });
+
+  it('localizes every authored POI on all three maps', () => {
+    const maps = [buildNeoCity(), buildOldFront(), buildEdenFacility()];
+    for (const map of maps) {
+      for (const poi of map.pois) {
+        expect(localizePoiName(poi.name, 'en')).toBe(poi.name);
+        expect(localizePoiName(poi.name, 'ja'), `${map.id}: ${poi.name}`).not.toBe(poi.name);
+      }
+    }
+  });
+});

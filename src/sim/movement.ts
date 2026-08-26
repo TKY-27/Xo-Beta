@@ -8,8 +8,17 @@
 import { MATCH, MOVE } from '../core/balance';
 import type { Actor, MoveState } from './actor';
 import type { InputCommand } from './input';
-import type { PhysicsWorld } from '../physics/physics';
+import {
+  CAPSULE_CENTER_OFFSET,
+  feetYFromBodyCenter,
+  GROUPS,
+  type PhysicsWorld,
+} from '../physics/physics';
 import type { WaterVolume } from '../world/types';
+
+// Compatibility exports for existing simulation and test imports. The
+// definitions live beside CharBody, which owns the coordinate contract.
+export { CAPSULE_CENTER_OFFSET, feetYFromBodyCenter } from '../physics/physics';
 
 export interface MovementEvents {
   onFootstep(actor: Actor, running: boolean): void;
@@ -26,11 +35,6 @@ export interface MovementEvents {
 }
 
 const FWD = { x: 0, z: -1 };
-
-/**
- * CharBody.position is the capsule CENTER; surfaces are at feet level.
- */
-export const CAPSULE_CENTER_OFFSET = MOVE.capsuleHalfHeight + MOVE.capsuleRadius + 0.04;
 
 /**
  * Yaw convention matches the render camera (three.js Euler YXZ): forward =
@@ -66,30 +70,72 @@ export class MovementSystem {
     switch (a.state) {
       case 'mantle':
         this.updateMantle(a, dt);
-        return;
+        break;
       case 'poundWindup':
         this.updatePoundWindup(a, dt);
-        return;
+        break;
       case 'poundFall':
+        if (a.inWater) {
+          this.enterSwim(a);
+          break;
+        }
         this.updatePoundFall(a, dt);
-        return;
+        break;
       case 'freefall':
         this.updateFreefall(a, cmd, dt);
-        return;
+        return; // flight states enforce bounds in clampFlightBounds
       case 'glide':
         this.updateGlide(a, cmd, dt);
-        return;
+        return; // flight states enforce bounds in clampFlightBounds
       case 'swim':
         this.updateSwim(a, cmd, dt);
-        return;
+        break;
       case 'wallrun':
         this.updateWallrun(a, cmd, dt);
-        return;
+        break;
       case 'slide':
         this.updateSlide(a, cmd, dt);
-        return;
+        break;
       default:
         this.updateGroundAir(a, cmd, dt);
+        break;
+    }
+    // Hard playable-area enforcement for every grounded/traversal state.
+    // (Flight states enforce their own bounds inside their updaters.)
+    this.clampToBounds(a);
+  }
+
+  /**
+   * Absolute map boundary: no walking, sprinting, dashing, bunny hopping,
+   * sliding, wall-running or swimming out of the playable world. Position is
+   * corrected immediately (teleport) so render, camera and AI agree with
+   * physics on the same side of the boundary.
+   */
+  private clampToBounds(a: Actor): void {
+    const p = a.body.position;
+    const lim = this.bounds.half;
+    const v = a.body.velocity;
+    let clamped = false;
+    if (p.x > lim) { p.x = lim; clamped = true; }
+    else if (p.x < -lim) { p.x = -lim; clamped = true; }
+    if (p.z > lim) { p.z = lim; clamped = true; }
+    else if (p.z < -lim) { p.z = -lim; clamped = true; }
+    // Zero outward velocity on the axes that were clamped.
+    if (p.x >= lim && v.x > 0) v.x = 0;
+    if (p.x <= -lim && v.x < 0) v.x = 0;
+    if (p.z >= lim && v.z > 0) v.z = 0;
+    if (p.z <= -lim && v.z < 0) v.z = 0;
+    if (clamped) {
+      // Sync immediately so render, camera and AI agree with physics.
+      a.body.teleport(p.x, p.y, p.z);
+    }
+    // Kill-plane failsafe: never fall forever below the world.
+    if (p.y < -60) {
+      const surf = this.phys.surfaceAt(p.x, p.z, 80, 200);
+      p.y = (surf ?? 0) + CAPSULE_CENTER_OFFSET + 0.05;
+      v.x = 0; v.y = 0; v.z = 0;
+      a.body.teleport(p.x, p.y, p.z);
+      a.peakFallSpeed = 0;
     }
   }
 
@@ -99,6 +145,7 @@ export class MovementSystem {
     if (a.coyote > 0) a.coyote -= dt;
     if (a.jumpBuffered > 0) a.jumpBuffered -= dt;
     if (a.bhopWindow > 0) a.bhopWindow -= dt;
+    if (a.wallrunCooldown > 0) a.wallrunCooldown -= dt;
     if (cmd.jumpPressed) a.jumpBuffered = MOVE.jumpBufferTime;
 
     // Dash charge regen (grounded only)
@@ -118,20 +165,27 @@ export class MovementSystem {
     if (wasCrouched && !a.crouched) {
       // headroom check before standing
       const p = a.body.position;
-      const hit = this.phys.raycast(p.x, p.y + 1.4, p.z, 0, 1, 0, 0.75);
+      const feetY = feetYFromBodyCenter(p.y);
+      // The probe begins inside the actor capsule, so an all-groups ray would
+      // immediately hit the character's own gameplay colliders and make
+      // crouch impossible to release. Only scenery can obstruct standing.
+      const hit = this.phys.raycast(p.x, feetY + MOVE.crouchEyeHeight, p.z, 0, 1, 0,
+        MOVE.eyeHeight - MOVE.crouchEyeHeight, GROUPS.rayWorldOnly);
       if (hit) a.crouched = true;
     }
   }
 
   private updateWaterState(a: Actor): void {
     const p = a.body.position;
-    const vol = this.waterAt(p.x, p.y + 1.0, p.z);
-    if (vol && p.y + 1.0 < vol.surfaceY - 0.55) {
+    const feetY = feetYFromBodyCenter(p.y);
+    const torsoY = feetY + 1.0;
+    const vol = this.waterAt(p.x, torsoY, p.z);
+    if (vol && torsoY < vol.surfaceY - 0.55) {
       if (!a.inWater && a.state !== 'freefall' && a.state !== 'glide') {
         this.events.onSplash(a, Math.hypot(a.body.velocity.x, a.body.velocity.z, a.body.velocity.y) > 14);
       }
       a.inWater = true;
-      a.submerged = p.y + 1.9 < vol.surfaceY;
+      a.submerged = feetY + 1.9 < vol.surfaceY;
       a.waterSurfaceY = vol.surfaceY;
       if (a.state !== 'swim' && a.state !== 'freefall' && a.state !== 'glide' &&
           a.state !== 'mantle' && a.state !== 'poundFall') {
@@ -204,6 +258,8 @@ export class MovementSystem {
       const justLanded = !wasGrounded;
       if (justLanded) {
         a.jumpsUsed = 0;
+        a.wallrunLanded = true;
+        a.wallrunChains = 0;
         if (a.peakFallSpeed > MOVE.fallDamageMinSpeed) {
           this.applyLanding(a);
         }
@@ -231,7 +287,8 @@ export class MovementSystem {
       if (a.grappleActive) {
         this.applyGrapplePull(a, dt);
       } else {
-        v.y -= MOVE.gravity * dt;
+        const gravityScale = v.y > 0 ? MOVE.jumpRiseGravityScale : MOVE.fallGravityScale;
+        v.y -= MOVE.gravity * gravityScale * dt;
       }
     }
 
@@ -242,6 +299,8 @@ export class MovementSystem {
     if (b.grounded && v.y < 0) v.y = 0;
     if (!b.grounded && wasGrounded) a.coyote = MOVE.coyoteTime;
     a.state = b.grounded ? 'ground' : 'air';
+    // QA invariant: ground-locomotion state while physically airborne.
+    a.airborneGroundTime = b.grounded ? 0 : a.airborneGroundTime + dt;
 
     // Footsteps
     if (b.grounded) {
@@ -264,7 +323,7 @@ export class MovementSystem {
     return def ?? 1;
   }
 
-  private handleJump(a: Actor, _cmd: InputCommand): void {
+  private handleJump(a: Actor, cmd: InputCommand): void {
     const b = a.body;
     const v = b.velocity;
     if (a.jumpBuffered <= 0) return;
@@ -278,7 +337,7 @@ export class MovementSystem {
     if (b.grounded || a.coyote > 0) {
       const hs = Math.hypot(v.x, v.z);
       const isBhop = a.bhopWindow > 0 && hs > MOVE.walkSpeed * 0.8;
-      v.y = MOVE.jumpVel;
+      v.y = MOVE.jumpVel * (cmd.sprint ? MOVE.sprintJumpMultiplier : 1);
       if (a.state === 'slide') {
         // slide jump preserves momentum + small hop boost
         v.y = MOVE.jumpVel * 0.92;
@@ -395,10 +454,11 @@ export class MovementSystem {
 
   private probeWall(a: Actor, side: number): { nx: number; nz: number; dist: number } | null {
     const p = a.body.position;
+    const feetY = feetYFromBodyCenter(p.y);
     const fwd = yawDir(a.yaw);
     const right = rightOf(fwd);
     const rx = right.x * side, rz = right.z * side;
-    const hit = this.phys.raycast(p.x, p.y + 1.2, p.z, rx, 0, rz, 0.95);
+    const hit = this.phys.raycast(p.x, feetY + 1.2, p.z, rx, 0, rz, 0.95, GROUPS.rayWorldOnly);
     if (!hit) return null;
     const ny = hit.normal.y;
     if (Math.abs(ny) > 0.35) return null;
@@ -407,23 +467,35 @@ export class MovementSystem {
 
   private tryWallrunEntry(a: Actor, cmd: InputCommand): void {
     if (cmd.crouchHeld) return;
+    // Anti-exploit: after leaving a wall there is a short cooldown, and the
+    // same wall cannot be re-attached until the actor has touched ground.
+    if (a.wallrunCooldown > 0) return;
+    // Anti-elevator: only a limited number of consecutive wall runs per airtime.
+    if (a.wallrunChains >= MOVE.wallRunMaxChains) return;
     const v = a.body.velocity;
     const hs = Math.hypot(v.x, v.z);
     if (hs < MOVE.wallRunMinSpeed) return;
     if (v.y < -12) return;
     const p = a.body.position;
+    const feetY = feetYFromBodyCenter(p.y);
     // Must be off the ground somewhat
-    const groundDist = this.phys.groundBelow(p.x, p.y + 0.5, p.z, MOVE.wallRunMinHeight + 0.6);
+    const groundDist = this.phys.groundBelow(p.x, feetY + 0.5, p.z, MOVE.wallRunMinHeight + 0.6);
     if (groundDist !== null && groundDist < MOVE.wallRunMinHeight) return;
 
     for (const side of [-1, 1] as const) {
       const wall = this.probeWall(a, side);
       if (wall) {
+        if (!a.wallrunLanded && wall.nx * a.lastWallNx + wall.nz * a.lastWallNz > MOVE.wallRunSameWallDot) {
+          continue;
+        }
         a.state = 'wallrun';
         a.wallSide = side;
         a.wallNormalX = wall.nx;
         a.wallNormalZ = wall.nz;
         a.wallrunTimer = 0;
+        a.wallrunChains++;
+        // Entering a run must not convert upward momentum into free lift.
+        v.y = Math.min(v.y, 1.2);
         a.jumpsUsed = 1; // wall jump counts as first jump for chain rules
         this.events.onWallrunStart(a);
         return;
@@ -439,6 +511,9 @@ export class MovementSystem {
     const wall = this.probeWall(a, a.wallSide);
     if (!wall || a.wallrunTimer > MOVE.wallRunMaxTime || cmd.crouchHeld) {
       a.state = 'air';
+      a.wallrunCooldown = MOVE.wallrunReentryCooldown;
+      a.lastWallNx = a.wallNormalX;
+      a.lastWallNz = a.wallNormalZ;
       v.x += a.wallNormalX * 2.5;
       v.z += a.wallNormalZ * 2.5;
       return;
@@ -459,9 +534,11 @@ export class MovementSystem {
     v.x += (dirX * targetSpeed - v.x) * blend;
     v.z += (dirZ * targetSpeed - v.z) * blend;
 
-    // Reduced gravity + initial upward carry
-    v.y -= MOVE.gravity * MOVE.wallRunGravityScale * dt;
-    if (a.wallrunTimer < 0.22) v.y = Math.max(v.y, 1.6);
+    // Reduced gravity that strengthens over the run (runs arc downward),
+    // plus a small initial carry so runs feel fluid.
+    const gScale = MOVE.wallRunGravityScale + Math.min(0.55, a.wallrunTimer * 0.4);
+    v.y -= MOVE.gravity * gScale * dt;
+    if (a.wallrunTimer < 0.22 && v.y < 1.6) v.y = 1.6;
 
     // Stick to wall
     v.x += -wall.nx * MOVE.wallRunStickAccel * dt;
@@ -475,6 +552,9 @@ export class MovementSystem {
       v.y = MOVE.wallJumpUpVel;
       a.jumpsUsed = 1;
       a.state = 'air';
+      a.wallrunCooldown = MOVE.wallrunReentryCooldown;
+      a.lastWallNx = wall.nx;
+      a.lastWallNz = wall.nz;
       this.events.onJump(a, 'wall');
       return;
     }
@@ -482,6 +562,8 @@ export class MovementSystem {
     b.move(v.x * dt, v.y * dt, v.z * dt);
     if (b.grounded) {
       a.state = 'ground';
+      a.wallrunLanded = true;
+      a.wallrunChains = 0;
       return;
     }
     if (a.peakFallSpeed < -v.y) a.peakFallSpeed = -v.y;
@@ -497,24 +579,24 @@ export class MovementSystem {
     const b = a.body;
     const p = b.position;
     const fwd = yawDir(cmd.yaw);
-    const eye = p.y + (a.crouched ? 1.35 : 2.05);
+    const eye = a.eyeY;
 
     // Wall ahead?
-    const wallHit = this.phys.raycast(p.x, eye - 0.7, p.z, fwd.x, 0, fwd.z, 1.0);
+    const wallHit = this.phys.raycast(p.x, eye - 0.7, p.z, fwd.x, 0, fwd.z, 1.0, GROUPS.rayWorldOnly);
     if (!wallHit || Math.abs(wallHit.normal.y) > 0.4) return false;
 
     // Ledge above and beyond the wall face?
     const probeX = wallHit.point.x + fwd.x * 0.45;
     const probeZ = wallHit.point.z + fwd.z * 0.45;
-    const topHit = this.phys.raycast(probeX, eye + 1.1, probeZ, 0, -1, 0, 3.4);
+    const topHit = this.phys.raycast(probeX, eye + 1.1, probeZ, 0, -1, 0, 3.4, GROUPS.rayWorldOnly);
     if (!topHit) return false;
     const ledgeY = topHit.point.y;
-    const feetY = p.y - CAPSULE_CENTER_OFFSET;
+    const feetY = feetYFromBodyCenter(p.y);
     const climb = ledgeY - feetY;
     if (climb < 0.55 || climb > MOVE.mantleMaxLedge) return false;
 
     // Clearance above ledge
-    const clear = this.phys.raycast(probeX, ledgeY + 0.3, probeZ, 0, 1, 0, 2.2);
+    const clear = this.phys.raycast(probeX, ledgeY + 0.3, probeZ, 0, 1, 0, 2.2, GROUPS.rayWorldOnly);
     if (clear) return false;
 
     a.state = 'mantle';
@@ -552,9 +634,9 @@ export class MovementSystem {
     if (a.grappleCooldown > 0 || a.grappleActive) return false;
     if (a.state === 'freefall' || a.state === 'glide' || a.state === 'swim') return false;
     const p = a.body.position;
-    const eyeY = p.y + (a.crouched ? 1.35 : 2.05);
+    const eyeY = a.eyeY;
     const dir = this.lookDir(a);
-    const hit = this.phys.raycast(p.x, eyeY, p.z, dir.x, dir.y, dir.z, MOVE.grappleRange, undefined);
+    const hit = this.phys.raycast(p.x, eyeY, p.z, dir.x, dir.y, dir.z, MOVE.grappleRange, GROUPS.rayWorldOnly);
     if (!hit) return false;
     a.grappleActive = true;
     a.grapplePoint = { ...hit.point };
@@ -573,8 +655,9 @@ export class MovementSystem {
   private applyGrapplePull(a: Actor, dt: number): void {
     const v = a.body.velocity;
     const p = a.body.position;
+    const ropeY = feetYFromBodyCenter(p.y) + 1.6;
     let tx = a.grapplePoint.x - p.x;
-    let ty = a.grapplePoint.y - (p.y + 1.6);
+    let ty = a.grapplePoint.y - ropeY;
     let tz = a.grapplePoint.z - p.z;
     const dist = Math.hypot(tx, ty, tz);
     if (dist < 2.2) {
@@ -639,7 +722,7 @@ export class MovementSystem {
       a.state = 'ground';
       v.y = 0;
       a.peakFallSpeed = 0;
-      this.events.onPoundImpact(a, a.body.position.x, a.body.position.y, a.body.position.z);
+      this.events.onPoundImpact(a, a.body.position.x, feetYFromBodyCenter(a.body.position.y), a.body.position.z);
     }
   }
 
@@ -653,7 +736,7 @@ export class MovementSystem {
     const sp = Math.hypot(v.x, v.y, v.z);
     if (sp > 13) this.events.onSplash(a, true);
     a.state = 'swim';
-    a.grappleActive = false;
+    this.releaseGrapple(a);
     a.peakFallSpeed = 0;
   }
 
@@ -661,6 +744,7 @@ export class MovementSystem {
     const b = a.body;
     const v = b.velocity;
     const p = b.position;
+    const feetY = feetYFromBodyCenter(p.y);
 
     const fwd = yawDir(cmd.yaw);
     const right = rightOf(fwd);
@@ -671,7 +755,7 @@ export class MovementSystem {
 
     const diving = cmd.crouchHeld;
     const surfacing = cmd.jumpHeld;
-    const depthBelowSurface = a.waterSurfaceY - (p.y + 1.0);
+    const depthBelowSurface = a.waterSurfaceY - (feetY + 1.0);
 
     let speed = depthBelowSurface > 1.2 ? MOVE.swimDiveSpeed : MOVE.swimSurfaceSpeed;
     speed *= this.currentMobility(a);
@@ -693,16 +777,19 @@ export class MovementSystem {
     b.move(v.x * dt, v.y * dt, v.z * dt);
 
     // Exit water: walk onto shore or mantle out
-    if (!this.waterAt(p.x, p.y + 1.0, p.z)) {
-      const ground = this.phys.surfaceAt(p.x, p.z, p.y + 2.4, 4);
-      if (ground !== null && ground <= p.y + 0.6) {
+    if (!this.waterAt(p.x, feetY + 1.0, p.z)) {
+      const ground = this.phys.surfaceAt(p.x, p.z, feetY + 2.4, 4);
+      if (ground !== null && ground <= feetY + 0.6) {
         a.state = 'ground';
         return;
       }
       // ledge nearby? try mantle assist
       const fwdOnly = yawDir(a.yaw);
-      const ledge = this.phys.raycast(p.x + fwdOnly.x * 0.8, p.y + 1.6, p.z + fwdOnly.z * 0.8, 0, -1, 0, 2.2);
-      if (ledge && ledge.point.y > p.y + 0.4 && ledge.point.y < p.y + 2.6) {
+      const ledge = this.phys.raycast(
+        p.x + fwdOnly.x * 0.8, feetY + 1.6, p.z + fwdOnly.z * 0.8,
+        0, -1, 0, 2.2, GROUPS.rayWorldOnly,
+      );
+      if (ledge && ledge.point.y > feetY + 0.4 && ledge.point.y < feetY + 2.6) {
         a.state = 'mantle';
         a.mantleFrom = { ...p };
         a.mantleTo = { x: p.x + fwdOnly.x * 0.8, y: ledge.point.y + CAPSULE_CENTER_OFFSET, z: p.z + fwdOnly.z * 0.8 };
@@ -728,7 +815,9 @@ export class MovementSystem {
 
   beginFreefall(a: Actor): void {
     a.state = 'freefall';
-    a.deployed = false;
+    // `deployed` means "has exited the transport" — set at jump, not at
+    // touchdown, so a gliding actor is never treated as still aboard.
+    a.deployed = true;
   }
 
   private updateFreefall(a: Actor, cmd: InputCommand, dt: number): void {
@@ -852,12 +941,13 @@ export class MovementSystem {
       const t = Math.min(1, (speed - MOVE.fallDamageMinSpeed) / (MOVE.fallDamageMaxSpeed - MOVE.fallDamageMinSpeed));
       dmg = Math.round(t * MOVE.fallDamageMax);
     }
-    this.events.onLand(a, speed, dmg);
     if (dmg > 0) {
       a.lastAttackerId = -1;
       const dealt = a.applyDamage(dmg);
       void dealt;
     }
+    // Emit after damage so lethal falls are already dead when handlers run.
+    this.events.onLand(a, speed, dmg);
   }
 
   lookDir(a: Actor): { x: number; y: number; z: number } {

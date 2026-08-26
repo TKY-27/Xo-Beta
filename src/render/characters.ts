@@ -7,12 +7,17 @@
  */
 
 import * as THREE from 'three';
+
+const _punchQ = new THREE.Quaternion();
+const _punchX = new THREE.Vector3(1, 0, 0);
 import { AnimationAction, AnimationMixer, LoopOnce } from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import type { Actor } from '../sim/actor';
 
 export interface CharacterRig {
   group: THREE.Group;
+  /** Currently playing base clip key (QA introspection). */
+  animName: string;
   /** Legacy fields kept for API compatibility */
   hips?: THREE.Object3D;
   torso?: THREE.Object3D;
@@ -28,6 +33,7 @@ export interface CharacterRig {
   /** Skinned-character extensions */
   update?(a: Actor, t: number, dt: number): void;
   attachWeapon?(model: THREE.Object3D | null): void;
+  dispose(): void;
 }
 
 interface AnimSet {
@@ -51,9 +57,15 @@ const CLIP_MAP: Array<[string, string]> = [
   ['aim_up', 'Pistol_Aim_Up'],
   ['aim_down', 'Pistol_Aim_Down'],
   ['armed_idle', 'Pistol_Idle_Loop'],
+  ['reload', 'Pistol_Reload'],
+  ['hit_chest', 'Hit_Chest'],
   ['death', 'Death01'],
   ['interact', 'Interact'],
 ];
+
+/** Clips that play once and hold their final pose until the state machine moves on. */
+const ONESHOT_CLIPS = new Set(['jump_start', 'jump_land', 'hit_chest', 'reload', 'interact', 'death']);
+const LOCOMOTION_CLIPS = new Set(['walk', 'jog', 'sprint', 'crouch_walk']);
 
 const TARGET_HEIGHT = 1.86;
 
@@ -117,6 +129,14 @@ export class CharacterFactory {
     const body = SkeletonUtils.clone(proto) as THREE.Group;
     body.scale.setScalar(s);
     group.add(body);
+    // SkeletonUtils intentionally shares immutable BufferGeometry with the
+    // loaded prototype. Keep those references out of per-rig cleanup; only
+    // procedural costume geometry belongs to this actor.
+    const sharedBodyGeometry = new Set<THREE.BufferGeometry>();
+    body.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh && mesh.geometry) sharedBodyGeometry.add(mesh.geometry);
+    });
 
     // Suit recolor: find materials and tint toward identity palette.
     const suitColor = new THREE.Color(accentColor);
@@ -134,10 +154,10 @@ export class CharacterFactory {
           nm.color = darkSuit.clone().lerp(suitColor, 0.22);
           nm.metalness = Math.min(0.65, nm.metalness + 0.25);
           nm.roughness = Math.max(0.42, nm.roughness * 0.85);
-          baseMats.push(nm);
-        } else if (/hair|Hair/i.test(nm.name ?? '')) {
-          baseMats.push(nm);
         }
+        // Every clone is actor-owned and must dissolve/dispose with the rig,
+        // including skin, hair and eye materials.
+        baseMats.push(nm);
         return nm;
       });
       mesh.material = Array.isArray(mesh.material) ? next : next[0]!;
@@ -267,11 +287,30 @@ export class CharacterFactory {
 
     let currentBase = '';
     let aimWeight = 0;
+    let wasGrounded = true;
+    let jumpStartT = 0;
+    let landT = 0;
+    let hitT = 0;
+    let prevDmg: number | null = null;
+    let visualSpeed = 0;
+    let forwardLean = 0;
+    let sideLean = 0;
+    let disposed = false;
+    const bodyBaseRotation = body.rotation.clone();
+    const punchPose: { active: boolean; base: { a: THREE.Quaternion; f: THREE.Quaternion | null } | null } = { active: false, base: null };
 
     function crossfade(from: string, to: string, dur = 0.16): void {
       const a = actions[to], b = actions[from];
       if (!a || from === to) return;
+      if (ONESHOT_CLIPS.has(to)) {
+        a.setLoop(LoopOnce, 1);
+        a.clampWhenFinished = true;
+      }
+      const phase = b && LOCOMOTION_CLIPS.has(from) && LOCOMOTION_CLIPS.has(to)
+        ? (b.time % Math.max(0.001, b.getClip().duration)) / Math.max(0.001, b.getClip().duration)
+        : 0;
       a.reset();
+      if (phase > 0) a.time = phase * a.getClip().duration;
       a.setEffectiveWeight(1);
       a.play();
       if (b) b.crossFadeTo(a, dur, false);
@@ -279,6 +318,7 @@ export class CharacterFactory {
 
     const rig: CharacterRig = {
       group,
+      animName: 'idle',
       accentMats: accents,
       baseMats: baseMats,
       dissolving: 0,
@@ -297,9 +337,31 @@ export class CharacterFactory {
           return;
         }
         const speedH = Math.hypot(a.body.velocity.x, a.body.velocity.z);
+        visualSpeed += (speedH - visualSpeed) * Math.min(1, dt * (speedH > visualSpeed ? 10 : 7));
+        const dashing = a.dashTimer > 0;
+
+        // One-shot clip edges: jump start/land, damage flinch, interaction.
+        // lastDamageTime is a count-up "time since damage" timer that saturates
+        // at 90 — a DECREASE means fresh damage was just applied.
+        if (prevDmg !== null && a.lastDamageTime < prevDmg) {
+          if (a.body.grounded && a.state !== 'swim') hitT = 0.34;
+        }
+        prevDmg = a.lastDamageTime;
+        if (!a.body.grounded && wasGrounded && a.body.velocity.y > 2) jumpStartT = 0.26;
+        if (a.body.grounded && !wasGrounded) {
+          landT = 0.3;
+          jumpStartT = 0;
+        }
+        wasGrounded = a.body.grounded;
+        jumpStartT = Math.max(0, jumpStartT - dt);
+        landT = Math.max(0, landT - dt);
+        hitT = Math.max(0, hitT - dt);
+        a.interactTimer = Math.max(0, a.interactTimer - dt);
 
         let want: string;
-        switch (a.state) {
+        if (dashing) {
+          want = 'sprint';
+        } else switch (a.state) {
           case 'slide': want = 'roll'; break;
           case 'mantle': want = 'roll'; break;
           case 'wallrun': want = 'sprint'; break;
@@ -307,32 +369,43 @@ export class CharacterFactory {
           case 'glide': want = 'jump_loop'; break;
           case 'swim': want = speedH > 1 ? 'swim' : 'swim_idle'; break;
           default:
-            if (!a.body.grounded) want = a.wpn.lastShotTime >= 0 && speedH > 2 ? 'jump_loop' : 'jump_loop';
+            if (!a.body.grounded) want = jumpStartT > 0 ? 'jump_start' : 'jump_loop';
+            else if (landT > 0 && speedH < 2.5) want = 'jump_land';
+            else if (hitT > 0 && speedH < 3) want = 'hit_chest';
+            else if (a.interactTimer > 0 && speedH < 2) want = 'interact';
             else if (a.crouched) want = speedH > 0.6 ? 'crouch_walk' : 'crouch_idle';
-            else if (speedH < 0.6) want = 'idle';
-            else if (speedH < 6.2) want = 'walk';
-            else if (speedH < 9.2) want = 'jog';
+            else if (speedH < 0.6) {
+              want = weaponHolder && weaponHolder.children.length > 0 && a.wpn.reloadTimer > 0
+                ? 'reload'
+                : 'idle';
+            }
+            else if (visualSpeed < 3.2) want = 'walk';
+            else if (visualSpeed < 8.6) want = 'jog';
             else want = 'sprint';
         }
         if (want !== currentBase) {
           crossfade(currentBase, want);
           currentBase = want;
         }
+        rig.animName = want;
         // Time-warp locomotion to actual speed so footfalls match ground speed
         const baseSpeeds: Record<string, number> = {
-          walk: 1.55, jog: 4.4, sprint: 7.0, crouch_walk: 1.5,
+          walk: 2.35, jog: 5.9, sprint: 9.7, crouch_walk: 2.0,
         };
         const act = actions[want];
         if (!act) return;
         if (baseSpeeds[want]) {
-          act.timeScale = THREE.MathUtils.clamp(speedH / baseSpeeds[want]!, 0.55, 1.9);
+          act.timeScale = THREE.MathUtils.clamp(visualSpeed / baseSpeeds[want]!, 0.72, dashing ? 1.45 : 1.32);
         } else {
           act.timeScale = 1;
         }
 
-        // Upper-body aim layer while holding a weapon
+        // Upper-body aim layer while holding a weapon (suppressed while a
+        // full-body one-shot owns the pose)
+        const aimBlocked = want === 'reload' || want === 'hit_chest' || want === 'interact';
         const armed = !!weaponHolder?.children.length &&
-          a.state !== 'mantle' && a.state !== 'swim' && !a.crouched;
+          a.state !== 'mantle' && a.state !== 'swim' && !a.crouched &&
+          !aimBlocked;
         const wantAim = armed ? 1 : 0;
         aimWeight += (wantAim - aimWeight) * Math.min(1, dt * 8);
         if (aimWeight > 0.01) {
@@ -357,6 +430,50 @@ export class CharacterFactory {
         }
 
         mixer.update(dt);
+
+        // Smooth whole-body anticipation: sprint/dash leans into travel while
+        // lateral acceleration produces only a restrained counter-lean. This
+        // sits below the authored clips, so feet and weapon posing stay intact.
+        const fwdX = -Math.sin(a.yaw), fwdZ = -Math.cos(a.yaw);
+        const rightX = Math.cos(a.yaw), rightZ = -Math.sin(a.yaw);
+        const localForward = a.body.velocity.x * fwdX + a.body.velocity.z * fwdZ;
+        const localSide = a.body.velocity.x * rightX + a.body.velocity.z * rightZ;
+        const targetForwardLean = dashing
+          ? 0.22
+          : THREE.MathUtils.clamp((Math.abs(localForward) - 5.5) * 0.018, 0, 0.095);
+        const targetSideLean = THREE.MathUtils.clamp(-localSide / 90, -0.085, 0.085);
+        forwardLean += (targetForwardLean - forwardLean) * Math.min(1, dt * 9);
+        sideLean += (targetSideLean - sideLean) * Math.min(1, dt * 10);
+        body.rotation.set(
+          bodyBaseRotation.x - forwardLean,
+          bodyBaseRotation.y,
+          bodyBaseRotation.z + sideLean,
+        );
+
+        // Procedural punch override (melee presentation)
+        if (a.punchTimer > 0 || punchPose.active) {
+          const arm = bones['upperarm_r'];
+          const fore = bones['lowerarm_r'];
+          if (arm) {
+            if (!punchPose.base) punchPose.base = { a: arm.quaternion.clone(), f: fore?.quaternion.clone() ?? null };
+            if (a.punchTimer > 0) {
+              punchPose.active = true;
+              const ph = 1 - a.punchTimer / 0.32;
+              const ext = Math.sin(Math.min(1, ph) * Math.PI);
+              _punchQ.setFromAxisAngle(_punchX, -ext * 1.45);
+              arm.quaternion.copy(punchPose.base.a).multiply(_punchQ);
+              if (fore && punchPose.base.f) {
+                _punchQ.setFromAxisAngle(_punchX, -Math.max(0, 0.5 - ext) * 1.2);
+                fore.quaternion.copy(punchPose.base.f).multiply(_punchQ);
+              }
+            } else {
+              arm.quaternion.copy(punchPose.base.a);
+              if (fore && punchPose.base.f) fore.quaternion.copy(punchPose.base.f);
+              punchPose.active = false;
+              punchPose.base = null;
+            }
+          }
+        }
       },
       attachWeapon(model: THREE.Object3D | null) {
         if (!weaponHolder) return;
@@ -365,6 +482,23 @@ export class CharacterFactory {
           model.position.set(0.02, 0.12, -0.02);
           weaponHolder.add(model);
         }
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        rig.attachWeapon?.(null);
+        mixer.stopAllAction();
+        mixer.uncacheRoot(body);
+        for (const material of new Set<THREE.Material>([...baseMats, ...accents])) material.dispose();
+        const ownedGeometry = new Set<THREE.BufferGeometry>();
+        group.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (mesh.isMesh && mesh.geometry && !sharedBodyGeometry.has(mesh.geometry)) {
+            ownedGeometry.add(mesh.geometry);
+          }
+        });
+        for (const geometry of ownedGeometry) geometry.dispose();
+        group.removeFromParent();
       },
     };
     return rig;
@@ -430,10 +564,21 @@ function fallbackRig(
   group.add(hips);
   const rig: CharacterRig = {
     group,
+    animName: 'idle',
     hips, torso,
     accentMats: accents,
     baseMats: baseMats,
     dissolving: 0,
+    dispose() {
+      for (const material of new Set<THREE.Material>([...baseMats, ...accents])) material.dispose();
+      const geometry = new Set<THREE.BufferGeometry>();
+      group.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh && mesh.geometry) geometry.add(mesh.geometry);
+      });
+      for (const item of geometry) item.dispose();
+      group.removeFromParent();
+    },
   };
   return rig;
 }

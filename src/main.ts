@@ -8,11 +8,13 @@ import { loadMap, MAP_LIST, ensureWorldReady } from './world';
 import { Match } from './sim/match';
 import { GROUPS as PHYS_GROUPS } from './physics/physics';
 import { BotController } from './ai/bot';
-import { MATCH, MOVE, RARITY_CSS, SIM, WEAPONS } from './core/balance';
-import { CAPSULE_CENTER_OFFSET } from './sim/movement';
+import { MATCH, RARITY_CSS, SIM, WEAPONS } from './core/balance';
+import type { WeaponId, Rarity } from './core/balance';
+import { CAPSULE_CENTER_OFFSET, feetYFromBodyCenter } from './sim/movement';
+import type { WeaponInstance } from './sim/inventory';
 import type { Actor } from './sim/actor';
 import { Rng } from './core/rng';
-import { onSettingsChanged, updateSettings, getSettings } from './core/settings';
+import { onSettingsChanged, updateSettings, getSettings, flushSettingsPersist } from './core/settings';
 import { createMaterials, type MaterialLibrary } from './render/materials';
 import { preloadAll } from './assets/assets';
 import { PropLibrary } from './render/props';
@@ -39,6 +41,7 @@ const $canvas = (): HTMLCanvasElement => document.getElementById('game-canvas') 
 // ---------------------------------------------------------------------------
 
 interface LiveGame {
+  generation: number;
   match: Match;
   renderer: GameRenderer;
   world: WorldView;
@@ -48,6 +51,7 @@ interface LiveGame {
   rigs: Map<number, CharacterRig>;
   player: PlayerController;
   mats: MaterialLibrary;
+  cleanup: Array<() => void>;
 }
 
 let live: LiveGame | null = null;
@@ -55,13 +59,96 @@ let hud: Hud;
 let audio: AudioEngine;
 let menus: Menus;
 const disposers: Array<() => void> = [];
+let matchGeneration = 0;
+let pendingStart: { generation: number; cleanup: Array<() => void> } | null = null;
+
+class MatchStartCancelled extends Error {}
+
+function ensureCurrentStart(generation: number): void {
+  if (pendingStart?.generation !== generation || generation !== matchGeneration) {
+    throw new MatchStartCancelled();
+  }
+}
+
+function registerStartCleanup(generation: number, cleanup: () => void): void {
+  ensureCurrentStart(generation);
+  pendingStart!.cleanup.push(cleanup);
+}
+
+function runCleanups(cleanups: Array<() => void>): void {
+  for (let i = cleanups.length - 1; i >= 0; i--) {
+    try { cleanups[i]!(); } catch (err) { console.warn('match cleanup failed', err); }
+  }
+  cleanups.length = 0;
+}
+
+function cancelPendingStart(): void {
+  matchGeneration++;
+  if (!pendingStart) return;
+  const cleanups = pendingStart.cleanup;
+  pendingStart = null;
+  runCleanups(cleanups);
+}
 
 let paused = false;
 let loopRunning = false;
 let accumulator = 0;
 let lastTime = 0;
 /** Dev-only frame-cost EMAs (ms) surfaced via __xoState.perf for QA profiling. */
-const perfStats = { simMs: 0, presentMs: 0 };
+const perfStats = { simMs: 0, presentMs: 0, lastSimMs: 0, lastPresentMs: 0 };
+
+// Frame-pacing telemetry: ring buffer of the last ~10 s of frame times plus
+// cumulative spike counters. Average FPS alone hides interaction freezes;
+// QA gates on p95/p99/worst and spike counts instead.
+const FRAME_RING = 600;
+const frameRing = new Float32Array(FRAME_RING);
+let frameRingIdx = 0;
+let framesTotal = 0;
+let spikes33 = 0;
+let spikes50 = 0;
+let worstFrameMs = 0;
+const recentSpikes: { t: number; ms: number; sim: number; pres: number; heapMB: number }[] = [];
+let lastQaDomUpdate = 0;
+
+function recordFrameMs(ms: number): void {
+  frameRing[frameRingIdx] = ms;
+  frameRingIdx = (frameRingIdx + 1) % FRAME_RING;
+  framesTotal++;
+  if (ms > worstFrameMs) worstFrameMs = ms;
+  if (ms > 33) {
+    spikes33++;
+    const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+    recentSpikes.push({
+      t: Math.round(performance.now()),
+      ms: Math.round(ms),
+      sim: Math.round(perfStats.lastSimMs * 10) / 10,
+      pres: Math.round(perfStats.lastPresentMs * 10) / 10,
+      heapMB: mem ? Math.round(mem.usedJSHeapSize / 1048576) : -1,
+    });
+    if (recentSpikes.length > 16) recentSpikes.shift();
+  }
+  if (ms > 50) spikes50++;
+}
+
+function resetPerfStats(): void {
+  frameRing.fill(0);
+  frameRingIdx = 0;
+  framesTotal = 0;
+  spikes33 = 0;
+  spikes50 = 0;
+  worstFrameMs = 0;
+  recentSpikes.length = 0;
+}
+
+function framePercentile(p: number): number {
+  const n = Math.min(framesTotal, FRAME_RING);
+  if (n === 0) return 0;
+  const copy: number[] = [];
+  for (let i = 0; i < n; i++) copy.push(frameRing[i]!);
+  copy.sort((a, b) => a - b);
+  const out = copy[Math.min(n - 1, Math.floor(p * (n - 1)))];
+  return out === undefined ? 0 : out;
+}
 let resultsShown = false;
 let spectateTargetId = -1;
 let wasInTransport = false;
@@ -81,6 +168,11 @@ const WEAPON_ICONS: Record<string, string> = {
   shotgun: '≡',
   sniper: '⌇',
 };
+
+// Powerful browser-inspection hooks must never be reachable from a production
+// deployment merely by adding a query parameter. Vite replaces DEV with false
+// during build, allowing Rollup to remove the entire QA surface.
+const QA_MODE = import.meta.env.DEV && new URLSearchParams(location.search).has('qa');
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -110,9 +202,11 @@ async function boot(): Promise<void> {
   await setLoad(0.08, t('load.preparing'));
   await ensureWorldReady();
   await setLoad(0.3, t('load.assets'));
-  await preloadAll((pct, label) => {
+  await preloadAll((pct, _label) => {
     $('loading-fill').style.width = `${Math.round((0.3 + pct * 0.55) * 100)}%`;
-    $('loading-status').textContent = label;
+    // Asset identifiers are implementation details and were previously shown
+    // only in English. Keep real progress while presenting localized copy.
+    $('loading-status').textContent = t('load.assets');
   });
   await audio.loadSamples();
   const sharedProps = new PropLibrary();
@@ -138,6 +232,7 @@ async function boot(): Promise<void> {
 
   menus = new Menus(MAP_LIST);
   menus.onUiSound = (kind) => audio.uiClick(kind);
+  menus.onScreenChanged = (id) => lobby.compose(id === 'settings-menu' ? 'settings' : 'main');
   menus.onPlayRequested = (sel) =>
     void startMatch(sel, sharedMats, sharedProps, characterFactory, weaponFactory, lobby);
   menus.onResumeRequested = resumeFromPause;
@@ -154,11 +249,42 @@ async function boot(): Promise<void> {
   window.addEventListener('pointerdown', unlockAudio, { once: true });
   window.addEventListener('keydown', unlockAudio, { once: true });
 
-  onSettingsChanged(() => {
-    live?.renderer.applyQuality();
+  // Loading can outlive the PLAY click's transient user activation, causing
+  // the initial pointer-lock request to be rejected. Let a subsequent click
+  // on the game canvas recover controls without forcing a pause round-trip.
+  const onCanvasClick = () => {
+    if (
+      live
+      && live.player.enabled
+      && !paused
+      && live.match.phase !== 'results'
+      && !menus.isAnyMenuOpen()
+      && !hud.isTacMapOpen()
+      && document.pointerLockElement !== $canvas()
+    ) {
+      live.player.requestLock();
+    }
+  };
+  $canvas().addEventListener('click', onCanvasClick);
+
+  // Only graphics-relevant changes may touch the render pipeline. Settings
+  // writes fire for every toggle (camera mode, crosshair, volume…); rebuilding
+  // quality state on each of those caused interaction hitches (V switching).
+  const GFX_KEYS = [
+    'quality', 'resolutionScale', 'shadows', 'shadowQuality', 'postProcessing',
+    'bloom', 'reflections', 'ao', 'aa', 'motionBlur', 'dof', 'fpsLimit',
+  ] as const;
+  let lastGfxKey = '';
+  onSettingsChanged((s) => {
+    const key = GFX_KEYS.map((k) => String(s[k])).join('|');
+    if (key !== lastGfxKey) {
+      lastGfxKey = key;
+      live?.renderer.applyQuality();
+    }
     hud.applyCrosshair();
     audio.applyVolumes();
   });
+  window.addEventListener('pagehide', flushSettingsPersist);
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && live && !paused && live.match.phase !== 'results') openPause();
@@ -171,6 +297,7 @@ async function boot(): Promise<void> {
     menus.hidePause();
     if (!live) return;
     paused = false;
+    live.player.enabled = true;
     live.player.requestLock();
   }
 
@@ -196,10 +323,43 @@ async function startMatch(
   lobby: LobbyScene,
 ): Promise<void> {
   teardownMatch();
+  const generation = ++matchGeneration;
+  pendingStart = { generation, cleanup: [] };
+  menus.setPlayEnabled(false);
+  try {
+    await startMatchImpl(
+      sel, sharedMats, sharedProps, charFactory, weaponFactory, lobby, generation,
+    );
+    if (generation === matchGeneration) menus.setPlayEnabled(true);
+  } catch (err) {
+    if (err instanceof MatchStartCancelled || generation !== matchGeneration) return;
+    console.error('match start failed', err);
+    teardownMatch();
+    $('loading-status').textContent = t('notice.loadFailed');
+    $('loading-screen').classList.add('hidden');
+    hud.show(false);
+    menus.setPlayEnabled(true);
+    menus.showMainMenu();
+    audio.setMusicState('lobby');
+    audio.startAmbience('night', true);
+    lobby.start($canvas(), charFactory, weaponFactory);
+  }
+}
+
+async function startMatchImpl(
+  sel: PlaySelection,
+  sharedMats: MaterialLibrary,
+  sharedProps: PropLibrary,
+  charFactory: CharacterFactory,
+  weaponFactory: WeaponModelFactory,
+  lobby: LobbyScene,
+  generation: number,
+): Promise<void> {
   lobby.stop();
   menus.hideAll();
   $('loading-screen').classList.remove('hidden');
   await setLoad(0.15, t('load.map', { name: t(`map.${sel.map}.name` as never) }));
+  ensureCurrentStart(generation);
 
   const loaded = loadMap(sel.map);
   const match = new Match({
@@ -207,25 +367,40 @@ async function startMatch(
     seed: Date.now() % 1000000,
     difficulty: sel.difficulty,
     withPlayer: true,
+    practice: sel.practice === true,
   });
+  registerStartCleanup(generation, () => match.dispose());
   match.populateInitialLoot();
   await setLoad(0.55, t('load.deploying'));
+  ensureCurrentStart(generation);
 
   // Presentation stack
   const canvas = $canvas();
   const renderer = new GameRenderer(canvas);
+  registerStartCleanup(generation, () => renderer.dispose());
   await renderer.setupSkyAndLights(loaded.def.sky);
+  ensureCurrentStart(generation);
   if (loaded.def.sky.grade) renderer.setGrading(loaded.def.sky.grade);
   const world = await WorldView.create(loaded.def, sharedMats, match, sharedProps);
+  ensureCurrentStart(generation);
   renderer.scene.add(world.group);
+  registerStartCleanup(generation, () => {
+    renderer.scene.remove(world.group);
+    world.dispose();
+  });
   const vfx = new VfxSystem();
   renderer.scene.add(vfx.group);
+  registerStartCleanup(generation, () => {
+    renderer.scene.remove(vfx.group);
+    vfx.dispose();
+  });
   const rig = new CameraRig(window.innerWidth / window.innerHeight);
+  rig.sunAzimuth = renderer.sunAzimuth();
+  rig.onScopedChanged = (s) => hud.setScoped(s);
   renderer.buildComposer(rig.camera);
   renderer.applyQuality();
   rig.mode = getSettings().cameraMode;
 
-  // Controllers
   // Controllers
   const gamepad = new GamepadInput({
     onJumpPress: () => undefined,
@@ -245,6 +420,13 @@ async function startMatch(
     onMapToggle: () => toggleTacMap(),
     onPauseRequest: () => openPause(),
     onSlotRequest: () => undefined,
+    onMeleePress: () => {
+      const p = live?.match.player;
+      if (p?.alive) {
+        p.inv.selectMelee();
+        lastWeaponKey = null;
+      }
+    },
     onPingPress: () => placePingAtAim(),
   });
   const player = new PlayerController(
@@ -260,6 +442,7 @@ async function startMatch(
     () => cycleSpectate(1),
     () => toggleTacMap(),
   );
+  registerStartCleanup(generation, () => player.dispose());
   player.gamepad = gamepad;
 
   // Damage-number world→screen projector
@@ -281,6 +464,7 @@ async function startMatch(
     audio.uiClick('click');
   };
   tacCanvas?.addEventListener('click', onTacClick);
+  registerStartCleanup(generation, () => tacCanvas?.removeEventListener('click', onTacClick));
 
   function toggleTacMap(): void {
     if (!match.player?.alive || match.phase === 'results') return;
@@ -298,13 +482,12 @@ async function startMatch(
     const dirX = -Math.sin(match.player.yaw) * Math.cos(match.player.pitch);
     const dirY = Math.sin(match.player.pitch);
     const dirZ = -Math.cos(match.player.yaw) * Math.cos(match.player.pitch);
-    const hit = match.phys.raycast(p.x, p.y + MOVE.eyeHeight, p.z, dirX, dirY, dirZ, 260, PHYS_GROUPS.rayWorldOnly);
+    const hit = match.phys.raycast(p.x, match.player.eyeY, p.z, dirX, dirY, dirZ, 260, PHYS_GROUPS.rayWorldOnly);
     if (hit) {
       hud.tacMarker = { x: hit.point.x, z: hit.point.z };
       audio.uiClick('confirm');
     }
   }
-  disposers.push(() => tacCanvas?.removeEventListener('click', onTacClick));
   for (const actor of match.actors) {
     if (actor.isPlayer) {
       // Open the transport shot facing along the flight line, city below.
@@ -326,8 +509,18 @@ async function startMatch(
   const rigs = new Map<number, CharacterRig>();
   for (const actor of match.actors) {
     const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name));
+    // QA metadata (read-only; used by the automated browser harness).
+    charRig.group.userData.isCharacterRig = true;
+    charRig.group.userData.isPlayerRig = actor.isPlayer;
     rigs.set(actor.id, charRig);
     world.group.add(charRig.group);
+  }
+  registerStartCleanup(generation, () => {
+    for (const charRig of rigs.values()) charRig.dispose();
+    rigs.clear();
+  });
+  if (import.meta.env.DEV) {
+    (window as unknown as Record<string, unknown>).__xoRigs = rigs;
   }
   live_weaponWatcher(rigs, match, weaponFactory);
 
@@ -335,14 +528,64 @@ async function startMatch(
   const viewmodel = new ViewModel(weaponFactory);
   viewmodel.group.visible = rig.mode === 'fps';
   renderer.scene.add(viewmodel.group);
+  registerStartCleanup(generation, () => {
+    renderer.scene.remove(viewmodel.group);
+    viewmodel.dispose();
+  });
   {
     const w0 = match.player?.inv.selectedWeapon;
-    if (w0) viewmodel.setWeapon(w0.weaponId, w0.rarity);
+    // Player starts unarmed on the permanent fists slot.
+    viewmodel.setWeapon(w0 ? w0.weaponId : null, w0?.rarity ?? 'common');
   }
 
-  attachAudio(match as never, audio, match.events);
+  const detachAudio = attachAudio(match as never, audio, match.events);
+  registerStartCleanup(generation, detachAudio);
+
+  // Prewarm: build every weapon archetype now (loading screen) so mid-match
+  // pickups/swaps only cheap-clone shared geometry, never allocate GPU state.
+  weaponFactory.prewarmAll();
+
+  // One-shot aerial capture for the tactical map while the loading screen is
+  // still up (single GPU readback, ~50 ms).
+  try {
+    const aerial = renderer.captureAerial(match.mapDef.size / 2, 1024, [
+      world.stormMesh,
+      world.transportGroup,
+      ...[...rigs.values()].map((r) => r.group),
+      viewmodel.group,
+    ]);
+    hud.setTacMapImage(aerial);
+    if (import.meta.env.DEV && aerial) {
+      (window as unknown as { __xoAerial?: HTMLCanvasElement }).__xoAerial = aerial;
+    }
+  } catch (err) {
+    console.error('aerial capture failed', err);
+    /* aerial capture is cosmetic — fall back to the drawn map */
+  }
+
+  // Compile all shader programs before gameplay starts. Rigs are made visible
+  // for the pass so first TPS reveal never stalls on program compilation
+  // (V-switch freeze). present() restores per-mode visibility each frame.
+  try {
+    for (const r of rigs.values()) r.group.visible = true;
+    viewmodel.group.visible = true;
+    await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+    ensureCurrentStart(generation);
+    // Warm the shadow/depth program variants too — compileAsync only covers
+    // the main pass, and the first shadow render of a skinned rig otherwise
+    // stalls ~50 ms on the first FP→TPS flip.
+    renderer.renderer.render(renderer.scene, rig.camera);
+  } catch {
+    /* parallel shader compile unsupported — runtime compile still works */
+  }
+  viewmodel.group.visible = rig.mode === 'fps';
+
+  ensureCurrentStart(generation);
+  const cleanup = pendingStart!.cleanup;
+  pendingStart = null;
 
   live = {
+    generation,
     match,
     renderer,
     world,
@@ -352,12 +595,15 @@ async function startMatch(
     rigs,
     player,
     mats: sharedMats,
+    cleanup,
   };
 
   wirePresentation(match, world, vfx, rigs, hud, viewmodel, rig);
 
   await setLoad(0.85, t('load.final'));
-  window.setTimeout(() => {
+  if (generation !== matchGeneration || live?.generation !== generation) throw new MatchStartCancelled();
+  const startTimer = window.setTimeout(() => {
+    if (live?.generation !== generation || generation !== matchGeneration) return;
     $('loading-screen').classList.add('hidden');
     hud.show(true);
     hud.applyCrosshair();
@@ -366,20 +612,31 @@ async function startMatch(
     audio.init();
     audio.resume();
     audio.startAmbience(loaded.def.sky.preset, false);
-    hud.banner(t('banner.drop'), 5.5);
+    if (!sel.practice) {
+      hud.banner(t('banner.drop', { jump: prettyBind(getSettings().bindings.jump) }), 5.5);
+    }
+    else hud.banner(t('menu.practice'), 2.4);
+    // Measure live interaction only; lobby, map loading and shader warm-up
+    // must not pollute the gameplay p95/p99/worst-frame regression signal.
+    resetPerfStats();
     startLoop();
   }, 180);
+  live.cleanup.push(() => window.clearTimeout(startTimer));
 }
 
 function teardownMatch(): void {
-  if (!live) return;
+  cancelPendingStart();
   loopRunning = false;
+  menus?.setPlayEnabled(true);
+  const ending = live;
+  live = null;
+  if (import.meta.env.DEV) {
+    delete (window as unknown as Record<string, unknown>).__xoRigs;
+    delete (window as unknown as Record<string, unknown>).__xoAerial;
+  }
   for (const d of disposers) d();
   disposers.length = 0;
-  live.player.enabled = false;
-  live.player.releaseLock();
-  live.renderer.renderer.dispose();
-  live = null;
+  if (ending) runCleanups(ending.cleanup);
   resultsShown = false;
   spectateTargetId = -1;
   lastWeaponKey = null;
@@ -387,6 +644,7 @@ function teardownMatch(): void {
   hud?.show(false);
   hud?.hideSpectate();
   hud?.interactPrompt(null);
+  hud?.setTacMapImage(null);
   audio?.stopAmbience();
   audio?.setMusicState('none');
 }
@@ -398,6 +656,8 @@ function teardownMatch(): void {
 function openPause(): void {
   if (!live || paused || live.match.phase === 'results') return;
   paused = true;
+  // World keeps simulating; only local input is suspended.
+  live.player.enabled = false;
   live.player.releaseLock();
   menus.showPause();
 }
@@ -430,13 +690,14 @@ function wirePresentation(
     offs.push(match.events.on(k, fn as never));
   };
 
+  const HEAVY_FLASH: Partial<Record<WeaponId, boolean>> = { shotgun: true, sniper: true };
   match.events.on('muzzleFlash', (e) => {
     const isPlayer = e.actorId === match.player?.id;
     if (isPlayer && rig.mode === 'fps') {
       viewmodel.kick(WEAPON_KICK[e.weaponId] ?? 1);
       viewmodel.muzzlePulse(isPlayer ? 0.8 : 1.15);
     } else {
-      vfx.muzzleFlash(e.x, e.y - 0.25, e.z, e.dx, e.dy, e.dz, isPlayer ? 0.8 : 1.15);
+      vfx.muzzleFlash(e.x, e.y - 0.25, e.z, e.dx, e.dy, e.dz, isPlayer ? 0.8 : 1.15, HEAVY_FLASH[e.weaponId] === true);
     }
   });
   match.events.on('tracer', (e) => vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color));
@@ -502,6 +763,20 @@ function wirePresentation(
     vfx.poundShockwave(e.x, e.y, e.z);
     rig.addShake(0.35);
   });
+  match.events.on('meleeSwing', (e) => {
+    const attacker = match.actors.find((a) => a.id === e.actorId);
+    audio.meleeSwing(e.x, attacker?.eyeY ?? e.y, e.z);
+    if (e.actorId === match.player?.id && rig.mode === 'fps') viewmodel.punch();
+  });
+  match.events.on('meleeHit', (e) => {
+    const target = match.actors.find((a) => a.id === e.targetId);
+    if (target) audio.meleeHit(target.body.position.x, target.body.position.y + 0.3, target.body.position.z);
+    if (e.attackerId === match.player?.id) {
+      hud.hitmarker(e.headshot);
+      rig.addShake(e.killed ? 0.22 : 0.08);
+    }
+    if (e.targetId === match.player?.id) rig.addShake(0.18);
+  });
   match.events.on('land', (e) => {
     if (e.actorId === match.player?.id) rig.addShake(Math.min(0.4, e.impactSpeed / 70));
   });
@@ -516,8 +791,9 @@ function wirePresentation(
   match.events.on('phaseChanged', (e) => {
     if (e.phase === 'live') hud.banner(t('banner.lastStanding'), 3);
   });
-  match.events.on('chestOpened', () => audio.chestOpen(cameraPos().x, 1, cameraPos().z));
-
+  match.events.on('transportGateOpened', () => {
+    hud.banner(t('banner.jumpUnlocked', { jump: prettyBind(getSettings().bindings.jump) }), 2.6);
+  });
   // Weapon swap sync
   const interval = window.setInterval(() => {
     const p = match.player;
@@ -528,10 +804,6 @@ function wirePresentation(
       lastWeaponKey = key;
       viewmodel.setWeapon(w ? w.weaponId : null, w?.rarity ?? 'common');
       if (w) audio.reloadClick(false);
-    }
-    if (w && p.wpn.reloadTimer <= 0) {
-      const def = WEAPONS[w.weaponId];
-      void def;
     }
   }, 120);
   disposers.push(() => window.clearInterval(interval));
@@ -562,10 +834,6 @@ function live_weaponWatcher(rigs: Map<number, CharacterRig>, match: Match, weapo
   disposers.push(() => window.clearInterval(interval));
 }
 
-function cameraPos(): THREE.Vector3 {
-  return live ? live.rig.camera.position : new THREE.Vector3();
-}
-
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -591,6 +859,7 @@ function frame(now: number): void {
 
   const dtReal = Math.min(SIM.maxFrameDt, (now - lastTime) / 1000);
   lastTime = now;
+  recordFrameMs(dtReal * 1000);
 
   fpsAccum += dtReal;
   fpsCount++;
@@ -600,8 +869,11 @@ function frame(now: number): void {
     fpsCount = 0;
   }
 
+  // The match simulation never freezes: ESC opens the in-game menu over the
+  // still-running world (user requirement). Only the local player's input is
+  // suspended while a menu is open.
   const m = live.match;
-  if (!paused) {
+  {
     accumulator += dtReal;
     let steps = 0;
     const simT0 = performance.now();
@@ -610,7 +882,9 @@ function frame(now: number): void {
       accumulator -= SIM.fixedDt;
       steps++;
     }
-    perfStats.simMs = perfStats.simMs * 0.9 + (performance.now() - simT0) * 0.1;
+    const simDt = performance.now() - simT0;
+    perfStats.simMs = perfStats.simMs * 0.9 + simDt * 0.1;
+    perfStats.lastSimMs = simDt;
     musicTimer -= dtReal;
     if (musicTimer <= 0) {
       musicTimer = 2;
@@ -620,7 +894,9 @@ function frame(now: number): void {
 
   const presT0 = performance.now();
   present(dtReal);
-  perfStats.presentMs = perfStats.presentMs * 0.9 + (performance.now() - presT0) * 0.1;
+  const presDt = performance.now() - presT0;
+  perfStats.presentMs = perfStats.presentMs * 0.9 + presDt * 0.1;
+  perfStats.lastPresentMs = presDt;
 }
 
 function updateMusicState(m: Match): void {
@@ -639,14 +915,21 @@ function present(dtReal: number): void {
   if (!live) return;
   const { match: m, renderer, world, vfx, rig, viewmodel, rigs, player } = live;
 
-  // Debug/QA introspection hook (read-only). Development builds only —
-  // browser QA scripts run against the Vite dev server.
-  if (import.meta.env.DEV) {
+  // Debug/QA introspection hook. Development-only because the related helpers
+  // below can mutate match state and must not ship as a production backdoor.
+  if (QA_MODE) {
     (window as unknown as Record<string, unknown>).__xoState = {
+      map: m.mapDef.id,
+      seed: m.seed,
+      practiceStart: m.practiceStart,
       phase: m.phase,
       time: m.time,
       aliveCount: m.aliveCount,
       stormRadius: m.storm.radius,
+      stormCenterX: m.storm.centerX,
+      stormCenterZ: m.storm.centerZ,
+      stormState: m.storm.state,
+      stormOutside: m.player ? m.storm.distanceOutside(m.player.body.position.x, m.player.body.position.z) : null,
       items: m.loot.items.length,
       scene: renderer.scene,
       cameraMode: rig.mode,
@@ -656,7 +939,15 @@ function present(dtReal: number): void {
       perf: {
         simMs: +perfStats.simMs.toFixed(2),
         presentMs: +perfStats.presentMs.toFixed(2),
+        p95: +framePercentile(0.95).toFixed(1),
+        p99: +framePercentile(0.99).toFixed(1),
+        worst: +worstFrameMs.toFixed(1),
+        spikes33,
+        spikes50,
+        frames: framesTotal,
+        recentSpikes,
       },
+      resetPerf: resetPerfStats,
       worldGroup: world.group,
       threeRenderer: renderer.renderer,
       sceneInfo: {
@@ -677,12 +968,36 @@ function present(dtReal: number): void {
         .map((a) => ({
           id: a.id,
           name: a.name,
+          alive: a.alive,
+          hp: Math.round(a.health),
           x: +a.body.position.x.toFixed(1),
           y: +a.body.position.y.toFixed(1),
           z: +a.body.position.z.toFixed(1),
           yaw: +a.yaw.toFixed(2),
           state: a.state,
         })),
+      chests: m.chests.slice(0, 14).map((c) => ({
+        x: +c.x.toFixed(1),
+        z: +c.z.toFixed(1),
+        opened: c.opened,
+        tier: c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0,
+      })),
+      lootNear: m.player
+        ? m.loot.items
+            .map((it) => ({ it, d: Math.hypot(it.x - m.player!.body.position.x, it.z - m.player!.body.position.z) }))
+            .sort((a, b) => a.d - b.d)
+            .filter(({ it }) => it.kind === 'weapon' || it.kind === 'heal')
+            .slice(0, 8)
+            .map(({ it, d }) => ({
+              kind: it.kind,
+              weapon: it.weapon?.weaponId ?? null,
+              rarity: it.rarity,
+              x: +it.x.toFixed(0),
+              y: +it.y.toFixed(1),
+              z: +it.z.toFixed(0),
+              d: +d.toFixed(1),
+            }))
+        : [],
       player: m.player
         ? {
             x: +m.player.body.position.x.toFixed(1),
@@ -691,21 +1006,62 @@ function present(dtReal: number): void {
             state: m.player.state,
             grounded: m.player.body.grounded,
             weapon: m.player.inv.selectedWeapon?.weaponId ?? null,
+            ads: +m.player.wpn.adsAmount.toFixed(2),
+            spread: +m.player.wpn.currentSpread.toFixed(4),
+            bloom: +m.player.wpn.bloom.toFixed(4),
+            shots: m.player.stats.shotsFired,
             health: Math.round(m.player.health),
+            vy: +m.player.body.velocity.y.toFixed(2),
+            jumpsUsed: m.player.jumpsUsed,
+            coyote: +m.player.coyote.toFixed(2),
+            jumpBuffered: +m.player.jumpBuffered.toFixed(2),
+            fov: Math.round(rig.camera.fov),
+            anim: rigs.get(m.player.id)?.animName ?? null,
           }
         : null,
     };
+
+    // The Codex headed browser evaluates page scripts in an isolated world,
+    // so window expandos are not observable there. Mirror only the small,
+    // non-sensitive QA status needed to record exploration routes onto the
+    // shared document at a low cadence; it remains invisible to players.
+    const qaNow = performance.now();
+    if (qaNow - lastQaDomUpdate >= 250) {
+      lastQaDomUpdate = qaNow;
+      const p = m.player?.body.position;
+      const start = m.practiceStart;
+      const data = document.documentElement.dataset;
+      data.xoQaMap = m.mapDef.id;
+      data.xoQaSeed = String(m.seed);
+      data.xoQaPhase = m.phase;
+      data.xoQaPosition = p ? `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}` : '';
+      data.xoQaLook = m.player
+        ? `${m.player.yaw.toFixed(2)},${m.player.pitch.toFixed(2)},${rig.mode}`
+        : '';
+      data.xoQaMovement = m.player
+        ? `${rigs.get(m.player.id)?.animName ?? 'none'}|vy=${m.player.body.velocity.y.toFixed(2)}|dash=${m.player.dashTimer.toFixed(2)}`
+        : '';
+      data.xoQaStart = start
+        ? `${start.poi}|${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)}`
+        : '';
+      data.xoQaPerf = `${framePercentile(0.95).toFixed(1)},${framePercentile(0.99).toFixed(1)},${worstFrameMs.toFixed(1)}`;
+    }
   }
 
-  // QA-only teleport hook (?qa=1) for screenshot navigation. Dev builds only.
-  if (import.meta.env.DEV && new URLSearchParams(location.search).has('qa')) {
-    (window as unknown as Record<string, unknown>).__xoTeleport = (x: number, z: number, yaw = 0) => {
+  // QA-only teleport hook (?qa=1) for screenshot navigation.
+  if (QA_MODE) {
+    (window as unknown as Record<string, unknown>).__xoTeleport = (x: number, z: number, yaw = 0, refY?: number) => {
       const p = m.player;
       if (!p || !p.alive) return;
       // Snap to the surface so the capsule never spawns inside terrain.
-      const surf = m.phys.surfaceAt(x, z, 400, 500);
+      // Optional refY anchors the downward query near a known height
+      // (e.g. a loot item) instead of landing on the highest roof/canopy.
+      const anchored = typeof refY === 'number';
+      const surf = anchored ? m.phys.surfaceAt(x, z, refY + 2.5, 80) : m.phys.surfaceAt(x, z, 400, 500);
       if (surf !== null) {
         p.body.teleport(x, surf + CAPSULE_CENTER_OFFSET + 0.05, z);
+      } else if (anchored) {
+        p.body.teleport(x, refY + CAPSULE_CENTER_OFFSET + 0.05, z);
       } else {
         p.body.position.x = x;
         p.body.position.z = z;
@@ -734,10 +1090,49 @@ function present(dtReal: number): void {
         a.body.velocity.x = 0; a.body.velocity.y = 0; a.body.velocity.z = 0;
       });
     };
+    // QA helper: grant + equip a weapon by id ('pistol'|'smg'|'ar'|
+    // 'shotgun'|'sniper', optional rarity). Dev/QA builds only.
+    (window as unknown as Record<string, unknown>).__xoGive = (weaponId: string, rarity?: string) => {
+      const p = m.player;
+      if (!p || !p.alive) return false;
+      const def = WEAPONS[weaponId as WeaponId];
+      if (!def) return false;
+      const rarityNames = ['common', 'uncommon', 'rare', 'epic', 'legendary'];
+      const item: WeaponInstance = {
+        kind: 'weapon',
+        weaponId: weaponId as WeaponId,
+        rarity: (rarityNames.includes(rarity ?? '') ? rarity : 'common') as Rarity,
+        ammoInMag: def.magSize,
+      };
+      const res = p.inv.add(item);
+      if (!res.ok || res.slot === undefined) return false;
+      p.inv.ammo[def.ammoType] = Math.max(p.inv.ammo[def.ammoType], def.reserveMax);
+      p.inv.select(res.slot);
+      lastWeaponKey = null;
+      return true;
+    };
+    // QA helper: drive player fire/ADS through the real command pipeline
+    // (browser automation cannot engage pointer lock). Pass null to clear.
+    // fireHeld implies firePressed so semi/pump weapons also cycle.
+    (window as unknown as Record<string, unknown>).__xoQaInput = (
+      o: { fireHeld?: boolean; adsHeld?: boolean } | null,
+    ) => {
+      m.qaInput =
+        o && (o.fireHeld || o.adsHeld)
+          ? { ...o, firePressed: o.fireHeld === true }
+          : null;
+    };
+    // QA helper: jump the storm to a mid-shrink state so the wall, outside
+    // tint, map fill and route-to-safety line can be verified without
+    // waiting out the real phase timers.
+    (window as unknown as Record<string, unknown>).__xoStorm = () => {
+      m.storm.qaForceShrink(90, -60, 130, 20);
+      return { toX: 90, toZ: -60, toR: 130 };
+    };
   }
 
   const spectating = !m.player?.alive && m.phase !== 'results';
-  const playerAboard = !!m.player && m.player.state !== 'freefall' && m.player.state !== 'glide';
+  const playerAboard = !!m.player && !m.player.deployed;
   const inTransport = m.phase === 'transport' && !spectating && playerAboard;
   // Drop-rig slots: combatants hang in a row beneath the hull, spread along
   // the flight axis. The player rides the front slot with the line of
@@ -780,7 +1175,8 @@ function present(dtReal: number): void {
   rig.tick(dtReal);
 
   // Characters
-  const freezeRigs = (window as unknown as { __xoFreezeRigs?: boolean }).__xoFreezeRigs === true;
+  const freezeRigs = import.meta.env.DEV
+    && (window as unknown as { __xoFreezeRigs?: boolean }).__xoFreezeRigs === true;
   for (const a of m.actors) {
     const charRig = rigs.get(a.id);
     if (!charRig) continue;
@@ -790,8 +1186,10 @@ function present(dtReal: number): void {
     }
     charRig.group.visible = true;
     if (!freezeRigs) {
-      // Combatants ride the drop rig beneath the transport hull until they jump.
-      const aboard = inTransport && a.state !== 'freefall' && a.state !== 'glide';
+      // Combatants ride the drop rig beneath the transport hull until they
+      // jump; `deployed` (not the anim state) is the source of truth so a
+      // landed early jumper is never snapped back to the hull.
+      const aboard = inTransport && !a.deployed;
       if (aboard) {
         const slot = slotOf(a);
         charRig.group.position.set(
@@ -800,7 +1198,14 @@ function present(dtReal: number): void {
           m.transportPos.z + slot.z,
         );
       } else {
-        charRig.group.position.set(a.body.position.x, a.body.position.y, a.body.position.z);
+        // CharBody.position is the capsule centre; character assets are
+        // authored from the soles upward. Anchor the presentation at the
+        // physical feet so the model and contact shadow share ground truth.
+        charRig.group.position.set(
+          a.body.position.x,
+          feetYFromBodyCenter(a.body.position.y),
+          a.body.position.z,
+        );
       }
       if (a.alive) {
         charRig.update?.(a, now() / 1000, dtReal);
@@ -816,7 +1221,7 @@ function present(dtReal: number): void {
       vfx.setGrappleRope(
         a.id,
         a.body.position.x,
-        a.body.position.y + 1.6,
+        feetYFromBodyCenter(a.body.position.y) + 1.6,
         a.body.position.z,
         a.grapplePoint.x,
         a.grapplePoint.y,
@@ -827,8 +1232,10 @@ function present(dtReal: number): void {
     }
   }
 
-  // Viewmodel
-  if (m.player?.alive && rig.mode === 'fps') {
+  // Viewmodel (hidden while riding the transport — the unified transport
+  // camera frames the drop rig instead of a weapon; hidden at full sniper
+  // scope where the scope overlay replaces the world view).
+  if (m.player?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(m.player.body.velocity.x, m.player.body.velocity.z);
     viewmodel.update(m.player, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
     viewmodel.group.visible = true;
@@ -852,6 +1259,7 @@ function present(dtReal: number): void {
 
   hud.syncPlayerState(m);
   hud.drawMinimap(m, () => hud.minimapContext());
+  if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
     const info = !spectating && m.player?.alive && !paused && !hud.isTacMapOpen() ? findInteractInfo(m) : null;
     hud.interactPrompt(info && info.prompt ? info.prompt : null);
@@ -902,7 +1310,7 @@ function findInteractInfo(m: Match): InteractInfo | null {
         typeText: t('loot.type.weapon'),
         rarityText: rarityText.toUpperCase(),
         rarityColor: RARITY_CSS[item.weapon.rarity],
-        metaText: `${def.ammoType.toUpperCase()} · ${item.weapon.ammoInMag}/${def.magSize}`,
+        metaText: `${t(`ammo.${def.ammoType}` as never)} · ${item.weapon.ammoInMag}/${def.magSize}`,
         keyLabel: prettyBind(getSettings().bindings.interact),
         inventoryFull: invFull,
       },

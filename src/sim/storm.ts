@@ -127,4 +127,19 @@ export class Storm {
   nextCircle(): { x: number; z: number; r: number } {
     return { x: this.toX, z: this.toZ, r: this.toR };
   }
+
+  /** QA/testing helper: jump straight into a shrinking phase. */
+  qaForceShrink(toX: number, toZ: number, toR: number, duration: number): void {
+    if (this.state === 'idle') this.begin();
+    this.state = 'shrinking';
+    this.phaseIndex = Math.min(this.phaseIndex, STORM_PHASES.length - 1);
+    this.fromX = this.centerX;
+    this.fromZ = this.centerZ;
+    this.fromR = this.radius;
+    this.toX = toX;
+    this.toZ = toZ;
+    this.toR = toR;
+    this.timer = duration;
+    this.dps = STORM_PHASES[this.phaseIndex]!.dps;
+  }
 }

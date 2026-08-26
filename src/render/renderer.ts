@@ -15,7 +15,7 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import type { SkyConfig } from '../world/types';
 import { getSettings } from '../core/settings';
-import { loadHdri } from '../assets/assets';
+import { loadHdri, clampHdriPeaks } from '../assets/assets';
 
 /** Display-referred grading: vignette + gentle saturation/contrast shaping. */
 const GradingShader = {
@@ -62,6 +62,7 @@ const GradingShader = {
 export class GameRenderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
+  private readonly onResize = () => this.resize();
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
   private bloomPass: UnrealBloomPass | null = null;
@@ -75,6 +76,8 @@ export class GameRenderer {
   private ambient: THREE.AmbientLight | null = null;
   private pmrem: THREE.PMREMGenerator | null = null;
   private envRenderTarget: THREE.WebGLRenderTarget | null = null;
+  private ownedBackground: THREE.Texture | null = null;
+  private fallbackSky: THREE.Mesh | null = null;
   private sunOffset = new THREE.Vector3(120, 220, 90);
   private grading = { vignette: 0.3, saturation: 1.05, contrast: 1.03, lift: new THREE.Vector3(0, 0, 0.004) };
 
@@ -91,7 +94,7 @@ export class GameRenderer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.setPixelRatio(this.effectivePixelRatio());
 
-    window.addEventListener('resize', () => this.resize());
+    window.addEventListener('resize', this.onResize);
   }
 
   resize(): void {
@@ -110,6 +113,13 @@ export class GameRenderer {
     if (this.fxaaPass) {
       (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(1 / (w * pr), 1 / (h * pr));
     }
+  }
+
+  dispose(): void {
+    window.removeEventListener('resize', this.onResize);
+    this.composer?.dispose();
+    this.disposeEnvironment();
+    this.renderer.dispose();
   }
 
   /**
@@ -143,6 +153,7 @@ export class GameRenderer {
       this.scene.environment = this.envRenderTarget.texture;
       this.scene.environmentIntensity = sky.envIntensity ?? 0.9;
       this.scene.background = tex;
+      this.ownedBackground = tex;
       this.scene.backgroundIntensity = sky.backgroundIntensity ?? 1.0;
       this.scene.backgroundBlurriness = sky.backgroundBlurriness ?? 0;
     } else if (sky.hdri) {
@@ -154,12 +165,24 @@ export class GameRenderer {
         this.scene.environmentIntensity = sky.envIntensity ?? 0.8;
         if (sky.preset === 'night') {
           // Authored starfield backdrop instead of photographic horizon.
-          this.scene.background = makeNightSkyTexture();
+          this.ownedBackground = makeNightSkyTexture();
+          this.scene.background = this.ownedBackground;
           this.scene.backgroundIntensity = sky.backgroundIntensity ?? 1.0;
         } else {
-          this.scene.background = equirect;
+          // Peak-clamped backdrop: keeps the baked sun disc from blooming
+          // into a screen-filling white wall; env map stays full-range.
+          this.ownedBackground = clampHdriPeaks(equirect, 4.5);
+          this.scene.background = this.ownedBackground;
           this.scene.backgroundBlurriness = sky.backgroundBlurriness ?? 0.04;
           this.scene.backgroundIntensity = sky.backgroundIntensity ?? 1.0;
+          // Align the HDR image's baked sun disc with the analytic sunDirection
+          // so visible glare, IBL hotspot and shadows agree. The intrinsic disc
+          // bearing was measured in-engine per asset (radians, atan2(x, z)).
+          const discYaw = sky.hdri.includes('qwantani') ? -2.2 : 0.4;
+          const sunYaw = Math.atan2(sky.sunDirection[0], sky.sunDirection[2]);
+          const rot = new THREE.Euler(0, sunYaw - discYaw, 0);
+          this.scene.backgroundRotation = rot;
+          this.scene.environmentRotation = rot;
         }
       } catch (err) {
         console.warn('HDRI unavailable, falling back to gradient sky', err);
@@ -177,6 +200,9 @@ export class GameRenderer {
     sunPos.y = Math.abs(sunPos.y) + 60;
     this.sun = new THREE.DirectionalLight(sky.sunColor, sky.sunIntensity);
     this.sun.position.copy(sunPos);
+    // Shadow light must travel with the same direction as the visible sun,
+    // otherwise shadows fall the wrong way on every map but one.
+    this.sunOffset.copy(sunPos).setLength(260);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.camera.near = 10;
@@ -194,6 +220,11 @@ export class GameRenderer {
     this.scene.add(this.hemi);
     this.ambient = new THREE.AmbientLight(sky.ambientColor, sky.ambientIntensity);
     this.scene.add(this.ambient);
+    // Sky-fill from the opposite side of the sun: keeps sun-facing contrast but
+    // lifts shaded facades so north walls don't read as near-black slabs.
+    const fill = new THREE.DirectionalLight(sky.hemisphereSky, 0.55);
+    fill.position.copy(sunPos).negate().setY(90);
+    this.scene.add(fill);
   }
 
   private setupGradientSky(sky: SkyConfig): void {
@@ -212,9 +243,22 @@ export class GameRenderer {
     mesh.frustumCulled = false;
     mesh.name = 'fallback-sky';
     this.scene.add(mesh);
-  }  private disposeEnvironment(): void {
+    this.fallbackSky = mesh;
+  }
+
+  private disposeEnvironment(): void {
     this.envRenderTarget?.dispose();
     this.envRenderTarget = null;
+    this.ownedBackground?.dispose();
+    this.ownedBackground = null;
+    if (this.fallbackSky) {
+      this.scene.remove(this.fallbackSky);
+      this.fallbackSky.geometry.dispose();
+      const material = this.fallbackSky.material;
+      if (Array.isArray(material)) material.forEach((m) => m.dispose());
+      else material.dispose();
+      this.fallbackSky = null;
+    }
     this.scene.environment = null;
     this.scene.background = null;
     this.pmrem?.dispose();
@@ -228,9 +272,70 @@ export class GameRenderer {
     this.sun.position.copy(pos).add(this.sunOffset);
   }
 
+  /** Azimuth (atan2(x, z)) pointing toward the visible sun, for camera framing. */
+  sunAzimuth(): number {
+    return Math.atan2(this.sunOffset.x, this.sunOffset.z);
+  }
+
   /** Legacy no-op retained for API stability (background is infinite). */
   followViewer(_pos: THREE.Vector3): void {
     void _pos;
+  }
+
+  /**
+   * One-shot top-down aerial render of the world for the tactical map.
+   * Renders orthographically from above into an offscreen target and returns
+   * it as a 2D canvas (north = -Z up, +X right — matches map coordinate math).
+   * Call once during match load; costs a single GPU readback (~50 ms).
+   */
+  captureAerial(half: number, size = 1024, hide: THREE.Object3D[] = []): HTMLCanvasElement | null {
+    const cam = new THREE.OrthographicCamera(-half, half, half, -half, 1, 800);
+    cam.position.set(0, 380, 0);
+    cam.up.set(0, 0, -1);
+    cam.lookAt(0, 0, 0);
+    cam.updateMatrixWorld(true);
+    const rt = new THREE.WebGLRenderTarget(size, size, { colorSpace: THREE.SRGBColorSpace });
+    const saved = hide.map((o) => o.visible);
+    hide.forEach((o) => { o.visible = false; });
+    const prevFog = this.scene.fog;
+    const prevTarget = this.renderer.getRenderTarget();
+    try {
+      this.scene.fog = null;
+      this.renderer.setRenderTarget(rt);
+      this.renderer.render(this.scene, cam);
+      const buf = new Uint8Array(size * size * 4);
+      this.renderer.readRenderTargetPixels(rt, 0, 0, size, size, buf);
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      // Render targets receive linear color (tone mapping / sRGB encode only run
+      // for the default framebuffer) — encode to sRGB while flipping rows.
+      const img = ctx.createImageData(size, size);
+      const out = img.data;
+      for (let y = 0; y < size; y++) {
+        const src = (size - 1 - y) * size * 4;
+        const dst = y * size * 4;
+        for (let x = 0; x < size; x++) {
+          for (let c = 0; c < 3; c++) {
+            const v = buf[src + x * 4 + c]! / 255;
+            out[dst + x * 4 + c] = (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055) * 255;
+          }
+          out[dst + x * 4 + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return canvas;
+    } catch (err) {
+      console.warn('aerial capture failed', err);
+      return null;
+    } finally {
+      this.renderer.setRenderTarget(prevTarget);
+      this.scene.fog = prevFog;
+      hide.forEach((o, i) => { o.visible = saved[i]!; });
+      rt.dispose();
+    }
   }
 
   buildComposer(camera: THREE.Camera): void {
@@ -276,7 +381,9 @@ export class GameRenderer {
         new THREE.Vector2(w, h),
         cinematic ? 0.42 : 0.5,
         cinematic ? 0.75 : 0.62,
-        cinematic ? 0.86 : 0.84,
+        // Threshold above 1.0 keeps daylight albedo (even white walls) out of
+        // the bloom; only true emitters (neon, muzzle flashes, sun) bloom.
+        cinematic ? 1.32 : 1.62,
       );
       this.composer.addPass(this.bloomPass);
     } else {
@@ -437,7 +544,8 @@ function makeBlueHourSkyTexture(): THREE.CanvasTexture {
 }
 
 /** Authored night-sky backdrop: deep gradient, stars, subtle milky band. */
-function makeNightSkyTexture(): THREE.CanvasTexture {  const w = 1024;
+function makeNightSkyTexture(): THREE.CanvasTexture {
+  const w = 1024;
   const h = 1024;
   const c = document.createElement('canvas');
   c.width = w;

@@ -1,6 +1,11 @@
 node_modules/
 dist/
-qa/*.png
+
+# Local QA captures and investigation artifacts
+qa/
+.qa-tmp/
+shots/
+
 *.local
 .DS_Store
 .wrangler/

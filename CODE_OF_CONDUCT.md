@@ -35,11 +35,12 @@ Examples of unacceptable behavior include:
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project maintainers via GitHub issue (marked `conduct`) or
-direct message. All complaints will be reviewed and investigated promptly and
-fairly. The project team is obligated to respect the privacy and security of
-the reporter of any incident.
+Instances of abusive, harassing, or otherwise unacceptable behavior should be
+reported through a private contact channel published by the maintainers. If no
+private channel is available, open a minimal issue requesting private contact;
+do not include personal, sensitive or incident details in that issue. Reports
+will be reviewed fairly, and maintainers must protect the reporter's privacy
+and safety to the greatest extent possible.
 
 Maintainers who do not follow or enforce this Code of Conduct may be removed
 from the project team.

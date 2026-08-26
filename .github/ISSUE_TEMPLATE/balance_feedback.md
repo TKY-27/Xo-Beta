@@ -13,6 +13,6 @@ npx tsx tests/sim/run-sim.ts map=... seed=... count=3
 # paste aggregate block
 ```
 
-**Expected behavior & why** (reference GAME_DESIGN.md targets):
+**Expected behavior & why** (reference `docs/GAME_DESIGN.md` targets):
 
 **Suggested change**:

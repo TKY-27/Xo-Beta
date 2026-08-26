@@ -4,9 +4,11 @@ Xo Beta is released under the MIT license (see `LICENSE`). It redistributes
 third-party assets and code under the terms below. Full provenance and
 checksums: `docs/ASSET_MANIFEST.md`, `docs/ASSET_CHECKSUMS.txt`.
 
-This file must be preserved, with the license texts below, in any
-redistribution of this repository or of a build produced from it. A copy is
-included at the root of every production build (`dist/THIRD_PARTY_NOTICES.md`).
+This file must be preserved, with the license texts below and the font license
+files alongside the fonts, in any
+redistribution of this repository or of a build produced from it. The project
+license and this notice are included at the root of every production build as
+`dist/LICENSE` and `dist/THIRD_PARTY_NOTICES.md`.
 
 ## CC0 1.0 (Public Domain Dedication)
 
@@ -18,19 +20,46 @@ The following projects publish their assets under
   (`public/assets/textures/`)
 - **Quaternius** — Universal Animation Library, Universal Base Characters
   (Standard), Stylized Nature MegaKit (Standard) (`public/assets/models/characters/`,
-  `public/assets/models/nature/`) — https://www.patreon.com/quaternius
+  `public/assets/models/nature/`). Exact pack pages are recorded in
+  `docs/ASSET_MANIFEST.md`.
 - **Kenney NL** — Blaster Kit, Car Kit, Impact Sounds, Interface Sounds,
   UI Audio, Sci-Fi Sounds (`public/assets/models/weapons/`,
-  `public/assets/models/vehicles/`, parts of `public/assets/audio/`) —
-  https://kenney.nl
+  `public/assets/models/vehicles/`, parts of `public/assets/audio/`). Exact
+  pack pages are recorded in `docs/ASSET_MANIFEST.md`.
 - **The Free Firearm Sound Library** — gunshot recordings shipped as
   `public/assets/audio/guns/*.wav` (trimmed, resampled to 44.1 kHz / 16-bit
   PCM and peak-normalized; no other modification). Created and recorded by
   Ben Jaszczak, Brian Nelson, Kevin Heras and Matthew Nanney; released by its
   authors under CC0 1.0 ("NO RIGHTS RESERVED").
   Source: https://opengameart.org/content/the-free-firearm-sound-library
+- **rubberduck** — two water splash samples derived from "40 CC0 water /
+  splash / slime SFX".
+  Source: https://opengameart.org/content/40-cc0-water-splash-slime-sfx
+- **Oiboo** — `openchest.wav`, derived from "open chest SFX".
+  Source: https://opengameart.org/content/open-chest-sfx
+- **Thimras** — wind and river ambience excerpts from "Park ambiences".
+  Source: https://opengameart.org/content/park-ambiences
+- **isaiah658** — bird ambience excerpt from "Ambient Bird Sounds".
+  Source: https://opengameart.org/content/ambient-bird-sounds
+- **TinyWorlds** — city ambience derived from "Scifi City - Ambient Loop".
+  Source: https://opengameart.org/content/scifi-city-ambient-loop
 
 CC0 does not require attribution; the credits above are given as a courtesy.
+
+## SIL Open Font License 1.1
+
+The self-hosted UI fonts are redistributed under the SIL Open Font License,
+Version 1.1:
+
+- **Saira Condensed** — Copyright 2016 The Saira Project Authors; reserved
+  font name "Saira".
+- **Inter Tight** — Copyright 2022 The Inter Project Authors.
+- **Noto Sans JP** — Copyright 2014–2021 Adobe; reserved font name "Source".
+
+The complete copyright notices and OFL 1.1 text are shipped with every build
+as `assets/fonts/OFL-SairaCondensed.txt`,
+`assets/fonts/OFL-InterTight.txt`, and
+`assets/fonts/OFL-NotoSansJP.txt`.
 
 ## Code dependencies
 

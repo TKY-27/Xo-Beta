@@ -7,7 +7,12 @@ export type MatKey =
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
   | 'windowWarm'
   | 'facadeA' | 'facadeB' | 'facadeC' | 'marble' | 'sandbag'
-  | 'corrugated' | 'bricksOld' | 'facilityFloor';
+  | 'corrugated' | 'bricksOld' | 'facilityFloor'
+  | 'paint'
+  | 'paving'
+  | 'signDimCyan'
+  | 'signDimMagenta'
+  | 'signDimOrange';
 
 export interface GeoBox {
   kind: 'box';
@@ -17,6 +22,8 @@ export interface GeoBox {
   mat: MatKey;
   /** Don't create a physics collider (pure decoration). */
   noCollide?: boolean;
+  /** Collider/placement proxy that is intentionally hidden from rendering. */
+  noRender?: boolean;
   materialHint?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage';
 }
 
@@ -27,6 +34,7 @@ export interface GeoCylinder {
   mat: MatKey;
   segments?: number;
   noCollide?: boolean;
+  noRender?: boolean;
   materialHint?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage';
 }
 
@@ -36,6 +44,7 @@ export interface GeoSphere {
   r: number;
   mat: MatKey;
   noCollide?: boolean;
+  noRender?: boolean;
   materialHint?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage';
 }
 
@@ -165,4 +174,36 @@ export interface PlatformRect {
   minZ: number; maxZ: number;
   y: number;
   water?: boolean;
+}
+
+/**
+ * Human-scale normalization for the Kenney vehicle GLBs, which are authored
+ * at toy scale (a sedan is only ~2.5 m long). Player eye height is 2.05 m,
+ * so cars are scaled until a sedan reads ~3.8 m long and a truck ~5.6 m.
+ * The render side scales the model; physics uses matching collider boxes.
+ */
+export const VEHICLE_SCALE: Record<string, number> = {
+  sedan: 1.5,
+  taxi: 1.5,
+  police: 1.5,
+  'hatchback-sports': 1.55,
+  'race-future': 1.5,
+  suv: 1.65,
+  van: 1.65,
+  'delivery-flat': 1.65,
+  truck: 1.9,
+};
+
+/** Approximate collider half-extents (x/z) + height for a scaled vehicle. */
+export function vehicleColliderBox(variant: string): { ex: number; ez: number; h: number; yawAligned: 'x' | 'z' } {
+  switch (variant) {
+    case 'truck':
+      return { ex: 1.42, ez: 2.8, h: 2.6, yawAligned: 'z' };
+    case 'van':
+      return { ex: 1.25, ez: 2.27, h: 2.4, yawAligned: 'z' };
+    case 'wrecked':
+      return { ex: 1.2, ez: 2.2, h: 2.0, yawAligned: 'z' };
+    default:
+      return { ex: 1.12, ez: 1.92, h: 1.75, yawAligned: 'z' };
+  }
 }

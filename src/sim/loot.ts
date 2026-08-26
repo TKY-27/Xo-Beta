@@ -10,6 +10,7 @@ import {
 import { Rng } from '../core/rng';
 import type { Actor } from './actor';
 import type { InventoryItem, WeaponInstance } from './inventory';
+import { feetYFromBodyCenter } from '../physics/physics';
 
 export type WorldItemKind = 'weapon' | 'ammo' | 'heal';
 
@@ -21,6 +22,8 @@ export interface WorldItem {
   z: number;
   /** Presentation */
   bobPhase: number;
+  /** Fixed believable orientation assigned at spawn (never spins). */
+  yaw: number;
   rarity: Rarity;
   /** Contents (exactly one is set by kind) */
   weapon?: WeaponInstance;
@@ -94,11 +97,12 @@ export class LootSystem {
     }, rng);
   }
 
-  private spawn(partial: Omit<WorldItem, 'id' | 'bobPhase' | 'spawnT' | 'settled'>, rng: Rng): WorldItem {
+  private spawn(partial: Omit<WorldItem, 'id' | 'bobPhase' | 'yaw' | 'spawnT' | 'settled'>, rng: Rng): WorldItem {
     const item: WorldItem = {
       ...partial,
       id: nextItemId++,
       bobPhase: rng.angle(),
+      yaw: rng.angle(),
       spawnT: this.time,
       settled: false,
     };
@@ -152,17 +156,18 @@ export class LootSystem {
   /** Drop an actor's whole inventory at its position (death drop). */
   dropInventory(actor: Actor, rng: Rng): void {
     const p = actor.body.position;
+    const dropY = feetYFromBodyCenter(p.y) + 0.8;
     for (const slot of actor.inv.slots) {
       if (!slot) continue;
       if (slot.kind === 'weapon') {
-        this.spawnWeapon(p.x, p.y + 0.8, p.z, slot, rng, true);
+        this.spawnWeapon(p.x, dropY, p.z, slot, rng, true);
       } else {
-        this.spawnHeal(p.x, p.y + 0.8, p.z, slot.itemId, slot.count, rng, true);
+        this.spawnHeal(p.x, dropY, p.z, slot.itemId, slot.count, rng, true);
       }
     }
     for (const [type, amount] of Object.entries(actor.inv.ammo)) {
       if (amount > 0) {
-        this.spawnAmmo(p.x, p.y + 0.8, p.z, type as AmmoType, amount, rng, true);
+        this.spawnAmmo(p.x, dropY, p.z, type as AmmoType, amount, rng, true);
       }
     }
   }
@@ -195,11 +200,21 @@ export class LootSystem {
    *  higher rarity (prevents bot pick-up/drop churn). */
   pickup(item: WorldItem, actor: Actor, swapIfBetterOnly = false): InventoryItem | null | false {
     if (item.kind === 'weapon' && item.weapon) {
+      let upgradeSlot: number | undefined;
       if (swapIfBetterOnly && actor.inv.slots.every((s) => s !== null)) {
-        const cur = actor.inv.selectedWeapon;
-        if (cur && rarityRank(item.weapon.rarity) <= rarityRank(cur.rarity)) return false;
+        const worstSlot = actor.inv.worstWeaponSlot();
+        if (worstSlot !== null) {
+          const current = actor.inv.slots[worstSlot];
+          if (!current || current.kind !== 'weapon'
+            || rarityRank(item.weapon.rarity) <= rarityRank(current.rarity)) return false;
+          upgradeSlot = worstSlot;
+        } else {
+          // A bot carrying five heal stacks may replace the first one with its
+          // first weapon; selection is updated by Match.tryInteract below.
+          upgradeSlot = 0;
+        }
       }
-      const res = actor.inv.add({ ...item.weapon });
+      const res = actor.inv.add({ ...item.weapon }, upgradeSlot);
       if (!res.ok) return false;
       this.remove(item);
       this.events.onPickup(item, actor);
