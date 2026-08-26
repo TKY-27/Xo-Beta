@@ -23,6 +23,8 @@ interface PlayOpts {
   lp?: number;
   refDist?: number;
   rolloff?: number;
+  /** Intentional layer offset in seconds. */
+  delay?: number;
 }
 
 const SAMPLES: Array<[string, string]> = [
@@ -71,6 +73,13 @@ const SAMPLES: Array<[string, string]> = [
   ['ui/error', 'ui/error_001.wav'],
   ['ui/drop', 'ui/drop_001.wav'],
   ['pickup/item', 'ui/open_001.wav'],
+  ['ui/headshot', 'ui/switch2.wav'],
+  ['ui/storm', 'ui/switch12.wav'],
+  ['chest/bell', 'impacts/impactBell_heavy_000.wav'],
+  ['bed/city_loop', 'ambience/city_loop.wav'],
+  ['bed/wind_loop', 'ambience/wind_loop.wav'],
+  ['bed/birds_loop', 'ambience/birds_loop.wav'],
+  ['bed/river_loop', 'ambience/river_loop.wav'],
 ];
 
 export class AudioEngine {
@@ -90,6 +99,24 @@ export class AudioEngine {
   private musicNodes: OscillatorNode[] = [];
   private musicGain: GainNode | null = null;
   private musicTimer: number | null = null;
+  private ambienceGeneration = 0;
+  private matchEffectGeneration = 0;
+  private matchEffectTimers = new Set<number>();
+
+  private scheduleMatchEffect(fn: () => void, delayMs: number): void {
+    const generation = this.matchEffectGeneration;
+    const timer = window.setTimeout(() => {
+      this.matchEffectTimers.delete(timer);
+      if (generation === this.matchEffectGeneration) fn();
+    }, delayMs);
+    this.matchEffectTimers.add(timer);
+  }
+
+  cancelMatchEffects(): void {
+    this.matchEffectGeneration++;
+    for (const timer of this.matchEffectTimers) window.clearTimeout(timer);
+    this.matchEffectTimers.clear();
+  }
 
   init(): void {
     if (this.ctx) return;
@@ -195,7 +222,7 @@ export class AudioEngine {
     g.gain.value = opts.vol ?? 1;
     g.connect(out);
     src.connect(g);
-    src.start(this.now() + Math.random() * 0.012);
+    src.start(this.now() + (opts.delay ?? 0) + Math.random() * 0.008);
   }
 
   /** Listener update (camera-relative panning). */
@@ -204,9 +231,12 @@ export class AudioEngine {
     if (!inst || !inst.ctx?.listener) return;
     const l = inst.ctx.listener;
     if (l.positionX) {
-      l.positionX.setTargetAtTime(0, inst.now(), 0.02);
-      l.positionY.setTargetAtTime(y - 2, inst.now(), 0.02);
-      l.positionZ.setTargetAtTime(0, inst.now(), 0.02);
+      // Panner sources use absolute world coordinates, so the listener must
+      // match the camera exactly. The old `y - 2` bias placed every sound
+      // above the listener and distorted both elevation and attenuation.
+      l.positionX.setTargetAtTime(x, inst.now(), 0.02);
+      l.positionY.setTargetAtTime(y, inst.now(), 0.02);
+      l.positionZ.setTargetAtTime(z, inst.now(), 0.02);
       l.forwardX.value = fx;
       l.forwardY.value = 0;
       l.forwardZ.value = fz;
@@ -238,17 +268,82 @@ export class AudioEngine {
     const dist = Math.hypot(x - cameraCenter.x, z - cameraCenter.z);
     const lp = Math.max(900, 18000 - dist * 90);
     const nearVol = kind === 'pistol' && dist < 3 ? 0.55 : 1;
+    const profile = {
+      pistol: { report: 0.92, crack: 0.12, body: 'boom/a', bodyVol: 0.055, bodyRate: 2.35, tail: 0.075 },
+      smg: { report: 0.86, crack: 0.09, body: 'boom/a', bodyVol: 0.045, bodyRate: 2.55, tail: 0.055 },
+      ar: { report: 0.98, crack: 0.14, body: 'boom/a', bodyVol: 0.09, bodyRate: 2.05, tail: 0.085 },
+      shotgun: { report: 1.08, crack: 0.18, body: 'boom/b', bodyVol: 0.25, bodyRate: 1.2, tail: 0.16 },
+      sniper: { report: 1.12, crack: 0.24, body: 'boom/a', bodyVol: 0.28, bodyRate: 1.05, tail: 0.2 },
+    }[kind] ?? { report: 0.92, crack: 0.12, body: 'boom/a', bodyVol: 0.055, bodyRate: 2.35, tail: 0.075 };
+
+    // The close report is a verified CC0 firearm recording. A very short
+    // filtered crack, low body and delayed outdoor tail restore the physical
+    // layers that disappear when a real shot is reduced to a single sample.
     this.play(key, {
       x, y, z,
-      vol: (kind === 'shotgun' || kind === 'sniper' ? 1.15 : 0.95) * nearVol,
+      vol: profile.report * nearVol,
       rate: 0.94 + Math.random() * 0.12,
       lp,
       refDist: 7,
     });
-    // low-end reinforcement for heavy weapons
+    this.gunCrack(x, y, z, profile.crack);
+    this.play(profile.body, {
+      x, y, z,
+      vol: profile.bodyVol,
+      rate: profile.bodyRate + Math.random() * 0.08,
+      lp: kind === 'shotgun' || kind === 'sniper' ? 5200 : 6800,
+      refDist: 9,
+      delay: 0.012,
+    });
+    this.play(key, {
+      x, y, z,
+      vol: profile.tail,
+      rate: 0.72 + Math.random() * 0.06,
+      lp: Math.max(1200, 6200 - dist * 35),
+      refDist: 15,
+      rolloff: 0.82,
+      delay: kind === 'sniper' ? 0.085 : 0.055,
+    });
+
+    // Low-end reinforcement for the two weapons whose muzzle blast is felt
+    // as much as heard.
     if (kind === 'shotgun' || kind === 'sniper') {
-      this.play('boom/sub', { x, y, z, vol: 0.5, rate: 1.1 + Math.random() * 0.2 });
+      this.play('boom/sub', {
+        x, y, z, vol: kind === 'sniper' ? 0.38 : 0.32,
+        rate: 1.08 + Math.random() * 0.14,
+        delay: 0.018,
+      });
     }
+  }
+
+  /** Brief high-frequency muzzle crack layered over recorded firearm reports. */
+  private gunCrack(x: number, y: number, z: number, volume: number): void {
+    if (!this.ctx || !this.noiseBuffer) return;
+    const p = this.ctx.createPanner();
+    p.panningModel = 'HRTF';
+    p.distanceModel = 'exponential';
+    p.refDistance = 8;
+    p.rolloffFactor = 1.05;
+    p.positionX.value = x;
+    p.positionY.value = y;
+    p.positionZ.value = z;
+    p.connect(this.buses.sfx!);
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 1700;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 9200;
+    const gain = this.ctx.createGain();
+    const now = this.now();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(volume, now + 0.0015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.032);
+    src.connect(hp); hp.connect(lp); lp.connect(gain); gain.connect(p);
+    src.start(now); src.stop(now + 0.038);
   }
 
   impact(x: number, y: number, z: number, material: string): void {
@@ -295,18 +390,24 @@ export class AudioEngine {
     const keys = (table[surface] ?? table.stone!).slice();
     if (isSelf && surface === 'metal') keys.push('step/carpet_a');
     const key = keys[Math.floor(Math.random() * keys.length)]!;
-    const vol = (running ? 0.62 : 0.38) * (isSelf ? 0.85 : 1);
+    // A restrained 10% reduction keeps material cues readable without
+    // competing with weapon reports and nearby threats.
+    const vol = (running ? 0.558 : 0.342) * (isSelf ? 0.85 : 1);
     const rate = surface === 'metal' ? 1.12 : 0.94 + Math.random() * 0.14;
     this.play(key, { x, y, z, vol, rate, refDist: 3, lp: running ? undefined : 5200 });
   }
 
-  jumpLand(x: number, y: number, z: number, hard: boolean): void {
-    this.footstep(x, y, z, true, 'stone');
+  jumpLand(x: number, y: number, z: number, hard: boolean, surface = 'stone'): void {
+    this.footstep(x, y, z, true, surface);
     this.play('impact/soft_a', { x, y, z, vol: hard ? 0.8 : 0.4, rate: 0.8 });
   }
 
-  whoosh(_x: number, _y: number, _z: number, pitch = 1): void {
+  whoosh(x: number, _y: number, z: number, pitch = 1): void {
     if (!this.ctx || !this.noiseBuffer) return;
+    // Distance attenuation so distant actors' movement layers stay local.
+    const d = Math.hypot(x - cameraCenter.x, z - cameraCenter.z);
+    if (d > 55) return;
+    const att = 1 / (1 + (d * d) / 420);
     const n = this.ctx.createBufferSource();
     n.buffer = this.noiseBuffer;
     n.loop = true;
@@ -317,7 +418,7 @@ export class AudioEngine {
     bp.frequency.exponentialRampToValueAtTime(2100 * pitch, this.now() + 0.16);
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, this.now());
-    g.gain.linearRampToValueAtTime(0.22, this.now() + 0.03);
+    g.gain.linearRampToValueAtTime(0.22 * att, this.now() + 0.03);
     g.gain.exponentialRampToValueAtTime(0.0001, this.now() + 0.24);
     n.connect(bp); bp.connect(g); g.connect(this.buses.sfx!);
     n.start(); n.stop(this.now() + 0.26);
@@ -328,8 +429,43 @@ export class AudioEngine {
     this.whoosh(x, y, z, 1.5);
   }
 
-  dashFx(): void {
-    this.whoosh(cameraCenter.x, 1.5, cameraCenter.z, 1.9);
+  /** Positional punch swing: short filtered-noise "fwip". */
+  meleeSwing(x: number, y: number, z: number): void {
+    if (!this.ctx || !this.noiseBuffer) return;
+    const p = this.ctx.createPanner();
+    p.panningModel = 'HRTF';
+    p.distanceModel = 'exponential';
+    p.refDistance = 4;
+    p.rolloffFactor = 1.3;
+    p.positionX.value = x;
+    p.positionY.value = y;
+    p.positionZ.value = z;
+    p.connect(this.buses.sfx!);
+    const n = this.ctx.createBufferSource();
+    n.buffer = this.noiseBuffer;
+    n.loop = true;
+    n.playbackRate.value = 0.9 + Math.random() * 0.2;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.6;
+    bp.frequency.setValueAtTime(500, this.now());
+    bp.frequency.exponentialRampToValueAtTime(2400, this.now() + 0.12);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, this.now());
+    g.gain.linearRampToValueAtTime(0.16, this.now() + 0.025);
+    g.gain.exponentialRampToValueAtTime(0.0001, this.now() + 0.18);
+    n.connect(bp); bp.connect(g); g.connect(p);
+    n.start(); n.stop(this.now() + 0.2);
+  }
+
+  /** Punch connect: soft body thud + knuckle crack layer. */
+  meleeHit(x: number, y: number, z: number): void {
+    this.play('impact/soft_a', { x, y, z, vol: 0.85, rate: 0.92, refDist: 4 });
+    this.play('impact/metal_a', { x, y, z, vol: 0.22, rate: 1.7, refDist: 4 });
+  }
+
+  dashFx(x: number, y: number, z: number): void {
+    this.whoosh(x, y, z, 1.9);
   }
 
   splashFx(x: number, y: number, z: number, heavy: boolean): void {
@@ -343,13 +479,24 @@ export class AudioEngine {
   }
 
   chestOpen(x: number, y: number, z: number, tier = 0): void {
-    this.play('mech/door_open', { x, y, z, vol: 0.7, rate: tier === 2 ? 0.82 : tier === 1 ? 0.95 : 1.08 });
-    window.setTimeout(() => {
-      this.play('chest/open_a', { x, y, z, vol: 0.95, rate: tier === 2 ? 0.88 : 1 });
-      this.play('impact/metal_b', { x, y, z, vol: 0.4, rate: 1.3 });
-    }, 260);
+    // Mechanical lid, then a layered crystalline "shaan" reveal.
+    // Bell + glass shimmer — deliberately non-electronic (treasure discovery).
+    const bellRate = tier === 2 ? 1.42 : tier === 1 ? 1.62 : 1.86;
+    this.play('mech/door_open', { x, y, z, vol: 0.6, rate: tier === 2 ? 0.82 : tier === 1 ? 0.95 : 1.08 });
+    this.scheduleMatchEffect(() => {
+      this.play('chest/open_a', { x, y, z, vol: 0.9, rate: tier === 2 ? 0.88 : 1 });
+      this.play('impact/metal_b', { x, y, z, vol: 0.32, rate: 1.3 });
+    }, 240);
+    this.scheduleMatchEffect(() => {
+      this.play('chest/bell', { x, y, z, vol: tier === 2 ? 0.5 : tier === 1 ? 0.4 : 0.3, rate: bellRate });
+      this.play('chest/bell', { x, y, z, vol: tier === 2 ? 0.34 : 0.24, rate: bellRate * 1.26 });
+      this.play('impact/glass_a', { x, y, z, vol: tier === 2 ? 0.42 : 0.3, rate: tier === 2 ? 1.7 : 1.95 });
+    }, 320);
     if (tier >= 1) {
-      window.setTimeout(() => this.play('shield/break', { x, y, z, vol: 0.35, rate: tier === 2 ? 0.9 : 1.1 }), 480);
+      this.scheduleMatchEffect(() => {
+        this.play('chest/bell', { x, y, z, vol: 0.28, rate: bellRate * 1.5 });
+        this.play('impact/glass_b', { x, y, z, vol: 0.22, rate: 1.6 });
+      }, 520);
     }
   }
 
@@ -367,7 +514,7 @@ export class AudioEngine {
   }
 
   reloadClick(emptyMag: boolean): void {
-    this.play(emptyMag ? 'ui/error' : 'impact/metal_a', { bus: 'sfx', vol: emptyMag ? 0.4 : 0.3, rate: emptyMag ? 1.4 : 1.7 });
+    this.play(emptyMag ? 'impact/metal_b' : 'impact/metal_a', { bus: 'sfx', vol: emptyMag ? 0.38 : 0.3, rate: emptyMag ? 1.15 : 1.7 });
   }
 
   shieldHit(x: number, y: number, z: number): void {
@@ -380,7 +527,7 @@ export class AudioEngine {
   }
 
   headshotTick(): void {
-    this.play('ui/switch2', { bus: 'ui', vol: 0.5, rate: 1.6 });
+    this.play('ui/headshot', { bus: 'ui', vol: 0.5, rate: 1.6 });
   }
 
   explosionFx(x: number, y: number, z: number): void {
@@ -394,7 +541,7 @@ export class AudioEngine {
   }
 
   stormWarningSting(): void {
-    this.play('ui/switch12', { bus: 'ui', vol: 0.7, rate: 0.8 });
+    this.play('ui/storm', { bus: 'ui', vol: 0.7, rate: 0.8 });
     this.play('boom/sub', { vol: 0.35, bus: 'ui', rate: 0.7 });
   }
 
@@ -417,6 +564,7 @@ export class AudioEngine {
 
   startAmbience(preset: string, indoor: boolean): void {
     this.init();
+    const generation = ++this.ambienceGeneration;
     const wanted: string[] =
       preset === 'night' || preset === 'bluehour'
         ? ['city_loop']
@@ -435,6 +583,7 @@ export class AudioEngine {
       if (!raw) {
         // decode lazily then retry once
         fetchAudio(file).then((ab) => this.ctx!.decodeAudioData(ab)).then((buf) => {
+          if (generation !== this.ambienceGeneration) return;
           this.buffers.set(`bed/${key}`, buf);
           this.startAmbience(preset, indoor);
         }).catch(() => undefined);
@@ -468,6 +617,7 @@ export class AudioEngine {
   }
 
   stopAmbience(): void {
+    this.ambienceGeneration++;
     for (const [, bed] of this.beds) {
       bed.gain.gain.setTargetAtTime(0, this.now(), 0.3);
       window.setTimeout(() => { try { bed.src.stop(); } catch { /* already */ } }, 900);
@@ -596,13 +746,22 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
   on('footstep', (e) => audio.footstep(e.x, e.y, e.z, e.running, e.surface));
   on('land', (e) => {
     const a = match.actors.find((x) => x.id === e.actorId);
-    if (a) audio.jumpLand(a.body.position.x, a.body.position.y, a.body.position.z, e.fallDamage > 0 || e.impactSpeed > 20);
+    if (a) audio.jumpLand(a.body.position.x, a.body.position.y, a.body.position.z, e.fallDamage > 0 || e.impactSpeed > 20, e.surface);
   });
-  on('jump', () => audio.whoosh(cameraCenter.x, 2, cameraCenter.z, 1.2));
-  on('slide', () => audio.whoosh(cameraCenter.x, 1, cameraCenter.z, 0.8));
-  on('dash', () => audio.dashFx());
+  on('jump', (e) => {
+    const a = match.actors.find((x) => x.id === e.actorId);
+    if (a) audio.whoosh(a.body.position.x, a.body.position.y, a.body.position.z, 1.2);
+  });
+  on('slide', (e) => {
+    const a = match.actors.find((x) => x.id === e.actorId);
+    if (a) audio.whoosh(a.body.position.x, a.body.position.y - 0.6, a.body.position.z, 0.8);
+  });
+  on('dash', (e) => {
+    const a = match.actors.find((x) => x.id === e.actorId);
+    if (a) audio.dashFx(a.body.position.x, a.body.position.y, a.body.position.z);
+  });
   on('grappleAttach', (e) => audio.grappleFire(e.x, e.y, e.z));
-  on('splash', (e) => audio.splashFx(cameraCenter.x, 0, cameraCenter.z, e.heavy));
+  on('splash', (e) => audio.splashFx(e.x, e.y, e.z, e.heavy));
   on('chestOpened', (e) => audio.chestOpen(e.x, e.y, e.z, e.tier ?? 0));
   on('itemPickedUp', (e) => audio.pickupUi(e.rare ?? false));
   on('healDone', () => audio.healComplete());
@@ -625,7 +784,10 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
   on('poundImpact', (e) => audio.poundImpact(e.x, e.y, e.z));
   on('stormWaiting', () => audio.stormWarningSting());
 
-  return () => offs.forEach((f) => f());
+  return () => {
+    offs.forEach((f) => f());
+    audio.cancelMatchEffects();
+  };
 }
 
 interface MatchLike {

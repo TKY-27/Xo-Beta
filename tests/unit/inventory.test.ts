@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Inventory, type WeaponInstance } from '../../src/sim/inventory';
+import { Inventory, MELEE_SLOT, type WeaponInstance } from '../../src/sim/inventory';
 import { WEAPONS } from '../../src/core/balance';
 
 function weapon(id: 'pistol' | 'smg' | 'ar' | 'shotgun' | 'sniper', rarity: WeaponInstance['rarity'] = 'common'): WeaponInstance {
@@ -87,24 +87,54 @@ describe('ammo & reload', () => {
 });
 
 describe('selection', () => {
-  it('selects valid slots only and cycles past empties', () => {
+  it('selects valid slots only and cycles through fists and occupied slots', () => {
     const inv = new Inventory();
     inv.add(weapon('ar'), 0);
     inv.add(weapon('pistol'), 4);
+    expect(inv.selected).toBe(MELEE_SLOT); // starts on fists
     expect(inv.select(1)).toBe(false);
+    expect(inv.selected).toBe(MELEE_SLOT);
+    inv.cycle(1); // fists → first occupied slot
     expect(inv.selected).toBe(0);
-    inv.cycle(1); // should land on slot 4 (next non-empty)
+    inv.cycle(1); // → slot 4 (next non-empty)
     expect(inv.selected).toBe(4);
-    inv.cycle(-1);
+    inv.cycle(-1); // back to slot 0
     expect(inv.selected).toBe(0);
+    inv.cycle(-1); // wraps to fists
+    expect(inv.selected).toBe(MELEE_SLOT);
   });
 
-  it('removing the selected slot falls back to another item', () => {
+  it('removing the selected slot falls back to fists', () => {
     const inv = new Inventory();
     inv.add(weapon('ar'));
     inv.add(weapon('pistol'));
     inv.select(0);
     inv.removeSlot(0);
-    expect(inv.selectedWeapon?.weaponId).toBe('pistol');
+    expect(inv.isMeleeSelected).toBe(true);
+    expect(inv.selectedWeapon).toBeNull();
+  });
+
+  it('never writes a hidden -1 slot when full while fists are selected', () => {
+    const inv = new Inventory();
+    for (const id of ['pistol', 'smg', 'ar', 'shotgun', 'sniper'] as const) inv.add(weapon(id));
+
+    const result = inv.add(weapon('ar', 'legendary'));
+    expect(result.ok).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(inv.slots, '-1')).toBe(false);
+    expect(inv.slots).toHaveLength(5);
+  });
+
+  it('judges full-inventory upgrades against the weakest weapon, not the held slot', () => {
+    const inv = new Inventory();
+    inv.add(weapon('pistol', 'legendary'));
+    inv.add(weapon('smg', 'common'));
+    inv.add(weapon('ar', 'rare'));
+    inv.add(weapon('shotgun', 'rare'));
+    inv.add(weapon('sniper', 'epic'));
+    inv.select(0);
+
+    expect(inv.wouldUpgradeWeapon(weapon('ar', 'uncommon'))).toBe(true);
+    expect(inv.wouldUpgradeWeapon(weapon('ar', 'common'))).toBe(false);
+    expect(inv.worstWeaponSlot()).toBe(1);
   });
 });

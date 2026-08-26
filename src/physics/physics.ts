@@ -33,6 +33,32 @@ export const GROUPS = {
   rayWorldOnly: grp(0xffff, CG.WORLD | CG.PROP),
 };
 
+/**
+ * Authoritative character-space contract.
+ *
+ * Rapier stores `CharBody.position.y` at the capsule centre, while authored
+ * world heights, character models and gameplay height constants are measured
+ * from the soles. Keep every conversion here so render, camera, movement and
+ * interaction systems cannot silently disagree about what a Y value means.
+ */
+/** Gap Rapier's character controller deliberately keeps around its capsule. */
+export const CHARACTER_CONTROLLER_OFFSET = 0.02;
+
+export const CAPSULE_CENTER_OFFSET =
+  MOVE.capsuleHalfHeight + MOVE.capsuleRadius + CHARACTER_CONTROLLER_OFFSET;
+
+export function feetYFromBodyCenter(bodyCenterY: number): number {
+  return bodyCenterY - CAPSULE_CENTER_OFFSET;
+}
+
+export function eyeYFromBodyCenter(bodyCenterY: number, crouched: boolean): number {
+  return feetYFromBodyCenter(bodyCenterY) + (crouched ? MOVE.crouchEyeHeight : MOVE.eyeHeight);
+}
+
+export function bodyYFromFeet(feetY: number): number {
+  return feetY + CAPSULE_CENTER_OFFSET;
+}
+
 export interface RayHit {
   point: { x: number; y: number; z: number };
   normal: { x: number; y: number; z: number };
@@ -68,6 +94,7 @@ export async function initPhysics(): Promise<void> {
 export class PhysicsWorld {
   readonly world: RAPIER.World;
   private meta = new WeakMap<RAPIER.Collider, ColliderMeta>();
+  private disposed = false;
 
   constructor(gravityY = -MOVE.gravity) {
     this.world = new RAPIER.World({ x: 0, y: gravityY, z: 0 });
@@ -110,7 +137,6 @@ export class PhysicsWorld {
       .setFriction(1.0)
       .setRestitution(0)
       .setCollisionGroups(GROUPS.worldStatic);
-    if (yaw !== 0) desc.setRotation(quatFromYaw(yaw));
     const collider = this.world.createCollider(desc, body);
     this.setMeta(collider, { kind: 'world', material });
     return collider;
@@ -224,6 +250,12 @@ export class PhysicsWorld {
     this.world.timestep = dt;
     this.world.step();
   }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.world.free();
+  }
 }
 
 export function quatFromYaw(yaw: number): { x: number; y: number; z: number; w: number } {
@@ -288,7 +320,7 @@ export class CharBody {
       phys['setMeta'](col, { kind: 'actor', actorId, region: ro.region });
     }
 
-    this.controller = phys.world.createCharacterController(0.02);
+    this.controller = phys.world.createCharacterController(CHARACTER_CONTROLLER_OFFSET);
     this.controller.setUp({ x: 0, y: 1, z: 0 });
     this.controller.enableAutostep(MOVE.stepHeight, 0.18, false);
     this.controller.enableSnapToGround(0.4);

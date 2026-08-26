@@ -1,9 +1,7 @@
 # Xo Beta — UI Design Charter
 
-Internal reference for all front-end work. Derived from study of current
-Fortnite / Apex Legends / Call of Duty interface conventions, premium game UI
-(Japanese action-RPG menu design), and contemporary criticism of generic
-AI-generated interfaces ("AI slop").
+Contributor reference for front-end work. It defines the project's visual
+identity, accessibility constraints and interaction conventions.
 
 Xo Beta does not copy any commercial UI pixel-for-pixel. It extracts
 principles and expresses them in its own identity: a near-future competitive
@@ -12,7 +10,7 @@ stone/amber, EDEN FACILITY green/aqua/white).
 
 ---
 
-## ANTI_AI_SLOP checklist (apply to every screen)
+## Visual quality checklist (apply to every screen)
 
 A screen fails review if any of these are true without a specific, stated
 design reason:

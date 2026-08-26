@@ -1,41 +1,31 @@
-# ADR-0003: Fully procedural asset pipeline
+# ADR-0003: Original and redistributed asset pipeline
 
-**Status:** Accepted · **Date:** 2026-08
+**Status:** Accepted (supersedes the original fully procedural decision) · **Date:** 2026-08
 
 ## Decision
 
-Every asset — geometry, textures, characters, weapons, sound, music — is
-generated procedurally at runtime by code in this repository. No downloaded or
-authored binary assets ship with the project.
+Keep simulation, VFX, water, storm, UI and character costume assembly original
+and code-generated. Redistribute selected third-party presentation assets only
+when their source, license, local path and checksum are documented in
+`docs/ASSET_MANIFEST.md`, `docs/ASSET_CHECKSUMS.txt` and
+`THIRD_PARTY_NOTICES.md`.
 
 ## Rationale
 
-- **Licensing cleanliness:** an MIT OSS release with zero third-party asset
-  provenance risk. Nothing to audit, nothing to misattribute.
-- **Download size:** no multi-hundred-MB art pipeline; the whole game ships as
-  JS + WASM (~1 MB compressed engine code + rapier).
-- **Originality:** Xo Beta has its own visual identity by construction.
-- **Iteration speed:** balance/layout changes are code changes, reviewable in PRs.
+- **Provenance:** every redistributed file has an independently reviewable
+  source and checksum; files with ambiguous rights are excluded.
+- **Scope:** only runtime-referenced production subsets ship, limiting download
+  size and avoiding unused pack contents.
+- **Originality:** gameplay and the defining presentation systems remain
+  project-owned code.
+- **Redistribution:** third-party assets retain their own CC0, Public Domain or
+  SIL OFL terms instead of being represented as MIT-licensed project code.
 
 ## Consequences
 
-- Visual fidelity ceiling is bounded by what procedural generation expresses;
-  we invest in lighting, materials and composition rather than sculpted meshes.
-- Audio is synthesized (WebAudio oscillators/noise + envelopes); weapon sounds
-  are tuned per class, spatialized with HRTF panners.
-- If hand-authored assets are ever introduced they MUST enter through
-  `docs/ASSET_MANIFEST.md` with license provenance, and must be compatible
-  with the MIT release (CC0/public-domain preferred).
-
----
-
-## Update (final presentation pass)
-
-ADR-0003 was partially superseded by the AAA finalization phase: the
-simulation remains fully code-generated, but presentation now ships
-redistributed CC0 (public-domain) asset packs for textures,
-HDRIs, character rigs/animations, weapon/vehicle models and sound effects.
-Provenance is fully tracked in `docs/ASSET_MANIFEST.md` +
-`docs/ASSET_CHECKSUMS.txt`; notices live in
-`THIRD_PARTY_NOTICES.md`. The MIT license of the repository applies to all
-original code; third-party assets keep their own licenses.
+- Asset additions must update the manifest, checksum inventory and notices.
+- `npm run audit:assets` fails when the production asset set and checksum
+  inventory diverge.
+- Runtime CDN loading remains prohibited; the build is self-contained.
+- The repository MIT license applies to original code and assets only;
+  redistributed files keep their documented licenses.

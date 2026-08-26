@@ -59,7 +59,7 @@ export class Perception {
     this.visionTimer = 0.12;
 
     const p = this.self.body.position;
-    const eyeY = p.y + 2.05;
+    const eyeY = this.self.eyeY;
     const fwdX = -Math.sin(this.self.yaw);
     const fwdZ = -Math.cos(this.self.yaw);
     const cosFov = Math.cos(VISION_FOV / 2);
@@ -81,7 +81,7 @@ export class Perception {
       }
 
       // Line of sight (chest height)
-      if (losBlocked(p.x, eyeY, p.z, op.x, op.y + 1.3, op.z)) continue;
+      if (losBlocked(p.x, eyeY, p.z, op.x, other.eyeY - 0.25, op.z)) continue;
 
       // Exposure: moving/crouching affects effective detection range
       const speed = Math.hypot(other.body.velocity.x, other.body.velocity.z);

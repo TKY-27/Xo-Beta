@@ -5,7 +5,7 @@
 
 import type { BotPersonality, HitRegion } from '../core/balance';
 import { HEALTH_MAX, SHIELD_MAX } from '../core/balance';
-import type { CharBody } from '../physics/physics';
+import { eyeYFromBodyCenter, type CharBody } from '../physics/physics';
 import { Inventory } from './inventory';
 
 export type MoveState =
@@ -26,6 +26,8 @@ export interface WeaponRuntime {
   adsAmount: number;
   swapTimer: number;
   lastShotTime: number;
+  /** Live cone half-angle (radians) the next shot disperses within. */
+  currentSpread: number;
 }
 
 export interface HealRuntime {
@@ -43,10 +45,9 @@ export interface ActorStats {
   survivalTime: number;
 }
 
-let nextActorId = 1;
-
 export class Actor {
-  readonly id = nextActorId++;
+  /** Match-local identity shared with every collider on this body. */
+  readonly id: number;
   readonly name: string;
   readonly isPlayer: boolean;
   personality: BotPersonality | null;
@@ -76,6 +77,7 @@ export class Actor {
     adsAmount: 0,
     swapTimer: 0,
     lastShotTime: -99,
+    currentSpread: 0,
   };
   healing: HealRuntime | null = null;
 
@@ -105,7 +107,24 @@ export class Actor {
   coyote = 0;
   jumpBuffered = 0;
   bhopWindow = 0;
+  /** Anti-exploit: blocks wallrun re-entry for a short time after leaving a wall. */
+  wallrunCooldown = 0;
+  /** True once the actor has touched the ground since its last wall jump. */
+  wallrunLanded = true;
+  /** Consecutive wall runs since last grounded contact (anti-elevator cap). */
+  wallrunChains = 0;
+  lastWallNx = 0;
+  lastWallNz = 0;
   peakFallSpeed = 0;
+  /** Debug/QA invariant: seconds spent in a ground-locomotion state while the
+   * physics body reports airborne. Sustained nonzero values indicate an
+   * impossible "floating bot" state. */
+  airborneGroundTime = 0;
+  /** Melee presentation timer: counts down from MELEE_PUNCH_TIME while a
+   * punch is animating. */
+  punchTimer = 0;
+  /** Render-side interaction animation timer (chest open / loot pickup). */
+  interactTimer = 0;
   poundTimer = 0;
   footstepAccum = 0;
   inWater = false;
@@ -125,6 +144,10 @@ export class Actor {
   };
 
   constructor(name: string, isPlayer: boolean, body: CharBody, accentColor: number, personality: BotPersonality | null = null) {
+    // Collider metadata is authoritative for projectile hit resolution. A
+    // module-global actor counter used to diverge from the 1..10 collider IDs
+    // on the second headless match in one process, making every bullet miss.
+    this.id = body.actorId;
     this.name = name;
     this.isPlayer = isPlayer;
     this.body = body;
@@ -133,7 +156,7 @@ export class Actor {
   }
 
   get eyeY(): number {
-    return this.body.position.y + (this.crouched ? 1.35 : 2.05);
+    return eyeYFromBodyCenter(this.body.position.y, this.crouched);
   }
 
   get position(): { x: number; y: number; z: number } {

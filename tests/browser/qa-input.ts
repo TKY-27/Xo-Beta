@@ -6,8 +6,6 @@
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
-interface PlayerState { x: number; z: number; grounded?: boolean }
-
 async function main(): Promise<void> {
   const t0 = Date.now();
   const log = (...a: unknown[]) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s]`, ...a);

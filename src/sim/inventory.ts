@@ -34,12 +34,25 @@ export function emptyAmmoPools(): AmmoPools {
 
 export const INVENTORY_SLOTS = 5;
 
+/**
+ * Fists are a permanent pseudo-slot rendered left of the five inventory
+ * slots in the HUD. It does NOT consume an inventory slot; `selected = MELEE_SLOT`
+ * means the actor is unarmed (melee only).
+ */
+export const MELEE_SLOT = -1;
+
 export class Inventory {
   slots: Array<InventoryItem | null> = [null, null, null, null, null];
-  selected = 0;
+  /** -1 = fists (permanent melee pseudo-slot), 0..4 = inventory slots. */
+  selected = MELEE_SLOT;
   ammo: AmmoPools = emptyAmmoPools();
 
+  get isMeleeSelected(): boolean {
+    return this.selected === MELEE_SLOT;
+  }
+
   get selectedItem(): InventoryItem | null {
+    if (this.selected === MELEE_SLOT) return null;
     return this.slots[this.selected] ?? null;
   }
 
@@ -76,18 +89,29 @@ export class Inventory {
         return { ok: true, slot: i };
       }
     }
-    // Full: swap with selected slot
-    const sel = this.selected;
-    const displaced = this.slots[sel]!;
-    this.slots[sel] = item;
-    return { ok: true, displaced, slot: sel };
+    // Full: swap only with an actual inventory slot. Fists are index -1 and
+    // must never become a hidden array property (which caused endless bot
+    // pick/drop churn). A caller may provide an explicit bot upgrade slot.
+    const swapSlot = preferSlot ?? this.selected;
+    if (swapSlot < 0 || swapSlot >= INVENTORY_SLOTS) return { ok: false };
+    const displaced = this.slots[swapSlot]!;
+    this.slots[swapSlot] = item;
+    return { ok: true, displaced, slot: swapSlot };
   }
 
   removeSlot(slot: number): InventoryItem | null {
     const it = this.slots[slot];
     this.slots[slot] = null;
-    if (this.selected === slot) this.selectFirstAvailable();
+    if (this.selected === slot) {
+      // Prefer fists over force-cycling: unarmed is always valid.
+      this.selected = MELEE_SLOT;
+    }
     return it ?? null;
+  }
+
+  /** Switch to the permanent fists pseudo-slot. */
+  selectMelee(): void {
+    this.selected = MELEE_SLOT;
   }
 
   select(slot: number): boolean {
@@ -98,18 +122,25 @@ export class Inventory {
   }
 
   cycle(dir: number): void {
-    for (let step = 1; step <= INVENTORY_SLOTS; step++) {
-      const idx = (this.selected + dir * step + INVENTORY_SLOTS * 4) % INVENTORY_SLOTS;
-      if (this.slots[idx] !== null) {
-        this.selected = idx;
-        return;
-      }
+    // Ordered selection ring: fists (lowest) → occupied slots ascending.
+    const order: number[] = [MELEE_SLOT];
+    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      if (this.slots[i] !== null) order.push(i);
     }
+    if (order.length === 1) {
+      this.selected = MELEE_SLOT;
+      return;
+    }
+    let pos = order.indexOf(this.selected);
+    if (pos === -1) pos = dir > 0 ? -1 : 1;
+    this.selected = order[(pos + dir + order.length) % order.length]!;
   }
 
   selectFirstAvailable(): void {
+    if (this.isMeleeSelected) return;
     if (this.slots[this.selected] !== null) return;
-    this.cycle(1);
+    // Nothing held → fists.
+    this.selected = MELEE_SLOT;
   }
 
   addAmmo(type: AmmoType, amount: number, reserveMax: number): number {
@@ -160,10 +191,27 @@ export class Inventory {
   /** Would storing this weapon be an upgrade over what we'd displace? */
   wouldUpgradeWeapon(w: WeaponInstance): boolean {
     if (this.slots.some((s) => s === null)) return true;
-    const sel = this.selectedWeapon;
-    if (!sel) return true;
     const rank = (r: Rarity): number => RARITIES.indexOf(r);
-    return rank(w.rarity) > rank(sel.rarity);
+    const slot = this.worstWeaponSlot();
+    if (slot === null) return true; // full of heals: first weapon is useful
+    const current = this.slots[slot] as WeaponInstance;
+    return rank(w.rarity) > rank(current.rarity);
+  }
+
+  /** Lowest-rarity weapon slot, with stable slot order for ties. */
+  worstWeaponSlot(): number | null {
+    let best: number | null = null;
+    let bestRank = Infinity;
+    for (let i = 0; i < INVENTORY_SLOTS; i++) {
+      const item = this.slots[i];
+      if (item?.kind !== 'weapon') continue;
+      const rank = RARITIES.indexOf(item.rarity);
+      if (rank < bestRank) {
+        best = i;
+        bestRank = rank;
+      }
+    }
+    return best;
   }
 
   totalWeaponCount(): number {

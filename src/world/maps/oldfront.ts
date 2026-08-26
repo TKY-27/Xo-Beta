@@ -7,7 +7,7 @@
 import { WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, scatterRocks, scatterTrees } from './common';
+import { addBuilding, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
@@ -17,6 +17,10 @@ function terrainH(x: number, z: number): number {
   // South forest dip (shallow, no structures there)
   const forestD = Math.hypot(x - 100, z - 195);
   if (forestD < 60) h -= (1 - forestD / 60) * 0.8;
+  // The quarry is a real terrain depression, not a solid box disguised as a
+  // pit. This lets render terrain, physics, stairs and props share one surface.
+  const quarryD = Math.hypot(x + 90, z + 40);
+  if (quarryD < 30) h -= (1 - quarryD / 30) * 4.6;
   return h;
 }
 
@@ -24,7 +28,8 @@ export function buildOldFront(): MapDef {
   const rng = new Rng(0x01f7 + 3);
   const b = new WorldBuilder('oldfront', 'OLD FRONT', 'A worn frontier town under an overcast sky. Stone streets, a cathedral, and war remnants.', S);
 
-  b.box(0, -1, 0, S + 200, 2, S + 200, 'grass', 0, { noCollide: true });
+  // Ground surface is rendered by src/render/vista.ts (terrain mesh matching
+  // this map's heightfield + beyond-bounds landscape).
 
   // Heightfield terrain (visual + collider)
   buildHeightfield(b);
@@ -92,7 +97,7 @@ export function buildOldFront(): MapDef {
   watchtower(b, -184, 80);
   b.vehicle(-164, 58, terrainH(-164, 58) + 0.2, 1.9, 'wrecked', 0x33302a);
   b.chest(-176, terrainH(-176, 54) + 0.3, 54, 'elite');
-  b.chest(-183, terrainH(-183, 82) + 8.2, 82, 'vault');
+  b.chest(-168, terrainH(-168, 70) + 0.3, 70, 'standard');
   crates(b, rng, -160, 66, 4);
 
   // ------------------------------------------------------------------
@@ -110,7 +115,7 @@ export function buildOldFront(): MapDef {
   // ------------------------------------------------------------------
   b.poi('Hill Tunnel', 205, -90, 35);
   tunnel(b, 205, -90);
-  b.chest(212, terrainH(212, -84) + 0.3, -84, 'elite');
+  b.chest(212, terrainH(212, -90) + 0.3, -90, 'elite');
   b.loot(198, terrainH(198, -96) + 0.4, -96);
 
   // ------------------------------------------------------------------
@@ -131,7 +136,7 @@ export function buildOldFront(): MapDef {
   b.poi('Broken Column', -220, -30, 18);
   ruinsSpot(b, -220, -30);
   b.poi('Crossroads', 30, 80, 22);
-  crossroads(b, 30, 80);
+  crossroads(b, rng, 30, 80);
 
   // Forest belt south + scattered oaks
   scatterTrees(b, rng, 90, { minX: -240, maxX: 240, minZ: 140, maxZ: 245 }, 'oak',
@@ -143,25 +148,27 @@ export function buildOldFront(): MapDef {
     [{ x: 20, z: -30, r: 70 }, { x: 110, z: 30, r: 60 }, { x: 150, z: 170, r: 50 }], terrainH);
 
   decorateOldFront(b, rng);
+  hedgerowsAndWalls(b, rng);
+  edgeHomesteads(b, rng);
 
   return b.finish(
     {
       preset: 'overcast',
       hdri: 'kloofendal_overcast_puresky_2k.hdr',
-      fogColor: 0x9aa5ae,
-      fogDensity: 0.0029,
+      fogColor: 0x8b949c,
+      fogDensity: 0.0016,
       sunDirection: [-0.55, -0.75, 0.35],
       sunColor: 0xe8ded0,
-      sunIntensity: 2.6,
+      sunIntensity: 2.2,
       ambientColor: 0xaeb9c6,
       ambientIntensity: 0.7,
       hemisphereSky: 0xc2cbd6,
       hemisphereGround: 0x6a685c,
-      hemisphereIntensity: 1.5,
-      exposure: 1.02,
-      envIntensity: 1.05,
+      hemisphereIntensity: 1.1,
+      exposure: 0.98,
+      envIntensity: 0.8,
       backgroundBlurriness: 0.12,
-      backgroundIntensity: 1.0,
+      backgroundIntensity: 0.6,
       grade: {
         vignette: 0.34,
         saturation: 0.94,
@@ -176,6 +183,93 @@ export function buildOldFront(): MapDef {
 // ---------------------------------------------------------------------------
 // Terrain heightfield
 // ---------------------------------------------------------------------------
+
+/**
+ * Old-European field boundaries: dry-stone walls + hedgerow copses dividing
+ * the meadow bands, plus haystacks. Fills the "empty field" reads and gives
+ * the outskirts the same authored attention as the town center.
+ */
+function hedgerowsAndWalls(b: WorldBuilder, rng: Rng): void {
+  const wallSeg = (x1: number, z1: number, x2: number, z2: number) => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const steps = Math.max(2, Math.round(len / 3.2));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x1 + (x2 - x1) * t;
+      const pz = z1 + (z2 - z1) * t;
+      if (rng.bool(0.12)) continue; // gaps as passages
+      b.box(px, terrainH(px, pz) + 0.45, pz, 3.4, 0.9, 0.7,
+        'stoneBrick', Math.atan2(z2 - z1, x2 - x1));
+    }
+  };
+  // Perimeter field walls just inside the boundary band
+  wallSeg(-238, -180, -120, -226);
+  wallSeg(60, -232, 200, -214);
+  wallSeg(-230, 90, -228, 210);
+  wallSeg(226, -40, 222, 130);
+  // Interior hedgerow lines between fields (SW + SE meadows)
+  const hedge = (x1: number, z1: number, x2: number, z2: number) => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const steps = Math.max(2, Math.round(len / 5));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x1 + (x2 - x1) * t;
+      const pz = z1 + (z2 - z1) * t;
+      b.tree({ x: px, z: pz, y: terrainH(px, pz), scale: rng.range(0.55, 0.85),
+        variant: rng.bool(0.75) ? 'oak' : 'dead' });
+      if (rng.bool(0.4)) {
+        b.box(px + rng.range(-1.5, 1.5), terrainH(px, pz) + 0.35, pz + rng.range(-1.5, 1.5),
+          2.6, 0.7, 0.6, rng.bool(0.5) ? 'dirt' : 'stoneBrick', rng.range(-0.3, 0.3));
+      }
+    }
+  };
+  hedge(-80, 160, -140, 220);
+  hedge(-190, 150, -150, 225);
+  hedge(30, 170, -40, 235);
+  hedge(210, 110, 160, 215);
+
+  // Haystacks in the open meadows
+  for (let i = 0; i < 14; i++) {
+    const hx = rng.range(-230, 230);
+    const hz = rng.range(-60, 130);
+    if (Math.hypot(hx - 20, hz + 10) < 70 || Math.hypot(hx - 110, hz - 30) < 70) continue;
+    const gy = terrainH(hx, hz);
+    b.sphere(hx, gy + 0.9, hz, rng.range(1.1, 1.5), 'sandbag', { noCollide: false });
+    if (rng.bool(0.25)) b.loot(hx + rng.range(-3, 3), gy + 0.4, hz + rng.range(-3, 3));
+  }
+}
+
+/**
+ * Edge homesteads: small ruined farms/camps near the map rim so every
+ * approach lane has cover, loot and a reason to exist.
+ */
+function edgeHomesteads(b: WorldBuilder, rng: Rng): void {
+  const spots: Array<[number, number]> = [
+    [-205, -60], [200, 195], [-60, -205], [95, -195], [-215, 175],
+  ];
+  let idx = 0;
+  for (const [sx, sz] of spots) {
+    idx++;
+    const gy = structureBaseY(terrainH, sx, sz, 9, 8);
+    // Broken cottage shell
+    addBuilding(b, {
+      x: sx, z: sz, baseY: gy, w: 9, d: 8, floors: 1, wallMat: idx % 2 ? 'stoneBrick' : 'plasterOld',
+      trimMat: 'woodDark', doors: [[idx % 2 ? 0 : 1, 3.5, 1.8]],
+      interiorDividers: false, windows: false, parapet: false,
+    });
+    // Collapsed barn hint: leaning beams + rubble
+    for (let i = 0; i < 3; i++) {
+      const bx = sx + rng.range(-8, 8);
+      const bz = sz + rng.range(-8, 8);
+      b.box(bx, terrainH(bx, bz) + 0.35, bz, 0.4, 2.4, 0.4, 'woodDark', rng.range(0, Math.PI));
+    }
+    b.crate(sx + rng.range(-5, 5), terrainH(sx, sz) + 0.2, sz + rng.range(-5, 5), 1);
+    b.chest(sx + rng.range(-4, 4), terrainH(sx + 2, sz + 4) + 0.3, sz + rng.range(-4, 4),
+      idx === 3 ? 'vault' : rng.bool(0.4) ? 'elite' : 'standard');
+    b.loot(sx + rng.range(-5, 5), gy + 0.4, sz + rng.range(-5, 5));
+    scatterRocks(b, rng, 4, { minX: sx - 14, maxX: sx + 14, minZ: sz - 14, maxZ: sz + 14 }, [], terrainH);
+  }
+}
 
 function buildHeightfield(b: WorldBuilder): void {
   const n = 64;
@@ -195,19 +289,21 @@ function buildHeightfield(b: WorldBuilder): void {
 // ---------------------------------------------------------------------------
 
 function cathedral(b: WorldBuilder, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
+  const gy = structureBaseY(terrainH, cx, cz, 20, 42);
   // Nave
   addBuilding(b, {
-    x: cx, z: cz, w: 20, d: 42, floors: 1, floorHeight: 9, wallMat: 'stoneBrick', trimMat: 'marble',
+    x: cx, z: cz, baseY: gy, w: 20, d: 42, floors: 1, floorHeight: 9, wallMat: 'stoneBrick', trimMat: 'marble',
     doors: [[0, 8, 3], [0, 12, 3], [2, 9, 3]], interiorDividers: false, parapet: false,
   });
   // Bell tower
+  const towerBaseY = structureBaseY(terrainH, cx, cz - 27, 10, 10);
   addBuilding(b, {
-    x: cx, z: cz - 27, w: 10, d: 10, floors: 3, floorHeight: 4.6, wallMat: 'stoneBrick', trimMat: 'marble',
+    x: cx, z: cz - 27, baseY: towerBaseY, w: 10, d: 10, floors: 3, floorHeight: 4.6, wallMat: 'stoneBrick', trimMat: 'marble',
     doors: [[0, 3.5, 2]], roofAccess: true, interiorDividers: false,
   });
-  b.cyl(cx, gy + 17.5, cz - 27, 3.4, 3, 'roofTile');
-  b.sphere(cx, gy + 19.6, cz - 27, 1.6, 'gold');
+  const towerRoofY = towerBaseY + 3 * 4.6 + 0.2;
+  b.cyl(cx, towerRoofY + 1.5, cz - 27, 3.4, 3, 'roofTile');
+  b.sphere(cx, towerRoofY + 4.4, cz - 27, 1.6, 'gold');
   // Buttresses
   for (let i = -1; i <= 1; i += 2) {
     for (let j = 0; j < 3; j++) {
@@ -237,18 +333,30 @@ function fountain(b: WorldBuilder, cx: number, cz: number): void {
 function townHouse(b: WorldBuilder, cx: number, cz: number, doorSide: 0 | 1 | 2 | 3): void {
   const mats: Array<'plaster' | 'plasterOld' | 'stoneBrick' | 'woodDark'> = ['plaster', 'plasterOld', 'stoneBrick', 'woodDark'];
   const mat = mats[Math.abs((cx * 7 + cz * 13) >> 2) % 4]!;
+  const gy = structureBaseY(terrainH, cx, cz, 13, 15);
   addBuilding(b, {
-    x: cx, z: cz, w: 13, d: 15, floors: 2, wallMat: mat, trimMat: 'woodDark', roofMat: 'roofTile',
+    x: cx, z: cz, baseY: gy, w: 13, d: 15, floors: 2, wallMat: mat, trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[doorSide, 5, 1.9]],
   });
-  const gy = terrainH(cx, cz);
   b.loot(cx + 3, gy + 0.4, cz + 3);
+  // Chest tucked against the door wall of some homes — never mid-street.
+  const r = new Rng(hash2(cx, cz));
+  if (r.bool(0.45)) {
+    const offX = doorSide === 1 ? 8.8 : doorSide === 3 ? -8.8 : r.range(-4, 4);
+    const offZ = doorSide === 0 ? 8.8 : doorSide === 2 ? -8.8 : r.range(-4, 4);
+    b.chest(cx + offX, terrainH(cx + offX, cz + offZ) + 0.3, cz + offZ,
+      r.bool(0.25) ? 'elite' : 'standard');
+  }
+}
+
+function hash2(x: number, z: number): number {
+  return ((x * 73856093) ^ (z * 19349663)) >>> 0;
 }
 
 function shopHouse(b: WorldBuilder, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
+  const gy = structureBaseY(terrainH, cx, cz, 16, 14);
   addBuilding(b, {
-    x: cx, z: cz, w: 16, d: 14, floors: 1, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
+    x: cx, z: cz, baseY: gy, w: 16, d: 14, floors: 1, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[0, 4, 2.6], [0, 11, 2.6]], interiorDividers: false,
   });
   // Awning
@@ -260,13 +368,14 @@ function shopHouse(b: WorldBuilder, cx: number, cz: number): void {
 function keepRuins(b: WorldBuilder, cx: number, cz: number): void {
   const gy = terrainH(cx, cz);
   // Broken curtain walls
-  b.wallWithGaps(cx - 26, cz - 26, 52, 6, 1.6, 'x', 'stoneBrick', [[20, 6], [38, 8]]);
-  b.wallWithGaps(cx - 26, cz + 26, 52, 5, 1.6, 'x', 'stoneBrick', [[6, 7], [30, 9]]);
-  b.wallWithGaps(cx - 26, cz - 26, 52, 6, 1.6, 'z', 'stoneBrick', [[8, 5], [36, 10]]);
-  b.wallWithGaps(cx + 26, cz - 26, 52, 4.5, 1.6, 'z', 'stoneBrick', [[14, 8]]);
+  b.wallWithGaps(cx - 26, cz - 26, 52, 6, 1.6, 'x', 'stoneBrick', [[20, 6], [38, 8]], 0, gy);
+  b.wallWithGaps(cx - 26, cz + 26, 52, 5, 1.6, 'x', 'stoneBrick', [[6, 7], [30, 9]], 0, gy);
+  b.wallWithGaps(cx - 26, cz - 26, 52, 6, 1.6, 'z', 'stoneBrick', [[8, 5], [36, 10]], 0, gy);
+  b.wallWithGaps(cx + 26, cz - 26, 52, 4.5, 1.6, 'z', 'stoneBrick', [[14, 8]], 0, gy);
   // Central donjon — broken tower with climbable interior stairs
+  const donjonY = structureBaseY(terrainH, cx, cz, 14, 14);
   addBuilding(b, {
-    x: cx, z: cz, w: 14, d: 14, floors: 2, floorHeight: 4.4, wallMat: 'stoneBrick', trimMat: 'stoneBrick',
+    x: cx, z: cz, baseY: donjonY, w: 14, d: 14, floors: 2, floorHeight: 4.4, wallMat: 'stoneBrick', trimMat: 'stoneBrick',
     doors: [[0, 5.5, 2.2]], roofAccess: true, interiorDividers: false,
   });
   // Rubble
@@ -281,9 +390,9 @@ function keepRuins(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function barn(b: WorldBuilder, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
+  const gy = structureBaseY(terrainH, cx, cz, 18, 24);
   addBuilding(b, {
-    x: cx, z: cz, w: 18, d: 24, floors: 1, floorHeight: 6.5, wallMat: 'woodDark', trimMat: 'wood',
+    x: cx, z: cz, baseY: gy, w: 18, d: 24, floors: 1, floorHeight: 6.5, wallMat: 'woodDark', trimMat: 'wood',
     doors: [[0, 7, 3.4], [2, 7, 3.4]], interiorDividers: false, parapet: false,
   });
   for (let i = 0; i < 5; i++) b.crate(cx - 5 + (i % 3) * 5, gy + 0.2, cz - 6 + Math.floor(i / 3) * 4, 1.2);
@@ -291,11 +400,11 @@ function barn(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function farmhouse(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = structureBaseY(terrainH, cx, cz, 14, 12);
   addBuilding(b, {
-    x: cx, z: cz, w: 14, d: 12, floors: 2, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
+    x: cx, z: cz, baseY: gy, w: 14, d: 12, floors: 2, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[0, 6, 2]],
   });
-  const gy = terrainH(cx, cz);
   b.loot(cx - 3, gy + 0.4, cz + 2);
 }
 
@@ -330,12 +439,12 @@ function hayCarts(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
 
 function bunker(b: WorldBuilder, cx: number, cz: number): void {
   const gy = terrainH(cx, cz);
-  b.box(cx, gy + 1.5, cz, 10, 3, 8, 'concrete');
-  b.platform(cx - 5, cx + 5, cz - 4, cz + 4, gy + 3);
-  b.wallWithGaps(cx - 5, cz - 4, 10, 3, 0.5, 'x', 'concrete', [[3.5, 2.4]]);
-  b.wallWithGaps(cx - 5, cz + 4, 10, 3, 0.5, 'x', 'concrete', []);
-  b.wallWithGaps(cx - 5, cz - 4, 8, 3, 0.5, 'z', 'concrete', []);
-  b.wallWithGaps(cx + 5, cz - 4, 8, 3, 0.5, 'z', 'concrete', []);
+  b.slab(cx, gy + 0.08, cz, 10, 8, 0.5, 'concreteDark');
+  b.slab(cx, gy + 3.2, cz, 10.8, 8.8, 0.5, 'concrete');
+  b.wallWithGaps(cx - 5, cz - 4, 10, 3, 0.5, 'x', 'concrete', [[3.5, 2.4]], 0, gy);
+  b.wallWithGaps(cx - 5, cz + 4, 10, 3, 0.5, 'x', 'concrete', [], 0, gy);
+  b.wallWithGaps(cx - 5, cz - 4, 8, 3, 0.5, 'z', 'concrete', [], 0, gy);
+  b.wallWithGaps(cx + 5, cz - 4, 8, 3, 0.5, 'z', 'concrete', [], 0, gy);
   b.loot(cx, gy + 0.4, cz + 1);
 }
 
@@ -368,9 +477,9 @@ function logCabins(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
   for (let i = 0; i < 2; i++) {
     const lx = cx + i * 22;
     const lz = cz + (i % 2) * 14;
-    const gy = terrainH(lx, lz);
+    const gy = structureBaseY(terrainH, lx, lz, 10, 9);
     addBuilding(b, {
-      x: lx, z: lz, w: 10, d: 9, floors: 1, wallMat: 'woodDark', trimMat: 'wood',
+      x: lx, z: lz, baseY: gy, w: 10, d: 9, floors: 1, wallMat: 'woodDark', trimMat: 'wood',
       doors: [[0, 4, 1.8]], interiorDividers: false, windows: false,
     });
     b.loot(lx + 2, gy + 0.4, lz + 2);
@@ -397,13 +506,14 @@ function campfire(b: WorldBuilder, cx: number, cz: number): void {
 
 function tunnel(b: WorldBuilder, cx: number, cz: number): void {
   const gy = terrainH(cx, cz);
-  // Hill mass above tunnel
-  b.box(cx, gy + 9, cz, 46, 18, 30, 'rock');
-  // Bore
-  b.box(cx, gy + 2.2, cz, 40, 4.4, 7, 'stoneBrick', 0, { noCollide: true }); // visual arch hint
+  // Split the hill into two shoulders and a cap. A single solid hill box made
+  // the apparent bore physically impassable and swallowed its loot.
+  b.box(cx, gy + 9, cz - 9.25, 46, 18, 11.5, 'rock');
+  b.box(cx, gy + 9, cz + 9.25, 46, 18, 11.5, 'rock');
+  b.box(cx, gy + 11.3, cz, 46, 13.4, 7, 'rock');
   // Tunnel walls: two side walls + roof slab, open ends
-  b.wallWithGaps(cx - 20, cz - 3.5, 40, 4.4, 1, 'x', 'stoneBrick');
-  b.wallWithGaps(cx - 20, cz + 3.5, 40, 4.4, 1, 'x', 'stoneBrick');
+  b.wallWithGaps(cx - 20, cz - 3.5, 40, 4.4, 1, 'x', 'stoneBrick', [], 0, gy);
+  b.wallWithGaps(cx - 20, cz + 3.5, 40, 4.4, 1, 'x', 'stoneBrick', [], 0, gy);
   b.slab(cx, gy + 4.6, cz, 42, 9, 0.8, 'stoneBrick');
   b.light(cx - 8, gy + 3.6, cz, 0xffd9a0, 1.4, 16);
   b.light(cx + 8, gy + 3.6, cz, 0xffd9a0, 1.4, 16);
@@ -412,9 +522,9 @@ function tunnel(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function chapel(b: WorldBuilder, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
+  const gy = structureBaseY(terrainH, cx, cz, 10, 16);
   addBuilding(b, {
-    x: cx, z: cz, w: 10, d: 16, floors: 1, floorHeight: 5.5, wallMat: 'stoneBrick', trimMat: 'marble',
+    x: cx, z: cz, baseY: gy, w: 10, d: 16, floors: 1, floorHeight: 5.5, wallMat: 'stoneBrick', trimMat: 'marble',
     doors: [[0, 4, 1.8]], interiorDividers: false, parapet: false,
   });
   b.cyl(cx, gy + 7.5, cz - 6, 1.4, 3, 'roofTile');
@@ -434,17 +544,21 @@ function stoneBridge(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function quarry(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
-  // Pit with terraced edges
-  b.box(cx, gy - 2.5, cz, 40, 5, 34, 'dirt');
-  b.platform(cx - 20, cx + 20, cz - 17, cz + 17, gy);
+  const bottomY = terrainH(cx, cz);
+  // Flat working floor inside the heightfield depression.
+  b.slab(cx, bottomY + 0.08, cz, 22, 16, 0.4, 'dirt');
   for (let i = 0; i < 10; i++) {
-    b.rock(cx + rng.range(-16, 16), cz + rng.range(-13, 13), gy - 4.6, rng.range(0.8, 2));
+    const rx = cx + rng.range(-16, 16);
+    const rz = cz + rng.range(-13, 13);
+    b.rock(rx, rz, terrainH(rx, rz), rng.range(0.8, 2));
   }
-  // ramp into pit
-  b.stairs(cx + 16, gy - 4.6, cz, 3, 8, 0.58, 0.7, 4, 'dirt');
-  b.chest(cx - 8, gy - 4.3, cz - 6, 'elite');
-  b.loot(cx + 6, gy - 4.2, cz + 8);
+  // Broad stair-ramp follows the east cut from the flat floor to the rim.
+  const rimX = cx + 22;
+  const rise = terrainH(rimX, cz) - (bottomY + 0.08);
+  const steps = Math.max(4, Math.ceil(rise / 0.45));
+  b.stairs(cx + 9, bottomY + 0.08, cz, 1, steps, rise / steps, 13 / steps, 4, 'dirt');
+  b.chest(cx - 6, bottomY + 0.08, cz - 4, 'elite');
+  b.loot(cx + 4, bottomY + 0.12, cz + 5);
 }
 
 function shrine(b: WorldBuilder, cx: number, cz: number): void {
@@ -456,9 +570,9 @@ function shrine(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function waterMill(b: WorldBuilder, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
+  const gy = structureBaseY(terrainH, cx, cz, 12, 12);
   addBuilding(b, {
-    x: cx, z: cz, w: 12, d: 12, floors: 2, wallMat: 'stoneBrick', trimMat: 'woodDark', roofMat: 'roofTile',
+    x: cx, z: cz, baseY: gy, w: 12, d: 12, floors: 2, wallMat: 'stoneBrick', trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[0, 5, 2]],
   });
   // Wheel
@@ -489,9 +603,18 @@ function ruinsSpot(b: WorldBuilder, cx: number, cz: number): void {
   b.chest(cx, gy + 0.3, cz, 'standard');
 }
 
-function crossroads(b: WorldBuilder, cx: number, cz: number): void {
+function crossroads(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
   const gy = terrainH(cx, cz);
+  // Main slab + irregular worn shoulders so the crossing blends into the grass.
   b.box(cx, gy + 0.06, cz, 30, 0.16, 30, 'dirt', 0, { floor: true });
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * Math.PI * 2 + rng.range(-0.2, 0.2);
+    const d = rng.range(15, 19);
+    b.box(
+      cx + Math.cos(a) * d, terrainH(cx + Math.cos(a) * d, cz + Math.sin(a) * d) - 0.12,
+      cz + Math.sin(a) * d, rng.range(6, 10), 0.3, rng.range(5, 8), 'dirt', rng.range(-0.4, 0.4), { noCollide: true },
+    );
+  }
   // signpost
   b.cyl(cx + 4, gy + 1.6, cz + 4, 0.14, 3.2, 'woodDark');
   b.box(cx + 4, gy + 2.9, cz + 4.4, 1.6, 0.3, 0.08, 'wood');
@@ -520,15 +643,27 @@ function well(b: WorldBuilder, cx: number, cz: number): void {
 // ---------------------------------------------------------------------------
 
 function decorateOldFront(b: WorldBuilder, rng: Rng): void {
-  // Worn dirt roads linking the main POIs (follow terrain, purely visual)
+  // Worn dirt roads linking the main POIs (follow terrain, purely visual).
+  // Segments overlap and sink into the ground so the ribbon reads as one worn
+  // road instead of discrete floating tiles.
   const road = (x1: number, z1: number, x2: number, z2: number) => {
     const len = Math.hypot(x2 - x1, z2 - z1);
-    const steps = Math.max(2, Math.round(len / 7));
+    const steps = Math.max(2, Math.round(len / 4.5));
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      const px = x1 + (x2 - x1) * t + Math.sin(t * 9.1) * 3.4;
-      const pz = z1 + (z2 - z1) * t + Math.cos(t * 7.3) * 3.0;
-      b.box(px, terrainH(px, pz) + 0.055, pz, 6.6, 0.09, 6.8, 'dirt', rng.range(-0.12, 0.12), { noCollide: true });
+      const px = x1 + (x2 - x1) * t + Math.sin(t * 9.1) * 2.6;
+      const pz = z1 + (z2 - z1) * t + Math.cos(t * 7.3) * 2.4;
+      // Width jitter + wider shoulder slabs sunk flush with the terrain so
+      // roads wear into the grass instead of reading as a hard-edged rug.
+      const w = rng.range(6.4, 8.4);
+      b.box(px, terrainH(px, pz) + 0.04 - 0.23, pz, w, 0.5, w * rng.range(1.0, 1.12), 'dirt', rng.range(-0.12, 0.12), { noCollide: true });
+      if (i % 3 === 0) {
+        const sw = w * rng.range(1.35, 1.6);
+        b.box(
+          px + rng.range(-1.2, 1.2), terrainH(px, pz) - 0.16, pz + rng.range(-1.2, 1.2),
+          sw, 0.42, sw * rng.range(0.9, 1.15), 'dirt', rng.range(-0.3, 0.3), { noCollide: true },
+        );
+      }
     }
   };
   road(20, -10, 110, 30);       // square → old town
@@ -562,15 +697,16 @@ function decorateOldFront(b: WorldBuilder, rng: Rng): void {
     b.box(x, y - 1.75, z, 1.25, 0.16, 0.09, 'gold', yaw, { noCollide: true });
     b.box(x, y + 1.62, z, 1.35, 0.12, 0.1, 'woodDark', yaw, { noCollide: true });
   };
-  bannerAt(20, terrainH(20, -33) + 6.2, -33.6, 0, bannerCols[0]!);
-  bannerAt(27, terrainH(28, -33) + 6.2, -33.6, 0, bannerCols[1]!);
-  bannerAt(100, terrainH(100, 39) + 4.6, 39.4, Math.PI, bannerCols[0]!);
-  bannerAt(116, terrainH(116, 39) + 4.6, 39.4, Math.PI, bannerCols[1]!);
-  bannerAt(-18, terrainH(-18, -21) + 4.4, -20.4, Math.PI, bannerCols[0]!);
-  bannerAt(58, terrainH(58, -21) + 4.4, -20.4, Math.PI, bannerCols[1]!);
+  bannerAt(20, terrainH(20, -33) + 3.5, -33.6, 0, bannerCols[0]!);
+  bannerAt(27, terrainH(28, -33) + 3.5, -33.6, 0, bannerCols[1]!);
+  bannerAt(100, terrainH(100, 39) + 3.5, 39.4, Math.PI, bannerCols[0]!);
+  bannerAt(116, terrainH(116, 39) + 3.5, 39.4, Math.PI, bannerCols[1]!);
+  bannerAt(-18, terrainH(-18, -21) + 3.5, -20.4, Math.PI, bannerCols[0]!);
+  bannerAt(58, terrainH(58, -21) + 3.5, -20.4, Math.PI, bannerCols[1]!);
 
-  // Warm evening windows on stone/plaster homes
-  const glowMats: MatKey[] = ['neonOrange', 'neonCyan'];
+  // Warm evening windows on stone/plaster homes (candlelight only — cyan
+  // glows read as anachronistic waterfalls on medieval facades)
+  const glowMats: MatKey[] = ['neonOrange', 'neonOrange'];
   for (const g of [...b.def.geo]) {
     if (g.kind !== 'box') continue;
     const m = g.mat;
@@ -628,4 +764,3 @@ function decorateOldFront(b: WorldBuilder, rng: Rng): void {
   };
   stall(100, 24, 0.2); stall(112, 26, 0.2); stall(106, 42, Math.PI / 2 + 0.15);
 }
-

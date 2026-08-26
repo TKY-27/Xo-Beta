@@ -21,6 +21,7 @@ export interface InputCommand {
   reloadPressed: boolean;
   interactPressed: boolean;
   slotRequest: number | null;
+  meleePressed: boolean;
   dropWeaponPressed: boolean;
   dashPressed: boolean;
   grapplePressed: boolean;
@@ -37,7 +38,7 @@ export function emptyCommand(): InputCommand {
     sprint: false, crouchHeld: false, crouchPressed: false,
     fireHeld: false, firePressed: false, adsHeld: false,
     reloadPressed: false, interactPressed: false,
-    slotRequest: null, dropWeaponPressed: false,
+    slotRequest: null, meleePressed: false, dropWeaponPressed: false,
     dashPressed: false, grapplePressed: false, grappleRelease: false,
     poundPressed: false, shieldPressed: false, medkitPressed: false,
   };

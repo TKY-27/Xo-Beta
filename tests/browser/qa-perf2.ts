@@ -106,7 +106,7 @@ async function main(): Promise<void> {
   const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
   await server.listen();
   // NOTE: do NOT pass --use-angle=metal/--enable-gpu — that flag path falls
-  // back to a crippled ANGLE backend (~100x slower fill, see probe-fill.ts).
+  // back to a severely constrained software/ANGLE backend.
   // Headed mode (HEADED=1) is the honest measurement: headless frame
   // scheduling throttles rAF without the metal-flag workaround.
   const headed = process.env.HEADED === '1';

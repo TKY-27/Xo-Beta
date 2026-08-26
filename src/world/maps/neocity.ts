@@ -22,19 +22,21 @@ export function buildNeoCity(): MapDef {
     const c = i * 100;
     b.box(c, 0.06, 0, 14, 0.12, S, 'concreteDark', 0, { noCollide: true });
     b.box(0, 0.06, c, S, 0.12, 14, 'concreteDark', 0, { noCollide: true });
-    // sidewalk slabs with expansion joints feel
-    b.box(c, 0.1, 0, 20, 0.2, S, 'sidewalk', 0, { floor: true });
-    b.box(0, 0.1, c, S, 0.2, 20, 'sidewalk', 0, { floor: true });
+    // sidewalk slabs FLANK the 14w road (20w each side, 7..27 from centerline)
+    b.box(c + 17, 0.1, 0, 20, 0.2, S, 'paving', 0, { floor: true });
+    b.box(c - 17, 0.1, 0, 20, 0.2, S, 'paving', 0, { floor: true });
+    b.box(0, 0.1, c + 17, S, 0.2, 20, 'paving', 0, { floor: true });
+    b.box(0, 0.1, c - 17, S, 0.2, 20, 'paving', 0, { floor: true });
     // road lane markings (dashed centerline both directions) — above road top (0.12)
     for (let d = -S / 2 + 6; d < S / 2 - 6; d += 9) {
-      b.box(c, 0.132, d, 0.35, 0.02, 3.4, 'sidewalk', 0, { noCollide: true });
-      b.box(d, 0.132, c, 3.4, 0.02, 0.35, 'sidewalk', 0, { noCollide: true });
+      b.box(c, 0.132, d, 0.35, 0.02, 3.4, 'paint', 0, { noCollide: true });
+      b.box(d, 0.132, c, 3.4, 0.02, 0.35, 'paint', 0, { noCollide: true });
     }
     // crosswalks near each intersection
     for (const s of [-1, 1]) {
       for (let k = -6; k <= 6; k += 2.4) {
-        b.box(c + k * 0.28, 0.132, c + s * 11.5, 0.5, 0.02, 5.2, 'sidewalk', 0, { noCollide: true });
-        b.box(c + s * 11.5, 0.132, c + k * 0.28, 5.2, 0.02, 0.5, 'sidewalk', 0, { noCollide: true });
+        b.box(c + k * 0.28, 0.132, c + s * 11.5, 0.5, 0.02, 5.2, 'paint', 0, { noCollide: true });
+        b.box(c + s * 11.5, 0.132, c + k * 0.28, 5.2, 0.02, 0.5, 'paint', 0, { noCollide: true });
       }
     }
     // manhole covers + storm drains for street credibility
@@ -114,7 +116,8 @@ export function buildNeoCity(): MapDef {
   b.chest(-118, 9.2, 98, 'vault');
   b.loot(-138, 1.2, 118);
   b.loot(-124, 1.2, 102);
-  b.vehicle(-158, 128, 0.2, 0.4, 'van', 0x27313d);
+  // Arena field is elevated to y=0.8; rest the van on that deck.
+  b.vehicle(-158, 128, 0.8, 0.4, 'van', 0x27313d);
 
   // ------------------------------------------------------------------
   // POI: RESIDENTIAL BLOCKS (SW)
@@ -238,8 +241,10 @@ export function buildNeoCity(): MapDef {
   b.light(20, 9, -180, 0x9d6bff, 2.2, 42);
 
   streetwallFiller(b, rng);
+  perimeterBand(b, rng);
   litWindows(b, rng);
   streetDressing(b, rng);
+  lotDressing(b, rng);
 
   return b.finish(
     {
@@ -315,10 +320,12 @@ function streetwallFiller(b: WorldBuilder, rng: Rng): void {
         const mat = facades[rng.int(0, facades.length - 1)]!;
         // Doors face the nearest street (cell edge)
         const doorSide = (jx - cx > 8 ? 1 : jx - cx < -8 ? 3 : jz - cz > 8 ? 0 : 2) as 0 | 1 | 2 | 3;
-        const doorOff = w / 2 - 4;
+        const doorWallLength = doorSide === 0 || doorSide === 2 ? w : d;
+        const nearDoor = 3;
+        const farDoor = doorWallLength - nearDoor - 2.2;
         addBuilding(b, {
           x: jx, z: jz, w, d, floors, wallMat: mat,
-          doors: [[doorSide, doorOff, 2.2], [doorSide, -doorOff, 2.2]],
+          doors: [[doorSide, nearDoor, 2.2], [doorSide, farDoor, 2.2]],
           interiorDividers: rng.bool(0.6),
           roofAccess: tower && rng.bool(0.5),
         });
@@ -326,7 +333,28 @@ function streetwallFiller(b: WorldBuilder, rng: Rng): void {
           // Rooftop beacon on tall blocks
           b.light(jx, floors * 3.6 + 2.2, jz, rng.bool(0.5) ? 0xff5a5a : 0x5fd0ff, 1.2, 14);
         }
+        // Anchored chest beside the entry of some blocks (never in open lots).
+        if (rng.bool(0.3)) {
+          const off = doorSide === 1 ? w / 2 + 1.6 : doorSide === 3 ? -(w / 2 + 1.6) : rng.range(-w / 3, w / 3);
+          const offZ = doorSide === 0 ? d / 2 + 1.6 : doorSide === 2 ? -(d / 2 + 1.6) : rng.range(-d / 3, d / 3);
+          b.chest(jx + off, 0.3, jz + offZ, rng.bool(0.2) ? 'elite' : 'standard');
+        }
       }
+      // Empty sub-lots become small parking lots so cells never read barren.
+      for (let sIdx = 0; sIdx < 4; sIdx++) {
+        if (picks.has(sIdx) || !rng.bool(0.45)) continue;
+        const [lx, lz] = subSpots[sIdx]!;
+        const along = rng.bool(0.5);
+        for (let k = 0; k < 3; k++) {
+          const vx = along ? lx - 6 + k * 6 : lx + rng.range(-2, 2);
+          const vz = along ? lz + rng.range(-2, 2) : lz - 6 + k * 6;
+          b.vehicle(vx, vz, 0.2, along ? 0 : Math.PI / 2,
+            rng.bool(0.3) ? 'van' : 'sedan', [0x27313d, 0x503030, 0x2e3a2f, 0x33384a, 0x6a6f78][rng.int(0, 4)]!);
+        }
+        b.crate(lx + (along ? 9 : 2), 0.2, lz + (along ? 2 : 9), rng.range(0.9, 1.4));
+        if (rng.bool(0.5)) b.loot(lx, 0.4, lz);
+      }
+
       // Alley props between blocks
       if (rng.bool(0.7)) {
         const ax = cx + rng.range(-24, 24);
@@ -335,6 +363,72 @@ function streetwallFiller(b: WorldBuilder, rng: Rng): void {
         if (rng.bool(0.5)) b.crate(ax + 1.6, 0.2, az + 1.2, rng.range(0.7, 1.1));
         b.loot(ax - 1.4, 0.4, az + 0.6);
       }
+    }
+  }
+}
+
+/**
+ * Outskirt development ring between the outermost roads (±200) and the
+ * playable boundary (~±247). Low warehouses, container yards, lots and
+ * street clutter so the map edge reads as continuing city, not a void.
+ */
+function perimeterBand(b: WorldBuilder, rng: Rng): void {
+  const pois = b.def.pois;
+  const tooClose = (x: number, z: number, margin: number): boolean =>
+    pois.some((p) => Math.hypot(p.x - x, p.z - z) < p.radius + margin);
+
+  const spots: Array<[number, number]> = [];
+  for (let t = -216; t <= 216; t += 48) {
+    spots.push([t, 224], [t, -224], [224, t], [-224, t]);
+    if (rng.bool(0.5)) spots.push([t + 24, 222], [t + 24, -222]);
+  }
+
+  for (const [sx, sz] of spots) {
+    if (tooClose(sx, sz, 16)) continue;
+    const roll = rng.next();
+    if (roll < 0.42) {
+      // Low warehouse / workshop block, door facing the map interior.
+      const w = rng.range(18, 26);
+      const d = rng.range(14, 20);
+      const doorSide = Math.abs(sx) > Math.abs(sz)
+        ? (sx > 0 ? 3 : 1)
+        : (sz > 0 ? 2 : 0);
+      const doorWallLength = doorSide === 0 || doorSide === 2 ? w : d;
+      addBuilding(b, {
+        x: sx, z: sz, w, d, floors: rng.bool(0.3) ? 2 : 1,
+        wallMat: rng.bool(0.5) ? 'rust' : 'metalDark',
+        doors: [[doorSide, doorWallLength / 2 - 1.5, 3] as [0 | 1 | 2 | 3, number, number]],
+        interiorDividers: false,
+      });
+      if (rng.bool(0.45)) b.chest(sx + rng.range(-6, 6), 0.3, sz + rng.range(-5, 5), rng.bool(0.25) ? 'elite' : 'standard');
+      b.loot(sx + rng.range(-7, 7), 0.4, sz + rng.range(-6, 6));
+    } else if (roll < 0.68) {
+      // Container / crate yard with cover lanes
+      const stacks = rng.int(3, 5);
+      for (let i = 0; i < stacks; i++) {
+        const bx = sx + rng.range(-10, 10);
+        const bz = sz + rng.range(-10, 10);
+        b.box(bx, 1.3, bz, 5.2, 2.6, 2.4, rng.bool(0.5) ? 'rust' : 'metalDark', rng.range(0, Math.PI));
+        if (rng.bool(0.35)) b.box(bx + rng.range(-1, 1), 3.9, bz + rng.range(-1, 1), 5, 2.6, 2.3, 'rust', rng.range(0, Math.PI));
+        b.platform(bx - 2.6, bx + 2.6, bz - 1.2, bz + 1.2, 2.6);
+      }
+      b.loot(sx + rng.range(-8, 8), 0.4, sz + rng.range(-8, 8));
+      if (rng.bool(0.3)) b.chest(sx + rng.range(-9, 9), 0.3, sz + rng.range(-9, 9), 'standard');
+    } else if (roll < 0.85) {
+      // Parking lot with a couple of cars + light pole
+      b.vehicle(sx, sz, 0.2, rng.range(0, Math.PI), rng.bool(0.5) ? 'sedan' : 'van',
+        [0x27313d, 0x503030, 0x33384a][rng.int(0, 2)]!);
+      if (rng.bool(0.6)) b.vehicle(sx + 7, sz + 4, 0.2, rng.range(0, Math.PI), 'sedan', 0x2e3a2f);
+      b.lampPost(sx + 4, sz - 4, 0, 5.4, 0xffd9a0, 2.2, 24);
+      b.loot(sx - 4, 0.4, sz + 2);
+    } else {
+      // Small kiosk cluster + vending alcove
+      b.box(sx, 1.5, sz, 4.5, 3, 3.5, 'facadeA');
+      b.platform(sx - 2.25, sx + 2.25, sz - 1.75, sz + 1.75, 3.05);
+      b.box(sx, 3.2, sz, 5, 0.25, 4, rng.bool(0.5) ? 'neonCyan' : 'neonOrange', 0, { noCollide: true });
+      b.light(sx, 3.4, sz + 1.5, 0xffd9a0, 1.2, 14);
+      b.crate(sx + 2.4, 0.2, sz + 1.8, 0.95);
+      b.loot(sx, 0.4, sz + 3);
     }
   }
 }
@@ -372,15 +466,15 @@ function courtyardProps(b: WorldBuilder, rng: Rng, cx: number, cz: number): void
 function underpassStation(b: WorldBuilder, cx: number, cz: number): void {
   // Shaft down to platform at y=-5
   const depth = 5;
-  b.stairs(cx - 8, 0, cz - 3, 0, 10, depth / 10, 0.62, 2.2, 'concreteDark');
+  b.stairs(cx - 8, 0, cz - 3, 0, 10, -depth / 10, 0.62, 2.2, 'concreteDark');
   // Platform box (hollow room underground)
   const py = -depth;
   b.slab(cx, py, cz, 30, 16, 0.5, 'concreteDark');
   b.slab(cx, py + 4.4, cz, 30, 16, 0.5, 'concreteDark'); // ceiling
-  b.wallWithGaps(cx - 15, cz - 8, 32, 4.4, 0.5, 'x', 'concrete', [[14, 2.4]]);
-  b.wallWithGaps(cx - 15, cz + 8, 32, 4.4, 0.5, 'x', 'concrete', []);
-  b.wallWithGaps(cx - 15, cz - 8, 16, 4.4, 0.5, 'z', 'concrete', []);
-  b.wallWithGaps(cx + 15, cz - 8, 16, 4.4, 0.5, 'z', 'concrete', []);
+  b.wallWithGaps(cx - 15, cz - 8, 32, 4.4, 0.5, 'x', 'concrete', [[14, 2.4]], 0, py);
+  b.wallWithGaps(cx - 15, cz + 8, 32, 4.4, 0.5, 'x', 'concrete', [], 0, py);
+  b.wallWithGaps(cx - 15, cz - 8, 16, 4.4, 0.5, 'z', 'concrete', [], 0, py);
+  b.wallWithGaps(cx + 15, cz - 8, 16, 4.4, 0.5, 'z', 'concrete', [], 0, py);
   // Rails hint
   b.box(cx, py + 0.25, cz - 5.5, 26, 0.3, 1.2, 'metalDark');
   b.box(cx, py + 0.25, cz + 5.5, 26, 0.3, 1.2, 'metalDark');
@@ -424,7 +518,7 @@ function parkingGarage(b: WorldBuilder, cx: number, cz: number): void {
       b.box(cx + sx * 15, y + 1.9, cz, 0.4, 3.6, 20, 'concrete');
     }
     b.box(cx, y + 1.9, cz - 10, 30, 3.6, 0.4, 'concrete');
-    b.wallWithGaps(cx - 15, cz + 10, 30, 3.6, 0.4, 'x', 'concrete', lvl === 0 ? [[12, 6]] : [[12, 6]]);
+    b.wallWithGaps(cx - 15, cz + 10, 30, 3.6, 0.4, 'x', 'concrete', [[12, 6]], 0, y);
     b.platform(cx - 15, cx + 15, cz - 10, cz + 10, y + 0.4);
     // ramp between levels
     if (lvl === 0) {
@@ -453,8 +547,8 @@ function miniPlaza(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function serverBunker(b: WorldBuilder, cx: number, cz: number): void {
-  b.box(cx, 1.6, cz, 16, 3.2, 12, 'concrete');
-  b.platform(cx - 8, cx + 8, cz - 6, cz + 6, 3.2);
+  b.slab(cx, 0.08, cz, 16, 12, 0.5, 'concreteDark');
+  b.slab(cx, 3.2, cz, 16.8, 12.8, 0.5, 'concrete');
   b.wallWithGaps(cx - 8, cz - 6, 16, 3.2, 0.4, 'x', 'concrete', [[6, 2.2]]);
   b.wallWithGaps(cx - 8, cz + 6, 16, 3.2, 0.4, 'x', 'concrete', []);
   b.wallWithGaps(cx - 8, cz - 6, 12, 3.2, 0.4, 'z', 'concrete', []);
@@ -485,8 +579,8 @@ function overpass(b: WorldBuilder, cx: number, cz: number): void {
   for (let i = -2; i <= 2; i++) {
     b.box(cx + i * 13, 3, cz, 2.4, 6, 2.4, 'concrete');
   }
-  b.wallWithGaps(cx - 30, cz - 5, 60, 1.1, 0.3, 'x', 'concrete');
-  b.wallWithGaps(cx - 30, cz + 5, 60, 1.1, 0.3, 'x', 'concrete');
+  b.wallWithGaps(cx - 30, cz - 5, 60, 1.1, 0.3, 'x', 'concrete', [], 0, 6.4);
+  b.wallWithGaps(cx - 30, cz + 5, 60, 1.1, 0.3, 'x', 'concrete', [], 0, 6.4);
   // access stairs at both ends
   b.stairs(cx - 30, 0, cz - 4.5, 0, 11, 0.58, 0.6, 2.6, 'concreteDark');
   b.stairs(cx + 30, 0, cz + 4.5, 2, 11, 0.58, 0.6, 2.6, 'concreteDark');
@@ -574,6 +668,62 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
           pushWindow(g.x + face.sign * (g.sx / 2 + 0.09), wy, g.z, 0.1, 0.85, bandLen, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
         } else {
           pushWindow(g.x, wy, g.z + face.sign * (g.sz / 2 + 0.09), bandLen, 0.85, 0.1, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Roadside/lot dressing: the space between building blocks previously read as
+ * vast empty lots. Parked cars, planters, transit shelters, dumpsters and
+ * barricades now line every road so streets read as a lived-in city.
+ */
+function lotDressing(b: WorldBuilder, rng: Rng): void {
+  const carCols = [0x27313d, 0x503030, 0x2e3a2f, 0x33384a, 0x3a2f28];
+  const roadCs = [-200, -100, 0, 100, 200];
+  for (let i = -2; i <= 2; i++) {
+    const c = i * 100;
+    for (let d = -226; d <= 226; d += 24) {
+      if (i === 0 && Math.abs(d) < 64) continue; // Spire Plaza
+      if (roadCs.some((o) => Math.abs(d - o) < 18)) continue; // intersections
+      for (const side of [-1, 1]) {
+        if (!rng.bool(0.44)) continue;
+        const along = d + rng.range(-5, 5);
+        const roll = rng.next();
+        for (const flip of [0, 1]) {
+          if (flip === 1 && !rng.bool(0.85)) continue;
+          const px = flip === 0 ? c + side * 8.4 : along;
+          const pz = flip === 0 ? along : c + side * 8.4;
+          const yaw = flip === 0 ? 0 : Math.PI / 2;
+          if (roll < 0.3) {
+            b.vehicle(px, pz, 0.2, yaw + (rng.bool(0.15) ? rng.range(-0.14, 0.14) : 0),
+              rng.bool(0.25) ? 'van' : 'sedan', carCols[rng.int(0, carCols.length - 1)]!);
+          } else if (roll < 0.5) {
+            for (const o of [-2.2, 2.2]) {
+              const bx = flip === 0 ? c + side * 12.6 : along + o;
+              const bz = flip === 0 ? along + o : c + side * 12.6;
+              b.box(bx, 0.55, bz, 2.6, 0.9, 1.4, 'concreteDark');
+              b.box(bx, 1.08, bz, 2.2, 0.4, 1.0, 'grass', 0, { noCollide: true });
+            }
+          } else if (roll < 0.66) {
+            const gx = flip === 0 ? c + side * 12.8 : along;
+            const gz = flip === 0 ? along : c + side * 12.8;
+            b.box(gx, 1.35, gz, flip === 0 ? 0.18 : 4.6, 2.7, flip === 0 ? 4.6 : 0.18, 'glass', yaw, { noCollide: true, hint: 'glass' });
+            b.box(gx, 2.82, gz, flip === 0 ? 1.7 : 5.2, 0.16, flip === 0 ? 5.2 : 1.7, 'metalDark', yaw, { noCollide: true });
+            b.box(gx, 0.5, gz, flip === 0 ? 0.5 : 3.6, 1.0, flip === 0 ? 3.6 : 0.5, 'metalDark', yaw, { noCollide: true });
+          } else if (roll < 0.82) {
+            const dx = flip === 0 ? c + side * 12.2 : along;
+            const dz = flip === 0 ? along : c + side * 12.2;
+            b.box(dx, 0.78, dz, flip === 0 ? 2.4 : 1.3, 1.55, flip === 0 ? 1.3 : 2.4, 'metalDark', yaw);
+            b.crate(dx + (flip === 0 ? -side * 1.9 : 1.6), 0.35, dz + (flip === 0 ? 1.6 : -side * 1.9), 1);
+            if (rng.bool(0.5)) b.crate(dx + (flip === 0 ? -side * 1.9 : 2.9), 0.35, dz + (flip === 0 ? 2.9 : -side * 1.9), 1);
+          } else {
+            const wx = flip === 0 ? c + side * 9.6 : along;
+            const wz = flip === 0 ? along : c + side * 9.6;
+            b.box(wx, 0.55, wz, flip === 0 ? 0.25 : 2.2, 1.0, flip === 0 ? 2.2 : 0.25, 'rust', yaw);
+            b.cyl(wx + (flip === 0 ? 0 : 1.8), 0.3, wz + (flip === 0 ? 1.8 : 0), 0.22, 0.6, 'neonOrange', { noCollide: true });
+          }
         }
       }
     }
@@ -671,8 +821,8 @@ function streetDressing(b: WorldBuilder, rng: Rng): void {
     const bz = onX ? along : road;
     const yaw = onX ? 0 : Math.PI / 2;
     // striped barrier
-    b.box(bx, 0.55, bz, 2.4, 0.14, 0.34, 'sidewalk', yaw, { noCollide: true });
-    b.box(bx, 1.02, bz, 2.4, 0.24, 0.1, 'sidewalk', yaw, { noCollide: true });
+    b.box(bx, 0.55, bz, 2.4, 0.14, 0.34, 'paving', yaw, { noCollide: true });
+    b.box(bx, 1.02, bz, 2.4, 0.24, 0.1, 'paving', yaw, { noCollide: true });
     for (const s of [-1, 1]) b.box(bx + s * (onX ? 1.0 : 0.0), 0.5, bz + s * (onX ? 0.0 : 1.0), 0.12, 1.0, 0.12, 'metalDark', 0, { noCollide: true });
     // orange beacon light
     b.light(bx, 1.25, bz, 0xff9040, 0.9, 9);

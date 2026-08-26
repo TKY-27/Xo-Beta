@@ -64,11 +64,15 @@ describe('loot generation', () => {
       counts[idx === -1 ? 0 : idx]!++;
     }
     const pct = counts.map((c) => (c / N) * 100) as [number, number, number, number, number];
-    expect(pct[0]).toBeGreaterThan(37); // common ~40%
-    expect(pct[0]).toBeLessThan(43);
-    expect(pct[4]!).toBeGreaterThan(2.8); // legendary ~4%
-    expect(pct[4]!).toBeLessThan(5.2);
-    expect(pct[4]!).toBeLessThan(pct[3]!); // legendary rarer than epic
+    // Floor loot weights [46, 32, 22, 0, 0] — epic/legendary never spawn on the floor.
+    expect(pct[0]).toBeGreaterThan(43); // common ~46%
+    expect(pct[0]).toBeLessThan(49);
+    expect(pct[1]).toBeGreaterThan(29); // uncommon ~32%
+    expect(pct[1]).toBeLessThan(35);
+    expect(pct[2]).toBeGreaterThan(19); // rare ~22%
+    expect(pct[2]).toBeLessThan(25);
+    expect(pct[3]).toBe(0);
+    expect(pct[4]).toBe(0);
   });
 
   it('chest contents stay within their tier band', () => {

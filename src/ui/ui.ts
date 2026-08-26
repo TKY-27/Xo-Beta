@@ -7,7 +7,9 @@ import {
   RARITY_CSS, WEAPONS, type Difficulty,
 } from '../core/balance';
 import { getSettings, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
-import { t, setLang, getLang, onLangChanged, type TextKey } from '../core/i18n';
+import {
+  t, setLang, getLang, isTextKey, localizePoiName, onLangChanged, type TextKey,
+} from '../core/i18n';
 import type { Match } from '../sim/match';
 import type { MapId } from '../world';
 
@@ -17,12 +19,22 @@ export type DifficultyChoice = Difficulty;
 export interface PlaySelection {
   map: MapId;
   difficulty: DifficultyChoice;
+  practice?: boolean;
 }
 
 /** Hydrate every [data-i18n] element; re-run on language change. */
 function hydrateStatic(): void {
+  const bindings = getSettings().bindings;
+  const vars = {
+    jump: prettyKey(bindings.jump),
+    camera: prettyKey(bindings.cameraToggle),
+    map: prettyKey(bindings.mapToggle),
+    prev: prettyKey(bindings.spectatePrev),
+    next: prettyKey(bindings.spectateNext),
+  };
   document.querySelectorAll<HTMLElement>('[data-i18n]').forEach((el) => {
-    el.textContent = t(el.dataset.i18n as TextKey);
+    const key = el.dataset.i18n;
+    if (key && isTextKey(key)) el.textContent = t(key, vars);
   });
 }
 
@@ -39,13 +51,16 @@ export class Menus {
   onUiSound?: (kind: 'click' | 'hover' | 'back' | 'confirm' | 'error') => void;
   private onOpenSettingsFromPause = false;
   private unsubs: Array<() => void> = [];
+  private controlId = 0;
 
   constructor(private maps: Array<{ id: MapId; nameKey?: string; name: string; descKey?: string; description: string }>) {
     this.bindButtons();
+    this.bindOnboarding();
     this.buildPlayMenu();
     this.buildSettings();
     hydrateStatic();
-    this.show('main-menu');
+    if (!getSettings().onboarded) this.showOnboarding();
+    else this.show('main-menu');
     this.unsubs.push(onLangChanged(() => {
       hydrateStatic();
       this.buildPlayMenu();
@@ -57,14 +72,79 @@ export class Menus {
     for (const u of this.unsubs) u();
   }
 
+  /** Fired whenever a menu screen becomes active (id may be '' for none). */
+  onScreenChanged: (id: string) => void = () => undefined;
+
   private show(id: string): void {
-    const ids = ['main-menu', 'play-menu', 'settings-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen'];
+    const ids = ['main-menu', 'play-menu', 'settings-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen'];
     for (const other of ids) $(other).classList.add('hidden');
     if (id) $(id).classList.remove('hidden');
+    this.onScreenChanged(id);
   }
 
   showMainMenu(): void { this.show('main-menu'); }
   hideAll(): void { this.show(''); }
+
+  setPlayEnabled(enabled: boolean): void {
+    for (const id of ['btn-play-start', 'btn-practice-start', 'btn-results-again']) {
+      const button = document.getElementById(id) as HTMLButtonElement | null;
+      if (button) button.disabled = !enabled;
+    }
+  }
+
+  /** First-run onboarding: language choice, then default view. */
+  showOnboarding(): void {
+    this.show('onboarding-screen');
+    $('onb-step-language').classList.remove('hidden');
+    $('onb-step-view').classList.add('hidden');
+    this.updateOnbStep(1);
+  }
+
+  private updateOnbStep(n: 1 | 2): void {
+    $('onb-step').textContent = t('onb.step', { n });
+  }
+
+  onOnboardingDone: () => void = () => undefined;
+
+  private bindOnboarding(): void {
+    const click = (id: string, fn: () => void, sound: 'click' | 'back' | 'confirm' = 'click') => {
+      $(id).addEventListener('click', () => {
+        this.onUiSound?.(sound);
+        fn();
+      });
+    };
+    click('btn-onb-en', () => {
+      setLang('en');
+      updateSettings({ lang: 'en' });
+      hydrateStatic();
+      this.advanceOnboarding();
+    }, 'confirm');
+    click('btn-onb-ja', () => {
+      setLang('ja');
+      updateSettings({ lang: 'ja' });
+      hydrateStatic();
+      this.advanceOnboarding();
+    }, 'confirm');
+    click('btn-onb-fp', () => {
+      updateSettings({ cameraMode: 'fps', onboarded: true });
+      this.finishOnboarding();
+    }, 'confirm');
+    click('btn-onb-tp', () => {
+      updateSettings({ cameraMode: 'tps', onboarded: true });
+      this.finishOnboarding();
+    }, 'confirm');
+  }
+
+  private advanceOnboarding(): void {
+    $('onb-step-language').classList.add('hidden');
+    $('onb-step-view').classList.remove('hidden');
+    this.updateOnbStep(2);
+  }
+
+  private finishOnboarding(): void {
+    this.showMainMenu();
+    this.onOnboardingDone();
+  }
   showPause(): void {
     this.show('pause-menu');
     this.onOpenSettingsFromPause = false;
@@ -98,11 +178,14 @@ export class Menus {
     click('btn-play-start', () => {
       this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty });
     }, 'confirm');
+    click('btn-practice-start', () => {
+      this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty, practice: true });
+    }, 'confirm');
     click('btn-settings-back', () => this.show(this.onOpenSettingsFromPause ? 'pause-menu' : 'main-menu'), 'back');
     click('btn-resume', () => this.onResumeRequested(), 'confirm');
     click('btn-pause-settings', () => { this.onOpenSettingsFromPause = true; this.show('settings-menu'); });
     click('btn-quit', () => this.onQuitRequested(), 'back');
-    click('btn-results-menu', () => { $('results-screen').classList.add('hidden'); this.showMainMenu(); }, 'back');
+    click('btn-results-menu', () => { $('results-screen').classList.add('hidden'); this.onQuitRequested(); }, 'back');
     click('btn-results-again', () => {
       $('results-screen').classList.add('hidden');
       this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty });
@@ -120,6 +203,7 @@ export class Menus {
     for (const m of this.maps) {
       const card = document.createElement('button');
       card.className = 'map-card' + (m.id === this.selectedMap ? ' selected' : '');
+      card.setAttribute('aria-pressed', String(m.id === this.selectedMap));
       card.style.setProperty('--mc-accent', accents[m.id] ?? 'var(--accent)');
       const art = document.createElement('div');
       art.className = 'mc-art';
@@ -142,8 +226,12 @@ export class Menus {
       card.append(art, scrim, body, check);
       card.addEventListener('click', () => {
         this.selectedMap = m.id;
-        list.querySelectorAll('.map-card').forEach((c) => c.classList.remove('selected'));
+        list.querySelectorAll<HTMLButtonElement>('.map-card').forEach((c) => {
+          c.classList.remove('selected');
+          c.setAttribute('aria-pressed', 'false');
+        });
         card.classList.add('selected');
+        card.setAttribute('aria-pressed', 'true');
         this.onUiSound?.('click');
       });
       list.appendChild(card);
@@ -157,11 +245,16 @@ export class Menus {
     for (const [d, key] of diffs) {
       const btn = document.createElement('button');
       btn.className = 'diff-btn' + (d === this.selectedDifficulty ? ' selected' : '');
+      btn.setAttribute('aria-pressed', String(d === this.selectedDifficulty));
       btn.textContent = t(key);
       btn.addEventListener('click', () => {
         this.selectedDifficulty = d;
-        dlist.querySelectorAll('.diff-btn').forEach((c) => c.classList.remove('selected'));
+        dlist.querySelectorAll<HTMLButtonElement>('.diff-btn').forEach((c) => {
+          c.classList.remove('selected');
+          c.setAttribute('aria-pressed', 'false');
+        });
         btn.classList.add('selected');
+        btn.setAttribute('aria-pressed', 'true');
         this.onUiSound?.('click');
       });
       dlist.appendChild(btn);
@@ -177,6 +270,8 @@ export class Menus {
     div.className = 'setting-row';
     const label = document.createElement('label');
     label.textContent = labelText;
+    if (!inner.id) inner.id = `setting-control-${++this.controlId}`;
+    label.htmlFor = inner.id;
     div.appendChild(label);
     div.appendChild(inner);
     return div;
@@ -212,6 +307,7 @@ export class Menus {
 
   private buildSettings(): void {
     const s = getSettings();
+    this.controlId = 0;
     // Idempotent: cleared and rebuilt (also on language change).
     for (const id of ['settings-controls', 'settings-graphics', 'settings-audio', 'settings-gameplay']) {
       $(id).innerHTML = '';
@@ -235,6 +331,7 @@ export class Menus {
     resetBtn.addEventListener('click', () => {
       updateSettings({ bindings: { ...DEFAULT_BINDINGS } });
       this.buildKeybinds();
+      hydrateStatic();
       this.onUiSound?.('confirm');
     });
     controls.appendChild(resetBtn);
@@ -279,6 +376,17 @@ export class Menus {
     gameplay.appendChild(this.row(t('set.cameraMode'), this.select(
       [['fps', t('cam.fps')], ['tps', t('cam.tps')]], s.cameraMode, (v) => updateSettings({ cameraMode: v as never }),
     )));
+    const rerun = document.createElement('button');
+    rerun.id = 'btn-rerun-onboarding';
+    rerun.className = 'btn-quiet small';
+    const rerunLabel = () => { rerun.textContent = t('set.rerunOnboarding'); };
+    rerunLabel();
+    rerun.addEventListener('click', () => {
+      this.onUiSound?.('click');
+      updateSettings({ onboarded: false });
+      this.showOnboarding();
+    });
+    gameplay.appendChild(this.row(t('set.rerunOnboardingHint'), rerun));
     gameplay.appendChild(this.row(t('set.damageNumbers'), this.checkbox(s.damageNumbers, (v) => updateSettings({ damageNumbers: v }))));
     gameplay.appendChild(this.row(t('set.colorVision'), this.select(
       [['none', t('cv.none')], ['protanopia', t('cv.protanopia')], ['deuteranopia', t('cv.deuteranopia')], ['tritanopia', t('cv.tritanopia')]],
@@ -303,8 +411,8 @@ export class Menus {
 
   private sectionTitle(text: string): HTMLElement {
     const h = document.createElement('h3');
+    h.className = 'setting-section-title';
     h.textContent = text.toUpperCase();
-    h.style.cssText = 'margin-top:1rem;';
     return h;
   }
 
@@ -319,9 +427,15 @@ export class Menus {
     const buttons = [...rail.querySelectorAll<HTMLButtonElement>('.rail-btn')];
     for (const btn of buttons) {
       btn.addEventListener('click', () => {
-        for (const b of buttons) b.classList.toggle('selected', b === btn);
+        for (const b of buttons) {
+          const selected = b === btn;
+          b.classList.toggle('selected', selected);
+          b.setAttribute('aria-selected', String(selected));
+        }
         for (const pane of document.querySelectorAll('.settings-pane')) {
-          pane.classList.toggle('selected', pane.id === btn.dataset.pane);
+          const selected = pane.id === btn.dataset.pane;
+          pane.classList.toggle('selected', selected);
+          pane.setAttribute('aria-hidden', String(!selected));
         }
         this.onUiSound?.('click');
       });
@@ -351,14 +465,20 @@ export class Menus {
       btn.addEventListener('click', () => {
         btn.classList.add('listening');
         btn.textContent = t('bind.pressKey');
+        const done = (label: string) => {
+          btn.textContent = label;
+          btn.classList.remove('listening');
+          window.removeEventListener('keydown', handler, true);
+        };
         const handler = (e: KeyboardEvent) => {
           e.preventDefault();
+          e.stopPropagation();
+          if (e.code === 'Escape') { done(prettyKey(b[key])); return; }
           const patch: Partial<KeyBindings> = {};
           patch[key] = e.code;
           updateSettings({ bindings: { ...getSettings().bindings, ...patch } });
-          btn.textContent = prettyKey(e.code);
-          btn.classList.remove('listening');
-          window.removeEventListener('keydown', handler, true);
+          hydrateStatic();
+          done(prettyKey(e.code));
         };
         window.addEventListener('keydown', handler, true);
       });
@@ -366,6 +486,8 @@ export class Menus {
       rowEl.className = 'setting-row';
       const lbl = document.createElement('label');
       lbl.textContent = labelKey ? t(labelKey) : code;
+      btn.id = `keybind-${code}`;
+      lbl.htmlFor = btn.id;
       rowEl.append(lbl, btn);
       host.appendChild(rowEl);
       this.keybindRows.push({ code: key, el: rowEl });
@@ -415,6 +537,11 @@ export class Menus {
     flare.classList.toggle('on', !!opts.won);
     $('results-screen').classList.remove('hidden');
   }
+
+  hideResults(): void {
+    $('results-screen').classList.add('hidden');
+    $('victory-flare').classList.remove('on');
+  }
 }
 
 function prettyKey(code: string): string {
@@ -438,6 +565,9 @@ function formatTime(sec: number): string {
 const WEAPON_ICONS: Record<string, string> = {
   pistol: '⌐', smg: '⁝⁝', ar: '⟋', shotgun: '≡', sniper: '⌇',
 };
+
+/** Minimal fist glyph for the permanent melee slot (inline SVG, currentColor). */
+const FIST_SVG = `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M6.5 3A2.5 2.5 0 0 0 4 5.5v7.2c0 1 .35 1.96 1 2.72l3.6 4.28c.66.79 1.64 1.25 2.67 1.25h4.48A4.25 4.25 0 0 0 20 16.75V12a2 2 0 0 0-1.5-1.94V9a2 2 0 0 0-2-2c-.18 0-.34.02-.5.06V6.5a2 2 0 0 0-2-2c-.54 0-1.04.17-1.45.46A2.5 2.5 0 0 0 10 3H8.5c-.74 0-1.43.32-1.92.83L6.5 3Z"/></svg>`;
 
 export interface LootPanelInfo {
   name: string;
@@ -466,6 +596,7 @@ export class Hud {
   private bannerTimer = 0;
   private elimTimer = 0;
   private hitmarkerTimer = 0;
+  private stormWarningTimer: number | null = null;
   private dmgNumbers: DamageNumberEntry[] = [];
   private captionEls = new Map<TextKey | string, HTMLElement>();
   private projector: ((x: number, y: number, z: number) => { x: number; y: number; visible: boolean }) | null = null;
@@ -498,6 +629,11 @@ export class Hud {
     if (dot) dot.style.display = s.crosshairDot ? 'block' : 'none';
   }
 
+  /** Sniper scope overlay: replaces the world-framing HUD while engaged. */
+  setScoped(scoped: boolean): void {
+    document.body.classList.toggle('scoped', scoped);
+  }
+
   syncPlayerState(match: Match): void {
     const p = match.player;
     if (!p) return;
@@ -507,6 +643,23 @@ export class Hud {
     const ads = p.wpn.adsAmount;
     const gap = Math.round(getSettings().crosshairSize * 0.7 + bloom * 240 * (1 - ads * 0.72));
     $('crosshair').style.setProperty('--ch-gap', `${gap}px`);
+
+    // Shotgun: circular spread reticle whose diameter mirrors the actual
+    // pellet-cone radius projected to screen distance (simulation-true).
+    const selWpn = p.inv.selectedWeapon;
+    const isShotgun = selWpn?.weaponId === 'shotgun';
+    const chEl = $('crosshair');
+    chEl.classList.toggle('shotgun', isShotgun);
+    if (isShotgun && p.wpn.currentSpread > 0.0005) {
+      const fovDeg = getSettings().fov - ads * 14;
+      const halfFovTan = Math.tan((fovDeg * Math.PI) / 360);
+      const spreadTan = Math.tan(p.wpn.currentSpread);
+      const radiusPx = Math.min(
+        window.innerHeight * 0.42,
+        (spreadTan / halfFovTan) * window.innerHeight * 0.5,
+      );
+      chEl.style.setProperty('--ring-d', `${Math.max(12, Math.round(radiusPx * 2))}px`);
+    }
 
     $('health-fill').style.width = `${p.health}%`;
     $('shield-fill').style.width = `${p.shield}%`;
@@ -528,10 +681,14 @@ export class Hud {
       $('weapon-name').textContent = t('hud.unarmed');
     }
 
-    // Slots
+    // Slots: [Fists] [1..5] — fists are a permanent pseudo-slot, leftmost.
     const slotsEl = $('inventory-slots');
-    if (slotsEl.childElementCount !== 5) {
+    if (slotsEl.childElementCount !== 6) {
       slotsEl.innerHTML = '';
+      const fist = document.createElement('div');
+      fist.className = 'slot melee';
+      fist.innerHTML = `<span class="num key-q">Q</span><span class="icon">${FIST_SVG}</span>`;
+      slotsEl.appendChild(fist);
       for (let i = 0; i < 5; i++) {
         const slot = document.createElement('div');
         slot.className = 'slot empty';
@@ -539,8 +696,11 @@ export class Hud {
         slotsEl.appendChild(slot);
       }
     }
+    const meleeSlot = slotsEl.children[0] as HTMLElement;
+    const isMelee = p.inv.isMeleeSelected;
+    meleeSlot.className = 'slot melee' + (isMelee ? ' active' : '');
     for (let i = 0; i < 5; i++) {
-      const slot = slotsEl.children[i] as HTMLElement;
+      const slot = slotsEl.children[i + 1] as HTMLElement;
       const item = p.inv.slots[i];
       slot.classList.toggle('active', i === p.inv.selected);
       const icon = slot.querySelector<HTMLElement>('.icon')!;
@@ -593,7 +753,7 @@ export class Hud {
     const vig = $('vignette');
     vig.style.opacity = String(Math.max(0, 1 - p.health / 65));
     const stormVig = $('storm-vignette');
-    stormVig.style.opacity = match.storm.isOutside(p.body.position.x, p.body.position.z) ? '0.85' : '0';
+    stormVig.style.opacity = match.storm.isOutside(p.body.position.x, p.body.position.z) ? '0.8' : '0';
 
     this.bannerTimer -= 1 / 60;
     this.elimTimer -= 1 / 60;
@@ -640,7 +800,11 @@ export class Hud {
     const el = $('storm-warning');
     el.textContent = text;
     el.classList.remove('hidden');
-    window.setTimeout(() => el.classList.add('hidden'), duration * 1000);
+    if (this.stormWarningTimer !== null) window.clearTimeout(this.stormWarningTimer);
+    this.stormWarningTimer = window.setTimeout(() => {
+      el.classList.add('hidden');
+      this.stormWarningTimer = null;
+    }, duration * 1000);
   }
 
   addKillfeed(killer: string | null, victim: string, weaponIcon: string | null, headshot: boolean, storm: boolean): void {
@@ -795,6 +959,12 @@ export class Hud {
    * Draw the fullscreen tactical map. Returns the canvas so main can attach
    * click handlers once.
    */
+  private tacImage: HTMLCanvasElement | null = null;
+
+  setTacMapImage(img: HTMLCanvasElement | null): void {
+    this.tacImage = img;
+  }
+
   drawTacMap(match: Match): HTMLCanvasElement {
     const canvas = $<HTMLCanvasElement>('tac-map');
     const ctx = canvas.getContext('2d');
@@ -804,9 +974,13 @@ export class Hud {
     const toPx = (wx: number) => ((wx + half) / match.mapDef.size) * size;
     ctx.clearRect(0, 0, size, size);
 
-    // backdrop
-    ctx.fillStyle = 'rgba(14,19,30,0.96)';
-    ctx.fillRect(0, 0, size, size);
+    // backdrop: real aerial render when available, dark fallback otherwise
+    if (this.tacImage) {
+      ctx.drawImage(this.tacImage, 0, 0, size, size);
+    } else {
+      ctx.fillStyle = 'rgba(14,19,30,0.96)';
+      ctx.fillRect(0, 0, size, size);
+    }
 
     // water
     ctx.fillStyle = 'rgba(64,130,190,0.4)';
@@ -820,10 +994,13 @@ export class Hud {
       ctx.beginPath();
       ctx.arc(toPx(poi.x), toPx(poi.z), (poi.radius / match.mapDef.size) * size, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = 'rgba(190,205,225,0.85)';
-      ctx.font = '600 13px system-ui, sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '700 13px system-ui, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(poi.name, toPx(poi.x), toPx(poi.z));
+      ctx.shadowColor = 'rgba(0,0,0,0.74)';
+      ctx.shadowBlur = 2;
+      ctx.fillText(localizePoiName(poi.name), toPx(poi.x), toPx(poi.z));
+      ctx.shadowBlur = 0;
     }
 
     // transport route
@@ -836,31 +1013,72 @@ export class Hud {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // storm circles
+    // storm circles — translucent purple outside-area, white forecast line
     const st = match.storm;
+    let routeTarget: { x: number; z: number; r: number } | null = null;
     if (st.state !== 'idle') {
-      ctx.strokeStyle = 'rgba(120,190,255,0.95)';
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      ctx.arc(toPx(st.centerX), toPx(st.centerZ), (st.radius / match.mapDef.size) * size, 0, Math.PI * 2);
-      ctx.stroke();
-      if (st.state !== 'done') {
-        const nc = st.nextCircle();
-        ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-        ctx.setLineDash([8, 8]);
-        ctx.beginPath();
-        ctx.arc(toPx(nc.x), toPx(nc.z), (nc.r / match.mapDef.size) * size, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      // outside shading
       ctx.save();
       ctx.beginPath();
       ctx.rect(0, 0, size, size);
       ctx.arc(toPx(st.centerX), toPx(st.centerZ), (st.radius / match.mapDef.size) * size, 0, Math.PI * 2, true);
-      ctx.fillStyle = 'rgba(70,120,210,0.16)';
+      ctx.fillStyle = 'rgba(118,52,196,0.34)';
       ctx.fill('evenodd');
       ctx.restore();
+      ctx.strokeStyle = '#b078ff';
+      ctx.lineWidth = 2.6;
+      ctx.shadowColor = 'rgba(150,90,255,0.8)';
+      ctx.shadowBlur = 6;
+      ctx.beginPath();
+      ctx.arc(toPx(st.centerX), toPx(st.centerZ), (st.radius / match.mapDef.size) * size, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      if (st.state !== 'done') {
+        const nc = st.nextCircle();
+        routeTarget = nc;
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        ctx.beginPath();
+        ctx.arc(toPx(nc.x), toPx(nc.z), (nc.r / match.mapDef.size) * size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([9, 7]);
+        ctx.beginPath();
+        ctx.arc(toPx(nc.x), toPx(nc.z), (nc.r / match.mapDef.size) * size, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        routeTarget = { x: st.centerX, z: st.centerZ, r: st.radius };
+      }
+    }
+
+    // route to safety: straight line + arrow from the player toward the safe
+    // zone (only when actually outside it)
+    const me = match.player;
+    if (me?.alive && routeTarget) {
+      const pdx = me.body.position.x - routeTarget.x;
+      const pdz = me.body.position.z - routeTarget.z;
+      const pd = Math.hypot(pdx, pdz);
+      if (pd > routeTarget.r) {
+        const ang = Math.atan2(pdz, pdx);
+        const tx = routeTarget.x + Math.cos(ang) * (routeTarget.r - 6);
+        const tz = routeTarget.z + Math.sin(ang) * (routeTarget.r - 6);
+        ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([10, 6]);
+        ctx.beginPath();
+        ctx.moveTo(toPx(me.body.position.x), toPx(me.body.position.z));
+        ctx.lineTo(toPx(tx), toPx(tz));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const aa = Math.atan2(tz - me.body.position.z, tx - me.body.position.x);
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.moveTo(toPx(tx) + Math.cos(aa) * 10, toPx(tz) + Math.sin(aa) * 10);
+        ctx.lineTo(toPx(tx) + Math.cos(aa + 2.5) * 9, toPx(tz) + Math.sin(aa + 2.5) * 9);
+        ctx.lineTo(toPx(tx) + Math.cos(aa - 2.5) * 9, toPx(tz) + Math.sin(aa - 2.5) * 9);
+        ctx.closePath();
+        ctx.fill();
+      }
     }
 
     // marker
@@ -877,22 +1095,47 @@ export class Hud {
     }
 
     // me
-    const me = match.player;
     if (me?.alive) {
       ctx.save();
       ctx.translate(toPx(me.body.position.x), toPx(me.body.position.z));
       ctx.rotate(-me.yaw - Math.PI / 2);
       ctx.fillStyle = '#5fd0ff';
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(11, 0); ctx.lineTo(-7, 8); ctx.lineTo(-7, -8);
       ctx.closePath();
       ctx.fill();
+      ctx.stroke();
       ctx.restore();
     }
+
+    // header: storm countdown (left) + alive/elims (right)
+    ctx.textAlign = 'left';
+    ctx.font = '700 15px "Saira Condensed", "Noto Sans JP", system-ui, sans-serif';
+    let header = '';
+    if (st.state === 'waiting') header = `${t('hud.stormClosesIn')} ${formatTime(st.timer)}`;
+    else if (st.state === 'shrinking') header = `${t('hud.stormShrinking')} — ${formatTime(st.timer)}`;
+    else if (st.state === 'done') header = t('hud.finalCircle');
+    if (header) {
+      const w = ctx.measureText(header).width;
+      ctx.fillStyle = 'rgba(10,14,22,0.72)';
+      ctx.fillRect(14, 12, w + 20, 26);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(header, 24, 30);
+    }
+    const aliveCount = match.actors.filter((a) => a.alive).length;
+    const right = `${t('hud.alive')} ${aliveCount} · ${t('hud.elims')} ${me?.stats.kills ?? 0}`;
+    ctx.textAlign = 'right';
+    const rw = ctx.measureText(right).width;
+    ctx.fillStyle = 'rgba(10,14,22,0.72)';
+    ctx.fillRect(size - rw - 34, 12, rw + 20, 26);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(right, size - 24, 30);
     return canvas;
   }
 
-  /** Minimap: player-centered top-down view with POIs, storm circle, actors, marker. */
+  /** Minimap: player-centered crop of the real aerial render plus safe overlays. */
   drawMinimap(match: Match, ctxProvider: () => CanvasRenderingContext2D | null): void {
     const ctx = ctxProvider();
     if (!ctx) return;
@@ -908,6 +1151,21 @@ export class Hud {
     ctx.scale(scale, scale);
     ctx.translate(-cx, -cz);
 
+    // Use the same one-shot orthographic world capture as the fullscreen map.
+    // Drawing it in world coordinates lets the canvas clip the player-centred
+    // crop naturally, including at map edges, without another GPU readback.
+    const half = match.mapDef.size / 2;
+    if (this.tacImage) {
+      ctx.save();
+      ctx.filter = 'brightness(0.74) saturate(0.82) contrast(1.08)';
+      ctx.drawImage(this.tacImage, -half, -half, match.mapDef.size, match.mapDef.size);
+      ctx.restore();
+    } else {
+      const span = size / scale;
+      ctx.fillStyle = 'rgba(14,19,30,0.96)';
+      ctx.fillRect(cx - span / 2, cz - span / 2, span, span);
+    }
+
     for (const poi of match.mapDef.pois) {
       ctx.fillStyle = 'rgba(140,165,195,0.32)';
       ctx.beginPath();
@@ -922,14 +1180,21 @@ export class Hud {
 
     const st = match.storm;
     if (st.state !== 'idle') {
-      ctx.strokeStyle = 'rgba(120,190,255,0.9)';
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(cx - size / scale, cz - size / scale, (size * 2) / scale, (size * 2) / scale);
+      ctx.arc(st.centerX, st.centerZ, st.radius, 0, Math.PI * 2, true);
+      ctx.fillStyle = 'rgba(118,52,196,0.3)';
+      ctx.fill('evenodd');
+      ctx.restore();
+      ctx.strokeStyle = '#b078ff';
       ctx.lineWidth = 3 / scale;
       ctx.beginPath();
       ctx.arc(st.centerX, st.centerZ, st.radius, 0, Math.PI * 2);
       ctx.stroke();
       if (st.state !== 'done') {
         const nc = st.nextCircle();
-        ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
         ctx.setLineDash([8 / scale, 8 / scale]);
         ctx.beginPath();
         ctx.arc(nc.x, nc.z, nc.r, 0, Math.PI * 2);
@@ -947,13 +1212,8 @@ export class Hud {
       ctx.stroke();
     }
 
-    for (const a of match.actors) {
-      if (!a.alive || a === me) continue;
-      ctx.fillStyle = '#ff5f5f';
-      ctx.beginPath();
-      ctx.arc(a.body.position.x, a.body.position.z, 5 / scale * 0.55, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    // NOTE: Enemy positions are intentionally never drawn on any player-facing
+    // map. Hidden bot locations must never leak into production UI.
 
     if (me) {
       ctx.save();

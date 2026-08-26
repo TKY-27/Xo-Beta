@@ -12,6 +12,20 @@ export const RARITIES: readonly Rarity[] = ['common', 'uncommon', 'rare', 'epic'
 export type AmmoType = 'light' | 'medium' | 'shells' | 'heavy';
 export type WeaponId = 'pistol' | 'shotgun' | 'ar' | 'smg' | 'sniper';
 
+/** Melee (fists) balance. Permanent pseudo-weapon; Q selects it. */
+export const MELEE = {
+  name: 'Fists',
+  /** Punches per minute. */
+  rpm: 150,
+  damage: 18,
+  headMult: 1.5,
+  range: 2.4,
+  /** Horizontal cone half-angle for hit detection (rad). */
+  arcCos: 0.5,
+  radius: 0.9,
+  knockback: 3.2,
+} as const;
+
 export interface WeaponDef {
   id: WeaponId;
   name: string;
@@ -53,7 +67,7 @@ export interface WeaponDef {
 export const WEAPONS: Record<WeaponId, WeaponDef> = {
   pistol: {
     id: 'pistol', name: 'P9 Sidearm', fireMode: 'semi', rpm: 400,
-    damage: [26, 29, 32, 35, 38], pellets: 1, magSize: 15, reserveMax: 120, ammoType: 'light',
+    damage: [26, 29, 32, 35, 38], pellets: 1, magSize: 15, reserveMax: 240, ammoType: 'light',
     projectileSpeed: 340, dropGravity: 0.55,
     spreadHip: 0.017, spreadAds: 0.004, bloomPerShot: 0.006, bloomDecay: 0.05, bloomMax: 0.045,
     recoilKick: 0.011, recoilRecover: 7, adsTime: 0.16,
@@ -63,7 +77,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
   smg: {
     id: 'smg', name: 'Viper SMG', fireMode: 'auto', rpm: 900,
-    damage: [17, 18, 19, 20, 21], pellets: 1, magSize: 32, reserveMax: 240, ammoType: 'light',
+    damage: [17, 18, 19, 20, 21], pellets: 1, magSize: 32, reserveMax: 480, ammoType: 'light',
     projectileSpeed: 380, dropGravity: 0.6,
     spreadHip: 0.03, spreadAds: 0.014, bloomPerShot: 0.0045, bloomDecay: 0.07, bloomMax: 0.08,
     recoilKick: 0.0075, recoilRecover: 8, adsTime: 0.19,
@@ -73,7 +87,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
   ar: {
     id: 'ar', name: 'Kestrel AR', fireMode: 'auto', rpm: 700,
-    damage: [24, 26, 28, 30, 32], pellets: 1, magSize: 30, reserveMax: 180, ammoType: 'medium',
+    damage: [24, 26, 28, 30, 32], pellets: 1, magSize: 30, reserveMax: 360, ammoType: 'medium',
     projectileSpeed: 480, dropGravity: 0.5,
     spreadHip: 0.02, spreadAds: 0.005, bloomPerShot: 0.005, bloomDecay: 0.06, bloomMax: 0.06,
     recoilKick: 0.010, recoilRecover: 6.5, adsTime: 0.24,
@@ -83,7 +97,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
   shotgun: {
     id: 'shotgun', name: 'Breacher 12', fireMode: 'pump', rpm: 60,
-    damage: [11, 12.5, 14, 17.5, 22], pellets: 10, magSize: 6, reserveMax: 48, ammoType: 'shells',
+    damage: [11, 12.5, 14, 17.5, 22], pellets: 10, magSize: 6, reserveMax: 96, ammoType: 'shells',
     projectileSpeed: 300, dropGravity: 0.7,
     spreadHip: 0.055, spreadAds: 0.042, bloomPerShot: 0.002, bloomDecay: 0.05, bloomMax: 0.01,
     recoilKick: 0.035, recoilRecover: 5, adsTime: 0.22,
@@ -93,7 +107,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
   },
   sniper: {
     id: 'sniper', name: 'Longview Mk2', fireMode: 'bolt', rpm: 40,
-    damage: [100, 115, 140, 205, 230], pellets: 1, magSize: 5, reserveMax: 30, ammoType: 'heavy',
+    damage: [100, 115, 140, 205, 230], pellets: 1, magSize: 5, reserveMax: 60, ammoType: 'heavy',
     projectileSpeed: 900, dropGravity: 0.22,
     spreadHip: 0.05, spreadAds: 0.0008, bloomPerShot: 0.01, bloomDecay: 0.04, bloomMax: 0.02,
     recoilKick: 0.05, recoilRecover: 4, adsTime: 0.34,
@@ -136,8 +150,12 @@ export const RARITY_CSS: Record<Rarity, string> = {
   legendary: '#ffb43a',
 };
 
-/** Floor-loot rarity weights (index-aligned with RARITIES). */
-export const FLOOR_RARITY_WEIGHTS = [40, 28, 18, 10, 4] as const;
+/**
+ * Floor-loot rarity weights (index-aligned with RARITIES).
+ * Epic and Legendary are chest/reward exclusives — floor loot tops out at
+ * Rare, with progressively scarcer tiers.
+ */
+export const FLOOR_RARITY_WEIGHTS = [46, 32, 22, 0, 0] as const;
 
 export type ChestKind = 'standard' | 'elite' | 'vault';
 
@@ -171,7 +189,7 @@ export const HEAL_ITEMS: Record<HealItemId, HealItemDef> = {
 };
 
 export const AMMO_PICKUP_AMOUNTS: Record<AmmoType, number> = {
-  light: 36, medium: 30, shells: 8, heavy: 6,
+  light: 72, medium: 60, shells: 16, heavy: 12,
 };
 
 // ---------------------------------------------------------------------------
@@ -196,18 +214,26 @@ export type HitRegion = keyof typeof HIT_REGION_MULT;
 // ---------------------------------------------------------------------------
 
 export const MOVE = {
-  gravity: 26,
-  walkSpeed: 7.2,
-  sprintSpeed: 9.8,
+  // Readable Fortnite-like jump arc: a softer rise and slightly firmer fall
+  // keep the apex controllable without making landings feel weightless.
+  gravity: 24.5,
+  jumpRiseGravityScale: 0.92,
+  fallGravityScale: 1.15,
+  walkSpeed: 6.6,
+  sprintSpeed: 10.8,
   crouchSpeed: 4.4,
   adsMoveMult: 0.6,
-  accelGround: 70,
-  accelAir: 22,
-  frictionGround: 9.5,
-  stopSpeed: 2.0,
+  // Acceleration coefficients (gain rate = coeff * wishSpeed):
+  // ground reaches sprint in ~0.15s, air steering is meaningful but
+  // momentum-preserving instead of the old instant redirects.
+  accelGround: 13,
+  accelAir: 4.0,
+  frictionGround: 11,
+  stopSpeed: 2.4,
 
-  jumpVel: 9.6,
-  doubleJumpVel: 9.0,
+  jumpVel: 9.2,
+  sprintJumpMultiplier: 1.06,
+  doubleJumpVel: 8.7,
   maxJumps: 2,
   coyoteTime: 0.12,
   jumpBufferTime: 0.12,
@@ -227,11 +253,14 @@ export const MOVE = {
 
   wallRunMinSpeed: 6.0,
   wallRunMaxTime: 1.9,
-  wallRunGravityScale: 0.22,
+  wallRunGravityScale: 0.18,
   wallRunStickAccel: 14,
   wallRunMinHeight: 1.0,
   wallJumpUpVel: 9.4,
   wallJumpOutVel: 8.5,
+  wallrunReentryCooldown: 0.5,
+  wallRunSameWallDot: 0.985,
+  wallRunMaxChains: 2,
 
   mantleMaxLedge: 2.7,
   mantleMinDepth: 0.5,
@@ -264,7 +293,7 @@ export const MOVE = {
   crouchEyeHeight: 1.35,
   capsuleRadius: 0.42,
   capsuleHalfHeight: 1.15,
-  stepHeight: 0.55,
+  stepHeight: 0.68,
 } as const;
 
 // ---------------------------------------------------------------------------

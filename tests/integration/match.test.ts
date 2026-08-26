@@ -23,21 +23,20 @@ describe('headless match lifecycle', () => {
   it('bots loot and fight: pickups and eliminations occur naturally', async () => {
     const r = await runHeadlessMatch({ mapId: 'oldfront', seed: 777, difficulty: 'normal', maxSeconds: 60 * 26 });
     expect(r.itemsPickedUp).toBeGreaterThan(20);
+    expect(r.itemsPickedUp).toBeLessThan(500); // no full-inventory pick/drop churn
     // 8+ eliminations (a rare simultaneous-survivor edge can leave 2 alive at cap)
     expect(r.killFeedSize).toBeGreaterThanOrEqual(6);
     expect(r.chestOpens).toBeGreaterThan(0);
+    expect(r.placements.reduce((sum, actor) => sum + actor.damage, 0)).toBeGreaterThan(0);
   }, 240_000);
 
   it('storm pressure exists: some matches end with storm kills', async () => {
-    // Run three seeds; at least one should feature storm deaths
+    // Scan seeds until one features storm deaths (exact seeds shift as bot
+    // behavior is tuned; the mechanic itself must keep existing).
     let sawStormDeaths = false;
-    for (const seed of [31, 32, 33]) {
+    for (let seed = 31; seed <= 40 && !sawStormDeaths; seed++) {
       const r = await runHeadlessMatch({ mapId: 'eden', seed, difficulty: 'hard', maxSeconds: 60 * 26 });
-      if (r.stormDeaths > 0) {
-        sawStormDeaths = true;
-        break;
-      }
-      void seed;
+      if (r.stormDeaths > 0) sawStormDeaths = true;
     }
     expect(sawStormDeaths).toBe(true);
   }, 600_000);

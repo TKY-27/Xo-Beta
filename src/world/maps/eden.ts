@@ -7,20 +7,41 @@
 import { WorldBuilder } from '../builder';
 import type { MapDef } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, scatterRocks, scatterTrees } from './common';
+import { addBuilding, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
 function terrainH(x: number, z: number): number {
   let h = Math.sin(x * 0.018) * 0.4 + Math.cos(z * 0.02) * 0.35;
-  // Lake basin (water volume handles the surface; bed sits below)
+  // Lake basin (water volume handles the surface; bed sits below). The old
+  // 6 m depression exposed only a tiny patch of a 145x150 m water volume;
+  // broaden/deepen it so the visible shoreline matches the advertised lake.
   const ld = Math.hypot(x - 140, z - 60);
-  if (ld < 85) {
-    h -= (1 - ld / 85) * 6;
+  if (ld < 100) {
+    h -= (1 - ld / 100) * 8;
   }
-  const pondD = Math.hypot(x + 220, z + 205);
-  if (pondD < 40) {
-    h -= (1 - pondD / 40) * 4;
+
+  // The authored river water used to sit four metres below completely flat
+  // terrain, making the whole channel invisible and non-traversable. Carve a
+  // real bed for the exact rectangular water volume, with a 12 m outer bank.
+  const rdx = Math.max(150 - x, 0, x - 190);
+  const rdz = Math.max(135 - z, 0, z - 165);
+  const riverOutside = Math.hypot(rdx, rdz);
+  const inRiver = x >= 150 && x <= 190 && z >= 135 && z <= 165;
+  if (inRiver) {
+    h = Math.min(h, -5.35 + Math.sin(x * 0.11 + z * 0.07) * 0.12);
+  } else if (riverOutside < 12) {
+    const t = 1 - riverOutside / 12;
+    const bed = -5.35 + Math.sin(x * 0.11 + z * 0.07) * 0.12;
+    h = Math.min(h, h + (bed - h) * t * t * (3 - 2 * t));
+  }
+
+  // Pond water is in the south-west quadrant at z=+205. The old basin used
+  // z=-205, so the visible water plane sat over flat land while an unrelated
+  // dry crater appeared on the opposite side of the map.
+  const pondD = Math.hypot(x + 220, z - 205);
+  if (pondD < 52) {
+    h -= (1 - pondD / 52) * 6.5;
   }
   return h;
 }
@@ -29,13 +50,14 @@ export function buildEdenFacility(): MapDef {
   const rng = new Rng(0x3d3e + 11);
   const b = new WorldBuilder('eden', 'EDEN FACILITY', 'A lakeside research station swallowed by green. Daylight, water, and long sightlines.', S);
 
-  b.box(0, -1, 0, S + 200, 2, S + 200, 'grass', 0, { noCollide: true });
+  // Ground surface is rendered by src/render/vista.ts (terrain mesh matching
+  // this map's heightfield + beyond-bounds landscape).
   buildHeightfield(b);
 
   // Water: lake + river to the south
   b.water(70, 215, -15, 135, -4.2, 6);          // lake basin
   b.water(150, 190, 135, 165, -4.0, 5);         // river mouth heading south-east... simplified channel
-  b.water(-260, -180, 180, 230, -3.8, 4);       // small pond SW
+  b.water(-248, -180, 180, 230, -3.8, 4);       // small pond SW (inside playable bounds)
 
   // ------------------------------------------------------------------
   // POI: RESEARCH COMPLEX (main labs, west plateau)
@@ -47,7 +69,7 @@ export function buildEdenFacility(): MapDef {
   atriumLink(b, -92, 8);
   helipad(b, -60, -55);
   b.chest(-88, terrainH(-88, -22) + 0.3, -22, 'vault');
-  b.chest(-118, terrainH(-118, 2) + 7.6, 2, 'elite');
+  b.chest(-126, structureBaseY(terrainH, -130, 5, 20, 15) + 8.2, 2, 'elite');
   b.chest(-58, terrainH(-58, 16) + 0.3, 16, 'standard');
   b.vehicle(-75, -50, terrainH(-75, -50) + 0.2, 0.5, 'van', 0xdde3e8);
 
@@ -60,7 +82,7 @@ export function buildEdenFacility(): MapDef {
   serviceHouse(b, -122, 128);
   courtyardGreen(b, rng, -108, 108);
   b.chest(-100, terrainH(-100, 106) + 0.3, 106, 'standard');
-  b.chest(-126, terrainH(-126, 97) + 7.6, 97, 'elite');
+  b.chest(-126, structureBaseY(terrainH, -125, 95, 22, 14) + 7.6, 97, 'elite');
 
   // ------------------------------------------------------------------
   // POI: WATER TREATMENT (underground facility, north-west)
@@ -68,7 +90,7 @@ export function buildEdenFacility(): MapDef {
   b.poi('Water Treatment', -170, -120, 45);
   treatmentPlant(b, -170, -120);
   b.chest(-162, terrainH(-162, -112) + 0.3, -112, 'elite');
-  b.chest(-176, -9.7, -124, 'vault');
+  b.chest(-176, terrainH(-170, -120) - 5, -124, 'vault');
 
   // ------------------------------------------------------------------
   // POI: LAKESIDE DOCK (east shore)
@@ -120,6 +142,17 @@ export function buildEdenFacility(): MapDef {
   b.poi('Watch Rock', 60, -60, 18);
   watchRock(b, 60, -60);
 
+  // Extra anchored chests — every minor site gets a reason to visit.
+  b.chest(58, terrainH(58, 178) + 0.3, 178, 'standard');          // ranger cabin porch
+  b.chest(-4, terrainH(-4, 29) + 0.3, 29, 'elite');               // greenhouse service path
+  b.chest(146, terrainH(146, 68) + 0.3, 68, 'standard');          // dock shore path
+  b.chest(-104, terrainH(-104, 118) + 0.3, 118, 'standard');      // dorm courtyard
+  b.chest(-166, terrainH(-166, -128) + 0.3, -128, 'elite');       // treatment yard
+  b.chest(224, terrainH(224, 96) + 0.3, 96, 'vault');             // meadow camp tents
+  b.chest(158, terrainH(158, 152) + 0.3, 152, 'standard');        // south ford bank
+  b.chest(-238, terrainH(-238, -62) + 0.3, -62, 'standard');      // pump house
+  b.chest(-214, terrainH(-214, 36) + 0.3, 36, 'elite');           // generator yard
+
   // Vegetation — dense pines across map
   scatterTrees(b, rng, 110, { minX: -245, maxX: 245, minZ: -245, maxZ: 245 }, 'pine',
     [
@@ -133,26 +166,28 @@ export function buildEdenFacility(): MapDef {
   scatterRocks(b, rng, 30, { minX: -245, maxX: 245, minZ: -245, maxZ: 245 },
     [{ x: -90, z: -20, r: 60 }, { x: 120, z: 40, r: 40 }, { x: 10, z: 30, r: 30 }], terrainH);
 
+  forestLife(b, rng);
+
   decorateEden(b, rng);
 
   return b.finish(
     {
       preset: 'day',
       hdri: 'qwantani_puresky_2k.hdr',
-      fogColor: 0xbfd6e4,
-      fogDensity: 0.002,
+      fogColor: 0xa9c2d4,
+      fogDensity: 0.0016,
       sunDirection: [0.45, -0.8, 0.35],
       sunColor: 0xfff2dd,
-      sunIntensity: 3.4,
+      sunIntensity: 2.9,
       ambientColor: 0xb6ccd8,
       ambientIntensity: 0.55,
       hemisphereSky: 0xa8d4f0,
       hemisphereGround: 0x55663f,
-      hemisphereIntensity: 1.45,
+      hemisphereIntensity: 1.55,
       exposure: 1.12,
       envIntensity: 1.15,
-      backgroundBlurriness: 0.02,
-      backgroundIntensity: 1.0,
+      backgroundBlurriness: 0.045,
+      backgroundIntensity: 0.62,
       grade: {
         vignette: 0.28,
         saturation: 1.08,
@@ -168,8 +203,68 @@ export function buildEdenFacility(): MapDef {
 // Terrain heightfield registration
 // ---------------------------------------------------------------------------
 
+/**
+ * Believable forest life: species-clustered woodland (pines on high ground,
+ * oaks near water, dead snags in damp hollows), age/size variation, fallen
+ * logs, stumps and boulder micro-outcrops. Cluster centers keep the forest
+ * reading as grown, not scattered.
+ */
+function forestLife(b: WorldBuilder, rng: Rng): void {
+  const clusters: Array<{ x: number; z: number; r: number; mix: Array<'pine' | 'oak' | 'dead'> }> = [
+    { x: -220, z: -200, r: 70, mix: ['pine', 'pine', 'oak'] },
+    { x: -30, z: -190, r: 60, mix: ['pine', 'oak', 'dead'] },
+    { x: 90, z: -140, r: 65, mix: ['pine', 'pine', 'dead'] },
+    { x: 210, z: 20, r: 55, mix: ['oak', 'oak', 'pine'] },
+    { x: -230, z: 130, r: 60, mix: ['oak', 'pine'] },
+    { x: 40, z: 120, r: 50, mix: ['oak', 'oak', 'pine'] },
+    { x: 190, z: 215, r: 45, mix: ['oak', 'dead'] },
+    { x: -160, z: 210, r: 40, mix: ['pine', 'oak', 'dead'] },
+    // Infill: the west/center meadows between the original clusters read as
+    // empty lawn; these smaller groves break up the open sightlines.
+    { x: -150, z: 30, r: 46, mix: ['pine', 'oak'] },
+    { x: -60, z: -75, r: 44, mix: ['pine', 'oak', 'dead'] },
+    { x: 150, z: -35, r: 42, mix: ['oak', 'pine'] },
+    { x: 60, z: 195, r: 38, mix: ['oak', 'oak', 'dead'] },
+  ];
+  for (const c of clusters) {
+    const n = Math.round(c.r / 3.2);
+    for (let i = 0; i < n; i++) {
+      const a = rng.angle();
+      const d = Math.sqrt(rng.next()) * c.r;
+      const x = c.x + Math.cos(a) * d;
+      const z = c.z + Math.sin(a) * d;
+      if (Math.abs(x) > 244 || Math.abs(z) > 244) continue;
+      // Keep out of water and facility cores.
+      if (terrainH(x, z) < -2.5) continue;
+      if (Math.hypot(x + 90, z + 20) < 55 || Math.hypot(x - 120, z - 40) < 34) continue;
+      const variant = c.mix[rng.int(0, c.mix.length - 1)]!;
+      // Age variation: saplings to old growth.
+      b.tree({ x, z, y: terrainH(x, z), scale: rng.range(0.7, 1.7), variant });
+    }
+  }
+
+  // Fallen logs (mossy horizontal trunks — real cover at waist height)
+  for (let i = 0; i < 20; i++) {
+    const lx = rng.range(-235, 235);
+    const lz = rng.range(-235, 235);
+    if (terrainH(lx, lz) < -1.5 || Math.hypot(lx + 90, lz + 20) < 58) continue;
+    b.box(lx, terrainH(lx, lz) + 0.42, lz, rng.range(3.4, 5.6), 0.72, 0.78,
+      rng.bool(0.6) ? 'woodDark' : 'wood', rng.angle());
+    if (rng.bool(0.35)) b.loot(lx + rng.range(-2, 2), terrainH(lx, lz) + 0.4, lz + rng.range(-2, 2));
+  }
+  // Stumps from old logging
+  for (let i = 0; i < 16; i++) {
+    const sx = rng.range(-235, 235);
+    const sz = rng.range(-235, 235);
+    if (terrainH(sx, sz) < -1.5) continue;
+    b.cyl(sx, terrainH(sx, sz) + 0.32, sz, rng.range(0.38, 0.6), rng.range(0.5, 0.85), 'woodDark');
+  }
+}
+
 function buildHeightfield(b: WorldBuilder): void {
-  const n = 64;
+  // River banks and the lake shelf need finer triangles than the old ~8 m
+  // grid; 128 keeps visual and Rapier contact within a few centimetres.
+  const n = 128;
   const heights = new Float32Array(n * n);
   for (let r = 0; r < n; r++) {
     for (let c = 0; c < n; c++) {
@@ -186,11 +281,11 @@ function buildHeightfield(b: WorldBuilder): void {
 // ---------------------------------------------------------------------------
 
 function labMain(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = structureBaseY(terrainH, cx, cz, 34, 24);
   addBuilding(b, {
-    x: cx, z: cz, w: 34, d: 24, floors: 2, floorHeight: 4.2, wallMat: 'facadeA', trimMat: 'metal',
+    x: cx, z: cz, baseY: gy, w: 34, d: 24, floors: 2, floorHeight: 4.2, wallMat: 'facadeA', trimMat: 'metal',
     doors: [[0, 10, 2.8], [0, 24, 2.8], [2, 17, 2.8], [1, 9, 2.8]], roofAccess: true,
   });
-  const gy = terrainH(cx, cz);
   // Rooftop units
   b.box(cx + 8, gy + 9.4, cz - 4, 4, 1.6, 3, 'metalDark');
   b.loot(cx - 8, gy + 0.4, cz + 4);
@@ -198,11 +293,11 @@ function labMain(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function labWing(b: WorldBuilder, cx: number, cz: number, doorSide: 0 | 1 | 2 | 3): void {
+  const gy = structureBaseY(terrainH, cx, cz, 20, 15);
   addBuilding(b, {
-    x: cx, z: cz, w: 20, d: 15, floors: 2, floorHeight: 4, wallMat: 'facadeC', trimMat: 'metalDark',
+    x: cx, z: cz, baseY: gy, w: 20, d: 15, floors: 2, floorHeight: 4, wallMat: 'facadeC', trimMat: 'metalDark',
     doors: [[doorSide, 8, 2.4]],
   });
-  const gy = terrainH(cx, cz);
   b.loot(cx + 3, gy + 0.4, cz + 2);
 }
 
@@ -214,12 +309,18 @@ function atriumLink(b: WorldBuilder, cx: number, cz: number): void {
   b.glassPane(cx + 5, gy + 2.4, cz, 26, 4.4, 'z');
   // Structural mullions: the roof must visibly land on something, especially
   // at distance where the glass panes fade into the fog.
-  for (let i = 0; i < 5; i++) {
-    const z = cz - 13 + i * 6.5;
-    b.box(cx - 4.7, gy + 2.4, z, 0.38, 4.8, 0.38, 'metalDark');
-    b.box(cx + 4.7, gy + 2.4, z, 0.38, 4.8, 0.38, 'metalDark');
+  for (let i = 0; i < 7; i++) {
+    const z = cz - 13 + i * (26 / 6);
+    b.box(cx - 4.7, gy + 2.4, z, 0.5, 4.8, 0.5, 'metalDark');
+    b.box(cx + 4.7, gy + 2.4, z, 0.5, 4.8, 0.5, 'metalDark');
   }
   b.slab(cx, gy + 4.8, cz, 10.6, 26.6, 0.4, 'metalDark');
+  // Perimeter beam under the slab edge — keeps the roof visually connected to
+  // the mullions even when the glass is washed out by daylight.
+  b.box(cx, gy + 4.55, cz - 13.3, 10.6, 0.3, 0.4, 'metalDark');
+  b.box(cx, gy + 4.55, cz + 13.3, 10.6, 0.3, 0.4, 'metalDark');
+  b.box(cx - 5.3, gy + 4.55, cz, 0.4, 0.3, 26.6, 'metalDark');
+  b.box(cx + 5.3, gy + 4.55, cz, 0.4, 0.3, 26.6, 'metalDark');
   // Roof edge trim — breaks the bright slab silhouette into a framed roof.
   b.box(cx, gy + 5.1, cz - 13.3, 11, 0.42, 0.55, 'metalDark');
   b.box(cx, gy + 5.1, cz + 13.3, 11, 0.42, 0.55, 'metalDark');
@@ -238,20 +339,20 @@ function helipad(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function dormitory(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = structureBaseY(terrainH, cx, cz, 22, 14);
   addBuilding(b, {
-    x: cx, z: cz, w: 22, d: 14, floors: 2, floorHeight: 3.6, wallMat: 'plaster', trimMat: 'woodDark', roofMat: 'roofTile',
+    x: cx, z: cz, baseY: gy, w: 22, d: 14, floors: 2, floorHeight: 3.6, wallMat: 'plaster', trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[0, 8, 2.2], [2, 8, 2.2]],
   });
-  const gy = terrainH(cx, cz);
   b.loot(cx - 4, gy + 0.4, cz + 2);
 }
 
 function serviceHouse(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = structureBaseY(terrainH, cx, cz, 10, 9);
   addBuilding(b, {
-    x: cx, z: cz, w: 10, d: 9, floors: 1, wallMat: 'woodDark', doors: [[0, 4, 1.8]],
+    x: cx, z: cz, baseY: gy, w: 10, d: 9, floors: 1, wallMat: 'woodDark', doors: [[0, 4, 1.8]],
     interiorDividers: false, windows: false,
   });
-  const gy = terrainH(cx, cz);
   b.loot(cx + 1, gy + 0.4, cz + 1);
 }
 
@@ -267,24 +368,24 @@ function courtyardGreen(b: WorldBuilder, rng: Rng, cx: number, cz: number): void
 }
 
 function treatmentPlant(b: WorldBuilder, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
+  const gy = structureBaseY(terrainH, cx, cz, 24, 18);
   // Ground building
   addBuilding(b, {
-    x: cx, z: cz, w: 24, d: 18, floors: 1, floorHeight: 5, wallMat: 'facadeB', trimMat: 'metalDark',
+    x: cx, z: cz, baseY: gy, w: 24, d: 18, floors: 1, floorHeight: 5, wallMat: 'facadeB', trimMat: 'metalDark',
     doors: [[0, 9, 2.8], [2, 9, 2.8]], interiorDividers: false,
   });
   // Clarifier tanks outside
   b.cyl(cx + 18, gy + 2.5, cz + 8, 5, 5, 'concrete');
   b.cyl(cx + 18, gy + 2.5, cz - 6, 5, 5, 'rust');
   // Underground pump room via stairs shaft
-  b.stairs(cx - 8, gy, cz + 6, 2, 9, 0.55, 0.62, 2.2, 'concreteDark');
+  b.stairs(cx - 8, gy, cz + 6, 2, 9, -5 / 9, 0.62, 2.2, 'concreteDark');
   const py = gy - 5;
   b.slab(cx, py, cz - 6, 20, 14, 0.5, 'concreteDark');
   b.slab(cx, py + 4.2, cz - 6, 20, 14, 0.5, 'concreteDark');
-  b.wallWithGaps(cx - 10, cz - 13, 20, 4.2, 0.5, 'x', 'concrete', []);
-  b.wallWithGaps(cx - 10, cz + 1, 20, 4.2, 0.5, 'x', 'concrete', [[8, 2.4]]);
-  b.wallWithGaps(cx - 10, cz - 13, 14, 4.2, 0.5, 'z', 'concrete', []);
-  b.wallWithGaps(cx + 10, cz - 13, 14, 4.2, 0.5, 'z', 'concrete', []);
+  b.wallWithGaps(cx - 10, cz - 13, 20, 4.2, 0.5, 'x', 'concrete', [], 0, py);
+  b.wallWithGaps(cx - 10, cz + 1, 20, 4.2, 0.5, 'x', 'concrete', [[8, 2.4]], 0, py);
+  b.wallWithGaps(cx - 10, cz - 13, 14, 4.2, 0.5, 'z', 'concrete', [], 0, py);
+  b.wallWithGaps(cx + 10, cz - 13, 14, 4.2, 0.5, 'z', 'concrete', [], 0, py);
   for (let i = 0; i < 3; i++) {
     b.cyl(cx - 6 + i * 6, py + 1.4, cz - 9, 1.4, 2.8, 'metalDark');
   }
@@ -293,28 +394,49 @@ function treatmentPlant(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function dock(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
-  // Wooden pier into the lake
+  // Wooden pier: shore landing at terrain grade, stairs down to lake level,
+  // then a flat deck on posts over the water.
   const surfaceY = -4.2;
-  for (let i = 0; i < 5; i++) {
-    const pz = cz + i * 6;
-    b.slab(cx, surfaceY + 1.1, pz, 5, 6, 0.3, 'woodDark');
-    if (i > 0) {
-      b.cyl(cx - 2, surfaceY + 0.4, pz, 0.22, 1.6, 'woodDark');
-      b.cyl(cx + 2, surfaceY + 0.4, pz, 0.22, 1.6, 'woodDark');
+  const deckY = surfaceY + 1.1;
+  // A small built-up landing creates a credible dry shoreline even where the
+  // smoothed lake basin is deeper than the rectangular water edge.
+  const shoreY = Math.max(terrainH(cx, cz), surfaceY + 0.15);
+  // Shore landing platform
+  b.slab(cx, shoreY + 0.06, cz - 2.4, 5, 4.6, 0.3, 'woodDark');
+  // Stairs join the two actual elevations. The old code always forced a
+  // 1.6 m descent, even when the deck was above the shore, leaving the run
+  // disconnected from the deck.
+  const rise = deckY - shoreY;
+  const stairSteps = Math.max(3, Math.ceil(Math.abs(rise) / 0.3));
+  const stepH = rise / stairSteps;
+  const stairZ = cz - 0.1;
+  const stair = b.stairs(cx, shoreY, stairZ, 0, stairSteps, stepH, 0.62, 4.6, 'woodDark');
+  // Flat lake-level deck on posts
+  const deckStart = stairZ + stair.run;
+  const deckEnd = cz + 30;
+  const segs = Math.max(2, Math.round((deckEnd - deckStart) / 6));
+  const segLen = (deckEnd - deckStart) / segs;
+  for (let i = 0; i < segs; i++) {
+    const pz = deckStart + segLen * (i + 0.5);
+    b.slab(cx, deckY, pz, 5, segLen + 0.3, 0.3, 'woodDark');
+    const bedY = terrainH(cx, pz);
+    if (bedY < deckY - 0.5) {
+      b.cyl(cx - 2, (bedY + deckY) / 2 - 0.15, pz, 0.22, deckY - bedY, 'woodDark');
+      b.cyl(cx + 2, (bedY + deckY) / 2 - 0.15, pz, 0.22, deckY - bedY, 'woodDark');
     }
   }
-  b.platform(cx - 2.5, cx + 2.5, cz, cz + 30, surfaceY + 1.25);
-  b.crate(cx, surfaceY + 1.4, cz + 8, 1);
+  b.platform(cx - 2.5, cx + 2.5, deckStart, deckEnd, deckY + 0.15);
+  b.crate(cx, deckY + 0.3, cz + 8, 1);
   for (let i = 0; i < 3; i++) {
-    b.cyl(cx + 1.5 + (i % 2) * 1.1, surfaceY + 0.55 + Math.floor(i / 2) * 1.1, cz + 20, 0.55, 1.1, 'rust');
+    b.cyl(cx + 1.5 + (i % 2) * 1.1, deckY + 0.55 + Math.floor(i / 2) * 1.1, cz + 20, 0.55, 1.1, 'rust');
   }
-  b.loot(cx, surfaceY + 1.6, cz + 14);
+  b.loot(cx, deckY + 0.5, cz + 14);
 }
 
 function boathouse(b: WorldBuilder, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
+  const gy = structureBaseY(terrainH, cx, cz, 12, 14);
   addBuilding(b, {
-    x: cx, z: cz, w: 12, d: 14, floors: 1, floorHeight: 5, wallMat: 'woodDark', trimMat: 'wood',
+    x: cx, z: cz, baseY: gy, w: 12, d: 14, floors: 1, floorHeight: 5, wallMat: 'woodDark', trimMat: 'wood',
     doors: [[1, 5, 2.6]], interiorDividers: false, windows: false,
   });
   b.loot(cx - 2, gy + 0.4, cz + 2);
@@ -398,11 +520,11 @@ function testField(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
 }
 
 function cabin(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = structureBaseY(terrainH, cx, cz, 9, 8);
   addBuilding(b, {
-    x: cx, z: cz, w: 9, d: 8, floors: 1, wallMat: 'woodDark', doors: [[0, 3.5, 1.7]],
+    x: cx, z: cz, baseY: gy, w: 9, d: 8, floors: 1, wallMat: 'woodDark', doors: [[0, 3.5, 1.7]],
     interiorDividers: false, windows: false,
   });
-  const gy = terrainH(cx, cz);
   b.loot(cx + 1, gy + 0.4, cz + 1);
   b.crate(cx - 3, gy + 0.2, cz + 3, 0.9);
 }
@@ -411,7 +533,9 @@ function ford(b: WorldBuilder, cx: number, cz: number): void {
   // Shallow river crossing with stepping stones
   const sy = -4.0;
   for (let i = 0; i < 6; i++) {
-    b.rock(cx - 8 + i * 3.2, cz + Math.sin(i) * 2, sy + 0.4, 1.1);
+    // Sink each base below the water plane; the upper rock still protrudes
+    // enough to read and collide as a stepping stone without floating.
+    b.rock(cx - 8 + i * 3.2, cz + Math.sin(i) * 2, sy - 0.75, 1.1);
   }
   b.loot(cx, sy + 0.8, cz);
   b.loot(cx + 6, sy + 0.8, cz + 2);
@@ -425,16 +549,16 @@ function meadowCamp(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
     b.box(tx, gy + 0.9, tz, 2.6, 1.8, 2.6, 'plasterOld', rng.angle());
     b.platform(tx - 1.3, tx + 1.3, tz - 1.3, tz + 1.3, gy + 1.8);
   }
-  b.chest(cx + 6, gy + 0.3, cz - 6, 'standard');
+  b.chest(cx + 10, terrainH(cx + 10, cz - 10) + 0.3, cz - 10, 'standard');
   b.loot(cx - 4, gy + 0.4, cz + 5);
 }
 
 function pumpHouse(b: WorldBuilder, cx: number, cz: number): void {
+  const gy = structureBaseY(terrainH, cx, cz, 8, 8);
   addBuilding(b, {
-    x: cx, z: cz, w: 8, d: 8, floors: 1, wallMat: 'brick' as never, doors: [[0, 3.5, 1.8]],
+    x: cx, z: cz, baseY: gy, w: 8, d: 8, floors: 1, wallMat: 'bricksOld', doors: [[0, 3.5, 1.8]],
     interiorDividers: false, windows: false,
   });
-  const gy = terrainH(cx, cz);
   b.cyl(cx + 6, gy + 1, cz, 0.8, 2, 'rust');
   b.loot(cx, gy + 0.4, cz + 2);
 }
@@ -452,15 +576,25 @@ function watchRock(b: WorldBuilder, cx: number, cz: number): void {
 // ---------------------------------------------------------------------------
 
 function decorateEden(b: WorldBuilder, rng: Rng): void {
-  // Concrete service paths linking facility POIs
+  // Concrete service paths linking facility POIs (overlapping, partially
+  // sunk segments so the path reads continuous rather than floating tiles)
   const path = (x1: number, z1: number, x2: number, z2: number) => {
     const len = Math.hypot(x2 - x1, z2 - z1);
-    const steps = Math.max(2, Math.round(len / 7));
+    const steps = Math.max(2, Math.round(len / 4.5));
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
       const px = x1 + (x2 - x1) * t + Math.sin(t * 8.3) * 2.6;
       const pz = z1 + (z2 - z1) * t + Math.cos(t * 6.7) * 2.4;
-      b.box(px, terrainH(px, pz) + 0.055, pz, 5.4, 0.09, 5.6, 'concreteDark', rng.range(-0.1, 0.1), { noCollide: true });
+      // Width jitter + gravel shoulders break the poured-stamp look.
+      const w = rng.range(4.6, 6.4);
+      b.box(px, terrainH(px, pz) + 0.04 - 0.21, pz, w, 0.5, w * rng.range(1.02, 1.18), 'concreteDark', rng.range(-0.12, 0.12), { noCollide: true });
+      if (i % 3 === 1) {
+        const sw = w * rng.range(1.4, 1.7);
+        b.box(
+          px + rng.range(-1.4, 1.4), terrainH(px, pz) - 0.14, pz + rng.range(-1.4, 1.4),
+          sw, 0.38, sw * rng.range(0.9, 1.15), 'dirt', rng.range(-0.35, 0.35), { noCollide: true },
+        );
+      }
     }
   };
   path(-95, -30, -55, 12);      // lab main → east wing
@@ -553,11 +687,13 @@ function decorateEden(b: WorldBuilder, rng: Rng): void {
     b.box(px, gy + 3.4, pz, 26, 0.5, 1.4, 'metalDark', 0, { noCollide: true });
   }
 
-  // Warning stripes at underground entries
+  // Warning stripes at underground entries: dark base strip with gold hazard
+  // dashes so it reads as painted hazard tape instead of a floating gold plank.
   for (const [sx, sz] of [[-176, -114], [-164, -126]] as Array<[number, number]>) {
     const gy = terrainH(sx, sz);
+    b.box(sx, gy + 0.045, sz, 5.6, 0.04, 3.4, 'concreteDark', 0, { noCollide: true });
     for (let i = 0; i < 4; i++) {
-      b.box(sx - 1.8 + i * 1.2, gy + 0.06, sz, 0.6, 0.05, 3.4, 'gold', 0, { noCollide: true });
+      b.box(sx - 1.8 + i * 1.2, gy + 0.07, sz, 0.6, 0.03, 3.4, 'gold', 0, { noCollide: true });
     }
   }
 }

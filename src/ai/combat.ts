@@ -73,7 +73,10 @@ export class BotCombat {
     const tp = t.body.position;
     const sp = this.self.body.position;
     let dx = tp.x - sp.x;
-    let dy = tp.y + 1.35 - (sp.y + 2.05);
+    // Aim at the upper torso from the real eye position. Body transforms are
+    // capsule centres, so adding foot-relative heights here aimed above both
+    // combatants and made otherwise level shots pitch downward.
+    let dy = (tp.y + 0.3) - this.self.eyeY;
     let dz = tp.z - sp.z;
     const dist = Math.hypot(dx, dy, dz);
 

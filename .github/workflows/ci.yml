@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
@@ -22,23 +25,29 @@ jobs:
         run: npm run lint
 
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
       - name: Secret scan
         run: npm run audit:secrets
 
-      - name: Unit tests
-        run: npx vitest run tests/unit
+      - name: Dependency vulnerability audit
+        run: npm audit --audit-level=high
 
-      - name: Integration tests (headless matches)
-        run: npx vitest run tests/integration
+      - name: Production asset audit
+        run: npm run audit:assets
+
+      - name: Dependency license audit
+        run: npm run audit:licenses
+
+      - name: Unit and integration tests
+        run: npm run test
         timeout-minutes: 15
 
       - name: Production build
         run: npm run build
 
-      - name: Dependency license audit
-        run: npm run audit:licenses
+      - name: Cloudflare packaging dry-run
+        run: npx wrangler deploy --dry-run --outdir .wrangler/dry-run
 
       - name: Upload production bundle
         uses: actions/upload-artifact@v4
