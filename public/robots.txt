@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://xo-beta.pages.dev/sitemap.xml
