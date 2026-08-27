@@ -2,6 +2,8 @@
 
 [日本語](README.ja.md)
 
+Play: https://xo-beta.pages.dev/
+
 **A browser-native single-player 3D battle royale. Ten combatants drop onto a dense arena — one human, nine autonomous bots — and the last one standing wins.**
 
 Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, no gameplay servers. Presentation combines original code-generated systems with redistributed CC0 (public-domain) art and audio packs — see [docs/ASSET_MANIFEST.md](docs/ASSET_MANIFEST.md) for full provenance.
