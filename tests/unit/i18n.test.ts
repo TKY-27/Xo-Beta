@@ -15,6 +15,14 @@ describe('localization contract', () => {
     for (const key of keys) expect(isTextKey(key), key).toBe(true);
   });
 
+  it('ships an explicit clickable spectator exit and a physical scope reticle', () => {
+    const html = readFileSync(join(process.cwd(), 'index.html'), 'utf8');
+    expect(html).toContain('id="btn-spectate-exit"');
+    expect(html).toContain('data-i18n="hud.spectateExit"');
+    expect(html).toContain('class="scope-housing"');
+    expect(html).toContain('class="scope-mil mil-h"');
+  });
+
   it('localizes every authored POI on all three maps', () => {
     const maps = [buildNeoCity(), buildOldFront(), buildEdenFacility()];
     for (const map of maps) {

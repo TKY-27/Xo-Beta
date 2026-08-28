@@ -297,7 +297,13 @@ export class MovementSystem {
     b.move(v.x * dt, v.y * dt, v.z * dt);
     if (b.hitCeiling && preY > 0) v.y = 0;
     if (b.grounded && v.y < 0) v.y = 0;
-    if (!b.grounded && wasGrounded) a.coyote = MOVE.coyoteTime;
+    if (!b.grounded && wasGrounded) {
+      a.coyote = MOVE.coyoteTime;
+      // Landing owns its own impact sample. Resetting the gait phase prevents
+      // a carried pre-jump remainder from producing a second step immediately
+      // after touchdown.
+      a.footstepAccum = 0;
+    }
     a.state = b.grounded ? 'ground' : 'air';
     // QA invariant: ground-locomotion state while physically airborne.
     a.airborneGroundTime = b.grounded ? 0 : a.airborneGroundTime + dt;
@@ -305,11 +311,14 @@ export class MovementSystem {
     // Footsteps
     if (b.grounded) {
       const hs = Math.hypot(v.x, v.z);
-      if (hs > 2.2) {
+      if (hs > 0.75) {
         a.footstepAccum += hs * dt;
-        const stride = cmd.sprint ? 3.1 : 2.6;
+        // One event represents one foot, not a complete left/right gait
+        // cycle. Retain overshoot so cadence remains even across frame spikes.
+        const walkStrideT = Math.min(1, hs / 6);
+        const stride = cmd.sprint ? 2.55 : 1.45 + (2.15 - 1.45) * walkStrideT;
         if (a.footstepAccum > stride) {
-          a.footstepAccum = 0;
+          a.footstepAccum -= stride;
           this.events.onFootstep(a, cmd.sprint);
         }
       }

@@ -5,7 +5,7 @@
  */
 
 import * as THREE from 'three';
-import { getSettings } from '../core/settings';
+import { getSettings, onSettingsChanged } from '../core/settings';
 import { CharacterFactory, type CharacterRig } from './characters';
 import type { WeaponModelFactory } from './weaponModels';
 
@@ -39,6 +39,10 @@ export class LobbyScene {
   private t = 0;
   private last = 0;
   private reduced = false;
+  private characters: CharacterFactory | null = null;
+  private actor = lobbyActor();
+  private previewSkin = getSettings().playerSkin;
+  private cleanupSettings: (() => void) | null = null;
   /** Horizontal look-at offset, eased each frame (pans the character in frame). */
   private lookX = -1.35;
   private lookXTarget = -1.35;
@@ -49,12 +53,13 @@ export class LobbyScene {
     _weapons: WeaponModelFactory,
   ): void {
     this.stop();
+    this.characters = characters;
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.25;
+    renderer.toneMappingExposure = 1.08;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0e1622);
@@ -101,7 +106,7 @@ export class LobbyScene {
       const strip = new THREE.Mesh(stripGeo, new THREE.MeshBasicMaterial({ color }));
       strip.position.set(x, 3.5, z);
       scene.add(strip);
-      const light = new THREE.PointLight(color, 40, 30, 2);
+      const light = new THREE.PointLight(color, 18, 30, 2);
       light.position.set(x * 0.72, 3.2, z * 0.72);
       scene.add(light);
     };
@@ -119,12 +124,12 @@ export class LobbyScene {
     }
 
     // Key + fill lights
-    const key = new THREE.SpotLight(0xeaf4ff, 700, 36, Math.PI / 4.4, 0.45, 1.6);
+    const key = new THREE.SpotLight(0xeaf4ff, 230, 36, Math.PI / 4.4, 0.45, 1.6);
     key.position.set(3.4, 7.6, 4.6);
     key.castShadow = true;
     key.shadow.mapSize.set(1024, 1024);
     scene.add(key, key.target);
-    const rim = new THREE.SpotLight(0x9fd8ff, 210, 28, Math.PI / 3.2, 0.55, 1.8);
+    const rim = new THREE.SpotLight(0x9fd8ff, 92, 28, Math.PI / 3.2, 0.55, 1.8);
     rim.position.set(-4.6, 5.2, -3.4);
     scene.add(rim, rim.target);
     const fill = new THREE.HemisphereLight(0x4a688c, 0x141a24, 1.7);
@@ -133,13 +138,14 @@ export class LobbyScene {
     // Combatant display: unarmed hero (fists guard pose — the permanent
     // melee stance). Weapon poses read poorly at lobby framing; the in-match
     // TPS rig shows weapons correctly.
-    const rig = characters.create('LOBBY_YOU', 0x5fd0ff, false);
+    const rig = characters.create('LOBBY_YOU', 0x5fd0ff, false, null, getSettings().playerSkin);
     rig.group.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) mesh.castShadow = true;
     });
     scene.add(rig.group);
-    const actor = lobbyActor();
+    this.actor = lobbyActor();
+    this.previewSkin = getSettings().playerSkin;
 
     const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 90);
 
@@ -153,6 +159,13 @@ export class LobbyScene {
     if (import.meta.env.DEV) {
       (window as unknown as Record<string, unknown>).__xoLobbyRig = rig;
     }
+    this.cleanupSettings = onSettingsChanged((settings) => {
+      this.reduced = settings.reducedMotion;
+      if (settings.playerSkin !== this.previewSkin) {
+        this.previewSkin = settings.playerSkin;
+        this.replacePreviewRig();
+      }
+    });
 
     const loop = (now: number) => {
       if (!this.running) return;
@@ -161,16 +174,23 @@ export class LobbyScene {
       this.last = now;
       this.t += dt;
 
-      // rig.update() derives rotation from actor.yaw (+π model offset), so
-      // steer facing through the stub: yaw π faces the camera at +Z.
-      actor.yaw = Math.PI + Math.sin(this.t * 0.32) * 0.16;
-      this.rig!.update?.(actor, now / 1000, dt);
+      // Keep the costume front aimed at the slowly orbiting camera. A fixed
+      // gameplay yaw inevitably drifted into a side/back view, hiding the
+      // palette and chest armour that players are trying to compare.
+      const previewFacing = this.camera
+        ? Math.atan2(this.camera.position.x, this.camera.position.z)
+        : 0;
+      this.actor.yaw = previewFacing + Math.PI + Math.sin(this.t * 0.32) * 0.06;
+      this.rig?.update?.(this.actor, now / 1000, dt);
 
       this.lookX += (this.lookXTarget - this.lookX) * Math.min(1, dt * 4.5);
 
       // Character framed right-of-center; nav rail owns the left edge.
       if (!this.reduced && this.camera) {
-        const a = this.t * 0.08;
+        // A restrained studio dolly reveals silhouette depth without orbiting
+        // behind the model or leaving the authored key light. Full 360-degree
+        // rotation made the selected skin periodically collapse to black.
+        const a = Math.sin(this.t * 0.18) * 0.18;
         const r = 5.4;
         this.camera.position.set(Math.sin(a) * r - 1.15, 1.76 + Math.sin(this.t * 0.31) * 0.12, Math.cos(a) * r + 0.9);
         this.camera.lookAt(this.lookX, 1.06, 0);
@@ -195,6 +215,22 @@ export class LobbyScene {
 
   private cleanupResize: (() => void) | null = null;
 
+  /** Rebuild only the preview rig; the selected skin is persisted by settings. */
+  private replacePreviewRig(): void {
+    if (!this.scene || !this.characters) return;
+    this.rig?.dispose();
+    const next = this.characters.create('LOBBY_YOU', 0x5fd0ff, false, null, this.previewSkin);
+    next.group.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) mesh.castShadow = true;
+    });
+    this.scene.add(next.group);
+    this.rig = next;
+    if (import.meta.env.DEV) {
+      (window as unknown as Record<string, unknown>).__xoLobbyRig = next;
+    }
+  }
+
   /**
    * Recompose the hero for the active screen: centered for the main menu,
    * panned toward the left edge when a wide panel (settings) owns the right.
@@ -205,6 +241,8 @@ export class LobbyScene {
 
   stop(): void {
     this.running = false;
+    this.cleanupSettings?.();
+    this.cleanupSettings = null;
     if (import.meta.env.DEV) {
       delete (window as unknown as Record<string, unknown>).__xoLobbyRig;
     }
@@ -226,6 +264,7 @@ export class LobbyScene {
     });
     this.scene = null;
     this.rig = null;
+    this.characters = null;
     this.renderer?.dispose();
     this.renderer = null;
     this.camera = null;

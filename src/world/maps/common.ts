@@ -109,32 +109,42 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     const backDoors = (o.doors ?? []).filter((dd) => dd[0] === 2).map((dd) => [dd[1], dd[2]] as [number, number]);
     const rightDoors = (o.doors ?? []).filter((dd) => dd[0] === 1).map((dd) => [dd[1], dd[2]] as [number, number]);
     const leftDoors = (o.doors ?? []).filter((dd) => dd[0] === 3).map((dd) => [dd[1], dd[2]] as [number, number]);
+    const windowGapsFront: Array<[number, number]> = [];
+    const windowGapsBack: Array<[number, number]> = [];
+    const step = Math.max(3, o.w / 4);
+    for (let wx = step / 2; wx < o.w - 0.5; wx += step) {
+      windowGapsFront.push([wx, 1.4]);
+      windowGapsBack.push([wx, 1.4]);
+    }
+    const windowGapsRight: Array<[number, number]> = [];
+    const windowGapsLeft: Array<[number, number]> = [];
+    const stepD = Math.max(3, o.d / 4);
+    for (let wz = stepD / 2; wz < o.d - 0.5; wz += stepD) {
+      windowGapsRight.push([wz, 1.4]);
+      windowGapsLeft.push([wz, 1.4]);
+    }
+    const groundWindowGapsFront: Array<[number, number]> = [
+      [o.w * 0.28 - 0.75, 1.5],
+      [o.w * 0.72 - 0.75, 1.5],
+    ];
 
     if (f === 0) {
-      b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat, frontDoors, 0, y0);
+      // Ground-floor glazing must be a real opening. Previously the opaque
+      // front wall and glass pane occupied the same depth, causing
+      // z-fighting and flickering highlights. Keep the sill as wall geometry,
+      // then place glass just inside the opening below.
+      b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat,
+        o.windows === false ? frontDoors : [...frontDoors, ...groundWindowGapsFront],
+        o.windows === false ? 0 : sillH, y0);
       b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat, backDoors, 0, y0);
       b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat, rightDoors, 0, y0);
       b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat, leftDoors, 0, y0);
     } else {
       // Upper floors: windows (sill gaps) all around
-      const winGapsFront: Array<[number, number]> = [];
-      const winGapsBack: Array<[number, number]> = [];
-      const step = Math.max(3, o.w / 4);
-      for (let wx = step / 2; wx < o.w - 0.5; wx += step) {
-        winGapsFront.push([wx, 1.4]);
-        winGapsBack.push([wx, 1.4]);
-      }
-      const winGapsRight: Array<[number, number]> = [];
-      const winGapsLeft: Array<[number, number]> = [];
-      const stepD = Math.max(3, o.d / 4);
-      for (let wz = stepD / 2; wz < o.d - 0.5; wz += stepD) {
-        winGapsRight.push([wz, 1.4]);
-        winGapsLeft.push([wz, 1.4]);
-      }
-      b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat, [...frontDoors, ...winGapsFront], sillH, y0);
-      b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat, [...backDoors, ...winGapsBack], sillH, y0);
-      b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat, [...rightDoors, ...winGapsRight], sillH, y0);
-      b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat, [...leftDoors, ...winGapsLeft], sillH, y0);
+      b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat, [...frontDoors, ...windowGapsFront], sillH, y0);
+      b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat, [...backDoors, ...windowGapsBack], sillH, y0);
+      b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat, [...rightDoors, ...windowGapsRight], sillH, y0);
+      b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat, [...leftDoors, ...windowGapsLeft], sillH, y0);
     }
 
     // Interior divider with doorway (alternating orientation per floor)
@@ -205,7 +215,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     const gy = baseY + 1.1 + (fh - 1.1) / 2;
     for (let i = 0; i < 2; i++) {
       const wx = x - hw + o.w * (0.28 + i * 0.44);
-      b.glassPane(wx, gy, z + hd, 1.5, fh - 1.6, 'x');
+      b.glassPane(wx, gy, z + hd - t / 2 - 0.08, 1.5, fh - 1.6, 'x');
     }
   }
 

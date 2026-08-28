@@ -6,13 +6,13 @@
 import * as THREE from 'three';
 import type { Actor } from '../sim/actor';
 import { getSettings } from '../core/settings';
-import { MOVE } from '../core/balance';
+import { MATCH, MOVE } from '../core/balance';
 import { feetYFromBodyCenter } from '../physics/physics';
 
 const _tv = new THREE.Vector3();
 
 export interface PhysicsQuery {
-  raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number): { dist: number } | null;
+  cameraCast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, radius?: number): { dist: number } | null;
 }
 
 export class CameraRig {
@@ -25,7 +25,10 @@ export class CameraRig {
   private currentAds = 0;
   private sprintKick = 0;
   private blendFrom: THREE.Vector3 | null = null;
+  private blendFromQuat: THREE.Quaternion | null = null;
+  private blendFromFov = 80;
   private blendT = 1;
+  private spectateInitialized = false;
   /** True while the sniper scope is fully engaged. */
   scoped = false;
   onScopedChanged: ((scoped: boolean) => void) | null = null;
@@ -48,6 +51,18 @@ export class CameraRig {
     if (this.scoped === v) return;
     this.scoped = v;
     this.onScopedChanged?.(v);
+  }
+
+  /** Clear presentation-only aim state when entering a non-combat camera. */
+  resetAimState(resetFov = true): void {
+    this.currentAds = 0;
+    this.sprintKick = 0;
+    this.shakeAmount = 0;
+    this.setScoped(false);
+    if (resetFov) {
+      this.camera.fov = this.baseFov;
+      this.camera.updateProjectionMatrix();
+    }
   }
 
   addShake(amount: number): void {
@@ -83,11 +98,14 @@ export class CameraRig {
     const sprinting = actor.body.grounded && !actor.crouched && hsNow > MOVE.walkSpeed + 0.8;
     this.sprintKick += ((sprinting ? 1 : 0) - this.sprintKick) * Math.min(1, dt * 6);
     const sniperScoped = actor.inv.selectedWeapon?.weaponId === 'sniper' && this.currentAds > 0.85;
-    // Full scope: ~5x magnification (baseFov 80 -> ~22.4). Partial ADS keeps
-    // the normal modest zoom so snap-scoping stays readable.
+    // The primary view keeps a modest ADS zoom. A dedicated scope camera owns
+    // the ~5x optical view, preventing the old full-screen magnification hack.
+    const presentationFov = this.mode === 'tps'
+      ? THREE.MathUtils.clamp(this.baseFov * 0.55, 42, 60)
+      : this.baseFov;
     const targetFov =
-      this.baseFov - this.currentAds * (sniperScoped ? this.baseFov * 0.72 : 14) +
-      this.sprintKick * this.baseFov * 0.085;
+      presentationFov - this.currentAds * (this.mode === 'tps' ? 6 : 14) +
+      this.sprintKick * presentationFov * 0.085;
     const scopedNow = sniperScoped && this.currentAds > 0.97;
     this.setScoped(scopedNow);
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
@@ -120,13 +138,22 @@ export class CameraRig {
       );
       this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shY * 0.5, yaw + shX * 0.5, 0, 'YXZ'));
     } else {
-      const pivot = new THREE.Vector3(p.x, feetY + this.smoothEye + 0.25, p.z);
+      // Chest-height pivot keeps both head and feet inside the tighter TPS
+      // framing instead of anchoring the boom at first-person eye height.
+      const pivot = new THREE.Vector3(p.x, feetY + this.smoothEye - 0.55, p.z);
       const desiredDist = this.tpsDistance + this.currentAds * 1.1;
-      // Camera collision: pull in when geometry blocks the boom
-      const back = dir.clone().multiplyScalar(-1);
-      const hit = phys.raycast(pivot.x, pivot.y, pivot.z, back.x, back.y, back.z, desiredDist + 0.3);
-      const dist = hit ? Math.max(0.7, hit.dist - 0.35) : desiredDist;
-      this.camera.position.copy(pivot).addScaledVector(back, dist);
+      const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      // Positive right offset places the character on the left side of the
+      // image; the opposite sign supports a left-handed/right-side layout.
+      const shoulder = settings.tpsCharacterSide === 'right' ? -1 : 1;
+      // The TPS-specific vertical FOV allows a natural ~1 unit physical
+      // shoulder offset to project the rig near 35/65% X at 16:9.
+      const desired = dir.clone().multiplyScalar(-desiredDist).addScaledVector(right, shoulder * 0.95);
+      const boomLength = desired.length();
+      desired.multiplyScalar(1 / Math.max(boomLength, 1e-6));
+      const hit = phys.cameraCast(pivot.x, pivot.y, pivot.z, desired.x, desired.y, desired.z, boomLength, 0.2);
+      const dist = hit ? Math.max(0.75, hit.dist - 0.12) : boomLength;
+      this.camera.position.copy(pivot).addScaledVector(desired, dist);
       this.camera.position.y += shY;
       this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shY * 0.4, yaw + shX * 0.4, 0, 'YXZ'));
     }
@@ -135,8 +162,17 @@ export class CameraRig {
     if (this.blendT < 1 && this.blendFrom) {
       this.blendT = Math.min(1, this.blendT + dt / 0.7);
       const k = this.blendT * this.blendT * (3 - 2 * this.blendT);
-      this.camera.position.lerpVectors(this.blendFrom, this.camera.position, k);
-      if (this.blendT >= 1) this.blendFrom = null;
+      const targetPos = this.camera.position.clone();
+      const targetQuat = this.camera.quaternion.clone();
+      const targetFovNow = this.camera.fov;
+      this.camera.position.lerpVectors(this.blendFrom, targetPos, k);
+      if (this.blendFromQuat) this.camera.quaternion.slerpQuaternions(this.blendFromQuat, targetQuat, k);
+      this.camera.fov = THREE.MathUtils.lerp(this.blendFromFov, targetFovNow, k);
+      this.camera.updateProjectionMatrix();
+      if (this.blendT >= 1) {
+        this.blendFrom = null;
+        this.blendFromQuat = null;
+      }
     }
   }
   private smoothEye = MOVE.eyeHeight;
@@ -149,10 +185,13 @@ export class CameraRig {
   }
 
   /** Spectator orbit around an alive target actor. */
-  updateSpectate(target: Actor, dt: number): void {
+  updateSpectate(target: Actor, dt: number, phys: PhysicsQuery): void {
+    this.setScoped(false);
+    this.camera.fov += (this.baseFov - this.camera.fov) * Math.min(1, dt * 12);
+    this.camera.updateProjectionMatrix();
     const p = target.body.position;
     const yaw = target.yaw;
-    const pitch = target.pitch;
+    const pitch = THREE.MathUtils.clamp(target.pitch, -1.15, 1.15);
     const dir = new THREE.Vector3(
       -Math.sin(yaw) * Math.cos(pitch),
       Math.sin(pitch),
@@ -160,63 +199,83 @@ export class CameraRig {
     );
     const pivot = new THREE.Vector3(p.x, target.eyeY - 0.2, p.z);
     const back = dir.clone().multiplyScalar(-1);
-    this.camera.position.copy(pivot).addScaledVector(back, 5);
-    this.camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
-    void dt;
+    const hit = phys.cameraCast(pivot.x, pivot.y, pivot.z, back.x, back.y, back.z, 5, 0.2);
+    const dist = hit ? Math.max(0.75, hit.dist - 0.12) : 5;
+    _tv.copy(pivot).addScaledVector(back, dist);
+    if (!this.spectateInitialized) {
+      this.camera.position.copy(_tv);
+      this.spectateInitialized = true;
+    } else {
+      this.camera.position.lerp(_tv, 1 - Math.exp(-dt * 10));
+    }
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+    this.camera.quaternion.slerp(q, 1 - Math.exp(-dt * 12));
   }
 
-  /** Azimuth toward the visible sun (set by main after sky setup); the
-   * transport orbit avoids framing it so the hull never sits in glare. */
-  sunAzimuth: number | null = null;
+  endSpectate(): void {
+    this.spectateInitialized = false;
+  }
 
   /**
-   * Transport-phase presentation: a single free-look orbit used regardless of
-   * the FP/TPS preference (that choice applies once the jump starts). The
-   * look input swings the camera around the transport, which therefore stays
-   * framed dead-center; the orbit radius keeps the hull clear of the lens.
+   * Transport-phase presentation. FPS is anchored at the player's hanging
+   * slot and preserves the full free-look range. TPS remains a continuous
+   * shoulder view. Neither path quantizes yaw around the sun.
    */
   updateTransport(
     pos: { x: number; y: number; z: number },
     slot: { x: number; y: number; z: number },
     playerYaw: number,
     playerPitch: number,
-    t: number,
+    _t: number,
     dt: number,
   ): void {
+    this.resetAimState(false);
+    this.baseFov = getSettings().fov;
+    const transportFov = this.mode === 'tps'
+      ? THREE.MathUtils.clamp(this.baseFov * 0.7, 52, 68)
+      : this.baseFov;
+    this.camera.fov += (transportFov - this.camera.fov) * Math.min(1, dt * 14);
+    this.camera.updateProjectionMatrix();
     this.smoothEye = MOVE.eyeHeight;
-    void slot;
-    // Bias the orbit downward so the transport is framed against the
-    // landscape below (never against the sky/sun glare), while look input
-    // still swings the view around the hull.
-    const pitch = THREE.MathUtils.clamp(playerPitch * 0.55 + 0.52, 0.3, 1.05);
-    // Pick the quadrant around the hull whose view direction stays farthest
-    // from the sun azimuth (view direction is orbitYaw + PI).
-    let orbitYaw = playerYaw;
-    if (this.sunAzimuth !== null) {
-      let best = -Infinity;
-      for (const cand of [playerYaw, playerYaw + Math.PI / 2, playerYaw - Math.PI / 2, playerYaw + Math.PI]) {
-        const d = Math.abs(Math.atan2(Math.sin(cand + Math.PI - this.sunAzimuth), Math.cos(cand + Math.PI - this.sunAzimuth)));
-        if (d > best) {
-          best = d;
-          orbitYaw = cand;
-        }
-      }
-    }
-    const r = 26;
-    const cy = pos.y - 1.5 + Math.sin(t * 1.13) * 0.05;
-    _tv.set(
-      pos.x + Math.sin(orbitYaw) * Math.cos(pitch) * r,
-      cy + Math.sin(pitch) * r,
-      pos.z + Math.cos(orbitYaw) * Math.cos(pitch) * r,
+    const pitch = THREE.MathUtils.clamp(playerPitch, -1.35, 1.35);
+    const seat = new THREE.Vector3(
+      pos.x + slot.x,
+      pos.y - MATCH.transportHangOffset + slot.y + 1.65,
+      pos.z + slot.z,
     );
-    // Smooth pursuit so look input feels weighty, never snappy.
-    this.camera.position.lerp(_tv, Math.min(1, dt * 6));
-    this.camera.lookAt(pos.x, cy - 2.2, pos.z);
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, playerYaw, 0, 'YXZ'));
+    if (this.mode === 'fps') {
+      _tv.copy(seat);
+      this.camera.position.lerp(_tv, 1 - Math.exp(-dt * 16));
+      this.camera.quaternion.slerp(q, 1 - Math.exp(-dt * 18));
+    } else {
+      // A transport is read from above: keep a constant height and distance
+      // relative to the interpolated hull while yaw orbits continuously. Aim
+      // input moves the look target instead of bobbing the camera, so terrain
+      // stays stable and the ship remains visible during free look.
+      const horizontalForward = new THREE.Vector3(-Math.sin(playerYaw), 0, -Math.cos(playerYaw));
+      const right = new THREE.Vector3(Math.cos(playerYaw), 0, -Math.sin(playerYaw));
+      const side = getSettings().tpsCharacterSide === 'right' ? -1 : 1;
+      const hull = new THREE.Vector3(pos.x, pos.y - 2.5, pos.z);
+      _tv.copy(hull)
+        .addScaledVector(horizontalForward, -27)
+        .addScaledVector(right, side * 5.2);
+      _tv.y = pos.y + 22;
+      this.camera.position.lerp(_tv, 1 - Math.exp(-dt * 16));
+      const lookTarget = hull
+        .addScaledVector(horizontalForward, 5.5)
+        .add(new THREE.Vector3(0, THREE.MathUtils.clamp(pitch, -1.1, 1.1) * 4.5, 0));
+      const look = new THREE.Matrix4().lookAt(this.camera.position, lookTarget, new THREE.Vector3(0, 1, 0));
+      const transportQ = new THREE.Quaternion().setFromRotationMatrix(look);
+      this.camera.quaternion.slerp(transportQ, 1 - Math.exp(-dt * 18));
+    }
   }
 
   /** Begin blending the camera back to gameplay after the transport jump. */
-  beginGameplayBlend(from: THREE.Vector3): void {
-    this.blendFrom = from.clone();
+  beginGameplayBlend(): void {
+    this.blendFrom = this.camera.position.clone();
+    this.blendFromQuat = this.camera.quaternion.clone();
+    this.blendFromFov = this.camera.fov;
     this.blendT = 0;
   }
 }

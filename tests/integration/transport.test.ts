@@ -44,6 +44,21 @@ function makeMatch(): Match {
 }
 
 describe('transport / drop lifecycle', () => {
+  it('publishes the pre-step transport position for presentation interpolation', () => {
+    const m = makeMatch();
+    expect(m.transportPos.x).toBe(m.transportFrom[0]);
+    expect(m.transportPos.z).toBe(m.transportFrom[1]);
+    expect(m.previousTransportPos).toEqual(m.transportPos);
+    const before = { ...m.transportPos };
+    m.fixedUpdate(STEP);
+    expect(m.previousTransportPos).toEqual(before);
+    expect(m.transportPos).not.toEqual(m.previousTransportPos);
+
+    const current = { ...m.transportPos };
+    m.fixedUpdate(STEP);
+    expect(m.previousTransportPos).toEqual(current);
+  });
+
   it('landed player keeps full control while other actors are still aboard', () => {
     const m = makeMatch();
     const player = m.player!;
