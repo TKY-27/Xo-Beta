@@ -469,20 +469,37 @@ html[lang='ja'] #loading-status { letter-spacing: 0.06em; }
 #crosshair.shotgun .ch-l, #crosshair.shotgun .ch-r { display: none; }
 #crosshair.shotgun .ch-dot { left: -1.2px; top: -1.2px; }
 
-/* Sniper scope overlay: dark vignette ring + fine hairlines, world stays
-   visible through the glass circle. */
+/* Physical sniper optic. The magnified lens image is rendered by the WebGL
+   scope pass; these layers provide the housing, coated glass and markings. */
 #scope-overlay {
   position: fixed; inset: 0; pointer-events: none; z-index: 30;
   opacity: 0; transition: opacity 0.12s ease-out;
-  background: radial-gradient(circle at 50% 50%,
-    rgba(0,0,0,0) 0%, rgba(0,0,0,0) 26vmin,
-    rgba(1,2,6,0.78) 29vmin, rgba(1,2,6,0.99) 32.5vmin);
 }
 body.scoped #scope-overlay { opacity: 1; }
 body.scoped #crosshair { display: none; }
-.scope-hair { position: absolute; background: rgba(10,14,18,0.85); }
-.scope-hair-h { left: 50%; top: calc(50% - 27vmin); width: calc(54vmin + 2px); height: 1.5px; transform: translateX(-50%); }
-.scope-hair-v { top: 50%; left: calc(50% - 27vmin); height: calc(54vmin + 2px); width: 1.5px; transform: translateY(-50%); }
+.scope-housing {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at 50% 50%, transparent 0 27.4vmin,
+    rgba(36,42,47,.5) 27.7vmin, #15191d 29vmin, #050607 31.3vmin,
+    rgba(1,2,3,.995) 33vmin 100%);
+  filter: drop-shadow(0 0 2.2vmin rgba(0,0,0,.8));
+}
+.scope-lens-glass {
+  position: absolute; width: 54.8vmin; height: 54.8vmin; left: 50%; top: 50%;
+  transform: translate(-50%, -50%); border-radius: 50%;
+  box-shadow: inset 0 0 4vmin rgba(1,5,8,.8), inset 1.2vmin 1.2vmin 2.8vmin rgba(117,202,216,.11);
+  background: linear-gradient(132deg, rgba(120,210,221,.09), transparent 22%, transparent 70%, rgba(31,82,93,.12));
+}
+.scope-reticle { position: absolute; left: 50%; top: 50%; width: 52vmin; height: 52vmin; transform: translate(-50%,-50%); }
+.scope-line { position: absolute; display: block; background: rgba(5,8,9,.9); box-shadow: 0 0 1px rgba(230,250,246,.35); }
+.scope-line.top,.scope-line.bottom { width: 1px; left: 50%; height: calc(50% - 1.45vmin); }
+.scope-line.top { top: 0; } .scope-line.bottom { bottom: 0; }
+.scope-line.left,.scope-line.right { height: 1px; top: 50%; width: calc(50% - 1.45vmin); }
+.scope-line.left { left: 0; } .scope-line.right { right: 0; }
+.scope-mil { position: absolute; inset: 15% 12%; opacity: .82; }
+.scope-mil.mil-h { top: calc(50% - 3px); height: 7px; border-left: 1px solid #0a0d0e; border-right: 1px solid #0a0d0e; background: repeating-linear-gradient(90deg, transparent 0 4.65vmin, rgba(5,8,9,.88) 4.65vmin 4.75vmin); }
+.scope-mil.mil-v { left: calc(50% - 3px); width: 7px; border-top: 1px solid #0a0d0e; border-bottom: 1px solid #0a0d0e; background: repeating-linear-gradient(0deg, transparent 0 4.65vmin, rgba(5,8,9,.88) 4.65vmin 4.75vmin); }
+.scope-range { position: absolute; left: 50%; bottom: 6%; transform: translateX(-50%); color: rgba(9,13,14,.82); font: 600 1.05vmin/1 monospace; letter-spacing: .6vmin; }
 
 #hitmarker {
   position: absolute; left: 50%; top: 50%; width: 26px; height: 26px;
@@ -556,6 +573,10 @@ html[lang='ja'] #weapon-name { letter-spacing: 0.14em; }
 }
 .slot .num { position: absolute; left: 6px; top: 3px; font-size: 0.62rem; color: #ffffff; font-weight: 700; }
 .slot .icon { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 1.05rem; font-weight: 700; }
+.slot .weapon-icon-svg { width: 38px; height: 23px; fill: currentColor; filter: drop-shadow(0 0 3px currentColor); }
+.weapon-icon-svg .weapon-detail { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.slot .item-icon-svg { width: 25px; height: 25px; fill: currentColor; }
+.slot .slot-count { position: absolute; right: 4px; bottom: 1px; color: #fff; font-size: 0.65rem; text-shadow: 0 1px 2px #000; }
 .slot.active { border-color: rgba(130, 200, 255, 0.65); background: rgba(26, 37, 52, 0.85); }
 .slot.heal-medkit .icon { color: #ff7d89; }
 .slot.heal-shieldpot .icon { color: #53d8ff; }
@@ -674,27 +695,108 @@ html[lang='ja'] #storm-warning { letter-spacing: 0.06em; text-indent: 0.06em; }
   background: rgba(10, 13, 19, 0.92);
   border: 1px solid var(--loot-rarity, var(--panel-border));
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-  padding: 12px 18px 12px;
-  clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  padding: 12px 16px;
+  display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 13px; align-items: center;
+  border-left-width: 4px;
+  border-radius: 4px;
   animation: promptIn 0.18s ease both;
 }
+#loot-panel.hidden { display: none; }
+#loot-panel .lp-icon {
+  width: 72px; height: 58px; display: grid; place-items: center;
+  color: var(--loot-rarity); background: rgba(255,255,255,0.035);
+  border: 1px solid color-mix(in srgb, var(--loot-rarity) 42%, transparent);
+}
+#loot-panel .lp-icon .weapon-icon-svg { width: 62px; height: 34px; fill: currentColor; filter: drop-shadow(0 0 5px currentColor); }
+#loot-panel .lp-icon .item-icon-svg { width: 38px; height: 38px; fill: currentColor; }
+#loot-panel .lp-copy { min-width: 0; }
 #loot-panel .lp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-#loot-panel .lp-name { font-size: 1rem; font-weight: 600; letter-spacing: 0.06em; color: var(--loot-rarity, var(--text)); }
+#loot-panel .lp-name { font-size: 1.04rem; font-weight: 700; letter-spacing: 0.02em; color: #fff; }
 #loot-panel .lp-type {
   font-family: var(--font-display);
-  font-size: 0.7rem; letter-spacing: 0.26em; color: #ffffff; font-weight: 700;
+  font-size: 0.64rem; letter-spacing: 0.13em; color: #b9c4cf; font-weight: 700;
 }
 html[lang='ja'] #loot-panel .lp-type { letter-spacing: 0.1em; }
 #loot-panel .lp-rarity {
   font-family: var(--font-display);
-  font-size: 0.68rem; letter-spacing: 0.3em; font-weight: 600; margin-top: 3px;
+  font-size: 0.68rem; letter-spacing: 0.16em; font-weight: 700; margin-top: 3px;
   color: var(--loot-rarity, var(--dim)); opacity: 0.9;
 }
 html[lang='ja'] #loot-panel .lp-rarity { letter-spacing: 0.12em; }
-#loot-panel .lp-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 0.74rem; color: #ffffff; font-weight: 700; font-variant-numeric: tabular-nums; }
+#loot-panel .lp-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 9px; font-size: 0.74rem; color: #cbd4dc; font-weight: 650; font-variant-numeric: tabular-nums; }
+#loot-panel .lp-key { display: inline-flex; align-items: center; gap: 6px; color: #fff; font-size: 0.65rem; letter-spacing: .08em; }
 #loot-panel .lp-key kbd { font-size: 0.72rem; }
-#loot-panel .lp-full { margin-top: 6px; font-size: 0.66rem; letter-spacing: 0.12em; color: var(--gold); font-weight: 600; }
+#loot-panel .lp-full { grid-column: 1 / -1; margin-top: 0; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.08); font-size: 0.66rem; letter-spacing: 0.08em; color: var(--gold); font-weight: 700; }
 html[lang='ja'] #loot-panel .lp-full { letter-spacing: 0.05em; }
+
+/* Full inventory — functional desktop loadout surface, not a decorative modal. */
+#inventory-overlay {
+  position: fixed; inset: 0; z-index: 42; display: grid; place-items: center;
+  pointer-events: auto; cursor: default;
+  background: rgba(4, 8, 13, 0.58); backdrop-filter: blur(5px) saturate(0.75);
+}
+#inventory-overlay.hidden { display: none; }
+.inventory-shell {
+  width: min(1120px, calc(100vw - 72px));
+  color: #f4f7fa; background: rgba(10, 15, 22, 0.96);
+  border: 1px solid rgba(184, 205, 223, 0.22); border-top: 3px solid #78c8ef;
+  box-shadow: 0 24px 70px rgba(0,0,0,.55);
+}
+.inventory-header { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px 15px; border-bottom: 1px solid rgba(255,255,255,.1); }
+.inventory-kicker { color: #8eb4cc; font-size: .66rem; font-weight: 700; letter-spacing: .2em; }
+.inventory-header h2 { margin: 2px 0 0; font-family: var(--font-display); font-size: 1.45rem; letter-spacing: .12em; }
+#btn-inventory-close { display: flex; align-items: center; gap: 9px; border: 1px solid rgba(255,255,255,.18); color: #e8eef3; background: rgba(255,255,255,.04); padding: 7px 11px; cursor: pointer; }
+#btn-inventory-close:hover { border-color: #78c8ef; background: rgba(120,200,239,.1); }
+#btn-inventory-close kbd { padding: 3px 7px; border: 1px solid rgba(255,255,255,.28); background: #111a23; font: inherit; }
+.inventory-grid { display: grid; grid-template-columns: minmax(250px, .72fr) minmax(560px, 1.7fr); min-height: 470px; }
+.inventory-details { padding: 28px; border-right: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.018); }
+.inventory-detail-icon { height: 132px; display: grid; place-items: center; margin-bottom: 22px; border-bottom: 1px solid rgba(255,255,255,.1); }
+.inventory-detail-icon .weapon-icon-svg { width: 230px; height: 112px; fill: currentColor; filter: drop-shadow(0 0 12px color-mix(in srgb, currentColor 48%, transparent)); }
+.inventory-detail-icon .item-icon-svg, .inventory-detail-icon > svg { width: 92px; height: 92px; fill: currentColor; }
+.inventory-detail-rarity { font-size: .7rem; font-weight: 800; letter-spacing: .18em; }
+.inventory-details h3 { margin: 5px 0 2px; font-size: 1.45rem; }
+.inventory-detail-type { color: #9eabb7; font-size: .73rem; letter-spacing: .08em; }
+#inventory-detail-stats { margin: 24px 0 0; }
+#inventory-detail-stats > div { display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid rgba(255,255,255,.08); }
+#inventory-detail-stats dt { color: #9eabb7; font-size: .72rem; letter-spacing: .08em; }
+#inventory-detail-stats dd { margin: 0; font-weight: 750; font-variant-numeric: tabular-nums; }
+.inventory-content { padding: 25px 28px; }
+.inventory-content > h3 { margin: 0 0 10px; color: #9fb0bd; font-size: .7rem; letter-spacing: .16em; }
+.inventory-content > h3:nth-of-type(2) { margin-top: 25px; }
+.inventory-ammo { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+.inventory-ammo-stack { display: grid; grid-template-columns: 32px 1fr; grid-template-rows: auto auto; column-gap: 8px; align-items: center; padding: 9px 10px; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.1); }
+.inventory-ammo-stack .ammo-icon { grid-row: 1 / 3; color: #d9e0e6; }
+.inventory-ammo-stack svg { width: 27px; height: 27px; fill: currentColor; }
+.inventory-ammo-stack .ammo-band { fill: #8193a1; }
+.inventory-ammo-stack > span:nth-child(2) { color: #9eabb7; font-size: .58rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inventory-ammo-stack strong { font-size: 1.02rem; font-variant-numeric: tabular-nums; }
+.inventory-grid-slots { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.inventory-grid-slot { min-width: 0; height: 126px; position: relative; padding: 26px 8px 8px; color: var(--slot-rarity, #d9e0e6); background: linear-gradient(180deg, color-mix(in srgb, var(--slot-rarity, #fff) 11%, rgba(255,255,255,.025)), rgba(255,255,255,.025)); border: 1px solid color-mix(in srgb, var(--slot-rarity, #fff) 48%, rgba(255,255,255,.1)); cursor: grab; }
+.inventory-grid-slot:hover, .inventory-grid-slot.drop-target { border-color: var(--slot-rarity, #78c8ef); background-color: rgba(255,255,255,.075); }
+.inventory-grid-slot.active { outline: 2px solid #f5f7d1; outline-offset: 2px; }
+.inventory-grid-slot.dragging { opacity: .42; cursor: grabbing; }
+.inventory-grid-slot.empty { cursor: default; border-style: dashed; color: #66737e; }
+.inventory-grid-slot .inv-key { position: absolute; top: 7px; left: 8px; color: #b6c1ca; font-size: .64rem; }
+.inventory-grid-slot .inv-icon { height: 56px; display: grid; place-items: center; }
+.inventory-grid-slot .weapon-icon-svg { width: 92px; height: 48px; fill: currentColor; filter: drop-shadow(0 0 7px color-mix(in srgb, currentColor 55%, transparent)); }
+.inventory-grid-slot .item-icon-svg { width: 48px; height: 48px; fill: currentColor; }
+.inventory-grid-slot .inv-name { display: block; color: #edf2f5; font-size: .68rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inventory-grid-slot .inv-count { position: absolute; right: 7px; bottom: 6px; color: #fff; font-size: .72rem; font-weight: 800; text-shadow: 0 1px 2px #000; }
+.inventory-drop-zone { margin-top: 18px; display: grid; grid-template-columns: 35px auto; grid-template-rows: auto auto; column-gap: 10px; align-items: center; padding: 12px 15px; border: 1px dashed rgba(255,255,255,.2); color: #aeb9c2; }
+.inventory-drop-zone.active { border-color: #ff7f7f; color: #fff; background: rgba(255,92,92,.09); }
+.inventory-drop-zone .drop-icon { grid-row: 1 / 3; font-size: 1.6rem; text-align: center; }
+.inventory-drop-zone strong { font-size: .72rem; letter-spacing: .1em; }
+.inventory-drop-zone small { font-size: .65rem; color: #87949e; }
+.inventory-footer { padding: 11px 24px; text-align: right; color: #8f9ba5; border-top: 1px solid rgba(255,255,255,.08); font-size: .66rem; letter-spacing: .04em; }
+body.inventory-open canvas { cursor: default; }
+/* Context cards must never obscure the optical sight picture. The nearest
+   item remains resolved and reappears immediately when ADS is released. */
+body.scoped #loot-panel,
+body.scoped #interact-prompt { display: none; }
+@media (max-width: 900px) {
+  .inventory-grid { grid-template-columns: 230px minmax(480px, 1fr); }
+  .inventory-shell { width: calc(100vw - 24px); overflow-x: auto; }
+}
 
 /* Damage numbers layer */
 #damage-numbers { position: absolute; inset: 0; overflow: hidden; }
@@ -736,6 +838,7 @@ html[lang='ja'] #loot-panel .lp-full { letter-spacing: 0.05em; }
   text-align: center; background: rgba(8, 11, 17, 0.82);
   border: 1px solid var(--panel-border); padding: 10px 26px;
   clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  pointer-events: auto;
 }
 #spectate-hud div:first-child {
   font-family: var(--font-display);
@@ -744,6 +847,12 @@ html[lang='ja'] #loot-panel .lp-full { letter-spacing: 0.05em; }
 #spectate-hud div:first-child span { color: var(--accent); }
 #spectate-hud .dim { font-size: 0.7rem; letter-spacing: 0.1em; margin-top: 4px; color: #ffffff; font-weight: 700; }
 html[lang='ja'] #spectate-hud div:first-child { letter-spacing: 0.1em; }
+#btn-spectate-exit {
+  margin-top: 9px; padding: 7px 14px; border: 1px solid rgba(95,208,255,.65);
+  background: rgba(20,36,48,.9); color: #fff; cursor: pointer;
+  font: 700 .72rem/1 var(--font-body); letter-spacing: .08em;
+}
+#btn-spectate-exit:hover, #btn-spectate-exit:focus-visible { background: rgba(42,88,112,.95); outline: 2px solid #fff; outline-offset: 2px; }
 
 /* FPS counter */
 #fps-counter {

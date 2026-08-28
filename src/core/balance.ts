@@ -66,7 +66,9 @@ export interface WeaponDef {
 
 export const WEAPONS: Record<WeaponId, WeaponDef> = {
   pistol: {
-    id: 'pistol', name: 'P9 Sidearm', fireMode: 'semi', rpm: 400,
+    // Semi-auto: one deliberate click per round, with a realistic 200 ms
+    // minimum cycle time (300 rounds/minute).
+    id: 'pistol', name: 'P9 Sidearm', fireMode: 'semi', rpm: 300,
     damage: [26, 29, 32, 35, 38], pellets: 1, magSize: 15, reserveMax: 240, ammoType: 'light',
     projectileSpeed: 340, dropGravity: 0.55,
     spreadHip: 0.017, spreadAds: 0.004, bloomPerShot: 0.006, bloomDecay: 0.05, bloomMax: 0.045,

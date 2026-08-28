@@ -42,7 +42,7 @@
   <!-- Loading -->
   <div id="loading-screen" class="screen">
     <div class="loading-inner">
-      <h1 class="logo">Xo<span> Beta</span></h1>
+      <div class="logo">Xo<span> Beta</span></div>
     </div>
     <div class="loading-foot">
       <div class="loading-bar"><div id="loading-fill"></div></div>
@@ -53,7 +53,7 @@
   <!-- First-run onboarding: language → default view -->
   <div id="onboarding-screen" class="screen hidden">
     <div class="onb-inner">
-      <h1 class="logo onb-logo">Xo<span>&nbsp;Beta</span></h1>
+      <div class="logo onb-logo">Xo<span>&nbsp;Beta</span></div>
       <p id="onb-step" class="onb-step"></p>
 
       <section id="onb-step-language" class="onb-card">
@@ -173,7 +173,16 @@
   <!-- HUD -->
   <div id="hud" class="hidden">
     <div id="crosshair"><span class="ch-t"></span><span class="ch-b"></span><span class="ch-l"></span><span class="ch-r"></span><span class="ch-dot"></span><span id="ch-ring"></span><span id="hitmarker"></span></div>
-    <div id="scope-overlay"><div class="scope-hair scope-hair-h"></div><div class="scope-hair scope-hair-v"></div></div>
+    <div id="scope-overlay" aria-hidden="true">
+      <div class="scope-housing"></div>
+      <div class="scope-lens-glass"></div>
+      <div class="scope-reticle">
+        <i class="scope-line top"></i><i class="scope-line bottom"></i>
+        <i class="scope-line left"></i><i class="scope-line right"></i>
+        <i class="scope-mil mil-h"></i><i class="scope-mil mil-v"></i>
+        <span class="scope-range">2 · 4 · 6 · 8</span>
+      </div>
+    </div>
 
     <div id="vignette"></div>
     <div id="storm-vignette"></div>
@@ -206,9 +215,12 @@
     <div id="interact-prompt" class="hidden"><kbd>E</kbd> <span id="interact-text"></span></div>
 
     <div id="loot-panel" class="hidden">
-      <div class="lp-head"><span class="lp-name" id="lp-name"></span><span class="lp-type" id="lp-type"></span></div>
-      <div class="lp-rarity" id="lp-rarity"></div>
-      <div class="lp-meta"><span id="lp-meta"></span><span class="lp-key"><kbd id="lp-key">E</kbd></span></div>
+      <div class="lp-icon" id="lp-icon" aria-hidden="true"></div>
+      <div class="lp-copy">
+        <div class="lp-head"><span class="lp-name" id="lp-name"></span><span class="lp-type" id="lp-type"></span></div>
+        <div class="lp-rarity" id="lp-rarity"></div>
+        <div class="lp-meta"><span id="lp-meta"></span><span class="lp-key"><kbd id="lp-key">E</kbd><span data-i18n="loot.pickup">PICK UP</span></span></div>
+      </div>
       <div class="lp-full hidden" id="lp-full" data-i18n="loot.inventoryFull">INVENTORY FULL — SWAP OR DROP</div>
     </div>
 
@@ -222,6 +234,7 @@
     <div id="spectate-hud" class="hidden">
       <div><span data-i18n="hud.spectating">SPECTATING</span> <span id="spectate-name"></span></div>
       <div class="dim" data-i18n="hud.spectateHint">← → switch combatant · V camera · M map</div>
+      <button id="btn-spectate-exit" type="button" data-i18n="hud.spectateExit">RETURN TO MENU (ESC)</button>
     </div>
 
     <div id="fps-counter" class="hidden"></div>
@@ -236,13 +249,47 @@
     </div>
   </div>
 
+  <!-- Mouse-driven inventory. The match remains live while this is open. -->
+  <div id="inventory-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="inventory-title">
+    <div class="inventory-shell">
+      <header class="inventory-header">
+        <div>
+          <div class="inventory-kicker" data-i18n="inventory.loadout">LOADOUT</div>
+          <h2 id="inventory-title" data-i18n="inventory.title">INVENTORY</h2>
+        </div>
+        <button id="btn-inventory-close" type="button"><kbd>TAB</kbd><span data-i18n="inventory.close">CLOSE</span></button>
+      </header>
+      <div class="inventory-grid">
+        <section class="inventory-details" aria-live="polite">
+          <div id="inventory-detail-icon" class="inventory-detail-icon"></div>
+          <div id="inventory-detail-rarity" class="inventory-detail-rarity"></div>
+          <h3 id="inventory-detail-name"></h3>
+          <div id="inventory-detail-type" class="inventory-detail-type"></div>
+          <dl id="inventory-detail-stats"></dl>
+        </section>
+        <section class="inventory-content">
+          <h3 data-i18n="inventory.ammo">AMMUNITION</h3>
+          <div id="inventory-ammo" class="inventory-ammo"></div>
+          <h3 data-i18n="inventory.equipment">EQUIPMENT</h3>
+          <div id="inventory-grid-slots" class="inventory-grid-slots"></div>
+          <div id="inventory-drop-zone" class="inventory-drop-zone">
+            <span class="drop-icon">↓</span>
+            <strong data-i18n="inventory.drop">DROP ITEM</strong>
+            <small data-i18n="inventory.dropHint">Drag an item here to drop it</small>
+          </div>
+        </section>
+      </div>
+      <footer class="inventory-footer" data-i18n="inventory.hint">Drag to reorder · Click to equip · Drag below to drop</footer>
+    </div>
+  </div>
+
   <div id="victory-flare"></div>
 
   <!-- Results -->
   <div id="results-screen" class="screen hidden">
     <div class="menu-shade dark"></div>
     <div class="results-box">
-      <h1 id="results-title">VICTORY</h1>
+      <h2 id="results-title">VICTORY</h2>
       <div id="results-subtitle"></div>
       <div id="results-grid"></div>
       <div class="menu-row">
@@ -256,7 +303,7 @@
   <div id="mobile-gate" class="screen hidden">
     <div class="menu-shade full"></div>
     <div class="pause-box">
-      <h1 class="logo">Xo<span> Beta</span></h1>
+      <div class="logo">Xo<span> Beta</span></div>
       <div class="credits-body">
         <h2 data-i18n="notice.mobileTitle">DESKTOP REQUIRED</h2>
         <p data-i18n="notice.mobileBody">Xo Beta is designed for desktop browsers with keyboard &amp; mouse.</p>

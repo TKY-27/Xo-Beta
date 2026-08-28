@@ -27,6 +27,12 @@ function keyEvent(type: 'keydown' | 'keyup', code: string, repeat = false): Even
   return event;
 }
 
+function mouseEvent(type: 'mousedown' | 'mouseup', button: number): Event {
+  const event = new Event(type, { cancelable: true });
+  Object.defineProperty(event, 'button', { value: button });
+  return event;
+}
+
 describe('QA input timing', () => {
   let now = 0;
 
@@ -72,6 +78,28 @@ describe('QA input timing', () => {
 
     window.dispatchEvent(keyEvent('keyup', 'KeyW'));
     expect(controller.updateCommand(actor, 1 / 60).moveZ).toBe(0);
+    controller.dispose();
+  });
+
+  it('toggles the Tab inventory even while gameplay input is disabled', () => {
+    const canvas = { requestPointerLock: () => undefined } as unknown as HTMLCanvasElement;
+    const onInventory = vi.fn();
+    const controller = new PlayerController(
+      canvas,
+      new EventBus(),
+      () => undefined,
+      () => undefined,
+      () => undefined,
+      () => undefined,
+      () => undefined,
+      () => undefined,
+      onInventory,
+    );
+    controller.enabled = false;
+    const tab = keyEvent('keydown', 'Tab');
+    window.dispatchEvent(tab);
+    expect(onInventory).toHaveBeenCalledTimes(1);
+    expect(tab.defaultPrevented).toBe(true);
     controller.dispose();
   });
 
@@ -141,6 +169,111 @@ describe('QA input timing', () => {
 
     const second = controller.updateCommand(actor, 1 / 60);
     expect(second.reloadPressed).toBe(false);
+    controller.dispose();
+  });
+
+  it('retains a mouse click edge until a fixed sample consumes it', () => {
+    const controller = makeController();
+    // QA mode intentionally allows input without pointer lock, matching the
+    // browser harness. The mousedown/up pair is completed before sampling.
+    window.dispatchEvent(mouseEvent('mousedown', 0));
+    window.dispatchEvent(mouseEvent('mouseup', 0));
+
+    const first = controller.updateCommand(actor, 1 / 60);
+    expect(first.firePressed).toBe(true);
+    expect(first.fireHeld).toBe(false);
+    expect(controller.updateCommand(actor, 1 / 60).firePressed).toBe(false);
+    controller.dispose();
+  });
+
+  it('clears held and edge-triggered gameplay input when an overlay disables controls', () => {
+    const controller = makeController();
+    window.dispatchEvent(keyEvent('keydown', 'KeyW'));
+    window.dispatchEvent(keyEvent('keydown', 'KeyR'));
+    window.dispatchEvent(mouseEvent('mousedown', 0));
+    controller.enabled = false;
+
+    // Key presses that occur while an overlay owns focus must not become a
+    // latent movement/action after gameplay is re-enabled either.
+    window.dispatchEvent(keyEvent('keydown', 'KeyW'));
+    controller.enabled = true;
+    const command = controller.updateCommand(actor, 1 / 60);
+    expect(command.moveZ).toBe(0);
+    expect(command.reloadPressed).toBe(false);
+    expect(command.firePressed).toBe(false);
+    expect(command.fireHeld).toBe(false);
+    controller.dispose();
+  });
+
+  it('keeps Escape reachable while gameplay input is disabled', () => {
+    let pauses = 0;
+    const canvas = { requestPointerLock: () => undefined } as unknown as HTMLCanvasElement;
+    const controller = new PlayerController(
+      canvas,
+      new EventBus(),
+      () => undefined,
+      () => { pauses++; },
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    );
+    controller.enabled = false;
+    window.dispatchEvent(keyEvent('keydown', 'Escape'));
+    expect(pauses).toBe(1);
+    controller.dispose();
+  });
+
+  it('routes QA arrow keys to spectator cycling instead of camera nudging', () => {
+    const previous = vi.fn();
+    const next = vi.fn();
+    const canvas = { requestPointerLock: () => undefined } as unknown as HTMLCanvasElement;
+    const controller = new PlayerController(
+      canvas,
+      new EventBus(),
+      () => undefined,
+      () => undefined,
+      previous,
+      next,
+      () => undefined,
+    );
+    controller.enabled = true;
+    controller.setSpectatorMode(true);
+    window.dispatchEvent(keyEvent('keydown', 'ArrowLeft'));
+    window.dispatchEvent(keyEvent('keydown', 'ArrowRight'));
+    expect(previous).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+
+  it('turns an RT threshold crossing into one fire edge while held remains continuous', () => {
+    const buttons = Array.from({ length: 20 }, () => ({ pressed: false, value: 0 }));
+    const pad = { connected: true, axes: [0, 0, 0, 0], buttons } as unknown as Gamepad;
+    vi.stubGlobal('navigator', { getGamepads: () => [pad] });
+    const noop = () => undefined;
+    const callbacks: GamepadCallbacks = {
+      onJumpPress: noop, onReloadPress: noop, onInteractPress: noop,
+      onDashPress: noop, onGrapplePress: noop, onPoundPress: noop,
+      onMedkitPress: noop, onShieldPress: noop, onDropWeaponPress: noop,
+      onCameraToggle: noop, onMapToggle: noop, onPauseRequest: noop,
+      onSlotRequest: noop, onMeleePress: noop, onPingPress: noop,
+    };
+    const controller = makeController();
+    controller.gamepad = new GamepadInput(callbacks);
+
+    buttons[7] = { pressed: false, value: 0.8 };
+    const first = controller.updateCommand(actor, 1 / 60);
+    expect(first.fireHeld).toBe(true);
+    expect(first.firePressed).toBe(true);
+
+    const second = controller.updateCommand(actor, 1 / 60);
+    expect(second.fireHeld).toBe(true);
+    expect(second.firePressed).toBe(false);
+
+    buttons[7] = { pressed: false, value: 0.1 };
+    controller.updateCommand(actor, 1 / 60);
+    buttons[7] = { pressed: false, value: 0.8 };
+    const third = controller.updateCommand(actor, 1 / 60);
+    expect(third.firePressed).toBe(true);
     controller.dispose();
   });
 });

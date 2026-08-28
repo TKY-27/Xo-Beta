@@ -13,6 +13,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
+import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
 import type { SkyConfig } from '../world/types';
 import { getSettings } from '../core/settings';
 import { loadHdri, clampHdriPeaks } from '../assets/assets';
@@ -53,11 +54,108 @@ const GradingShader = {
       c += uLift * (1.0 - l);
       // vignette
       vec2 d = vUv - 0.5;
-      float vig = smoothstep(uVignette, uVignette - uVignetteSoftness, length(d));
+      float vig = 1.0 - smoothstep(uVignette, uVignette + uVignetteSoftness, length(d));
       c *= mix(1.0 - uVignette * 0.35, 1.0, vig);
       gl_FragColor = vec4(max(c, 0.0), src.a);
     }`,
 };
+
+const ScopeCompositeShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    tScope: { value: null as THREE.Texture | null },
+    uAspect: { value: 1 },
+    // Match the 54.8vmin physical lens aperture in the DOM housing. Keeping
+    // the optical composite and bezel on the same radius prevents a second,
+    // larger magnified circle from leaking under the scope body.
+    uRadius: { value: 0.274 },
+    uEnabled: { value: 0 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform sampler2D tScope;
+    uniform float uAspect;
+    uniform float uRadius;
+    uniform float uEnabled;
+    varying vec2 vUv;
+    void main() {
+      vec4 base = texture2D(tDiffuse, vUv);
+      if (uEnabled < 0.5) { gl_FragColor = base; return; }
+      vec2 p = (vUv - vec2(0.5)) * vec2(uAspect, 1.0);
+      float d = length(p);
+      float lens = 1.0 - smoothstep(uRadius - 0.008, uRadius + 0.008, d);
+      vec4 optics = texture2D(tScope, vUv);
+      // Subtle blue/green lens cast, restrained so the scene remains legible.
+      optics.rgb *= vec3(0.94, 0.98, 1.03);
+      vec3 color = mix(base.rgb, optics.rgb, lens);
+      // A dark mechanical bezel and a fine glass edge surround the lens.
+      float bezel = 1.0 - smoothstep(uRadius - 0.028, uRadius + 0.018, d);
+      float edge = 1.0 - smoothstep(0.0, 0.012, abs(d - uRadius));
+      color = mix(color, color * 0.12, (1.0 - bezel) * 0.82);
+      color += vec3(0.22, 0.28, 0.31) * edge;
+      // Reticle in lens-space; central gap avoids hiding the target point.
+      float lineX = 1.0 - smoothstep(0.0015, 0.004, abs(p.x));
+      float lineY = 1.0 - smoothstep(0.0015, 0.004, abs(p.y));
+      float gap = smoothstep(0.022, 0.036, d);
+      float reticle = max(lineX, lineY) * gap * lens;
+      // MIL/hash ticks on both axes and a lower range scale.
+      for (int i = -8; i <= 8; i++) {
+        float tick = float(i) * 0.045;
+        float horizontal = (1.0 - smoothstep(0.0015, 0.0035, abs(p.x - tick)))
+          * (1.0 - smoothstep(0.0012, 0.0035, abs(p.y - 0.028)));
+        float vertical = (1.0 - smoothstep(0.0015, 0.0035, abs(p.y - tick)))
+          * (1.0 - smoothstep(0.0012, 0.0035, abs(p.x - 0.028)));
+        reticle = max(reticle, (horizontal + vertical) * lens * 0.85);
+        float rangeTick = (1.0 - smoothstep(0.0014, 0.0035, abs(p.x - tick)))
+          * (1.0 - smoothstep(0.0012, 0.0035, abs(p.y + 0.22)));
+        reticle = max(reticle, rangeTick * lens * 0.7);
+      }
+      color += vec3(0.77, 0.9, 0.82) * reticle;
+      // A small reflection streak provides a glass cue without hiding the view.
+      float reflection = (1.0 - smoothstep(0.0, 0.035, abs(p.y + p.x * 0.44 - 0.24))) * lens * 0.055;
+      color += vec3(0.8, 0.93, 1.0) * reflection;
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+};
+
+class ScopeCompositePass extends Pass {
+  readonly material = new THREE.ShaderMaterial(ScopeCompositeShader);
+  private readonly quad = new FullScreenQuad(this.material);
+
+  constructor() {
+    super();
+    this.needsSwap = true;
+  }
+
+  setScope(texture: THREE.Texture | null, active: boolean, aspect: number): void {
+    this.material.uniforms['tScope']!.value = texture;
+    this.material.uniforms['uEnabled']!.value = active ? 1 : 0;
+    this.material.uniforms['uAspect']!.value = aspect;
+    this.enabled = active;
+  }
+
+  override render(renderer: THREE.WebGLRenderer, writeBuffer: THREE.WebGLRenderTarget, readBuffer: THREE.WebGLRenderTarget): void {
+    this.material.uniforms['tDiffuse']!.value = readBuffer.texture;
+    if (this.renderToScreen) {
+      renderer.setRenderTarget(null);
+    } else {
+      renderer.setRenderTarget(writeBuffer);
+      renderer.clear();
+    }
+    this.quad.render(renderer);
+  }
+
+  override dispose(): void {
+    // FullScreenQuad uses Three's process-wide shared triangle geometry; only
+    // this pass's material is owned here.
+    this.material.dispose();
+  }
+}
 
 export class GameRenderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -71,6 +169,11 @@ export class GameRenderer {
   private fxaaPass: ShaderPass | null = null;
   private gradingPass: ShaderPass | null = null;
   private outputPass: OutputPass | null = null;
+  private scopePass: ScopeCompositePass | null = null;
+  private scopeTarget: THREE.WebGLRenderTarget | null = null;
+  private scopeCamera: THREE.PerspectiveCamera | null = null;
+  private scopeSource: THREE.PerspectiveCamera | null = null;
+  private scopeActive = false;
   private sun: THREE.DirectionalLight | null = null;
   private hemi: THREE.HemisphereLight | null = null;
   private ambient: THREE.AmbientLight | null = null;
@@ -88,7 +191,9 @@ export class GameRenderer {
       powerPreference: 'high-performance',
     });
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // three.js r185 removed the soft alias and falls back with a console
+    // warning. Select the supported filter explicitly so QA logs stay clean.
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.25;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -110,6 +215,7 @@ export class GameRenderer {
       this.composer.setPixelRatio(pr);
       this.composer.setSize(w, h);
     }
+    this.resizeScopeTarget(w, h);
     if (this.fxaaPass) {
       (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(1 / (w * pr), 1 / (h * pr));
     }
@@ -118,8 +224,67 @@ export class GameRenderer {
   dispose(): void {
     window.removeEventListener('resize', this.onResize);
     this.composer?.dispose();
+    this.scopePass?.dispose();
+    this.scopeTarget?.dispose();
+    this.scopePass = null;
+    this.scopeTarget = null;
+    this.scopeCamera = null;
+    this.scopeSource = null;
     this.disposeEnvironment();
     this.renderer.dispose();
+  }
+
+  /** Enable the optical sniper view without replacing the primary camera. */
+  setScopeActive(active: boolean, sourceCamera?: THREE.PerspectiveCamera): void {
+    this.scopeActive = active;
+    if (active && sourceCamera) {
+      this.scopeSource = sourceCamera;
+      if (!this.scopeCamera) this.scopeCamera = new THREE.PerspectiveCamera();
+      if (!this.scopeTarget) this.resizeScopeTarget(window.innerWidth, window.innerHeight);
+    } else if (!active) {
+      this.scopeSource = null;
+      this.scopeCamera = null;
+      this.scopeTarget?.dispose();
+      this.scopeTarget = null;
+    }
+    this.scopePass?.setScope(this.scopeTarget?.texture ?? null, this.scopeActive, window.innerWidth / Math.max(1, window.innerHeight));
+  }
+
+  private resizeScopeTarget(width: number, height: number): void {
+    if (!this.scopeActive && !this.scopeTarget) return;
+    const scale = Math.min(0.55, 640 / Math.max(width, height));
+    const targetWidth = Math.max(256, Math.round(width * scale));
+    const targetHeight = Math.max(144, Math.round(height * scale));
+    if (!this.scopeTarget) {
+      this.scopeTarget = new THREE.WebGLRenderTarget(targetWidth, targetHeight, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+    } else if (this.scopeTarget.width !== targetWidth || this.scopeTarget.height !== targetHeight) {
+      this.scopeTarget.setSize(targetWidth, targetHeight);
+    }
+    this.scopePass?.setScope(this.scopeTarget.texture, this.scopeActive, width / Math.max(1, height));
+  }
+
+  private renderScopeTarget(): void {
+    if (!this.scopeActive || !this.scopeSource || !this.scopeCamera || !this.scopeTarget) return;
+    const source = this.scopeSource;
+    const scope = this.scopeCamera;
+    scope.position.copy(source.position);
+    scope.quaternion.copy(source.quaternion);
+    scope.near = source.near;
+    scope.far = source.far;
+    scope.aspect = this.scopeTarget.width / Math.max(1, this.scopeTarget.height);
+    scope.fov = Math.max(13, source.fov / 5);
+    scope.updateProjectionMatrix();
+    scope.updateMatrixWorld(true);
+    const previousTarget = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this.scopeTarget);
+    this.renderer.clear();
+    this.renderer.render(this.scene, scope);
+    this.renderer.setRenderTarget(previousTarget);
   }
 
   /**
@@ -339,6 +504,8 @@ export class GameRenderer {
   }
 
   buildComposer(camera: THREE.Camera): void {
+    this.scopePass?.dispose();
+    this.scopePass = null;
     this.composer?.dispose();
     const settings = getSettings();
     const w = Math.max(8, window.innerWidth);
@@ -376,6 +543,17 @@ export class GameRenderer {
       this.gtaoPass = null;
     }
 
+    // Composite the linear optical image before bloom, AA and grading so the
+    // lens receives the same display treatment as the primary view. GTAO is
+    // camera-depth dependent and therefore remains on the primary view only.
+    this.scopePass = new ScopeCompositePass();
+    this.scopePass.setScope(
+      this.scopeTarget?.texture ?? null,
+      this.scopeActive,
+      w / Math.max(1, h),
+    );
+    this.composer.addPass(this.scopePass);
+
     if (settings.bloom && settings.postProcessing) {
       this.bloomPass = new UnrealBloomPass(
         new THREE.Vector2(w, h),
@@ -404,9 +582,6 @@ export class GameRenderer {
       this.fxaaPass = null;
     }
 
-    this.outputPass = new OutputPass();
-    this.composer.addPass(this.outputPass);
-
     if (settings.postProcessing) {
       this.gradingPass = new ShaderPass(GradingShader);
       const u = this.gradingPass.uniforms as Record<string, { value: unknown }> | undefined;
@@ -420,6 +595,11 @@ export class GameRenderer {
     } else {
       this.gradingPass = null;
     }
+
+    // All scene and optical passes remain linear until the final display
+    // conversion.
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.outputPass);
 
     this.renderPass.camera = camera;
     this.resize();
@@ -471,7 +651,8 @@ export class GameRenderer {
   render(dt: number): void {
     const settings = getSettings();
     const usePost = settings.postProcessing || settings.aa !== 'off';
-    if (this.composer && usePost && this.renderPass) {
+    this.renderScopeTarget();
+    if (this.composer && (usePost || this.scopeActive) && this.renderPass) {
       this.composer.render(dt);
     } else {
       const cam = (this.renderPass?.camera ?? undefined) as THREE.Camera | undefined;

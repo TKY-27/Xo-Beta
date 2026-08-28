@@ -35,6 +35,10 @@ export interface WorldItem {
   vy: number;
   vz: number;
   settled: boolean;
+  /** Actor that deliberately dropped this item, if any. */
+  dropperId?: number;
+  /** Loot clock time before which the dropper cannot pick it back up. */
+  pickupLockedUntil?: number;
 }
 
 export interface LootEvents {
@@ -199,6 +203,7 @@ export class LootSystem {
    *  swapIfBetterOnly: when inventory is full, only swap weapons for strictly
    *  higher rarity (prevents bot pick-up/drop churn). */
   pickup(item: WorldItem, actor: Actor, swapIfBetterOnly = false): InventoryItem | null | false {
+    if (!this.canActorPickup(item, actor)) return false;
     if (item.kind === 'weapon' && item.weapon) {
       let upgradeSlot: number | undefined;
       if (swapIfBetterOnly && actor.inv.slots.every((s) => s !== null)) {
@@ -235,6 +240,10 @@ export class LootSystem {
       return res.displaced ?? null;
     }
     return false;
+  }
+
+  canActorPickup(item: WorldItem, actor: Actor): boolean {
+    return item.dropperId !== actor.id || this.time >= (item.pickupLockedUntil ?? 0);
   }
 
   remove(item: WorldItem): void {

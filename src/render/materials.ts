@@ -287,7 +287,10 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('neonOrange', neon(0xff9040, 2.4));
   mats.set('neonGreen', neon(0x54ff9f, 2.6));
   mats.set('neonBlue', neon(0x5f8cff, 2.6));
-  mats.set('windowWarm', neon(0xffd9a0, 3.4));
+  // Lit rooms should read as luminous panes, not white bloom cards. Large
+  // window surfaces stay below the bloom threshold so frame detail survives
+  // indoors and at street distance; dedicated neon remains the bloom source.
+  mats.set('windowWarm', neon(0xffd9a0, 0.72));
   // Large sign panels: emissive just above the 1.62 bloom threshold so big
   // surfaces glow without blowing out into white slabs.
   mats.set('signDimCyan', neon(0x53e0ff, 1.05));

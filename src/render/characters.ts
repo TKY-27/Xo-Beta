@@ -13,6 +13,9 @@ const _punchX = new THREE.Vector3(1, 0, 0);
 import { AnimationAction, AnimationMixer, LoopOnce } from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import type { Actor } from '../sim/actor';
+import type { SkinId } from '../core/settings';
+
+export type { SkinId } from '../core/settings';
 
 export interface CharacterRig {
   group: THREE.Group;
@@ -33,6 +36,8 @@ export interface CharacterRig {
   /** Skinned-character extensions */
   update?(a: Actor, t: number, dt: number): void;
   attachWeapon?(model: THREE.Object3D | null): void;
+  /** Resolve the attached weapon's authored muzzle in world space. */
+  muzzleWorld?(position: THREE.Vector3, direction: THREE.Vector3): boolean;
   dispose(): void;
 }
 
@@ -69,6 +74,45 @@ const LOCOMOTION_CLIPS = new Set(['walk', 'jog', 'sprint', 'crouch_walk']);
 
 const TARGET_HEIGHT = 1.86;
 
+/**
+ * Appearance is deliberately data-driven, but all geometry remains procedural
+ * and uses the already licensed male/female base rigs. This keeps skin changes
+ * deterministic and avoids loading an unapproved asset per cosmetic.
+ */
+export interface SkinSpec {
+  id: SkinId;
+  label: string;
+  primary: number;
+  secondary: number;
+  accent: number;
+  helmetKind: 0 | 1 | 2 | 3;
+  armorHeavy: boolean;
+  hasPack: boolean;
+}
+
+export const SKIN_SPECS: Readonly<Record<SkinId, SkinSpec>> = {
+  vanguard: { id: 'vanguard', label: 'Vanguard', primary: 0x263446, secondary: 0x171c25, accent: 0xf2b544, helmetKind: 1, armorHeavy: true, hasPack: true },
+  pathfinder: { id: 'pathfinder', label: 'Pathfinder', primary: 0x315d52, secondary: 0x172a29, accent: 0x7de0c0, helmetKind: 3, armorHeavy: false, hasPack: true },
+  specter: { id: 'specter', label: 'Specter', primary: 0x191d2b, secondary: 0x0a0d14, accent: 0x9c7cff, helmetKind: 2, armorHeavy: false, hasPack: false },
+  striker: { id: 'striker', label: 'Striker', primary: 0x5b2d2d, secondary: 0x241316, accent: 0xff6b55, helmetKind: 0, armorHeavy: true, hasPack: false },
+  warden: { id: 'warden', label: 'Warden', primary: 0x4b5142, secondary: 0x20231c, accent: 0xd6e890, helmetKind: 1, armorHeavy: true, hasPack: true },
+  nova: { id: 'nova', label: 'Nova', primary: 0x3d2a58, secondary: 0x1b122c, accent: 0x66d8ff, helmetKind: 3, armorHeavy: false, hasPack: true },
+};
+
+export const SKIN_IDS: readonly SkinId[] = Object.freeze([
+  'vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova',
+]);
+
+/** Stable bot appearance assignment; never depends on frame order or Math.random. */
+export function skinForName(name: string): SkinId {
+  let hash = 2166136261;
+  for (let i = 0; i < name.length; i++) {
+    hash ^= name.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return SKIN_IDS[(hash >>> 0) % SKIN_IDS.length]!;
+}
+
 export class CharacterFactory {
   private protoMale: THREE.Group | null = null;
   private protoFemale: THREE.Group | null = null;
@@ -103,27 +147,33 @@ export class CharacterFactory {
   }
 
   /**
-   * Build a rig for an actor. `identitySeed` varies costume pieces;
-   * accentColor drives emissive trims; `female` picks the body.
+   * Build a rig for an actor. The explicit skin selects a deterministic
+   * procedural costume; `female` picks the existing base body. The fourth
+   * argument accepts either the legacy weapon model or a skin id.
    */
-  create(name: string, accentColor: number, female: boolean, weaponModel: THREE.Object3D | null = null): CharacterRig {
+  create(
+    name: string,
+    accentColor: number,
+    female: boolean,
+    weaponModelOrSkin: THREE.Object3D | null | SkinId = null,
+    explicitSkin?: SkinId,
+  ): CharacterRig {
     const proto = female ? this.protoFemale : this.protoMale;
     const s = female ? this.scaleF : this.scaleM;
-
-    // Deterministic identity variation
-    let seed = 0;
-    for (let i = 0; i < name.length; i++) seed = (seed * 31 + name.charCodeAt(i)) | 0;
-    const rnd = () => {
-      seed = (seed * 16807) % 2147483647;
-      return (seed & 0x7fffffff) / 0x7fffffff;
-    };
+    // Keep the legacy weapon fourth argument source-compatible while allowing
+    // callers that do not need a weapon to pass the skin in that position.
+    const weaponModel = typeof weaponModelOrSkin === 'string' ? null : weaponModelOrSkin;
+    const skinId = typeof weaponModelOrSkin === 'string'
+      ? weaponModelOrSkin
+      : explicitSkin ?? skinForName(name);
+    const skin = SKIN_SPECS[skinId] ?? SKIN_SPECS.vanguard;
 
     const group = new THREE.Group();
     const accents: THREE.MeshStandardMaterial[] = [];
     const baseMats: THREE.MeshStandardMaterial[] = [];
 
     if (!this.ready || !proto || !Object.keys(this.anims).length) {
-      return fallbackRig(group, accentColor, accents, baseMats, name);
+      return fallbackRig(group, accentColor, accents, baseMats, name, skin);
     }
 
     const body = SkeletonUtils.clone(proto) as THREE.Group;
@@ -139,8 +189,12 @@ export class CharacterFactory {
     });
 
     // Suit recolor: find materials and tint toward identity palette.
-    const suitColor = new THREE.Color(accentColor);
-    const darkSuit = suitColor.clone().multiplyScalar(0.35).lerp(new THREE.Color(0x22262c), 0.55);
+    const suitColor = new THREE.Color(skin.primary).lerp(new THREE.Color(accentColor), 0.18);
+    // Preserve readable cloth/plate values under the night maps. The previous
+    // double darkening drove the body albedo close to black, so a correctly
+    // exposed TPS character still rendered as a silhouette with no costume
+    // detail. This remains a physically lit material rather than self-lighting.
+    const darkSuit = suitColor.clone().multiplyScalar(0.58).lerp(new THREE.Color(0x30363e), 0.35);
     const trimColor = suitColor.clone();
     body.traverse((o) => {
       const mesh = o as THREE.Mesh;
@@ -151,9 +205,17 @@ export class CharacterFactory {
         const nm = std.clone();
         nm.envMapIntensity = 0.9;
         if (/suit|body|armor|MI_Superhero/i.test(nm.name ?? '')) {
-          nm.color = darkSuit.clone().lerp(suitColor, 0.22);
+          nm.color = darkSuit.clone().lerp(suitColor, 0.35);
           nm.metalness = Math.min(0.65, nm.metalness + 0.25);
           nm.roughness = Math.max(0.42, nm.roughness * 0.85);
+          // The bundled suit texture is intentionally very dark. A restrained
+          // albedo-derived bounce term keeps seams and armour planes readable
+          // in NeoCity without turning the actor into an unlit/glowing model.
+          // This mirrors the soft character fill used by competitive TPS games
+          // while all highlights and shadows still come from the PBR material.
+          nm.emissive.copy(suitColor).multiplyScalar(0.34);
+          nm.emissiveMap = null;
+          nm.emissiveIntensity = 0.52;
         }
         // Every clone is actor-owned and must dissolve/dispose with the rig,
         // including skin, hair and eye materials.
@@ -169,17 +231,21 @@ export class CharacterFactory {
     // ---- Costume attachments -------------------------------------------
     const bones = collectBones(body);
     const costumeMat = new THREE.MeshStandardMaterial({
-      color: 0x262b33, roughness: 0.52, metalness: 0.45,
+      color: skin.secondary,
+      emissive: new THREE.Color(skin.secondary).multiplyScalar(0.3),
+      emissiveIntensity: 0.4,
+      roughness: 0.52,
+      metalness: 0.45,
     });
     const trimMat = new THREE.MeshStandardMaterial({
-      color: 0x111318, emissive: trimColor, emissiveIntensity: 1.15, roughness: 0.38, metalness: 0.5,
+      color: 0x111318, emissive: new THREE.Color(skin.accent).lerp(trimColor, 0.18), emissiveIntensity: 1.15, roughness: 0.38, metalness: 0.5,
     });
     accents.push(trimMat);
     baseMats.push(costumeMat);
 
-    const helmetKind = Math.floor(rnd() * 4);
-    const armorHeavy = rnd() < 0.45;
-    const hasPack = rnd() < 0.5;
+    const helmetKind = skin.helmetKind;
+    const armorHeavy = skin.armorHeavy;
+    const hasPack = skin.hasPack;
 
     if (bones['Head']) {
       const head = bones['Head'];
@@ -328,10 +394,11 @@ export class CharacterFactory {
         rig.group.rotation.y = a.yaw + Math.PI;
         if (!a.alive) {
           // death clip once, then dissolve handled externally
-          if (!actions['death']!.isRunning() && rig.dissolving === 0) {
+          const death = actions['death'];
+          if (death && !death.isRunning() && rig.dissolving === 0) {
             crossfade(currentBase, 'death', 0.12);
-            actions['death']!.setLoop(LoopOnce, 1);
-            actions['death']!.clampWhenFinished = true;
+            death.setLoop(LoopOnce, 1);
+            death.clampWhenFinished = true;
           }
           mixer.update(dt);
           return;
@@ -483,6 +550,18 @@ export class CharacterFactory {
           weaponHolder.add(model);
         }
       },
+      muzzleWorld(position: THREE.Vector3, direction: THREE.Vector3) {
+        if (!weaponHolder) return false;
+        const muzzle = weaponHolder.getObjectByName('muzzle');
+        if (!muzzle) return false;
+        // Animation bones and the weapon mount both move every presentation
+        // frame, so derive the flash from the rendered rig rather than the
+        // actor eye/capsule approximation used by simulation.
+        group.updateWorldMatrix(true, true);
+        muzzle.getWorldPosition(position);
+        direction.set(0, 0, -1).transformDirection(muzzle.matrixWorld).normalize();
+        return true;
+      },
       dispose() {
         if (disposed) return;
         disposed = true;
@@ -548,19 +627,45 @@ function fallbackRig(
   accents: THREE.MeshStandardMaterial[],
   baseMats: THREE.MeshStandardMaterial[],
   name: string,
+  skin: SkinSpec,
 ): CharacterRig {
-  const suitColor = name === 'YOU' ? 0x2e3a44 : 0x33383f;
+  // Keep the failure state useful in gameplay. An empty Group is especially
+  // damaging in TPS because it makes the player appear to vanish entirely.
+  const suitColor = new THREE.Color(name === 'YOU' ? 0x2e3a44 : skin.primary).getHex();
   const darkMat = new THREE.MeshStandardMaterial({ color: suitColor, roughness: 0.62, metalness: 0.25 });
   const accentMat = new THREE.MeshStandardMaterial({
-    color: 0x15171a, emissive: accentColor, emissiveIntensity: 0.85, roughness: 0.45, metalness: 0.35,
+    color: 0x15171a,
+    emissive: new THREE.Color(skin.accent).lerp(new THREE.Color(accentColor), 0.2),
+    emissiveIntensity: 0.85, roughness: 0.45, metalness: 0.35,
   });
   accents.push(accentMat);
   baseMats.push(darkMat);
   const hips = new THREE.Group();
-  hips.position.y = 1.02;
+  // Author the emergency rig in the same feet-origin space as the GLB rigs.
+  // The old capsule centres left the soles 0.2u above ground and separated
+  // the legs from the torso.
+  hips.position.y = 0.67;
   const torso = new THREE.Group();
-  torso.position.y = 0.12;
+  torso.position.y = 0.38;
   hips.add(torso);
+  const add = (geometry: THREE.BufferGeometry, material: THREE.MeshStandardMaterial, parent: THREE.Object3D, position: [number, number, number]): THREE.Mesh => {
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(...position);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+  add(new THREE.BoxGeometry(0.42, 0.62, 0.26), darkMat, torso, [0, 0, 0]);
+  add(new THREE.BoxGeometry(0.34, 0.18, 0.24), darkMat, hips, [0, 0, 0]);
+  add(new THREE.CylinderGeometry(0.07, 0.075, 0.16, 10), darkMat, torso, [0, 0.37, 0]);
+  add(new THREE.SphereGeometry(0.19, 12, 8), darkMat, torso, [0, 0.61, 0]);
+  add(new THREE.BoxGeometry(0.48, 0.075, 0.29), accentMat, torso, [0, 0.09, 0.145]);
+  add(new THREE.CapsuleGeometry(0.075, 0.45, 6, 10), darkMat, hips, [-0.14, -0.37, 0]);
+  add(new THREE.CapsuleGeometry(0.075, 0.45, 6, 10), darkMat, hips, [0.14, -0.37, 0]);
+  add(new THREE.CapsuleGeometry(0.06, 0.48, 6, 10), darkMat, torso, [-0.29, 0, 0]);
+  add(new THREE.CapsuleGeometry(0.06, 0.48, 6, 10), darkMat, torso, [0.29, 0, 0]);
+  add(new THREE.BoxGeometry(0.24, 0.3, 0.11), darkMat, torso, [0, 0.02, -0.18]);
   group.add(hips);
   const rig: CharacterRig = {
     group,
@@ -569,6 +674,9 @@ function fallbackRig(
     accentMats: accents,
     baseMats: baseMats,
     dissolving: 0,
+    update(a: Actor) {
+      group.rotation.y = a.yaw + Math.PI;
+    },
     dispose() {
       for (const material of new Set<THREE.Material>([...baseMats, ...accents])) material.dispose();
       const geometry = new Set<THREE.BufferGeometry>();

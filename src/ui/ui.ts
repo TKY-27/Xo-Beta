@@ -4,9 +4,10 @@
  */
 
 import {
-  RARITY_CSS, WEAPONS, type Difficulty,
+  HEAL_ITEMS, RARITY_CSS, WEAPONS, type AmmoType, type Difficulty, type WeaponId,
 } from '../core/balance';
 import { getSettings, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
+import { SKIN_IDS, SKIN_SPECS } from '../render/characters';
 import {
   t, setLang, getLang, isTextKey, localizePoiName, onLangChanged, type TextKey,
 } from '../core/i18n';
@@ -14,6 +15,7 @@ import type { Match } from '../sim/match';
 import type { MapId } from '../world';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
+const settingCopy = (en: string, ja: string): string => getLang() === 'ja' ? ja : en;
 
 export type DifficultyChoice = Difficulty;
 export interface PlaySelection {
@@ -376,6 +378,22 @@ export class Menus {
     gameplay.appendChild(this.row(t('set.cameraMode'), this.select(
       [['fps', t('cam.fps')], ['tps', t('cam.tps')]], s.cameraMode, (v) => updateSettings({ cameraMode: v as never }),
     )));
+    gameplay.appendChild(this.row(
+      settingCopy('TPS character side', '三人称キャラクター位置'),
+      this.select(
+        [['left', settingCopy('Left (recommended)', '左（推奨）')], ['right', settingCopy('Right', '右')]],
+        s.tpsCharacterSide,
+        (v) => updateSettings({ tpsCharacterSide: v as never }),
+      ),
+    ));
+    gameplay.appendChild(this.row(
+      settingCopy('Player skin', 'プレイヤースキン'),
+      this.select(
+        SKIN_IDS.map((id) => [id, SKIN_SPECS[id].label]),
+        s.playerSkin,
+        (v) => updateSettings({ playerSkin: v as never }),
+      ),
+    ));
     const rerun = document.createElement('button');
     rerun.id = 'btn-rerun-onboarding';
     rerun.className = 'btn-quiet small';
@@ -449,7 +467,7 @@ export class Menus {
     for (const kb of this.keybindRows) kb.el.remove();
     this.keybindRows = [];
     const b = getSettings().bindings;
-    const labels: Partial<Record<keyof KeyBindings, TextKey>> = {
+    const labels: Partial<Record<keyof KeyBindings, TextKey | string>> = {
       forward: 'bind.forward', back: 'bind.back', left: 'bind.left', right: 'bind.right',
       jump: 'bind.jump', sprint: 'bind.sprint', crouch: 'bind.crouch',
       reload: 'bind.reload', interact: 'bind.interact', dash: 'bind.dash',
@@ -457,6 +475,7 @@ export class Menus {
       useMedkit: 'bind.useMedkit', useShield: 'bind.useShield',
       dropWeapon: 'bind.dropWeapon', cameraToggle: 'bind.cameraToggle', mapToggle: 'bind.mapToggle',
     };
+    labels.shoulderSwap = 'Shoulder swap / 肩切替';
     for (const [code, labelKey] of Object.entries(labels)) {
       const key = code as keyof KeyBindings;
       const btn = document.createElement('button');
@@ -485,7 +504,7 @@ export class Menus {
       const rowEl = document.createElement('div');
       rowEl.className = 'setting-row';
       const lbl = document.createElement('label');
-      lbl.textContent = labelKey ? t(labelKey) : code;
+      lbl.textContent = labelKey && isTextKey(labelKey) ? t(labelKey) : labelKey ?? code;
       btn.id = `keybind-${code}`;
       lbl.htmlFor = btn.id;
       rowEl.append(lbl, btn);
@@ -562,14 +581,37 @@ function formatTime(sec: number): string {
 // HUD
 // ---------------------------------------------------------------------------
 
-const WEAPON_ICONS: Record<string, string> = {
-  pistol: '⌐', smg: '⁝⁝', ar: '⟋', shotgun: '≡', sniper: '⌇',
+const WEAPON_ICON_PATHS: Record<WeaponId, string> = {
+  pistol: '<path d="M9 13h67l15 6v8H58l-7 17H35l4-17H9zM70 9h12v4H70z"/><path class="weapon-detail" d="M55 29h19c0 8-5 12-14 12M39 31h17"/>',
+  smg: '<path d="M5 16h54l10 5h37v7H63l-3 15H45l2-15H5zM22 10h31v6H22zM70 12h25v8H70z"/><path class="weapon-detail" d="M61 31h18v11H67zM40 29h19"/>',
+  ar: '<path d="M4 20h31L49 9h16l-6 11h29l8-4h20v8H91l-8 6H65L55 43H39l7-13H31L20 38H6l8-11H4z"/><path d="M55 12h32v7H55z"/><path class="weapon-detail" d="m65 31 16 1-4 12H63zM47 30h18"/>',
+  shotgun: '<path d="M4 20h55l10-5h46v7l-17 5H65L53 42H37l9-15H31L20 36H7l8-10H4z"/><path d="M65 12h50v5H65z"/><path class="weapon-detail" d="M68 26h24M38 28h22"/>',
+  sniper: '<path d="M3 21h34l14-8h15l6 8h44v6H71l-12 5-8 12H34l9-15H30l-11 8H5l10-10H3z"/><path d="M48 8h43v8H48zM58 4h20v4H58z"/><path class="weapon-detail" d="M72 30 84 44M73 30 66 44M43 29h24"/>',
+};
+
+function weaponIconSvg(id: WeaponId, label = ''): string {
+  return `<svg class="weapon-icon-svg" viewBox="0 0 120 48" role="img" aria-label="${label}">${WEAPON_ICON_PATHS[id]}</svg>`;
+}
+
+function healIconSvg(itemId: 'medkit' | 'shieldpot'): string {
+  if (itemId === 'medkit') {
+    return '<svg class="item-icon-svg" viewBox="0 0 40 40" aria-hidden="true"><path d="M8 10h24a4 4 0 0 1 4 4v18H4V14a4 4 0 0 1 4-4Z"/><path d="M14 10V6h12v4M17 15h6v5h5v6h-5v5h-6v-5h-5v-6h5z" fill-rule="evenodd"/></svg>';
+  }
+  return '<svg class="item-icon-svg" viewBox="0 0 40 40" aria-hidden="true"><path d="M13 4h14v5l3 4v20a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V13l3-4z"/><path d="M12 22c5-4 11 5 16 0v10H12z" class="icon-liquid"/></svg>';
+}
+
+const AMMO_ICONS: Record<AmmoType, string> = {
+  light: '<svg viewBox="0 0 32 32"><path d="M8 5h5v22H8zM19 3h5v24h-5z"/></svg>',
+  medium: '<svg viewBox="0 0 32 32"><path d="M5 7h6v20H5zM14 4h6v23h-6zM23 7h5v20h-5z"/></svg>',
+  shells: '<svg viewBox="0 0 32 32"><path d="M5 5h9v22H5zM18 5h9v22h-9z"/><path d="M5 5h9v6H5zM18 5h9v6h-9z" class="ammo-band"/></svg>',
+  heavy: '<svg viewBox="0 0 32 32"><path d="m16 2 6 8v17H10V10z"/><path d="M10 21h12v6H10z" class="ammo-band"/></svg>',
 };
 
 /** Minimal fist glyph for the permanent melee slot (inline SVG, currentColor). */
 const FIST_SVG = `<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M6.5 3A2.5 2.5 0 0 0 4 5.5v7.2c0 1 .35 1.96 1 2.72l3.6 4.28c.66.79 1.64 1.25 2.67 1.25h4.48A4.25 4.25 0 0 0 20 16.75V12a2 2 0 0 0-1.5-1.94V9a2 2 0 0 0-2-2c-.18 0-.34.02-.5.06V6.5a2 2 0 0 0-2-2c-.54 0-1.04.17-1.45.46A2.5 2.5 0 0 0 10 3H8.5c-.74 0-1.43.32-1.92.83L6.5 3Z"/></svg>`;
 
 export interface LootPanelInfo {
+  iconId: WeaponId | 'medkit' | 'shieldpot';
   name: string;
   typeText: string;
   rarityText: string;
@@ -601,9 +643,15 @@ export class Hud {
   private captionEls = new Map<TextKey | string, HTMLElement>();
   private projector: ((x: number, y: number, z: number) => { x: number; y: number; visible: boolean }) | null = null;
   tacMarker: TacMarker | null = null;
+  onInventoryMove: (from: number, to: number) => void = () => undefined;
+  onInventoryDrop: (slot: number) => void = () => undefined;
+  onInventorySelect: (slot: number) => void = () => undefined;
+  onInventoryClose: () => void = () => undefined;
+  private inventoryDragSlot: number | null = null;
 
   constructor() {
     this.applyCrosshair();
+    this.buildInventoryOverlay();
     onLangChanged(() => {
       hydrateStatic();
       this.applyCrosshair();
@@ -612,6 +660,73 @@ export class Hud {
 
   show(visible: boolean): void {
     $('hud').classList.toggle('hidden', !visible);
+  }
+
+  isInventoryOpen(): boolean {
+    return !$('inventory-overlay').classList.contains('hidden');
+  }
+
+  setInventoryOpen(open: boolean): void {
+    $('inventory-overlay').classList.toggle('hidden', !open);
+    document.body.classList.toggle('inventory-open', open);
+    this.inventoryDragSlot = null;
+    if (open) hydrateStatic();
+  }
+
+  private buildInventoryOverlay(): void {
+    const grid = $('inventory-grid-slots');
+    grid.innerHTML = '';
+    for (let i = 0; i < 5; i++) {
+      const slot = document.createElement('button');
+      slot.type = 'button';
+      slot.className = 'inventory-grid-slot empty';
+      slot.dataset.slot = String(i);
+      slot.innerHTML = `<span class="inv-key">${i + 1}</span><span class="inv-icon"></span><span class="inv-name"></span><span class="inv-count"></span>`;
+      slot.addEventListener('click', () => this.onInventorySelect(i));
+      slot.addEventListener('dragstart', (event) => {
+        if (!slot.draggable) {
+          event.preventDefault();
+          return;
+        }
+        this.inventoryDragSlot = i;
+        event.dataTransfer?.setData('text/x-xo-inventory-slot', String(i));
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        slot.classList.add('dragging');
+      });
+      slot.addEventListener('dragend', () => {
+        this.inventoryDragSlot = null;
+        slot.classList.remove('dragging');
+      });
+      slot.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        slot.classList.add('drop-target');
+      });
+      slot.addEventListener('dragleave', () => slot.classList.remove('drop-target'));
+      slot.addEventListener('drop', (event) => {
+        event.preventDefault();
+        slot.classList.remove('drop-target');
+        const raw = event.dataTransfer?.getData('text/x-xo-inventory-slot');
+        const from = raw === undefined || raw === '' ? this.inventoryDragSlot : Number(raw);
+        if (from !== null && Number.isInteger(from) && from !== i) this.onInventoryMove(from, i);
+      });
+      grid.appendChild(slot);
+    }
+    $('btn-inventory-close').addEventListener('click', () => this.onInventoryClose());
+    const drop = $('inventory-drop-zone');
+    drop.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+      drop.classList.add('active');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('active'));
+    drop.addEventListener('drop', (event) => {
+      event.preventDefault();
+      drop.classList.remove('active');
+      const raw = event.dataTransfer?.getData('text/x-xo-inventory-slot');
+      const slot = raw === undefined || raw === '' ? this.inventoryDragSlot : Number(raw);
+      if (slot !== null && Number.isInteger(slot)) this.onInventoryDrop(slot);
+    });
   }
 
   /** World→screen projection used by damage numbers. */
@@ -712,16 +827,17 @@ export class Hud {
       if (item.kind === 'weapon') {
         slot.className = 'slot' + (i === p.inv.selected ? ' active' : '');
         icon.style.color = RARITY_CSS[item.rarity];
-        icon.style.textShadow = `0 0 6px ${RARITY_CSS[item.rarity]}`;
-        icon.textContent = WEAPON_ICONS[item.weaponId] ?? '⌗';
+        icon.style.textShadow = '';
+        icon.innerHTML = weaponIconSvg(item.weaponId, t(`wpn.${item.weaponId}` as TextKey));
       } else {
-        const med = item.itemId === 'medkit';
         slot.className = `slot heal-${item.itemId}` + (i === p.inv.selected ? ' active' : '');
         icon.style.color = '';
         icon.style.textShadow = '';
-        icon.textContent = med ? `✚${item.count}` : `◇${item.count}`;
+        icon.innerHTML = `${healIconSvg(item.itemId)}<span class="slot-count">${item.count}</span>`;
       }
     }
+
+    if (this.isInventoryOpen()) this.syncInventoryOverlay(match);
 
     $('alive-count').textContent = String(match.aliveCount);
     $('kills-count').textContent = String(p.stats.kills);
@@ -767,6 +883,94 @@ export class Hud {
 
     // Live-update damage number positions
     this.updateDamageNumbers();
+  }
+
+  private syncInventoryOverlay(match: Match): void {
+    const p = match.player;
+    if (!p) return;
+    const selected = p.inv.selectedItem;
+    const detailIcon = $('inventory-detail-icon');
+    const detailName = $('inventory-detail-name');
+    const detailRarity = $('inventory-detail-rarity');
+    const detailType = $('inventory-detail-type');
+    const stats = $('inventory-detail-stats');
+
+    if (!selected) {
+      detailIcon.innerHTML = FIST_SVG;
+      detailIcon.style.color = '#dce5ed';
+      detailName.textContent = t('hud.unarmed');
+      detailRarity.textContent = '';
+      detailType.textContent = t('inventory.empty');
+      stats.innerHTML = '';
+    } else if (selected.kind === 'weapon') {
+      const def = WEAPONS[selected.weaponId];
+      const rarity = t(`rarity.${selected.rarity}` as TextKey);
+      const color = RARITY_CSS[selected.rarity];
+      detailIcon.innerHTML = weaponIconSvg(selected.weaponId, t(`wpn.${selected.weaponId}` as TextKey));
+      detailIcon.style.color = color;
+      detailName.textContent = t(`wpn.${selected.weaponId}` as TextKey);
+      detailRarity.textContent = rarity.toUpperCase();
+      detailRarity.style.color = color;
+      detailType.textContent = `${t('loot.type.weapon')} · ${t(`ammo.${def.ammoType}` as TextKey)}`;
+      const damage = def.damage[['common', 'uncommon', 'rare', 'epic', 'legendary'].indexOf(selected.rarity)] ?? def.damage[0]!;
+      stats.innerHTML = [
+        [t('inventory.damage'), String(damage)],
+        [t('inventory.fireRate'), `${def.rpm} RPM`],
+        [t('inventory.magazine'), `${selected.ammoInMag} / ${def.magSize}`],
+        [t('inventory.reload'), `${def.reloadTactical.toFixed(1)} s`],
+      ].map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
+    } else {
+      const def = HEAL_ITEMS[selected.itemId];
+      const color = selected.itemId === 'medkit' ? '#ff7d89' : '#53d8ff';
+      detailIcon.innerHTML = healIconSvg(selected.itemId);
+      detailIcon.style.color = color;
+      detailName.textContent = selected.itemId === 'medkit' ? t('bind.useMedkit') : t('bind.useShield');
+      detailRarity.textContent = t(selected.itemId === 'medkit' ? 'rarity.rare' : 'rarity.uncommon').toUpperCase();
+      detailRarity.style.color = color;
+      detailType.textContent = t('loot.type.heal');
+      stats.innerHTML = [
+        [t('inventory.count'), String(selected.count)],
+        [selected.itemId === 'medkit' ? t('inventory.restoreHealth') : t('inventory.restoreShield'), `+${def.amount}`],
+        [t('inventory.useTime'), `${def.useTime.toFixed(1)} s`],
+      ].map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
+    }
+
+    const ammo = $('inventory-ammo');
+    const ammoTypes: AmmoType[] = ['light', 'medium', 'shells', 'heavy'];
+    ammo.innerHTML = ammoTypes.map((type) => `
+      <div class="inventory-ammo-stack">
+        <span class="ammo-icon">${AMMO_ICONS[type]}</span>
+        <span>${t(`ammo.${type}` as TextKey)}</span>
+        <strong>${p.inv.ammo[type]}</strong>
+      </div>`).join('');
+
+    const grid = $('inventory-grid-slots');
+    for (let i = 0; i < 5; i++) {
+      const slot = grid.children[i] as HTMLButtonElement;
+      const item = p.inv.slots[i];
+      const icon = slot.querySelector<HTMLElement>('.inv-icon')!;
+      const name = slot.querySelector<HTMLElement>('.inv-name')!;
+      const count = slot.querySelector<HTMLElement>('.inv-count')!;
+      slot.className = 'inventory-grid-slot' + (item ? '' : ' empty') + (i === p.inv.selected ? ' active' : '');
+      slot.draggable = Boolean(item);
+      slot.style.removeProperty('--slot-rarity');
+      if (!item) {
+        icon.innerHTML = '';
+        name.textContent = t('inventory.empty');
+        count.textContent = '';
+      } else if (item.kind === 'weapon') {
+        slot.style.setProperty('--slot-rarity', RARITY_CSS[item.rarity]);
+        icon.innerHTML = weaponIconSvg(item.weaponId, t(`wpn.${item.weaponId}` as TextKey));
+        name.textContent = t(`wpn.${item.weaponId}` as TextKey);
+        count.textContent = String(item.ammoInMag);
+      } else {
+        const color = item.itemId === 'medkit' ? '#ff7d89' : '#53d8ff';
+        slot.style.setProperty('--slot-rarity', color);
+        icon.innerHTML = healIconSvg(item.itemId);
+        name.textContent = item.itemId === 'medkit' ? t('bind.useMedkit') : t('bind.useShield');
+        count.textContent = `×${item.count}`;
+      }
+    }
   }
 
   setFps(fps: number): void {
@@ -864,6 +1068,9 @@ export class Hud {
       return;
     }
     panel.style.setProperty('--loot-rarity', info.rarityColor);
+    $('lp-icon').innerHTML = info.iconId === 'medkit' || info.iconId === 'shieldpot'
+      ? healIconSvg(info.iconId)
+      : weaponIconSvg(info.iconId, info.name);
     $('lp-name').textContent = info.name;
     $('lp-type').textContent = info.typeText;
     $('lp-rarity').textContent = info.rarityText;

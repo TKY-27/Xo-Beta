@@ -34,8 +34,8 @@ interface Particle {
   gravity: number;
 }
 
-const MAX_TRACERS = 64;
-const MAX_FLASHES = 12;
+const MAX_TRACERS = 128;
+const MAX_FLASHES = 24;
 const MAX_PARTICLES = 512;
 const MAX_SHOCKWAVES = 8;
 
@@ -88,12 +88,16 @@ export class VfxSystem {
     }
 
     // Tracer pool: ONE instanced mesh, per-instance color fade (additive)
-    const tracerGeo = new THREE.BoxGeometry(0.03, 0.03, 1);
+    // At gameplay speeds a 3 cm / 90 ms segment vanishes between presented
+    // frames, especially when travelling toward the camera. A slightly wider
+    // luminous core with a longer persistence reads as a fast projectile
+    // rather than a static laser line.
+    const tracerGeo = new THREE.BoxGeometry(0.026, 0.026, 1);
     tracerGeo.translate(0, 0, -0.5);
     this.tracerMesh = new THREE.InstancedMesh(
       tracerGeo,
       new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.9,
+        color: 0xffffff, transparent: true, opacity: 0.72,
         blending: THREE.AdditiveBlending, depthWrite: false,
       }),
       MAX_TRACERS,
@@ -104,7 +108,10 @@ export class VfxSystem {
     this.group.add(this.tracerMesh);
     for (let i = 0; i < MAX_TRACERS; i++) {
       this.tracers.push({ slot: i, life: 0, maxLife: 1, color: 0xffffff });
+      _m4.makeScale(0, 0, 0);
+      this.tracerMesh.setMatrixAt(i, _m4);
     }
+    this.tracerMesh.instanceMatrix.needsUpdate = true;
 
     // Muzzle flash pool — two looks: compact core (pistol/SMG/AR) and
     // wide petal star (shotgun/sniper).
@@ -173,7 +180,8 @@ export class VfxSystem {
 
   spawnTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number): void {
     if (!finite(x1, y1, z1, x2, y2, z2, color)) return;
-    const tracer = this.tracers.find((t) => t.life <= 0) ?? this.tracers[0]!;
+    const tracer = this.tracers.find((t) => t.life <= 0)
+      ?? this.tracers.reduce((oldest, current) => current.life < oldest.life ? current : oldest, this.tracers[0]!);
     const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
     const len = Math.hypot(dx, dy, dz);
     if (len < 0.5) return;
@@ -184,8 +192,12 @@ export class VfxSystem {
     _m4.compose(_v1, _q, _scl.set(1, 1, len));
     this.tracerMesh.setMatrixAt(tracer.slot, _m4);
     this.tracerMesh.setColorAt(tracer.slot, _col.setHex(color));
-    tracer.life = 0.09;
-    tracer.maxLife = 0.09;
+    // Every physical projectile contributes successive substep segments.
+    // Keeping more than about two presented frames stacks an entire flight
+    // path into a solid laser. A 34 ms afterimage is still visible while the
+    // gaps between rounds preserve the impression of discrete bullets.
+    tracer.life = 0.034;
+    tracer.maxLife = 0.034;
     tracer.color = color;
     this.tracerDirty = true;
   }
@@ -195,16 +207,22 @@ export class VfxSystem {
     // Prefer a star-texture flash for heavy weapon classes.
     const f = this.flashes.find((fl) => fl.life <= 0 && fl.star === heavy)
       ?? this.flashes.find((fl) => fl.life <= 0)
-      ?? this.flashes[0]!;
-    f.sprite.position.set(x + dx * 0.5, y + dy * 0.5 - 0.06, z + dz * 0.5);
-    f.sprite.scale.setScalar((heavy ? 1.05 : 0.7) * scale + Math.random() * 0.25);
+      ?? this.flashes.reduce((oldest, current) => current.life < oldest.life ? current : oldest, this.flashes[0]!);
+    // `x/y/z` is the authored weapon muzzle when the rendered rig is
+    // available. Keep only a small forward clearance so the flash sits on the
+    // barrel rather than floating half a metre in front of it.
+    f.sprite.position.set(x + dx * 0.12, y + dy * 0.12 - 0.02, z + dz * 0.12);
+    // A metre-wide camera-facing disc reads as an energy orb, especially on
+    // nearby bots. Keep ordinary report flashes close to real muzzle scale;
+    // shotgun/sniper variants retain the larger petal texture.
+    f.sprite.scale.setScalar((heavy ? 0.5 : 0.28) * scale + Math.random() * (heavy ? 0.1 : 0.06));
     f.sprite.material.rotation = Math.random() * Math.PI * 2;
     f.sprite.material.opacity = 1;
     f.sprite.visible = true;
     f.light.position.copy(f.sprite.position);
-    f.light.intensity = (heavy ? 9 : 6) * scale;
+    f.light.intensity = (heavy ? 5.5 : 3.2) * scale;
     f.light.color.setHex(heavy ? 0xffb060 : 0xffc878);
-    f.life = heavy ? 0.07 : 0.055;
+    f.life = heavy ? 0.055 : 0.04;
     f.maxLife = f.life;
   }
 

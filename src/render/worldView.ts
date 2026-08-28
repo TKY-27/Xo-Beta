@@ -8,6 +8,7 @@
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { VEHICLE_SCALE, type MapDef, type MatKey } from '../world/types';
 import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
@@ -15,6 +16,12 @@ import { WeaponModelFactory } from './weaponModels';
 import { buildVista, type VistaHandle } from './vista';
 import type { Match } from '../sim/match';
 import { RARITY_COLORS } from '../core/balance';
+
+export interface PresentationTransport {
+  position: THREE.Vector3;
+  /** Optional interpolated yaw; falls back to the route direction. */
+  yaw?: number;
+}
 
 const STORM_VERT = /* glsl */ `
   varying vec2 vUv;
@@ -90,6 +97,8 @@ const WATER_FRAG = /* glsl */ `
   uniform vec3 uSkyColor;
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
+  uniform vec2 uWaterCenter;
+  uniform vec2 uHalfSize;
   uniform float uTime;
   varying vec3 vWPos;
   varying vec3 vNormalW;
@@ -97,7 +106,7 @@ const WATER_FRAG = /* glsl */ `
   void main() {
     vec3 n = normalize(vNormalW);
     vec3 v = normalize(cameraPosition - vWPos);
-    float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+    float fres = pow(1.0 - max(dot(n, v), 0.0), 4.0);
 
     // sun glint (blinn) — tight lobe, modest gain so grazing water never
     // blows out to a white sheet
@@ -108,14 +117,65 @@ const WATER_FRAG = /* glsl */ `
     float ripple = sin(vWPos.x * 2.4 + uTime * 1.8) * sin(vWPos.z * 2.1 - uTime * 1.3);
     float sparkle = smoothstep(0.88, 1.0, ripple) * 0.22;
 
-    vec3 base = mix(uShallowColor, uDeepColor, clamp(fres, 0.0, 1.0) * 0.85);
-    vec3 sky = mix(base, uSkyColor, fres * 0.85);
-    vec3 col = sky + uSunColor * spec * 0.22 + uSkyColor * sparkle;
+    vec2 local = abs(vWPos.xz - uWaterCenter);
+    float edgeDistance = min(uHalfSize.x - local.x, uHalfSize.y - local.y);
+    float shoreline = 1.0 - smoothstep(0.0, 4.5, edgeDistance);
+    vec3 base = mix(uDeepColor, uShallowColor, shoreline * 0.82 + 0.08);
+    vec3 sky = mix(base, uSkyColor, 0.12 + fres * 0.48);
+    vec3 col = sky + uSunColor * spec * 0.26 + uSkyColor * sparkle * 0.42;
+    col += uShallowColor * shoreline * 0.12;
 
-    float alpha = mix(0.86, 0.97, fres);
-    // shoreline foam: brighten near plane edges (uv-based via world bounds passed as uniforms)
+    float alpha = mix(0.82, 0.94, fres);
     gl_FragColor = vec4(col, alpha);
-    #include <colorspace_fragment>
+  }
+`;
+
+/**
+ * A restrained rarity treatment for floor weapons.  The old presentation
+ * used a tall additive beam and a ground ring, which made the light read as
+ * a search light rather than as a property of the item.  This shell follows
+ * the actual weapon geometry and only adds a small, view-dependent edge
+ * highlight so the silhouette remains legible without washing out nearby
+ * surfaces.
+ *
+ * There is deliberately no time uniform here.  A static spatial scan gives
+ * the hologram a little material character while keeping its brightness
+ * deterministic from frame to frame (and therefore free of pickup flicker).
+ */
+const RARITY_HOLOGRAM_VERT = /* glsl */ `
+  varying vec3 vNormalV;
+  varying vec3 vViewDirV;
+  varying vec3 vPositionO;
+
+  void main() {
+    vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+    vNormalV = normalize(normalMatrix * normal);
+    vViewDirV = normalize(-viewPosition.xyz);
+    // Keep the small scan pattern in object space.  View-space coordinates
+    // would shimmer as the camera moves even though the item is stationary.
+    vPositionO = position;
+    gl_Position = projectionMatrix * viewPosition;
+  }
+`;
+
+const RARITY_HOLOGRAM_FRAG = /* glsl */ `
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  varying vec3 vNormalV;
+  varying vec3 vViewDirV;
+  varying vec3 vPositionO;
+
+  void main() {
+    vec3 normalV = normalize(vNormalV);
+    vec3 viewDirV = normalize(vViewDirV);
+    // abs() keeps the treatment symmetrical for the double-sided shell.
+    float rim = pow(1.0 - abs(dot(normalV, viewDirV)), 2.35);
+    // A fixed, very low-contrast scan modulation breaks up a flat wash but
+    // never changes over time, unlike the old pulsing beacon.
+    float scan = 0.94 + 0.06 * sin(vPositionO.y * 26.0);
+    float alpha = uOpacity * (0.10 + rim * 0.38) * scan;
+    vec3 color = uColor * (0.42 + rim * 1.05);
+    gl_FragColor = vec4(color, alpha);
   }
 `;
 
@@ -128,13 +188,19 @@ const WATER_FRAG = /* glsl */ `
 class StaticLightPool {
   readonly group = new THREE.Group();
   private pool: THREE.PointLight[] = [];
+  private assignments: Array<{ source: number; target: number; blend: number }> = [];
   private sources: Array<{ x: number; y: number; z: number; color: number; intensity: number; range: number }> = [];
   private timer = 0;
+  private fromPos = new THREE.Vector3();
+  private targetPos = new THREE.Vector3();
+  private fromColor = new THREE.Color();
+  private targetColor = new THREE.Color();
 
   constructor(count: number) {
     for (let i = 0; i < count; i++) {
       const l = new THREE.PointLight(0xffffff, 0, 10, 1.7);
       this.pool.push(l);
+      this.assignments.push({ source: -1, target: -1, blend: 1 });
       this.group.add(l);
     }
   }
@@ -145,40 +211,79 @@ class StaticLightPool {
 
   update(dt: number, viewPos: THREE.Vector3): void {
     this.timer -= dt;
-    if (this.timer > 0 || this.sources.length === 0) return;
-    this.timer = 0.25;
-    // Score by distance; take the closest ones.
-    const scored = this.sources.map((s, idx) => {
-      const d2 = (s.x - viewPos.x) ** 2 + (s.z - viewPos.z) ** 2;
-      return { idx, d2, s };
-    });
-    scored.sort((a, b) => a.d2 - b.d2);
-    const n = Math.min(this.pool.length, scored.length);
+    if (this.timer <= 0 && this.sources.length > 0) {
+      this.timer = 0.25;
+      // Retain assignments while they remain in the nearest set. This
+      // hysteresis prevents a light from swapping at every selection tick as
+      // the viewer crosses a source boundary.
+      const scored = this.sources.map((s, idx) => ({
+        idx,
+        d2: (s.x - viewPos.x) ** 2 + (s.z - viewPos.z) ** 2,
+      })).sort((a, b) => a.d2 - b.d2);
+      const activeCount = Math.min(this.pool.length, scored.length);
+      // Keep a small reserve set so a currently visible source is not dropped
+      // immediately at the edge of the active window (selection hysteresis).
+      const desired = scored.slice(0, Math.min(activeCount + 2, scored.length)).map((entry) => entry.idx);
+      const used = new Set<number>();
+      for (const assignment of this.assignments) {
+        if (assignment.source >= 0 && desired.includes(assignment.source)) used.add(assignment.source);
+      }
+      for (const assignment of this.assignments) {
+        if (assignment.source >= 0 && desired.includes(assignment.source)) {
+          assignment.target = assignment.source;
+          continue;
+        }
+        const replacement = scored.slice(0, activeCount).map((entry) => entry.idx).find((idx) => !used.has(idx));
+        if (replacement === undefined) continue;
+        used.add(replacement);
+        assignment.target = replacement;
+        assignment.blend = 0;
+      }
+    }
+
+    // Move and dim assignments over a short window instead of teleporting the
+    // light. This is intentionally done every frame, including between pool
+    // selection ticks, so facades do not flash during traversal.
     for (let i = 0; i < this.pool.length; i++) {
       const light = this.pool[i]!;
-      if (i < n) {
-        const s = scored[i]!.s;
-        const fade = Math.min(1, Math.max(0, 1 - Math.sqrt(scored[i]!.d2) / (s.range * 1.35)));
-        light.position.set(s.x, s.y, s.z);
-        light.color.setHex(s.color);
-        light.intensity = s.intensity * (0.35 + 0.65 * fade);
-        light.distance = s.range;
-      } else {
+      const assignment = this.assignments[i]!;
+      if (assignment.target < 0 || !this.sources[assignment.target]) {
         light.intensity = 0;
+        continue;
       }
+      const target = this.sources[assignment.target]!;
+      const from = assignment.source >= 0 ? this.sources[assignment.source] ?? target : target;
+      assignment.blend = Math.min(1, assignment.blend + dt / 0.18);
+      const blend = assignment.blend;
+      this.fromPos.set(from.x, from.y, from.z);
+      this.targetPos.set(target.x, target.y, target.z);
+      light.position.lerpVectors(this.fromPos, this.targetPos, blend);
+      this.fromColor.setHex(from.color);
+      this.targetColor.setHex(target.color);
+      light.color.copy(this.fromColor).lerp(this.targetColor, blend);
+      const targetDistance = Math.hypot(target.x - viewPos.x, target.z - viewPos.z);
+      const targetFade = Math.min(1, Math.max(0, 1 - targetDistance / (target.range * 1.35)));
+      const targetIntensity = target.intensity * (0.35 + 0.65 * targetFade);
+      const fromDistance = Math.hypot(from.x - viewPos.x, from.z - viewPos.z);
+      const fromFade = Math.min(1, Math.max(0, 1 - fromDistance / (from.range * 1.35)));
+      const fromIntensity = assignment.source >= 0
+        ? from.intensity * (0.35 + 0.65 * fromFade)
+        : 0;
+      // Crossfade energy as well as position/color. Multiplying only the new
+      // intensity by blend caused every reassignment to dip to black for one
+      // frame, which read as a building-light flash.
+      light.intensity = THREE.MathUtils.lerp(fromIntensity, targetIntensity, blend);
+      light.distance = target.range;
+      if (assignment.blend >= 1) assignment.source = assignment.target;
     }
   }
 }
 
 export class WorldView {
-  static beamGeos = new Map<number, THREE.CylinderGeometry>();
-  static beamMats = new Map<number, THREE.Material>();
-  static ringGeo: THREE.RingGeometry | null = null;
-  static ringMats = new Map<number, THREE.MeshBasicMaterial>();
   readonly group = new THREE.Group();
   private destructibleMeshes = new Map<number, THREE.Object3D>();
   private chestMats = new Map<number, { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial }>();
-  private lootViews = new Map<number, { root: THREE.Group; inner: THREE.Object3D | null; beam?: THREE.Mesh; ring?: THREE.Mesh; phase: number }>();
+  private lootViews = new Map<number, { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D }>();
   stormMesh!: THREE.Mesh;
   readonly transportGroup = new THREE.Group();
   private time = 0;
@@ -558,6 +663,13 @@ export class WorldView {
         }
         list.forEach((m, i) => mesh.setMatrixAt(i, m));
         mesh.instanceMatrix.needsUpdate = true;
+        // InstancedMesh starts with a source-geometry bound. Once per-cell
+        // transforms are installed, compute the aggregate bound before
+        // enabling frustum culling; otherwise a large cell can disappear when
+        // its source origin leaves the camera frustum.
+        mesh.computeBoundingBox();
+        mesh.computeBoundingSphere();
+        mesh.frustumCulled = true;
         mesh.castShadow = castShadow;
         this.group.add(mesh);
       }
@@ -625,6 +737,9 @@ export class WorldView {
         fragmentShader: WATER_FRAG,
         transparent: true,
         side: THREE.DoubleSide,
+        depthTest: true,
+        depthWrite: false,
+        premultipliedAlpha: false,
         uniforms: {
           uTime: { value: 0 },
           uDeepColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x0a1a2e : 0x14486b) },
@@ -632,6 +747,8 @@ export class WorldView {
           uSkyColor: { value: new THREE.Color(def.sky.preset === 'day' ? 0x8fb6cc : def.sky.fogColor) },
           uSunDir: { value: new THREE.Vector3(...def.sky.sunDirection).normalize() },
           uSunColor: { value: new THREE.Color(def.sky.sunColor) },
+          uWaterCenter: { value: new THREE.Vector2((w.minX + w.maxX) / 2, (w.minZ + w.maxZ) / 2) },
+          uHalfSize: { value: new THREE.Vector2((w.maxX - w.minX) / 2, (w.maxZ - w.minZ) / 2) },
         },
       });
       const mesh = new THREE.Mesh(geo, mat);
@@ -694,7 +811,7 @@ export class WorldView {
 
   /**
    * Chest presentation — fully instanced per tier (~7 draws total vs ~11 per
-   * chest). Lid animation + halo fade run through per-instance matrices.
+   * chest). Only the lid is animated; lighting remains stable per tier.
    */
   private chestInst: Array<{
     body: THREE.InstancedMesh; trim: THREE.InstancedMesh; lock: THREE.InstancedMesh;
@@ -703,7 +820,7 @@ export class WorldView {
     mats: { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial };
   } | null> = [null, null, null];
   private chestSlots = new Map<number, {
-    tier: number; idx: number; pos: THREE.Vector3; yaw: number; lidAngle: number; opened: boolean; haloScale: number;
+    tier: number; idx: number; pos: THREE.Vector3; yaw: number; lidAngle: number; opened: boolean;
   }>();
 
   private trackChests(match: Match): void {
@@ -711,17 +828,23 @@ export class WorldView {
     for (const c of match.chests) counts[c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0]!++;
     for (let tier = 0; tier < 3; tier++) {
       if (this.chestInst[tier] || counts[tier] === 0) continue;
-      const glowHex = tier === 2 ? 0xffb43a : tier === 1 ? 0xb06ce8 : 0x4f9fe8;
+      const glowHex = tier === 2 ? 0xffa632 : tier === 1 ? 0xb878f0 : 0xffc45c;
       let cached = this.chestMats.get(tier);
       if (!cached) {
         const trimMat = new THREE.MeshStandardMaterial({
-          color: 0x111214, emissive: glowHex, emissiveIntensity: 0.85 + tier * 0.35, roughness: 0.35, metalness: 0.5,
+          color: 0x24211c, emissive: glowHex, emissiveIntensity: 0.55 + tier * 0.2, roughness: 0.35, metalness: 0.5,
         });
         const accentMat = trimMat.clone();
-        // Weathered supply-crate bodies (olive standard / gunmetal elite /
-        // dark vault) instead of glossy toy-plastic blue.
+        // Weathered metal bodies remain readable in unlit interiors. Standard
+        // crates use the familiar warm-gold language of a valuable chest;
+        // higher tiers retain distinct gunmetal/bronze bodies.
+        const bodyColor = tier === 2 ? 0x51402c : tier === 1 ? 0x34313d : 0x5b492b;
         const bodyMat = new THREE.MeshStandardMaterial({
-          color: tier === 2 ? 0x2b2320 : tier === 1 ? 0x2c2c34 : 0x46503e, roughness: 0.62, metalness: 0.38,
+          color: bodyColor,
+          emissive: new THREE.Color(bodyColor),
+          emissiveIntensity: 0.38,
+          roughness: 0.62,
+          metalness: 0.38,
         });
         for (const m of [trimMat, accentMat, bodyMat]) (m.userData as { shared?: boolean }).shared = true;
         cached = { body: bodyMat, trim: trimMat, accent: accentMat };
@@ -729,7 +852,7 @@ export class WorldView {
       }
       const n = counts[tier]!;
       // static base (body) — lid pivot at (0,0.72,0), children baked relative
-      const baseGeo = new THREE.BoxGeometry(1.46, 0.68, 0.96);
+      const baseGeo = new RoundedBoxGeometry(1.46, 0.68, 0.96, 3, 0.055);
       baseGeo.translate(0, 0.38, 0);
       // static trim: base skirt + 4 corner brackets, merged
       const skirt = new THREE.BoxGeometry(1.52, 0.09, 1.02);
@@ -740,18 +863,38 @@ export class WorldView {
         b.translate(sx * 0.67, 0.38, sz * 0.42);
         brackets.push(b);
       }
+      // Recessed face bands catch highlights and break up the old featureless
+      // box silhouette while remaining one instanced draw.
+      for (const y of [0.3, 0.52]) {
+        const band = new THREE.BoxGeometry(1.18, 0.055, 0.055);
+        band.translate(0, y, -0.495);
+        brackets.push(band);
+      }
       const trimGeo = mergeGeometries([skirt, ...brackets])!;
       // lock cylinder (static, accent)
       const lockGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.08, 10);
       lockGeo.rotateX(Math.PI / 2);
       lockGeo.translate(0, 0.62, -0.5);
-      // lid parts — translated relative to the lid pivot (0, 0.72, 0)
-      const lidBodyGeo = new THREE.BoxGeometry(1.5, 0.34, 0.99);
-      lidBodyGeo.translate(0, 0.17, 0);
-      const lidTrimGeo = new THREE.BoxGeometry(1.54, 0.12, 0.1);
-      lidTrimGeo.translate(0, 0.17, -0.47);
-      const coreGeo = new THREE.SphereGeometry(0.13 + tier * 0.03, 10, 8);
-      coreGeo.translate(0, 0.17, 0.42);
+      // Classic arched coffer lid. A half-cylinder creates a continuous
+      // silhouette and readable specular roll instead of stacked cuboids.
+      // Geometry remains relative to the hinge pivot at (0, 0.72, 0).
+      const lidArch = new THREE.CylinderGeometry(0.47, 0.47, 1.5, 18, 1, false, 0, Math.PI);
+      lidArch.rotateZ(Math.PI / 2);
+      const lidBase = new THREE.BoxGeometry(1.5, 0.08, 0.94);
+      lidBase.translate(0, 0.035, 0);
+      const lidBodyGeo = mergeGeometries([lidArch, lidBase])!;
+      const lidFrontBand = new THREE.BoxGeometry(1.54, 0.1, 0.08);
+      lidFrontBand.translate(0, 0.1, -0.46);
+      const lidRibs: THREE.BufferGeometry[] = [];
+      for (const x of [-0.48, 0, 0.48]) {
+        const rib = new THREE.TorusGeometry(0.48, 0.035, 6, 18, Math.PI);
+        rib.rotateY(Math.PI / 2);
+        rib.translate(x, 0, 0);
+        lidRibs.push(rib);
+      }
+      const lidTrimGeo = mergeGeometries([lidFrontBand, ...lidRibs])!;
+      const coreGeo = new RoundedBoxGeometry(0.3 + tier * 0.03, 0.1, 0.045, 2, 0.018);
+      coreGeo.translate(0, 0.12, -0.485);
       const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, shadow: boolean) => {
         const im = new THREE.InstancedMesh(geo, mat, n);
         im.castShadow = shadow;
@@ -760,16 +903,10 @@ export class WorldView {
         this.group.add(im);
         return im;
       };
-      let halo: THREE.InstancedMesh | null = null;
-      if (tier > 0) {
-        const haloGeo = new THREE.TorusGeometry(0.62 + tier * 0.1, 0.022 + tier * 0.008, 8, 40);
-        haloGeo.rotateX(Math.PI / 2);
-        haloGeo.translate(0, 1.55 + tier * 0.12, 0);
-        halo = mk(haloGeo, new THREE.MeshBasicMaterial({
-          color: glowHex, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false,
-        }), false);
-        halo.renderOrder = 2;
-      }
+      // No animated halo mesh: the old scale pulse read as lighting flicker
+      // and the floating/ground ring made the object look broken. Stable PBR
+      // body highlights plus restrained emissive hardware provide the cue.
+      const halo: THREE.InstancedMesh | null = null;
       this.chestInst[tier] = {
         body: mk(baseGeo, cached.body, true),
         trim: mk(trimGeo, cached.trim, false),
@@ -791,10 +928,10 @@ export class WorldView {
         tier, idx,
         pos: new THREE.Vector3(c.x, c.y, c.z),
         yaw: Math.abs(Math.round((c.x * 13.7 + c.z * 7.3))) * 0.61 % (Math.PI * 2),
-        lidAngle: 0, opened: false, haloScale: 1,
+        lidAngle: 0, opened: false,
       });
     }
-    // write static transforms once (base/trim/lock/halo base matrices)
+    // Write static transforms once (base, hardware and closed-lid pose).
     const m4 = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const one = new THREE.Vector3(1, 1, 1);
@@ -827,7 +964,6 @@ export class WorldView {
     const qx = new THREE.Quaternion();
     const pivot = new THREE.Vector3(0, 0.72, 0);
     const one = new THREE.Vector3(1, 1, 1);
-    const pulseByTier = [false, false, false];
     for (const c of match.chests) {
       const s = this.chestSlots.get(c.id);
       if (!s) continue;
@@ -835,7 +971,6 @@ export class WorldView {
       const targetLid = -Math.min(1, c.openT * 1.6) * 1.85;
       s.lidAngle += (targetLid - s.lidAngle) * 0.14;
       s.opened = c.opened;
-      if (!c.opened) pulseByTier[s.tier] = true;
       qy.setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw);
       // lid: chest transform · translate(pivot) · rotateX(angle)
       m4.compose(s.pos, qy, one);
@@ -845,12 +980,6 @@ export class WorldView {
       inst.lidBody.setMatrixAt(s.idx, lidM);
       inst.lidTrim.setMatrixAt(s.idx, lidM);
       inst.core.setMatrixAt(s.idx, lidM);
-      // halo shrinks away once opened
-      if (inst.halo) {
-        s.haloScale = Math.max(0, s.haloScale - this.timeDelta() * (s.opened ? 1.4 : 0));
-        m4.compose(s.pos, qy, s.haloScale < 1 ? new THREE.Vector3().setScalar(Math.max(0.0001, s.haloScale)) : one);
-        inst.halo.setMatrixAt(s.idx, m4);
-      }
     }
     for (let tier = 0; tier < 3; tier++) {
       const inst = this.chestInst[tier];
@@ -859,22 +988,17 @@ export class WorldView {
       inst.lidTrim.instanceMatrix.needsUpdate = true;
       inst.core.instanceMatrix.needsUpdate = true;
       if (inst.halo) inst.halo.instanceMatrix.needsUpdate = true;
-      const pulse = 1 + Math.sin(this.time * 2.6) * 0.12;
-      const e = pulseByTier[tier] ? 1.5 + pulse * 0.6 : inst.mats.trim.emissiveIntensity * Math.exp(-this.timeDelta() * 1.4);
-      inst.mats.trim.emissiveIntensity = e;
-      inst.mats.accent.emissiveIntensity = e;
+      // Tier materials are shared and intentionally stable. Open-state
+      // animation is expressed only through the per-instance lid transform.
+      inst.mats.trim.emissiveIntensity = 0.55 + tier * 0.2;
+      inst.mats.accent.emissiveIntensity = 0.55 + tier * 0.2;
     }
   }
 
-  private lastFrameTime = 0;
-  private timeDelta(): number {
-    return Math.max(0.001, this.time - this.lastFrameTime);
-  }
-
   // -------------------------------------------------------------------------
-  // Loot presentation: floating items, rarity beams, ground rings.
+  // Loot presentation: floating items and model-attached rarity highlights.
   // Ammo/heals render through shared instanced pools (draw-call budget);
-  // weapons keep individual models with rarity beams (distance-culled).
+  // weapons keep individual models with a subtle geometry-following shell.
   // -------------------------------------------------------------------------
 
   private lootInst: Partial<Record<'ammo' | 'med' | 'shield', THREE.InstancedMesh>> = {};
@@ -912,62 +1036,26 @@ export class WorldView {
     return mesh;
   }
 
-  private lootViewFor(item: import('../sim/loot').WorldItem): { root: THREE.Group; inner: THREE.Object3D | null; beam?: THREE.Mesh; ring?: THREE.Mesh } {
+  private lootViewFor(item: import('../sim/loot').WorldItem): { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D } {
     const root = new THREE.Group();
     const rarityRank = ['common', 'uncommon', 'rare', 'epic', 'legendary'].indexOf(item.rarity);
     const glowHex = RARITY_COLORS[item.rarity];
 
     // Weapons only — consumables render through the shared instanced pools.
     let inner: THREE.Object3D | null = null;
+    let hologram: THREE.Object3D | undefined;
     if (item.kind === 'weapon' && item.weapon) {
       const wm = this.weaponFactory.buildWorldScale(item.weapon.weaponId, item.rarity);
-      if (wm) inner = wm.group;
+      if (wm) {
+        inner = wm.group;
+        root.add(inner);
+        // Keep the shell just outside the real model.  The slight scale
+        // expansion avoids depth ties while preserving the authored shape.
+        hologram = buildWeaponHologram(wm.group, glowHex, rarityRank);
+        if (hologram) root.add(hologram);
+      }
     }
-    if (inner) root.add(inner);
-
-    // Rarity presentation: beam + ground ring scale with rarity.
-    // Geometry/material caches are shared — creating these per spawn caused
-    // measurable interaction-frame spikes when chests opened mid-match.
-    let beam: THREE.Mesh | undefined;
-    let ring: THREE.Mesh | undefined;
-    if (item.kind === 'weapon' && rarityRank >= 1) {
-      const beamH = 3.4 + rarityRank * 0.7;
-      let beamGeo = WorldView.beamGeos.get(beamH);
-      if (!beamGeo) {
-        beamGeo = new THREE.CylinderGeometry(0.16, 0.3, beamH, 12, 1, true);
-        beamGeo.translate(0, beamH / 2, 0);
-        beamGeo.userData.externalShared = true;
-        WorldView.beamGeos.set(beamH, beamGeo);
-      }
-      let beamMat = WorldView.beamMats.get(glowHex);
-      if (!beamMat) {
-        beamMat = makeBeamMaterial(glowHex, 0.16 + rarityRank * 0.05);
-        WorldView.beamMats.set(glowHex, beamMat);
-      }
-      beam = new THREE.Mesh(beamGeo, beamMat);
-      beam.position.y = 0.1;
-      beam.renderOrder = 2;
-      let ringGeo = WorldView.ringGeo;
-      if (!ringGeo) {
-        ringGeo = new THREE.RingGeometry(0.42, 0.58, 28);
-        ringGeo.rotateX(-Math.PI / 2);
-        ringGeo.userData.externalShared = true;
-        WorldView.ringGeo = ringGeo;
-      }
-      let ringMat = WorldView.ringMats.get(glowHex);
-      if (!ringMat) {
-        ringMat = new THREE.MeshBasicMaterial({
-          color: glowHex, transparent: true, opacity: 0.5 + rarityRank * 0.08,
-          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-        });
-        ringMat.userData.externalShared = true;
-        WorldView.ringMats.set(glowHex, ringMat);
-      }
-      ring = new THREE.Mesh(ringGeo, ringMat);
-      ring.renderOrder = 2;
-      root.add(beam, ring);
-    }
-    return { root, inner, beam, ring };
+    return { root, inner, hologram };
   }
 
   syncLoot(match: Match): void {
@@ -986,29 +1074,23 @@ export class WorldView {
       }
       let view = this.lootViews.get(item.id);
       if (!view) {
-        view = { ...this.lootViewFor(item), phase: Math.random() * Math.PI * 2 };
+        view = {
+          ...this.lootViewFor(item),
+        };
         view.root.position.set(item.x, item.y, item.z);
         this.lootViews.set(item.id, view);
         this.group.add(view.root);
       }
-      // Distance-cull the item model; rarity beams stay visible as far cues.
+      // Distance-cull the item model and its attached hologram together.  A
+      // floating beacon would be cheap to spot but was the source of the
+      // distracting vertical light column this presentation replaces.
       const dx = item.x - this.viewPos.x;
       const dz = item.z - this.viewPos.z;
-      if (view.inner) view.inner.visible = dx * dx + dz * dz < farSqr;
+      const nearby = dx * dx + dz * dz < farSqr;
+      if (view.inner) view.inner.visible = nearby;
+      if (view.hologram) view.hologram.visible = nearby;
       // Fixed believable orientation — floor loot never spins.
       view.root.rotation.y = item.yaw;
-      const pulse = 1 + Math.sin(this.time * 3.4 + view.phase) * 0.14;
-      const beam = view.beam;
-      if (beam) {
-        (beam.material as THREE.MeshBasicMaterial).opacity =
-          (parseFloat(((beam.material as THREE.MeshBasicMaterial).userData.baseOpacity ?? '0.2')) ) * (0.8 + pulse * 0.35);
-        beam.rotation.y = -this.time * 0.3;
-      }
-      const ring = view.ring;
-      if (ring) {
-        ring.scale.setScalar(pulse);
-        ring.position.y = 0.06 + bob * 0.1;
-      }
       view.root.position.y = item.y + bob;
     }
     // Flush consumable loot into the shared instanced pools.
@@ -1033,6 +1115,7 @@ export class WorldView {
     }
     for (const [id, view] of this.lootViews) {
       if (!seen.has(id)) {
+        disposeWeaponHologram(view.hologram);
         this.group.remove(view.root);
         this.lootViews.delete(id);
       }
@@ -1089,8 +1172,9 @@ export class WorldView {
   }
 
   private buildTransport(): void {
-    const hullMat = new THREE.MeshStandardMaterial({ color: 0x39424e, roughness: 0.5, metalness: 0.72 });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x22262e, roughness: 0.55, metalness: 0.66 });
+    const hullMat = new THREE.MeshStandardMaterial({ color: 0x42566f, roughness: 0.42, metalness: 0.7 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x1c2633, roughness: 0.48, metalness: 0.72 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0xa87332, roughness: 0.34, metalness: 0.84 });
     const glassMat = new THREE.MeshStandardMaterial({
       color: 0x0c1218, emissive: 0x53e0ff, emissiveIntensity: 0.9, roughness: 0.3, metalness: 0.5,
     });
@@ -1109,6 +1193,41 @@ export class WorldView {
     const fin = new THREE.Mesh(new THREE.BoxGeometry(3.4, 4.4, 0.3), darkMat);
     fin.position.set(6.4, 2.4, 0);
     fin.castShadow = true;
+    // Structural hoops and a raised cockpit break up the old featureless
+    // capsule silhouette. These pieces share the hull axes, so the ship still
+    // reads clearly from the high transport camera at normal gameplay scale.
+    const hoops: THREE.Mesh[] = [];
+    for (const hx of [-4.6, 0, 4.6]) {
+      const hoop = new THREE.Mesh(new THREE.TorusGeometry(3.55, 0.14, 6, 18), trimMat);
+      hoop.geometry.rotateY(Math.PI / 2);
+      hoop.position.x = hx;
+      hoop.castShadow = true;
+      hoops.push(hoop);
+    }
+    const cockpit = new THREE.Mesh(new THREE.CapsuleGeometry(1.4, 2.4, 4, 10), glassMat);
+    cockpit.geometry.rotateZ(Math.PI / 2);
+    cockpit.position.set(4.4, 2.8, 0);
+    cockpit.scale.set(1, 0.58, 1.25);
+    const cargoCabin = new THREE.Mesh(new THREE.BoxGeometry(6.4, 2.2, 3.8), darkMat);
+    cargoCabin.position.set(-0.5, -3.2, 0);
+    cargoCabin.castShadow = true;
+    const cabinWindowL = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.75, 0.12), glassMat);
+    cabinWindowL.position.set(-0.5, -3.05, 1.96);
+    const cabinWindowR = cabinWindowL.clone();
+    cabinWindowR.position.z = -1.96;
+    const nacelles: THREE.Object3D[] = [];
+    for (const nz of [-5.3, 5.3]) {
+      const nacelle = new THREE.Mesh(new THREE.CapsuleGeometry(0.85, 3.2, 4, 10), darkMat);
+      nacelle.geometry.rotateZ(Math.PI / 2);
+      nacelle.position.set(-3.4, -0.1, nz);
+      nacelle.castShadow = true;
+      const exhaust = new THREE.Mesh(new THREE.SphereGeometry(0.72, 12, 8), glassMat);
+      exhaust.scale.set(0.65, 1, 1);
+      exhaust.position.set(-5.45, -0.1, nz);
+      nacelles.push(nacelle, exhaust);
+    }
+    const dorsalRail = new THREE.Mesh(new THREE.BoxGeometry(8.8, 0.16, 0.22), trimMat);
+    dorsalRail.position.set(-0.4, 3.45, 0);
     // running lights
     const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff5f5f });
     for (const bz of [4.4, -4.4]) {
@@ -1116,7 +1235,10 @@ export class WorldView {
       beacon.position.set(3.2, 2.2, bz);
       this.transportGroup.add(beacon);
     }
-    this.transportGroup.add(hull, wingL, wingR, engineGlow, fin);
+    this.transportGroup.add(
+      hull, wingL, wingR, engineGlow, fin,
+      ...hoops, cockpit, cargoCabin, cabinWindowL, cabinWindowR, ...nacelles, dorsalRail,
+    );
     this.transportGroup.visible = false;
     this.group.add(this.transportGroup);
   }
@@ -1135,8 +1257,7 @@ export class WorldView {
   }
 
   /** Per-frame updates driven by the game loop. */
-  update(dt: number, match: Match): void {
-    this.lastFrameTime = this.time;
+  update(dt: number, match: Match, presentationTransport?: PresentationTransport): void {
     this.time += dt;
     this.vista.update(this.viewPos, this.time);
     this.lightPool.update(dt, this.viewPos);
@@ -1150,9 +1271,10 @@ export class WorldView {
 
     if (match.phase === 'transport') {
       this.transportGroup.visible = true;
-      this.transportGroup.position.set(match.transportPos.x, match.transportPos.y, match.transportPos.z);
+      const transportPosition = presentationTransport?.position ?? match.transportPos;
+      this.transportGroup.position.copy(transportPosition);
       // Model's long axis is +X; align it with the flight direction.
-      this.transportGroup.rotation.y = Math.atan2(
+      this.transportGroup.rotation.y = presentationTransport?.yaw ?? Math.atan2(
         -(match.transportTo[1] - match.transportFrom[1]),
         match.transportTo[0] - match.transportFrom[0],
       );
@@ -1234,14 +1356,79 @@ function moorTintSoft(m: THREE.Material): void {
   }
 }
 
-function makeBeamMaterial(color: number, baseOpacity: number): THREE.MeshBasicMaterial {
-  const mat = new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: baseOpacity, blending: THREE.AdditiveBlending,
-    depthWrite: false, side: THREE.DoubleSide,
+/**
+ * Clone only the scene graph for the visual shell; the weapon factory owns
+ * the source geometries and materials.  The shell gets per-loot materials so
+ * each world item can be released when it is picked up without touching the
+ * shared weapon archetypes.
+ */
+function buildWeaponHologram(source: THREE.Object3D, colorHex: number, rarityRank: number): THREE.Object3D | undefined {
+  const shell = source.clone(true);
+  shell.name = 'weapon-rarity-hologram';
+  // Common weapons stay readable but do not look like a beacon.  Higher
+  // tiers gain a little more edge energy, never a separate light source.
+  const opacity = 0.14 + Math.max(0, rarityRank) * 0.022;
+  shell.scale.multiplyScalar(1.018);
+  shell.renderOrder = 1;
+  shell.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const hasNormals = mesh.geometry.getAttribute('normal') !== undefined;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    mesh.material = materials.map(() => makeWeaponHologramMaterial(colorHex, opacity, hasNormals));
+    mesh.renderOrder = 1;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
   });
-  (mat.userData as { baseOpacity?: string }).baseOpacity = String(baseOpacity);
-  mat.userData.externalShared = true;
-  return mat;
+  return shell;
+}
+
+function makeWeaponHologramMaterial(colorHex: number, opacity: number, hasNormals: boolean): THREE.Material {
+  if (!hasNormals) {
+    // A malformed/very small imported mesh may not carry normals.  Keep it
+    // visible as a quiet silhouette instead of failing the whole shell.
+    const fallback = new THREE.MeshBasicMaterial({
+      color: colorHex,
+      transparent: true,
+      opacity: opacity * 0.28,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    });
+    fallback.userData.weaponHologram = true;
+    return fallback;
+  }
+  const material = new THREE.ShaderMaterial({
+    vertexShader: RARITY_HOLOGRAM_VERT,
+    fragmentShader: RARITY_HOLOGRAM_FRAG,
+    uniforms: {
+      uColor: { value: new THREE.Color(colorHex) },
+      uOpacity: { value: opacity },
+    },
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+  material.userData.weaponHologram = true;
+  return material;
+}
+
+function disposeWeaponHologram(root: THREE.Object3D | undefined): void {
+  if (!root) return;
+  const materials = new Set<THREE.Material>();
+  root.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of list) {
+      if (material.userData.weaponHologram) materials.add(material);
+    }
+  });
+  for (const material of materials) material.dispose();
 }
 
 /** Shared ground-loot materials (one instance per look — draw-call/GC budget). */

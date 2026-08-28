@@ -3,7 +3,7 @@
  * state; controllers only write InputCommands.
  */
 
-import type { BotPersonality, HitRegion } from '../core/balance';
+import type { BotPersonality, HitRegion, WeaponId } from '../core/balance';
 import { HEALTH_MAX, SHIELD_MAX } from '../core/balance';
 import { eyeYFromBodyCenter, type CharBody } from '../physics/physics';
 import { Inventory } from './inventory';
@@ -19,6 +19,12 @@ export interface WeaponRuntime {
   reloadTimer: number;
   reloadTotal: number;
   reloadingEmpty: boolean;
+  /** Weapon being incrementally filled; null when no reload is active. */
+  reloadWeaponId: WeaponId | null;
+  /** Magazine count at reload start, used to derive deterministic progress. */
+  reloadInitialAmmo: number;
+  /** Number of rounds already transferred during this reload. */
+  reloadRoundsLoaded: number;
   boltTimer: number;
   bloom: number;
   recoilPitch: number;
@@ -70,6 +76,9 @@ export class Actor {
     reloadTimer: 0,
     reloadTotal: 0,
     reloadingEmpty: false,
+    reloadWeaponId: null,
+    reloadInitialAmmo: 0,
+    reloadRoundsLoaded: 0,
     boltTimer: 0,
     bloom: 0,
     recoilPitch: 0,
