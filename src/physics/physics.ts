@@ -218,6 +218,31 @@ export class PhysicsWorld {
     };
   }
 
+  /**
+   * Sweep a small camera volume through scenery only. Actor colliders are
+   * deliberately excluded so a third-person boom can never collapse against
+   * the player whose camera it is positioning.
+   */
+  cameraCast(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    maxDist: number,
+    radius = 0.18,
+  ): { dist: number } | null {
+    const hit = this.world.castShape(
+      { x: ox, y: oy, z: oz },
+      { x: 0, y: 0, z: 0, w: 1 },
+      { x: dx, y: dy, z: dz },
+      new RAPIER.Ball(radius),
+      0,
+      maxDist,
+      true,
+      undefined,
+      GROUPS.rayWorldOnly,
+    );
+    return hit ? { dist: hit.time_of_impact } : null;
+  }
+
   /** True if segment origin->origin+dir*maxDist hits world-only geometry. */
   losBlocked(
     ox: number, oy: number, oz: number,

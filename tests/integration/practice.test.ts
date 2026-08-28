@@ -5,6 +5,7 @@ import { emptyCommand } from '../../src/sim/input';
 import { loadMap } from '../../src/world';
 import { RAPIER_READY } from '../../src/world/rapierReady';
 import { CAPSULE_CENTER_OFFSET } from '../../src/sim/movement';
+import { HEAL_ITEMS } from '../../src/core/balance';
 
 beforeAll(async () => {
   await RAPIER_READY();
@@ -46,7 +47,56 @@ class CrouchController implements ActorController {
   }
 }
 
+class FireOnceController implements ActorController {
+  firePressed = true;
+
+  updateCommand(_actor: Actor, _dt: number): ReturnType<typeof emptyCommand> {
+    const cmd = emptyCommand();
+    cmd.firePressed = this.firePressed;
+    cmd.fireHeld = true;
+    this.firePressed = false;
+    return cmd;
+  }
+}
+
 describe('practice starts', () => {
+  it('routes deterministic QA elimination through placement, loot and alive-count processing', () => {
+    const match = makePractice(94991);
+    const player = match.player!;
+    player.inv.add({ kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: 3 }, 0);
+    expect(match.eliminateActor(player)).toBe(true);
+    expect(match.eliminateActor(player)).toBe(false);
+    match.fixedUpdate(1 / 60);
+
+    expect(match.aliveCount).toBe(0);
+    expect(player.placement).toBe(1);
+    expect(player.deathTime).toBeGreaterThanOrEqual(0);
+    expect(match.loot.items.some((item) => item.weapon?.weaponId === 'pistol')).toBe(true);
+    match.dispose();
+  }, 30_000);
+
+  it('uses a selected heal stack from a left-click edge and HEAL_ITEMS timing/amount', () => {
+    const match = makePractice(95001);
+    const player = match.player!;
+    const controller = new FireOnceController();
+    player.shield = 50;
+    player.inv.add({ kind: 'heal', itemId: 'shieldpot', count: 1 });
+    player.inv.select(0);
+    match.controllers.set(player.id, controller);
+
+    match.fixedUpdate(1 / 60);
+    expect(player.healing?.itemId).toBe('shieldpot');
+    expect(player.healing?.total).toBe(HEAL_ITEMS.shieldpot.useTime);
+    expect(player.inv.selectedItem).toBeNull();
+    expect(player.punchTimer).toBe(0);
+
+    for (let i = 1; i < Math.ceil(HEAL_ITEMS.shieldpot.useTime * 60) + 2; i++) {
+      match.fixedUpdate(1 / 60);
+    }
+    expect(player.healing).toBeNull();
+    expect(player.shield).toBe(50 + HEAL_ITEMS.shieldpot.amount);
+  }, 30_000);
+
   it('selects a deterministic, validated dry navigation node', () => {
     const first = makePractice(840776);
     const repeat = makePractice(840776);

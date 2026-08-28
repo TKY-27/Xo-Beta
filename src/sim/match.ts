@@ -6,7 +6,8 @@
  */
 
 import {
-  BOT_PERSONALITIES, DIFFICULTY, GAMEPLAY, MATCH, MOVE, WEAPONS,
+  BOT_PERSONALITIES, DIFFICULTY, GAMEPLAY, HEALTH_MAX, HEAL_ITEMS, MATCH, MOVE,
+  SHIELD_MAX, WEAPONS,
   type BotPersonality, type Difficulty, type WeaponId,
 } from '../core/balance';
 import { EventBus } from '../core/events';
@@ -29,7 +30,7 @@ import { Actor } from './actor';
 import { emptyCommand, type InputCommand } from './input';
 import { MovementSystem, CAPSULE_CENTER_OFFSET, type MovementEvents } from './movement';
 import { CombatSystem, type CombatEvents } from './combat';
-import { LootSystem, type LootEvents } from './loot';
+import { LootSystem, type LootEvents, type WorldItem } from './loot';
 import { Storm, type StormEvents } from './storm';
 
 export type MatchPhase = 'transport' | 'drop' | 'live' | 'results';
@@ -174,6 +175,8 @@ export class Match {
   transportEnterTime = 0;
   private transportGateOpen = false;
   transportPos = { x: 0, y: MATCH.transportAltitude, z: 0 };
+  /** Previous fixed-step transport position for render interpolation. */
+  previousTransportPos = { x: 0, y: MATCH.transportAltitude, z: 0 };
 
   chests: ChestEntity[] = [];
   killFeed: KillFeedEntry[] = [];
@@ -262,6 +265,15 @@ export class Match {
     const dist = Math.hypot(this.transportTo[0] - this.transportFrom[0], this.transportTo[1] - this.transportFrom[1]);
     this.transportDuration = dist / MATCH.transportSpeed;
     this.transportEnterTime = this.computeTransportEnterTime();
+    // Start both presentation samples at the authored route origin. Leaving
+    // the default (0, altitude, 0) here would create a large first-frame
+    // interpolation jump on maps whose route starts elsewhere.
+    this.transportPos.x = this.transportFrom[0];
+    this.transportPos.y = MATCH.transportAltitude;
+    this.transportPos.z = this.transportFrom[1];
+    this.previousTransportPos.x = this.transportPos.x;
+    this.previousTransportPos.y = this.transportPos.y;
+    this.previousTransportPos.z = this.transportPos.z;
 
     // Chest entities
     let cid = 1;
@@ -324,7 +336,24 @@ export class Match {
     const candidates = poi
       ? this.nav.nodesWithin(poi.x, poi.z, poi.radius).filter((node) => !node.water)
       : [];
-    const node = candidates.length > 0 ? this.rng.pick(candidates) : null;
+    // Practice should open into a readable exploration space, not a narrow
+    // interior where the TPS boom immediately collapses against a wall. Rank
+    // valid navigation nodes by horizontal scenery clearance and then retain
+    // seeded variety among the best candidates.
+    const scored = candidates.map((node) => {
+      let clearance = 0;
+      for (let i = 0; i < 8; i++) {
+        const angle = i * Math.PI / 4;
+        const dx = Math.sin(angle);
+        const dz = Math.cos(angle);
+        const hit = this.phys.raycast(node.x, node.y + 1.35, node.z, dx, 0, dz, 5.4, PHYS_GROUPS.rayWorldOnly);
+        clearance += hit ? Math.min(1, hit.dist / 5.4) : 1;
+      }
+      return { node, clearance };
+    }).sort((a, b) => b.clearance - a.clearance);
+    const bestClearance = scored[0]?.clearance ?? 0;
+    const spacious = scored.filter((entry) => entry.clearance >= bestClearance - 0.55).slice(0, 12);
+    const node = spacious.length > 0 ? this.rng.pick(spacious).node : candidates.length > 0 ? this.rng.pick(candidates) : null;
     const x = node?.x ?? poi?.x ?? 0;
     const z = node?.z ?? poi?.z ?? 0;
     const surf = node?.y ?? this.phys.surfaceAt(x, z, 300, 500) ?? 2;
@@ -419,17 +448,16 @@ export class Match {
 
   private combatEvents(): CombatEvents {
     return {
-      onMuzzleFlash: (a, weaponId) => {
-        const dir = this.movement.lookDir(a);
+      onMuzzleFlash: (a, weaponId, x, y, z, dx, dy, dz) => {
         this.events.emit('muzzleFlash', {
-          actorId: a.id, x: a.body.position.x, y: a.eyeY, z: a.body.position.z,
-          dx: dir.x, dy: dir.y, dz: dir.z, weaponId,
+          actorId: a.id, x, y, z, dx, dy, dz, weaponId,
         });
       },
-      onShotFired: (a, weaponId, x, y, z) => {
-        const w = a.inv.selectedWeapon;
-        const dry = !w || w.ammoInMag === 0;
+      onShotFired: (a, weaponId, x, y, z, dry) => {
         this.events.emit('shotFired', { actorId: a.id, weaponId, x, y, z, dry });
+      },
+      onReloadStarted: (a, empty) => {
+        this.events.emit('reloadStarted', { actorId: a.id, empty });
       },
       onImpact: (x, y, z, nx, ny, nz, material) => {
         this.events.emit('impact', { x, y, z, nx, ny, nz, material });
@@ -508,6 +536,12 @@ export class Match {
     if (this.finished && this.phase === 'results') return;
     this.time += dt;
     this.phaseTime += dt;
+    // Capture the authoritative value before this fixed step mutates it. The
+    // renderer can interpolate previousTransportPos -> transportPos using its
+    // accumulator remainder without changing simulation state.
+    this.previousTransportPos.x = this.transportPos.x;
+    this.previousTransportPos.y = this.transportPos.y;
+    this.previousTransportPos.z = this.transportPos.z;
 
     // Controllers produce commands
     const commands = new Map<number, InputCommand>();
@@ -633,10 +667,7 @@ export class Match {
       a.pitch = clampPitch(cmd.pitch);
 
       if (cmd.slotRequest !== null) {
-        if (a.inv.select(cmd.slotRequest)) {
-          this.cancelReload(a);
-          a.wpn.swapTimer = this.swapTimeFor(a);
-        }
+        this.selectInventorySlot(a, cmd.slotRequest);
       }
       if (cmd.meleePressed) {
         a.inv.selectMelee();
@@ -645,20 +676,24 @@ export class Match {
       }
       if (cmd.dropWeaponPressed) this.dropSelectedWeapon(a);
 
+      const selectedBeforeHealing = a.inv.selectedItem;
       this.updateHealing(a, cmd, dt);
 
       this.combat.updateWeaponTimers(a, dt);
+      const selected = a.inv.selectedItem;
       const w = a.inv.selectedWeapon;
-      if (w && cmd.fireHeld) {
+      if (w) {
         const def = WEAPONS[w.weaponId];
-        const wantsFire = def.fireMode === 'auto' ? true : cmd.firePressed;
-        if (wantsFire) this.combat.tryFire(a, dt);
-      } else if (!w && (cmd.fireHeld || cmd.firePressed)) {
+        // Auto weapons use the held state; semi-auto, pump and bolt weapons
+        // consume one press edge per shot. A click is valid even when mouseup
+        // happened before this fixed step sampled it.
+        const wantsFire = def.fireMode === 'auto' ? cmd.fireHeld : cmd.firePressed;
+        if (wantsFire) this.combat.tryFire(a, dt, undefined, cmd.firePressed);
+      } else if (!selected && !(selectedBeforeHealing?.kind === 'heal' && cmd.firePressed)
+        && (cmd.fireHeld || cmd.firePressed)) {
         this.combat.tryMelee(a, dt, this.actors);
       }
-      if (cmd.reloadPressed && this.combat.tryReload(a)) {
-        this.events.emit('reloadStarted', { actorId: a.id, empty: a.wpn.reloadingEmpty });
-      }
+      if (cmd.reloadPressed) this.combat.tryReload(a);
 
       if (cmd.grapplePressed) {
         if (a.grappleActive) this.movement.releaseGrapple(a);
@@ -683,7 +718,11 @@ export class Match {
 
   private cancelReload(a: Actor): void {
     a.wpn.reloadTimer = 0;
+    a.wpn.reloadTotal = 0;
     a.wpn.reloadingEmpty = false;
+    a.wpn.reloadWeaponId = null;
+    a.wpn.reloadInitialAmmo = 0;
+    a.wpn.reloadRoundsLoaded = 0;
   }
 
   private swapTimeFor(a: Actor): number {
@@ -691,15 +730,69 @@ export class Match {
     return w ? WEAPONS[w.weaponId].swapInTime : 0.3;
   }
 
+  /** Select a live player's inventory slot from the UI. */
+  selectPlayerInventorySlot(slot: number): boolean {
+    const player = this.player;
+    if (!player || !player.alive) return false;
+    return this.selectInventorySlot(player, slot);
+  }
+
+  private selectInventorySlot(a: Actor, slot: number): boolean {
+    if (a.inv.selected === slot) return true;
+    if (!a.inv.select(slot)) return false;
+    this.cancelReload(a);
+    a.wpn.swapTimer = this.swapTimeFor(a);
+    return true;
+  }
+
+  /** Reorder two live player's inventory slots from the inventory UI. */
+  reorderPlayerInventory(from: number, to: number): boolean {
+    const player = this.player;
+    if (!player || !player.alive) return false;
+    if (from === to) return player.inv.swapSlots(from, to);
+    const selectedWeapon = player.inv.selectedWeapon;
+    const touchesSelected = player.inv.selected === from || player.inv.selected === to;
+    const swapped = player.inv.swapSlots(from, to);
+    if (!swapped) return false;
+    // Selection follows the dragged item, but its reload animation must not
+    // continue across an inventory move. Rounds already committed remain in
+    // the weapon and reserve is never refunded.
+    if (touchesSelected && selectedWeapon) this.cancelReload(player);
+    return true;
+  }
+
+  /** Drop any live player's inventory item, including healing stacks. */
+  dropPlayerInventorySlot(slot: number): boolean {
+    const player = this.player;
+    if (!player || !player.alive) return false;
+    return this.dropInventorySlot(player, slot);
+  }
+
   private dropSelectedWeapon(a: Actor): void {
-    const w = a.inv.selectedWeapon;
-    if (!w) return;
+    const slot = a.inv.selected;
+    const item = slot >= 0 ? a.inv.slots[slot] : null;
+    if (!item || item.kind !== 'weapon') return;
+    this.dropInventorySlot(a, slot);
+  }
+
+  private dropInventorySlot(a: Actor, slot: number): boolean {
+    if (slot < 0 || slot >= a.inv.slots.length) return false;
+    const item = a.inv.slots[slot];
+    if (!item) return false;
     const p = a.body.position;
     const fwd = { x: -Math.sin(a.yaw), z: -Math.cos(a.yaw) };
-    this.cancelReload(a);
-    a.inv.removeSlot(a.inv.selected);
-    this.loot.spawnWeapon(p.x + fwd.x * 1.4, feetYFromBodyCenter(p.y) + 1.2,
-      p.z + fwd.z * 1.4, w, this.rng, false);
+    if (a.inv.selected === slot) this.cancelReload(a);
+    const removed = a.inv.removeSlot(slot);
+    if (!removed) return false;
+    const x = p.x + fwd.x * 1.4;
+    const y = feetYFromBodyCenter(p.y) + 1.2;
+    const z = p.z + fwd.z * 1.4;
+    const dropped = removed.kind === 'weapon'
+      ? this.loot.spawnWeapon(x, y, z, removed, this.rng, false)
+      : this.loot.spawnHeal(x, y, z, removed.itemId, removed.count, this.rng, false);
+    dropped.dropperId = a.id;
+    dropped.pickupLockedUntil = this.loot.time + GAMEPLAY.dropPickupDelaySelf;
+    return true;
   }
 
   private updateHealing(a: Actor, cmd: InputCommand, dt: number): void {
@@ -707,8 +800,9 @@ export class Match {
       a.healing.remaining -= dt;
       const interrupted = cmd.firePressed || cmd.jumpPressed || cmd.dashPressed;
       if (a.healing.remaining <= 0) {
-        if (a.healing.itemId === 'medkit') a.healHealth(75);
-        else a.addShield(50);
+        const def = HEAL_ITEMS[a.healing.itemId];
+        if (a.healing.itemId === 'medkit') a.healHealth(def.amount);
+        else a.addShield(def.amount);
         this.events.emit('healDone', { actorId: a.id, item: a.healing.itemId });
         a.healing = null;
       } else if (interrupted) {
@@ -717,38 +811,33 @@ export class Match {
       }
       return;
     }
-    if (cmd.medkitPressed && a.health < 100) {
-      if (a.inv.findHeal('medkit')) {
-        a.inv.consumeHeal('medkit');
-        a.healing = { itemId: 'medkit', remaining: 5, total: 5 };
-        this.events.emit('healStarted', { actorId: a.id, item: 'medkit' });
-      }
-      return;
-    }
-    if (cmd.shieldPressed && a.shield < 100) {
-      if (a.inv.findHeal('shieldpot')) {
-        a.inv.consumeHeal('shieldpot');
-        a.healing = { itemId: 'shieldpot', remaining: 3, total: 3 };
-        this.events.emit('healStarted', { actorId: a.id, item: 'shieldpot' });
-      }
-    }
+    // G/H keep their quick-use semantics. A selected heal stack can also be
+    // activated with the same left-click edge used by weapons; held fire is
+    // deliberately ignored so holding the mouse cannot repeatedly consume it.
+    const selected = a.inv.selectedItem;
+    const selectedHeal = selected?.kind === 'heal' ? selected.itemId : null;
+    const requested = cmd.medkitPressed ? 'medkit'
+      : cmd.shieldPressed ? 'shieldpot'
+      : cmd.firePressed ? selectedHeal
+      : null;
+    if (!requested) return;
+
+    const def = HEAL_ITEMS[requested];
+    const canUse = requested === 'medkit' ? a.health < HEALTH_MAX : a.shield < SHIELD_MAX;
+    if (!canUse) return;
+    const slot = selectedHeal === requested ? a.inv.selected : a.inv.findHeal(requested)?.slot ?? -1;
+    const stack = slot >= 0 ? a.inv.slots[slot] : null;
+    if (!stack || stack.kind !== 'heal' || stack.itemId !== requested || stack.count <= 0) return;
+    stack.count--;
+    if (stack.count <= 0) a.inv.removeSlot(slot);
+    a.healing = { itemId: requested, remaining: def.useTime, total: def.useTime };
+    this.events.emit('healStarted', { actorId: a.id, item: requested });
   }
 
   tryInteract(a: Actor): void {
     const p = a.body.position;
     const feetY = p.y - CAPSULE_CENTER_OFFSET;
-    let bestChest: ChestEntity | null = null;
-    let bestCD = GAMEPLAY.interactionRange * GAMEPLAY.interactionRange;
-    for (const c of this.chests) {
-      if (c.opened) continue;
-      const dx = c.x - p.x, dz = c.z - p.z;
-      if (Math.abs(c.y - feetY) > 2.8) continue;
-      const d = dx * dx + dz * dz;
-      if (d < bestCD) {
-        bestCD = d;
-        bestChest = c;
-      }
-    }
+    const bestChest = this.nearestInteractableChest(a);
     if (bestChest) {
       bestChest.opened = true;
       a.interactTimer = 0.6;
@@ -757,14 +846,16 @@ export class Match {
       this.events.emit('chestOpened', { chestId: bestChest.id, kind: bestChest.kind, tier: chestTier, x: bestChest.x, y: bestChest.y, z: bestChest.z });
       return;
     }
-    const item = this.loot.nearestItem(p.x, p.y, p.z, GAMEPLAY.interactionRange + 0.8,
-      (it) => it.kind !== 'ammo');
-    if (item) {
-      a.interactTimer = 0.5;
+    const candidates = this.interactableItems(a);
+    for (const item of candidates) {
       // Standard FPS behavior: interacting with your first floor weapon equips it
-      // immediately instead of leaving the actor on fists.
+      // immediately instead of leaving the actor on fists. If the closest item
+      // cannot be stored (for example a full heal stack while unarmed), try the
+      // next deterministic candidate rather than making the prompt a dead end.
       const hadWeapon = a.inv.slots.some((s) => s !== null && s.kind === 'weapon');
       const displaced = this.loot.pickup(item, a, !a.isPlayer);
+      if (displaced === false) continue;
+      a.interactTimer = 0.5;
       if (displaced && displaced.kind === 'weapon') {
         this.loot.spawnWeapon(p.x, feetY + 1, p.z, displaced, this.rng, true);
       } else if (displaced && displaced.kind === 'heal') {
@@ -778,7 +869,60 @@ export class Match {
           a.wpn.swapTimer = this.swapTimeFor(a);
         }
       }
+      break;
     }
+  }
+
+  /**
+   * Shared chest resolver for both the HUD and the interaction itself. Chest
+   * reach is horizontal from the actor's feet, with a floor-height guard so a
+   * chest above or below the player cannot steal the prompt through a ceiling.
+   */
+  nearestInteractableChest(a: Actor, maxDist = GAMEPLAY.interactionRange): ChestEntity | null {
+    const p = a.body.position;
+    const feetY = feetYFromBodyCenter(p.y);
+    const maxDistSq = maxDist * maxDist;
+    let best: ChestEntity | null = null;
+    let bestDistance = maxDistSq;
+    for (const chest of this.chests) {
+      if (chest.opened || Math.abs(chest.y - feetY) > 2.8) continue;
+      const dx = chest.x - p.x;
+      const dz = chest.z - p.z;
+      const distance = dx * dx + dz * dz;
+      if (distance > maxDistSq) continue;
+      if (distance < bestDistance || (distance === bestDistance && (best === null || chest.id < best.id))) {
+        best = chest;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Resolve the one floor item an interaction prompt should describe.
+   * Distance is measured from the actor's feet, matching the actual pickup
+   * reach rather than the capsule centre, and ties use the stable world-item
+   * id so a pile never changes target because of array iteration order.
+   */
+  nearestInteractableItem(a: Actor, maxDist = GAMEPLAY.interactionRange + 0.8): WorldItem | null {
+    return this.interactableItems(a, maxDist)[0] ?? null;
+  }
+
+  private interactableItems(a: Actor, maxDist = GAMEPLAY.interactionRange + 0.8): WorldItem[] {
+    const p = a.body.position;
+    const feetY = feetYFromBodyCenter(p.y);
+    const maxDistSq = maxDist * maxDist;
+    return this.loot.items
+      .filter((item) => item.kind !== 'ammo' && this.loot.canActorPickup(item, a))
+      .map((item) => {
+        const dx = item.x - p.x;
+        const dy = item.y - feetY;
+        const dz = item.z - p.z;
+        return { item, distance: dx * dx + dy * dy + dz * dz };
+      })
+      .filter(({ distance }) => distance <= maxDistSq)
+      .sort((a, b) => a.distance - b.distance || a.item.id - b.item.id)
+      .map(({ item }) => item);
   }
 
   private autoPickupAmmo(a: Actor): void {
@@ -830,6 +974,11 @@ export class Match {
       });
       if (this.killFeed.length > 30) this.killFeed.shift();
 
+      // Stop any in-flight staged reload before the death drop. Rounds that
+      // already entered the magazine stay on the dropped weapon; the
+      // not-yet-loaded portion remains in the reserve because reload loading
+      // is committed one round at a time.
+      this.cancelReload(victim);
       this.loot.dropInventory(victim, this.rng);
       this.aliveCount = this.actors.filter((a) => a.alive).length;
       this.events.emit('eliminated', {
@@ -926,6 +1075,18 @@ export class Match {
 
   spectatorTargets(): Actor[] {
     return this.actors.filter((a) => a.alive);
+  }
+
+  /**
+   * Apply a deterministic elimination through the same queued pipeline used
+   * by combat, fall and storm deaths. This keeps integration/QA controls from
+   * manufacturing a half-dead actor with stale placement, loot and counters.
+   */
+  eliminateActor(a: Actor): boolean {
+    if (!a.alive) return false;
+    a.applyDamage(a.effectiveHealth() + 1);
+    this.pendingEliminations.push({ victim: a, killer: null, weaponId: null, headshot: false, storm: false });
+    return true;
   }
 
   dispose(): void {

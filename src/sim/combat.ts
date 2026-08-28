@@ -35,8 +35,16 @@ export interface Projectile {
 }
 
 export interface CombatEvents {
-  onMuzzleFlash(actor: Actor, weaponId: WeaponId): void;
-  onShotFired(actor: Actor, weaponId: WeaponId, x: number, y: number, z: number): void;
+  onMuzzleFlash(
+    actor: Actor,
+    weaponId: WeaponId,
+    x: number, y: number, z: number,
+    dx: number, dy: number, dz: number,
+  ): void;
+  /** `dry` is explicit so consumers do not infer it from post-shot ammo. */
+  onShotFired(actor: Actor, weaponId: WeaponId, x: number, y: number, z: number, dry: boolean): void;
+  /** Fired for both manual and empty-mag automatic reload starts. */
+  onReloadStarted?(actor: Actor, empty: boolean): void;
   onImpact(x: number, y: number, z: number, nx: number, ny: number, nz: number, material: string, projectile: boolean): void;
   onActorHit(target: Actor, attacker: Actor | null, damage: number, region: string, weaponId: WeaponId, killed: boolean, headshot: boolean): void;
   onShieldBroken?(target: Actor): void;
@@ -92,21 +100,39 @@ export class CombatSystem {
   // -------------------------------------------------------------------------
 
   /** Attempt to fire the actor's selected weapon. Returns true if a shot happened. */
-  tryFire(a: Actor, dt: number, aimDirOverride?: { x: number; y: number; z: number }): boolean {
+  tryFire(
+    a: Actor,
+    _dt: number,
+    aimDirOverride?: { x: number; y: number; z: number },
+    triggerPressed = true,
+  ): boolean {
     const w = a.inv.selectedWeapon;
     if (!w || !a.alive) return false;
     const def = WEAPONS[w.weaponId];
     const rt = a.wpn;
 
-    if (rt.reloadTimer > 0 || rt.swapTimer > 0 || a.healing) return false;
+    // A trigger press during a staged reload is allowed to use rounds that
+    // have already been transferred. It cancels only the remaining reload;
+    // an empty magazine keeps reloading because there is no physical round to
+    // fire yet.
+    if (rt.reloadTimer > 0) {
+      if (!triggerPressed) return false;
+      if (w.ammoInMag <= 0) return false;
+      // Do not throw away a partial reload for a click that arrives before
+      // the weapon's normal cycle/bolt delay has elapsed. The next click can
+      // still interrupt once a shot is actually legal.
+      if (rt.fireCooldown > 0 || rt.boltTimer > 0 || rt.swapTimer > 0 || a.healing) return false;
+      this.cancelReload(a);
+    }
+    if (rt.swapTimer > 0 || a.healing) return false;
     if (rt.boltTimer > 0) return false;
-    rt.fireCooldown -= dt;
     if (rt.fireCooldown > 0) return false;
 
     if (w.ammoInMag <= 0) {
-      // dry click event handled by audio layer via shot event with empty flag
+      // Keep dry fire separate from a real shot. In particular, the last
+      // round decrements the magazine to zero but is still a live shot.
       rt.fireCooldown = 0.25;
-      this.events.onShotFired(a, w.weaponId, a.body.position.x, a.eyeY, a.body.position.z);
+      this.events.onShotFired(a, w.weaponId, a.body.position.x, a.eyeY, a.body.position.z, true);
       return false;
     }
 
@@ -125,11 +151,16 @@ export class CombatSystem {
     const eyeY = a.eyeY;
     const px = a.body.position.x;
     const pz = a.body.position.z;
+    // Canonical logical muzzle shared by projectile, flash fallback and audio.
+    // Rendered rigs may refine the visual flash to the authored weapon marker,
+    // but simulation consumers must never fall back to the actor's chest.
+    const muzzleX = px + baseDir.x * 0.7;
+    const muzzleY = eyeY + baseDir.y * 0.7 - 0.12;
+    const muzzleZ = pz + baseDir.z * 0.7;
 
     for (let p = 0; p < def.pellets; p++) {
       const dir = coneSample(baseDir, spread);
       const proj = this.alloc();
-      if (!proj) break;
       const speed = def.projectileSpeed * RARITY_MODS[w.rarity].projSpeedMult * (p === 0 ? 1 : 0.96 + ((p * 37) % 10) * 0.008);
       proj.active = true;
       proj.ownerId = a.id;
@@ -161,17 +192,17 @@ export class CombatSystem {
     rt.recoilYaw += (gameNext() - 0.5) * def.recoilKick * 0.7 * rMod;
     rt.bloom = Math.min(def.bloomMax, rt.bloom + def.bloomPerShot);
 
-    this.events.onMuzzleFlash(a, w.weaponId);
-    this.events.onShotFired(a, w.weaponId, px, eyeY, pz);
+    this.events.onMuzzleFlash(a, w.weaponId, muzzleX, muzzleY, muzzleZ, baseDir.x, baseDir.y, baseDir.z);
+    this.events.onShotFired(a, w.weaponId, muzzleX, muzzleY, muzzleZ, false);
+    if (w.ammoInMag === 0) this.tryReload(a);
     return true;
   }
 
   /** Attempt a punch with the permanent fists pseudo-weapon. */
-  tryMelee(a: Actor, dt: number, actors: readonly Actor[]): boolean {
+  tryMelee(a: Actor, _dt: number, actors: readonly Actor[]): boolean {
     if (!a.alive || a.healing) return false;
     const rt = a.wpn;
     if (rt.swapTimer > 0) return false;
-    rt.fireCooldown -= dt;
     if (rt.fireCooldown > 0) return false;
     rt.fireCooldown = 60 / MELEE.rpm;
     rt.lastShotTime = 0;
@@ -222,14 +253,28 @@ export class CombatSystem {
     const def = WEAPONS[w.weaponId];
     if (w.ammoInMag >= def.magSize) return false;
     if (a.inv.ammo[def.ammoType] <= 0) return false;
+    return this.beginReload(a, w);
+  }
+
+  /** Start a staged reload and publish the edge exactly once. */
+  private beginReload(a: Actor, w: NonNullable<Actor['inv']['selectedWeapon']>): boolean {
+    const rt = a.wpn;
+    const def = WEAPONS[w.weaponId];
+    if (rt.reloadTimer > 0 || rt.swapTimer > 0 || a.healing) return false;
+    if (w.ammoInMag >= def.magSize || a.inv.ammo[def.ammoType] <= 0) return false;
     rt.reloadingEmpty = w.ammoInMag === 0;
     rt.reloadTotal = (w.ammoInMag === 0 ? def.reloadEmpty : def.reloadTactical) * RARITY_MODS[w.rarity].reloadMult;
     rt.reloadTimer = rt.reloadTotal;
+    rt.reloadWeaponId = w.weaponId;
+    rt.reloadInitialAmmo = w.ammoInMag;
+    rt.reloadRoundsLoaded = 0;
+    this.events.onReloadStarted?.(a, rt.reloadingEmpty);
     return true;
   }
 
   updateWeaponTimers(a: Actor, dt: number): void {
     const rt = a.wpn;
+    if (rt.fireCooldown > 0) rt.fireCooldown = Math.max(0, rt.fireCooldown - dt);
     if (rt.boltTimer > 0) rt.boltTimer -= dt;
     if (rt.lastShotTime < 90) rt.lastShotTime += dt;
     if (a.punchTimer > 0) a.punchTimer = Math.max(0, a.punchTimer - dt);
@@ -263,17 +308,58 @@ export class CombatSystem {
       rt.adsAmount = 0;
     }
 
-    // Reload completion
+    // Staged reload progress. The simulation remains authoritative at the
+    // round level: at each elapsed fraction we load the corresponding number
+    // of rounds, consuming reserve only when that round enters the magazine.
     if (rt.reloadTimer > 0) {
-      rt.reloadTimer -= dt;
-      if (rt.reloadTimer <= 0) {
-        rt.reloadTimer = 0;
-        const wsel = a.inv.selectedWeapon;
-        if (wsel) a.inv.finishReload(wsel);
-        rt.reloadingEmpty = false;
+      const wsel = a.inv.selectedWeapon;
+      if (!wsel || rt.reloadWeaponId !== wsel.weaponId) {
+        this.cancelReload(a);
+      } else {
+        this.advanceReload(a, wsel, dt);
       }
     }
     if (rt.swapTimer > 0) rt.swapTimer -= dt;
+  }
+
+  private advanceReload(a: Actor, w: NonNullable<Actor['inv']['selectedWeapon']>, dt: number): void {
+    const rt = a.wpn;
+    const total = Math.max(1e-6, rt.reloadTotal);
+    const beforeTimer = Math.max(0, rt.reloadTimer);
+    const elapsedBefore = Math.max(0, total - beforeTimer);
+    const elapsedAfter = Math.min(total, elapsedBefore + Math.max(0, dt));
+    const missing = Math.max(0, WEAPONS[w.weaponId].magSize - rt.reloadInitialAmmo);
+    const targetLoaded = Math.min(missing, Math.floor((elapsedAfter / total) * missing + 1e-9));
+    const requested = targetLoaded - rt.reloadRoundsLoaded;
+    if (requested > 0) {
+      const loaded = a.inv.loadReloadRounds(w, requested);
+      rt.reloadRoundsLoaded += loaded;
+    }
+
+    rt.reloadTimer = Math.max(0, beforeTimer - Math.max(0, dt));
+    // A depleted reserve cannot produce any further rounds. Ending the
+    // animation here avoids a misleading reload state and leaves the
+    // already-loaded magazine/reserve values untouched.
+    const ammoType = WEAPONS[w.weaponId].ammoType;
+    if (rt.reloadTimer <= 0
+      || (a.inv.ammo[ammoType] <= 0 && rt.reloadRoundsLoaded < missing)) {
+      rt.reloadTimer = 0;
+      rt.reloadTotal = 0;
+      rt.reloadingEmpty = false;
+      rt.reloadWeaponId = null;
+      rt.reloadInitialAmmo = 0;
+      rt.reloadRoundsLoaded = 0;
+    }
+  }
+
+  private cancelReload(a: Actor): void {
+    const rt = a.wpn;
+    rt.reloadTimer = 0;
+    rt.reloadTotal = 0;
+    rt.reloadingEmpty = false;
+    rt.reloadWeaponId = null;
+    rt.reloadInitialAmmo = 0;
+    rt.reloadRoundsLoaded = 0;
   }
 
   /**
@@ -317,6 +403,15 @@ export class CombatSystem {
       return;
     }
 
+    const startX = p.x;
+    const startY = p.y;
+    const startZ = p.z;
+    const emitTracer = (x: number, y: number, z: number): void => {
+      if (Math.hypot(x - startX, y - startY, z - startZ) > 1e-4) {
+        this.events.onTracer(startX, startY, startZ, x, y, z, p.tracerColor);
+      }
+    };
+
     const vol = this.waterAt(p.x, p.y, p.z);
     const wasInWater = p.inWater;
     p.inWater = vol !== null && p.y < vol.surfaceY;
@@ -340,6 +435,7 @@ export class CombatSystem {
       if (meta?.kind === 'actor') {
         const target = actors.find((ac) => ac.id === meta.actorId);
         if (target && target.alive && target.id !== p.ownerId) {
+          emitTracer(hit.point.x, hit.point.y, hit.point.z);
           this.resolveActorHit(p, target, hit.point.x, hit.point.y, hit.point.z, meta.region);
           p.active = false;
           return;
@@ -348,6 +444,7 @@ export class CombatSystem {
       } else if (meta?.kind === 'destructible') {
         const d = this.destructibles.get(meta.id);
         if (d && d.alive) {
+          emitTracer(hit.point.x, hit.point.y, hit.point.z);
           d.hp -= p.damage;
           const gone = d.type === 'glass' || d.hp <= 0;
           if (gone) {
@@ -374,6 +471,7 @@ export class CombatSystem {
         const canRicochet =
           p.weaponId === 'sniper' && p.ricochets < 1 && shallowDot < 0.22;
         if (canRicochet) {
+          emitTracer(hit.point.x, hit.point.y, hit.point.z);
           p.ricochets++;
           // Reflect velocity
           const dot = p.vx * hit.normal.x + p.vy * hit.normal.y + p.vz * hit.normal.z;
@@ -388,6 +486,7 @@ export class CombatSystem {
           this.events.onRicochet(hit.point.x, hit.point.y, hit.point.z);
           return;
         }
+        emitTracer(hit.point.x, hit.point.y, hit.point.z);
         this.events.onImpact(hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, 'stone', true);
         p.active = false;
         return;
@@ -399,7 +498,9 @@ export class CombatSystem {
     p.z += p.vz * dt;
     p.dist += stepLen;
 
-    // Tracer sampling is done by the renderer reading active projectiles.
+    // Publish the segment that was actually simulated. This keeps the tracer
+    // event path alive even though renderers do not poll projectile state.
+    emitTracer(p.x, p.y, p.z);
   }
 
   private resolveActorHit(p: Projectile, target: Actor, hx: number, hy: number, hz: number, region: string): void {
@@ -453,11 +554,17 @@ export class CombatSystem {
     return [...this.destructibles.values()];
   }
 
-  private alloc(): Projectile | null {
+  private alloc(): Projectile {
     for (const p of this.projectiles) {
       if (!p.active) return p;
     }
-    return null;
+    // Saturation must not produce a fake shot (ammo/audio/flash with no
+    // projectile). Recycle the projectile closest to natural expiry so a new
+    // trigger pull always has a physical round while disturbing the least
+    // remaining flight time.
+    return this.projectiles.reduce((oldest, candidate) => (
+      candidate.life < oldest.life ? candidate : oldest
+    ), this.projectiles[0]!);
   }
 }
 

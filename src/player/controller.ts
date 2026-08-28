@@ -31,13 +31,18 @@ export class PlayerController implements ActorController {
     && new URLSearchParams(location.search).has('qa');
   private readonly qaKeyDeadlines = new Map<string, number>();
   private readonly qaKeyDownAt = new Map<string, number>();
-  private readonly qaMouseVersions = new Map<number, number>();
   private lookDx = 0;
   private lookDy = 0;
   yaw = 0;
   pitch = 0;
-  enabled = false;
+  private inputEnabled = false;
+  get enabled(): boolean { return this.inputEnabled; }
+  set enabled(value: boolean) {
+    if (!value) this.clearGameplayInput();
+    this.inputEnabled = value;
+  }
   locked = false;
+  private spectatorMode = false;
   /** Optional controller input merged into every command. */
   gamepad: GamepadInput | null = null;
 
@@ -69,6 +74,8 @@ export class PlayerController implements ActorController {
     onSpectatePrev: () => void,
     onSpectateNext: () => void,
     onMapToggle: () => void,
+    onShoulderSwap: () => void = () => undefined,
+    onInventoryToggle: () => void = () => undefined,
   ) {
     window.addEventListener('keydown', (e) => {
       const code = e.code;
@@ -81,7 +88,7 @@ export class PlayerController implements ActorController {
         }
         return;
       }
-      if (this.qaUnlockedInput && !this.locked && this.enabled) {
+      if (this.qaUnlockedInput && !this.locked && this.enabled && !this.spectatorMode) {
         // Pointer lock is intentionally unavailable in the headed Codex
         // browser. Arrow-key taps provide deterministic camera turns there;
         // ordinary mouse look remains unchanged and is still exercised.
@@ -111,9 +118,27 @@ export class PlayerController implements ActorController {
         this.qaKeyDownAt.set(code, now);
         this.qaKeyDeadlines.set(code, now + timeout);
       }
-      this.keys.add(code);
       const b = getSettings().bindings;
-      if (!this.enabled) return;
+      // Escape must remain available while gameplay input is disabled (pause
+      // menu and spectator transition). All other gameplay actions stay
+      // behind the enabled guard.
+      if (code === 'Escape') {
+        onPauseRequest();
+        return;
+      }
+      // Inventory owns pointer focus and disables gameplay input while open,
+      // so Tab must be handled before the enabled guard in both directions.
+      if (code === 'Tab') {
+        onInventoryToggle();
+        e.preventDefault();
+        return;
+      }
+      if (!this.enabled) {
+        this.qaKeyDeadlines.delete(code);
+        this.qaKeyDownAt.delete(code);
+        return;
+      }
+      this.keys.add(code);
       if (code === b.jump) this.pendingJump = true;
       else if (code === b.reload) this.pendingReload = true;
       else if (code === b.interact) this.pendingInteract = true;
@@ -130,7 +155,7 @@ export class PlayerController implements ActorController {
       else if (code === b.slot4) this.slotRequest = 3;
       else if (code === b.slot5) this.slotRequest = 4;
       else if (code === b.cameraToggle) onCameraToggle();
-      else if (code === 'Escape') onPauseRequest();
+      else if (code === (b as typeof b & { shoulderSwap?: string }).shoulderSwap) onShoulderSwap();
       else if (code === b.spectatePrev) onSpectatePrev();
       else if (code === b.spectateNext) onSpectateNext();
       else if (code === b.mapToggle) onMapToggle();
@@ -157,29 +182,17 @@ export class PlayerController implements ActorController {
     }, { signal: this.listenerAbort.signal });
     window.addEventListener('mousedown', (e) => {
       if (!this.enabled || (!this.locked && !this.qaUnlockedInput)) return;
-      if (this.qaUnlockedInput && !this.locked) {
-        this.qaMouseVersions.set(e.button, (this.qaMouseVersions.get(e.button) ?? 0) + 1);
-      }
       this.mouseButtons.add(e.button);
       const b = getSettings().bindings;
       if (e.button === 0 && b.fire === 'Mouse0') this.pendingFirePress = true;
       if (e.button === 2 && b.ads === 'Mouse2') { /* ads is held */ }
     }, { signal: this.listenerAbort.signal });
     window.addEventListener('mouseup', (e) => {
-      if (this.qaUnlockedInput && !this.locked) {
-        // CUA emits a complete click too quickly for the fixed simulation to
-        // sample its held state. Preserve the real event briefly in QA only;
-        // ordinary pointer-lock mouse input remains frame-exact.
-        const version = this.qaMouseVersions.get(e.button) ?? 0;
-        window.setTimeout(() => {
-          if ((this.qaMouseVersions.get(e.button) ?? 0) !== version) return;
-          this.mouseButtons.delete(e.button);
-          if (e.button === 0) this.pendingFirePress = false;
-        }, 420);
-      } else {
-        this.mouseButtons.delete(e.button);
-        if (e.button === 0) this.pendingFirePress = false;
-      }
+      this.mouseButtons.delete(e.button);
+      // Do not clear the edge here. A click can begin and end between two
+      // fixed simulation ticks; the edge is consumed exactly once by
+      // updateCommand instead. Held state is still cleared immediately so
+      // automatic weapons stop on mouseup.
     }, { signal: this.listenerAbort.signal });
     window.addEventListener('contextmenu', (e) => e.preventDefault(), { signal: this.listenerAbort.signal });
     window.addEventListener('mousemove', (e) => {
@@ -195,6 +208,7 @@ export class PlayerController implements ActorController {
       if (!this.locked) {
         this.keys.clear();
         this.mouseButtons.clear();
+        this.pendingFirePress = false;
       }
     }, { signal: this.listenerAbort.signal });
     this.offRequestPointerLock = bus.on('requestPointerLock', () => this.requestLock());
@@ -222,7 +236,31 @@ export class PlayerController implements ActorController {
     this.mouseButtons.clear();
     this.qaKeyDeadlines.clear();
     this.qaKeyDownAt.clear();
-    this.qaMouseVersions.clear();
+  }
+
+  private clearGameplayInput(): void {
+    this.keys.clear();
+    this.mouseButtons.clear();
+    this.qaKeyDeadlines.clear();
+    this.qaKeyDownAt.clear();
+    this.lookDx = 0;
+    this.lookDy = 0;
+    this.lookVelX = 0;
+    this.lookVelY = 0;
+    this.pendingJump = false;
+    this.pendingFirePress = false;
+    this.pendingReload = false;
+    this.pendingInteract = false;
+    this.pendingDash = false;
+    this.pendingGrapple = false;
+    this.pendingGrappleRelease = false;
+    this.pendingPound = false;
+    this.pendingMedkit = false;
+    this.pendingShield = false;
+    this.pendingDropWeapon = false;
+    this.pendingMelee = false;
+    this.slotRequest = null;
+    this.lastCrouchHeld = false;
   }
 
   resetLook(yaw: number, pitch: number): void {
@@ -230,9 +268,17 @@ export class PlayerController implements ActorController {
     this.pitch = pitch;
   }
 
+  setSpectatorMode(active: boolean): void {
+    this.spectatorMode = active;
+    this.clearGameplayInput();
+  }
+
   updateCommand(actor: Actor, dt: number): InputCommand {
     const cmd = emptyCommand();
-    if (!this.enabled) return cmd;
+    if (!this.enabled) {
+      this.clearGameplayInput();
+      return cmd;
+    }
     if (this.qaUnlockedInput && !this.locked) {
       const now = performance.now();
       for (const [code, deadline] of this.qaKeyDeadlines) {

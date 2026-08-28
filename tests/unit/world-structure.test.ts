@@ -118,4 +118,28 @@ describe('world-space structure contracts', () => {
     expect(proxy.y - proxy.sy / 2).toBeCloseTo(3.25, 8);
     expect(proxy.noCollide).not.toBe(true);
   });
+
+  it('cuts ground-floor glazing openings before placing glass inside the wall', () => {
+    const b = new WorldBuilder('windows', 'Windows', 'Windows', 100);
+    addBuilding(b, {
+      x: 0, z: 0, w: 12, d: 10, floors: 1, floorHeight: 3.6,
+      wallMat: 'concrete', windows: true, interiorDividers: false,
+    });
+    const frontGlass = b.def.destructibles.filter((d) => d.type === 'glass' && d.geo.kind === 'box');
+    expect(frontGlass).toHaveLength(2);
+    const frontWalls = b.def.geo.filter((g) => g.kind === 'box' && g.mat === 'concrete' && Math.abs(g.z - 5) < 0.01);
+    expect(frontWalls.length).toBeGreaterThan(1);
+    for (const glass of frontGlass) {
+      const glassGeo = glass.geo;
+      if (glassGeo.kind !== 'box') continue;
+      expect(glassGeo.z).toBeLessThan(5 - 0.15);
+      expect(frontWalls.every((wall) => {
+        if (wall.kind !== 'box') return true;
+        return wall.x + wall.sx / 2 <= glassGeo.x - glassGeo.sx / 2
+          || wall.x - wall.sx / 2 >= glassGeo.x + glassGeo.sx / 2
+          || wall.y + wall.sy / 2 <= glassGeo.y - glassGeo.sy / 2
+          || wall.y - wall.sy / 2 >= glassGeo.y + glassGeo.sy / 2;
+      })).toBe(true);
+    }
+  });
 });

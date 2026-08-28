@@ -2,6 +2,8 @@
 
 export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra' | 'cinematic';
 export type CameraMode = 'fps' | 'tps';
+export type TpsCharacterSide = 'left' | 'right';
+export type SkinId = 'vanguard' | 'pathfinder' | 'specter' | 'striker' | 'warden' | 'nova';
 
 export interface KeyBindings {
   forward: string; back: string; left: string; right: string;
@@ -11,6 +13,8 @@ export interface KeyBindings {
   cameraToggle: string; melee: string; dash: string; grapple: string; groundPound: string;
   dropWeapon: string; useMedkit: string; useShield: string;
   spectatePrev: string; spectateNext: string; mapToggle: string;
+  /** Moves the third-person shoulder to the opposite side. */
+  shoulderSwap: string;
 }
 
 export const DEFAULT_BINDINGS: KeyBindings = {
@@ -21,6 +25,7 @@ export const DEFAULT_BINDINGS: KeyBindings = {
   cameraToggle: 'KeyV', melee: 'KeyQ', dash: 'ShiftRight', grapple: 'KeyF', groundPound: 'KeyC',
   dropWeapon: 'KeyX', useMedkit: 'KeyG', useShield: 'KeyH',
   spectatePrev: 'ArrowLeft', spectateNext: 'ArrowRight', mapToggle: 'KeyM',
+  shoulderSwap: 'KeyZ',
 };
 
 export interface Settings {
@@ -54,6 +59,10 @@ export interface Settings {
 
   // Gameplay
   cameraMode: CameraMode;
+  /** Third-person shoulder placement; left keeps the character near 35% X. */
+  tpsCharacterSide: TpsCharacterSide;
+  /** Selected player appearance. Applied to the next spawned rig in a match. */
+  playerSkin: SkinId;
   crosshairColor: string;
   crosshairSize: number;
   crosshairDot: boolean;
@@ -103,6 +112,8 @@ export const DEFAULT_SETTINGS: Settings = {
   uiVolume: 0.8,
 
   cameraMode: 'fps',
+  tpsCharacterSide: 'left',
+  playerSkin: 'vanguard',
   crosshairColor: '#eaf6ff',
   crosshairSize: 10,
   crosshairDot: true,
@@ -208,6 +219,8 @@ function mergeSettings(base: Settings, patch: unknown): Settings {
     uiVolume: bounded(patch.uiVolume, base.uiVolume, 0, 1),
 
     cameraMode: choice(patch.cameraMode, base.cameraMode, ['fps', 'tps']),
+    tpsCharacterSide: choice(patch.tpsCharacterSide, base.tpsCharacterSide, ['left', 'right']),
+    playerSkin: choice(patch.playerSkin, base.playerSkin, ['vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova']),
     crosshairColor,
     crosshairSize: bounded(patch.crosshairSize, base.crosshairSize, 4, 20),
     crosshairDot: bool(patch.crosshairDot, base.crosshairDot),

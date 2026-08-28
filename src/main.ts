@@ -24,7 +24,7 @@ import { WorldView } from './render/worldView';
 import { VfxSystem } from './render/vfx';
 import { CameraRig } from './render/cameraRig';
 import { ViewModel } from './render/viewmodel';
-import { CharacterFactory, updateEliminationFx, type CharacterRig } from './render/characters';
+import { CharacterFactory, skinForName, updateEliminationFx, type CharacterRig } from './render/characters';
 import { WeaponModelFactory } from './render/weaponModels';
 import { loadGltf } from './assets/assets';
 import { PlayerController } from './player/controller';
@@ -49,6 +49,7 @@ interface LiveGame {
   rig: CameraRig;
   viewmodel: ViewModel;
   rigs: Map<number, CharacterRig>;
+  characterFill: THREE.PointLight;
   player: PlayerController;
   mats: MaterialLibrary;
   cleanup: Array<() => void>;
@@ -61,6 +62,9 @@ let menus: Menus;
 const disposers: Array<() => void> = [];
 let matchGeneration = 0;
 let pendingStart: { generation: number; cleanup: Array<() => void> } | null = null;
+const presentationMuzzle = new THREE.Vector3();
+const presentationMuzzleDirection = new THREE.Vector3();
+const presentationFillDirection = new THREE.Vector3();
 
 class MatchStartCancelled extends Error {}
 
@@ -152,7 +156,9 @@ function framePercentile(p: number): number {
 let resultsShown = false;
 let spectateTargetId = -1;
 let wasInTransport = false;
+let wasSpectating = false;
 let lastWeaponKey: string | null = null;
+const presentationTransportPos = new THREE.Vector3();
 
 const WEAPON_KICK: Record<string, number> = {
   pistol: 0.7,
@@ -237,6 +243,7 @@ async function boot(): Promise<void> {
     void startMatch(sel, sharedMats, sharedProps, characterFactory, weaponFactory, lobby);
   menus.onResumeRequested = resumeFromPause;
   menus.onQuitRequested = quitToMenu;
+  $('btn-spectate-exit').addEventListener('click', () => menus.onQuitRequested());
 
   await setLoad(1, t('load.ready'));
   window.setTimeout(() => $('loading-screen').classList.add('hidden'), 240);
@@ -256,6 +263,7 @@ async function boot(): Promise<void> {
     if (
       live
       && live.player.enabled
+      && live.match.player?.alive === true
       && !paused
       && live.match.phase !== 'results'
       && !menus.isAnyMenuOpen()
@@ -292,14 +300,6 @@ async function boot(): Promise<void> {
   window.addEventListener('blur', () => {
     if (live && !paused && live.match.phase !== 'results' && !menus.isAnyMenuOpen()) openPause();
   });
-
-  function resumeFromPause(): void {
-    menus.hidePause();
-    if (!live) return;
-    paused = false;
-    live.player.enabled = true;
-    live.player.requestLock();
-  }
 
   function quitToMenu(): void {
     teardownMatch();
@@ -395,8 +395,10 @@ async function startMatchImpl(
     vfx.dispose();
   });
   const rig = new CameraRig(window.innerWidth / window.innerHeight);
-  rig.sunAzimuth = renderer.sunAzimuth();
-  rig.onScopedChanged = (s) => hud.setScoped(s);
+  rig.onScopedChanged = (s) => {
+    hud.setScoped(s);
+    renderer.setScopeActive(s, rig.camera);
+  };
   renderer.buildComposer(rig.camera);
   renderer.applyQuality();
   rig.mode = getSettings().cameraMode;
@@ -418,7 +420,7 @@ async function startMatchImpl(
       viewmodel.group.visible = rig.mode === 'fps';
     },
     onMapToggle: () => toggleTacMap(),
-    onPauseRequest: () => openPause(),
+    onPauseRequest: () => handlePauseOrSpectateExit(),
     onSlotRequest: () => undefined,
     onMeleePress: () => {
       const p = live?.match.player;
@@ -437,10 +439,14 @@ async function startMatchImpl(
       updateSettings({ cameraMode: rig.mode });
       viewmodel.group.visible = rig.mode === 'fps';
     },
-    () => openPause(),
+    () => handlePauseOrSpectateExit(),
     () => cycleSpectate(-1),
     () => cycleSpectate(1),
     () => toggleTacMap(),
+    () => updateSettings({
+      tpsCharacterSide: getSettings().tpsCharacterSide === 'left' ? 'right' : 'left',
+    }),
+    () => toggleInventory(),
   );
   registerStartCleanup(generation, () => player.dispose());
   player.gamepad = gamepad;
@@ -468,6 +474,7 @@ async function startMatchImpl(
 
   function toggleTacMap(): void {
     if (!match.player?.alive || match.phase === 'results') return;
+    if (hud.isInventoryOpen()) hud.setInventoryOpen(false);
     hud.toggleTacMap();
     if (hud.isTacMapOpen()) {
       player.releaseLock();
@@ -475,6 +482,46 @@ async function startMatchImpl(
       player.requestLock();
     }
   }
+
+  function toggleInventory(force?: boolean): void {
+    const currentlyOpen = hud.isInventoryOpen();
+    const open = force ?? !currentlyOpen;
+    if (open === currentlyOpen) return;
+    if (open && (!match.player?.alive || match.phase === 'results' || paused)) return;
+    if (open && hud.isTacMapOpen()) hud.toggleTacMap();
+    hud.setInventoryOpen(open);
+    rig.resetAimState();
+    renderer.setScopeActive(false);
+    player.enabled = !open;
+    if (open) player.releaseLock();
+    else if (!paused) player.requestLock();
+  }
+
+  hud.onInventoryClose = () => toggleInventory(false);
+  hud.onInventorySelect = (slot) => {
+    if (match.selectPlayerInventorySlot(slot)) {
+      lastWeaponKey = null;
+      audio.uiClick('click');
+    }
+  };
+  hud.onInventoryMove = (from, to) => {
+    if (match.reorderPlayerInventory(from, to)) {
+      audio.uiClick('click');
+    }
+  };
+  hud.onInventoryDrop = (slot) => {
+    if (match.dropPlayerInventorySlot(slot)) {
+      lastWeaponKey = null;
+      audio.uiClick('confirm');
+    }
+  };
+  registerStartCleanup(generation, () => {
+    hud.setInventoryOpen(false);
+    hud.onInventoryClose = () => undefined;
+    hud.onInventorySelect = () => undefined;
+    hud.onInventoryMove = () => undefined;
+    hud.onInventoryDrop = () => undefined;
+  });
 
   function placePingAtAim(): void {
     if (!match.player?.alive || hud.isTacMapOpen()) return;
@@ -490,11 +537,13 @@ async function startMatchImpl(
   }
   for (const actor of match.actors) {
     if (actor.isPlayer) {
-      // Open the transport shot facing along the flight line, city below.
-      const fdx = match.transportTo[0] - match.transportFrom[0];
-      const fdz = match.transportTo[1] - match.transportFrom[1];
+      // Transport follows the flight line. Practice instead faces toward the
+      // map centre from its spacious seeded spawn, avoiding a first frame into
+      // a nearby wall and preserving the requested full-body TPS composition.
+      const fdx = match.practice ? -actor.body.position.x : match.transportTo[0] - match.transportFrom[0];
+      const fdz = match.practice ? -actor.body.position.z : match.transportTo[1] - match.transportFrom[1];
       const fl = Math.hypot(fdx, fdz) || 1;
-      player.resetLook(Math.atan2(-fdx / fl, -fdz / fl), -0.38);
+      player.resetLook(Math.atan2(-fdx / fl, -fdz / fl), -0.12);
       match.controllers.set(actor.id, player);
     } else if (actor.personality) {
       match.controllers.set(
@@ -508,7 +557,8 @@ async function startMatchImpl(
   const females = ['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX'];
   const rigs = new Map<number, CharacterRig>();
   for (const actor of match.actors) {
-    const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name));
+    const skinId = actor.isPlayer ? getSettings().playerSkin : skinForName(actor.name);
+    const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name), null, skinId);
     // QA metadata (read-only; used by the automated browser harness).
     charRig.group.userData.isCharacterRig = true;
     charRig.group.userData.isPlayerRig = actor.isPlayer;
@@ -523,6 +573,15 @@ async function startMatchImpl(
     (window as unknown as Record<string, unknown>).__xoRigs = rigs;
   }
   live_weaponWatcher(rigs, match, weaponFactory);
+
+  // A restrained camera-side fill preserves the local TPS silhouette against
+  // NeoCity's dark streets. It is a real inverse-square light (not an unlit
+  // character shader), affects only the immediate player area, and is hidden
+  // in FPS/spectator views.
+  const characterFill = new THREE.PointLight(0xcfe0ff, 2.0, 4.8, 2);
+  characterFill.visible = false;
+  renderer.scene.add(characterFill);
+  registerStartCleanup(generation, () => renderer.scene.remove(characterFill));
 
   // Viewmodel
   const viewmodel = new ViewModel(weaponFactory);
@@ -593,10 +652,115 @@ async function startMatchImpl(
     rig,
     viewmodel,
     rigs,
+    characterFill,
     player,
     mats: sharedMats,
     cleanup,
   };
+
+  if (QA_MODE) {
+    // Internal-browser shortcuts seed deterministic state while every action
+    // under test (selection, click edge, firing/healing, spectating) still
+    // travels through the normal controller and fixed-step pipeline.
+    let qaAdsLatched = false;
+    const setQaAds = (held: boolean) => {
+      qaAdsLatched = held;
+      window.dispatchEvent(new MouseEvent(held ? 'mousedown' : 'mouseup', { button: 2, bubbles: true }));
+    };
+    const onQaKey = (e: KeyboardEvent) => {
+      const p = match.player;
+      if (!p) return;
+      if (e.code === 'F5') {
+        const stress = (window as unknown as Record<string, unknown>).__xoStress;
+        if (typeof stress === 'function') stress();
+      } else if (e.code === 'F6') {
+        const chest = match.chests
+          .filter((c) => !c.opened)
+          .sort((a, b) =>
+            Math.hypot(a.x - p.body.position.x, a.z - p.body.position.z)
+            - Math.hypot(b.x - p.body.position.x, b.z - p.body.position.z))[0];
+        if (chest) {
+          // Choose a same-floor interaction point with the most room behind
+          // the player. A fixed +X offset frequently put the TPS boom inside
+          // a facade, producing unusable chest recordings that did not
+          // represent an approach a player would choose.
+          const approaches = Array.from({ length: 8 }, (_, i) => {
+            const angle = i * Math.PI / 4;
+            const outwardX = Math.cos(angle);
+            const outwardZ = Math.sin(angle);
+            const x = chest.x + outwardX * 3.0;
+            const z = chest.z + outwardZ * 3.0;
+            const surface = match.phys.surfaceAt(x, z, chest.y + 1.8, 4);
+            if (surface === null || Math.abs(surface - chest.y) > 1.2) return null;
+            const obstruction = match.phys.raycast(
+              x, surface + 1.45, z, outwardX, 0, outwardZ, 5.2, PHYS_GROUPS.rayWorldOnly,
+            );
+            return { x, z, surface, clearance: obstruction?.dist ?? 5.2 };
+          }).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+            .sort((a, b) => b.clearance - a.clearance);
+          const approach = approaches[0];
+          const x = approach?.x ?? chest.x + 3.0;
+          const z = approach?.z ?? chest.z;
+          // Keep the browser harness on the chest's floor layer. Casting from
+          // far above selected a roof in multi-storey NeoCity and made the
+          // mandatory flicker recording stare at a wall instead of the chest.
+          const surface = approach?.surface ?? match.phys.surfaceAt(x, z, chest.y + 1.8, 4) ?? chest.y;
+          p.body.teleport(x, surface + CAPSULE_CENTER_OFFSET + 0.05, z);
+          p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
+          player.resetLook(Math.atan2(-(chest.x - x), -(chest.z - z)), -0.08);
+        }
+      } else if (e.code === 'F7') {
+        const water = match.mapDef.water[0];
+        if (water) {
+          // Stand just outside the nearest authored water edge and face the
+          // surface for repeatable transparency/reflection QA.
+          const x = (water.minX + water.maxX) * 0.5;
+          const z = water.minZ - 3.2;
+          const surface = match.phys.surfaceAt(x, z, water.surfaceY + 8, 30) ?? water.surfaceY;
+          p.body.teleport(x, surface + CAPSULE_CENTER_OFFSET + 0.05, z);
+          p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
+          player.resetLook(Math.PI, -0.18);
+        }
+      } else if (e.code === 'F8') {
+        const def = WEAPONS.pistol;
+        const result = p.inv.add({ kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: def.magSize });
+        if (result.ok && result.slot !== undefined) {
+          p.inv.ammo.light = Math.max(p.inv.ammo.light, 30);
+          p.inv.select(result.slot);
+          lastWeaponKey = null;
+        }
+      } else if (e.code === 'F9') {
+        const result = p.inv.add({ kind: 'heal', itemId: 'medkit', count: 1 });
+        p.shield = 0;
+        p.applyDamage(45);
+        if (result.ok && result.slot !== undefined) p.inv.select(result.slot);
+      } else if (e.code === 'F10') {
+        const result = p.inv.add({ kind: 'heal', itemId: 'shieldpot', count: 1 });
+        p.shield = 0;
+        if (result.ok && result.slot !== undefined) p.inv.select(result.slot);
+      } else if (e.code === 'F11') {
+        const def = WEAPONS.sniper;
+        const result = p.inv.add({ kind: 'weapon', weaponId: 'sniper', rarity: 'rare', ammoInMag: def.magSize });
+        if (result.ok && result.slot !== undefined) {
+          p.inv.ammo.heavy = Math.max(p.inv.ammo.heavy, 12);
+          p.inv.select(result.slot);
+          lastWeaponKey = null;
+        }
+      } else if (e.code === 'F12') {
+        // Chrome CUA cannot hold RMB across frames. This QA-only latch emits
+        // the same DOM button events consumed by PlayerController so scope
+        // engagement and teardown still exercise the real input path.
+        setQaAds(!qaAdsLatched);
+      } else if (e.code === 'End') {
+        match.eliminateActor(p);
+      }
+    };
+    window.addEventListener('keydown', onQaKey);
+    live.cleanup.push(() => {
+      if (qaAdsLatched) setQaAds(false);
+      window.removeEventListener('keydown', onQaKey);
+    });
+  }
 
   wirePresentation(match, world, vfx, rigs, hud, viewmodel, rig);
 
@@ -630,18 +794,25 @@ function teardownMatch(): void {
   menus?.setPlayEnabled(true);
   const ending = live;
   live = null;
+  ending?.rig.resetAimState();
+  ending?.renderer.setScopeActive(false);
   if (import.meta.env.DEV) {
-    delete (window as unknown as Record<string, unknown>).__xoRigs;
-    delete (window as unknown as Record<string, unknown>).__xoAerial;
+    const qaWindow = window as unknown as Record<string, unknown>;
+    for (const key of [
+      '__xoRigs', '__xoAerial', '__xoState', '__xoTeleport', '__xoStress',
+      '__xoGive', '__xoQaInput', '__xoStorm',
+    ]) delete qaWindow[key];
   }
   for (const d of disposers) d();
   disposers.length = 0;
   if (ending) runCleanups(ending.cleanup);
   resultsShown = false;
   spectateTargetId = -1;
+  wasSpectating = false;
   lastWeaponKey = null;
   paused = false;
   hud?.show(false);
+  hud?.setInventoryOpen(false);
   hud?.hideSpectate();
   hud?.interactPrompt(null);
   hud?.setTacMapImage(null);
@@ -655,11 +826,40 @@ function teardownMatch(): void {
 
 function openPause(): void {
   if (!live || paused || live.match.phase === 'results') return;
+  hud.setInventoryOpen(false);
   paused = true;
   // World keeps simulating; only local input is suspended.
   live.player.enabled = false;
   live.player.releaseLock();
   menus.showPause();
+}
+
+function resumeFromPause(): void {
+  menus.hidePause();
+  if (!live) return;
+  paused = false;
+  live.player.enabled = true;
+  live.player.requestLock();
+}
+
+function handlePauseOrSpectateExit(): void {
+  if (hud.isInventoryOpen()) {
+    hud.setInventoryOpen(false);
+    if (live) {
+      live.player.enabled = true;
+      live.player.requestLock();
+    }
+    return;
+  }
+  if (live?.match.player?.alive === false && live.match.phase !== 'results') {
+    menus.onQuitRequested();
+    return;
+  }
+  if (paused) {
+    resumeFromPause();
+    return;
+  }
+  openPause();
 }
 
 function cycleSpectate(dir: number): void {
@@ -680,7 +880,7 @@ function wirePresentation(
   match: Match,
   _world: WorldView,
   vfx: VfxSystem,
-  _rigs: Map<number, CharacterRig>,
+  rigs: Map<number, CharacterRig>,
   hud: Hud,
   viewmodel: ViewModel,
   rig: CameraRig,
@@ -697,7 +897,20 @@ function wirePresentation(
       viewmodel.kick(WEAPON_KICK[e.weaponId] ?? 1);
       viewmodel.muzzlePulse(isPlayer ? 0.8 : 1.15);
     } else {
-      vfx.muzzleFlash(e.x, e.y - 0.25, e.z, e.dx, e.dy, e.dz, isPlayer ? 0.8 : 1.15, HEAVY_FLASH[e.weaponId] === true);
+      const renderedMuzzle = rigs.get(e.actorId)?.muzzleWorld?.(
+        presentationMuzzle,
+        presentationMuzzleDirection,
+      ) === true;
+      vfx.muzzleFlash(
+        renderedMuzzle ? presentationMuzzle.x : e.x,
+        renderedMuzzle ? presentationMuzzle.y : e.y - 0.25,
+        renderedMuzzle ? presentationMuzzle.z : e.z,
+        renderedMuzzle ? presentationMuzzleDirection.x : e.dx,
+        renderedMuzzle ? presentationMuzzleDirection.y : e.dy,
+        renderedMuzzle ? presentationMuzzleDirection.z : e.dz,
+        isPlayer ? 0.9 : 1.35,
+        HEAVY_FLASH[e.weaponId] === true,
+      );
     }
   });
   match.events.on('tracer', (e) => vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color));
@@ -913,7 +1126,7 @@ function updateMusicState(m: Match): void {
 
 function present(dtReal: number): void {
   if (!live) return;
-  const { match: m, renderer, world, vfx, rig, viewmodel, rigs, player } = live;
+  const { match: m, renderer, world, vfx, rig, viewmodel, rigs, player, characterFill } = live;
 
   // Debug/QA introspection hook. Development-only because the related helpers
   // below can mutate match state and must not ship as a production backdoor.
@@ -1044,7 +1257,21 @@ function present(dtReal: number): void {
       data.xoQaStart = start
         ? `${start.poi}|${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)}`
         : '';
+      const nearestChest = m.player
+        ? m.chests
+          .filter((chest) => !chest.opened)
+          .sort((a, b) =>
+            Math.hypot(a.x - m.player!.body.position.x, a.z - m.player!.body.position.z)
+            - Math.hypot(b.x - m.player!.body.position.x, b.z - m.player!.body.position.z))[0]
+        : undefined;
+      data.xoQaChest = nearestChest
+        ? `${nearestChest.x.toFixed(1)},${nearestChest.y.toFixed(1)},${nearestChest.z.toFixed(1)}|open=0`
+        : 'none';
+      data.xoQaPlayer = m.player
+        ? `${m.player.inv.selectedWeapon?.weaponId ?? m.player.inv.selectedItem?.kind ?? 'empty'}|shots=${m.player.stats.shotsFired}|hp=${Math.round(m.player.health)}|shield=${Math.round(m.player.shield)}|heal=${m.player.healing?.itemId ?? 'none'}`
+        : 'none';
       data.xoQaPerf = `${framePercentile(0.95).toFixed(1)},${framePercentile(0.99).toFixed(1)},${worstFrameMs.toFixed(1)}`;
+      data.xoQaRender = `${renderer.renderer.info.render.calls},${renderer.renderer.info.render.triangles}|sim=${perfStats.simMs.toFixed(2)}|present=${perfStats.presentMs.toFixed(2)}`;
     }
   }
 
@@ -1079,15 +1306,34 @@ function present(dtReal: number): void {
     (window as unknown as Record<string, unknown>).__xoStress = () => {
       const p = m.player;
       if (!p) return;
+      p.deployed = true;
+      p.state = 'ground';
+      p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
       const alive = m.actors.filter((a) => a.alive && !a.isPlayer);
       alive.forEach((a, i) => {
-        const ang = (i / Math.max(1, alive.length)) * Math.PI * 2;
-        const x = p.body.position.x + Math.cos(ang) * 18;
-        const z = p.body.position.z + Math.sin(ang) * 18;
-        const surf = m.phys.surfaceAt(x, z, 400, 500);
-        if (surf !== null) a.body.teleport(x, surf + 1.1, z);
-        else { a.body.position.x = x; a.body.position.z = z; }
+        // Put the first opponent in the player's current view and spread the
+        // rest around a wider ring. Probe near the player's floor layer so a
+        // city stress test does not silently place combatants on rooftops.
+        const ang = i === 0
+          ? Math.atan2(-Math.cos(p.yaw), -Math.sin(p.yaw))
+          : (i / Math.max(1, alive.length - 1)) * Math.PI * 2;
+        const radius = i === 0 ? 10 : 42;
+        const x = p.body.position.x + Math.cos(ang) * radius;
+        const z = p.body.position.z + Math.sin(ang) * radius;
+        const surf = m.phys.surfaceAt(x, z, p.body.position.y + 5, 14);
+        const floorY = surf ?? feetYFromBodyCenter(p.body.position.y);
+        a.body.teleport(x, floorY + CAPSULE_CENTER_OFFSET + 0.05, z);
         a.body.velocity.x = 0; a.body.velocity.y = 0; a.body.velocity.z = 0;
+        a.deployed = true;
+        a.state = 'ground';
+        if (!a.inv.slots.some((slot) => slot?.kind === 'weapon')) {
+          const def = WEAPONS.ar;
+          const result = a.inv.add({
+            kind: 'weapon', weaponId: 'ar', rarity: 'rare', ammoInMag: def.magSize,
+          });
+          if (result.ok && result.slot !== undefined) a.inv.select(result.slot);
+          a.inv.ammo[def.ammoType] = Math.max(a.inv.ammo[def.ammoType], def.reserveMax);
+        }
       });
     };
     // QA helper: grant + equip a weapon by id ('pistol'|'smg'|'ar'|
@@ -1112,14 +1358,14 @@ function present(dtReal: number): void {
       return true;
     };
     // QA helper: drive player fire/ADS through the real command pipeline
-    // (browser automation cannot engage pointer lock). Pass null to clear.
-    // fireHeld implies firePressed so semi/pump weapons also cycle.
+    // (browser automation cannot engage pointer lock). Press and held remain
+    // independent so automation cannot conceal a lost short-click edge.
     (window as unknown as Record<string, unknown>).__xoQaInput = (
-      o: { fireHeld?: boolean; adsHeld?: boolean } | null,
+      o: { firePressed?: boolean; fireHeld?: boolean; adsHeld?: boolean } | null,
     ) => {
       m.qaInput =
-        o && (o.fireHeld || o.adsHeld)
-          ? { ...o, firePressed: o.fireHeld === true }
+        o && (o.firePressed || o.fireHeld || o.adsHeld)
+          ? { ...o }
           : null;
     };
     // QA helper: jump the storm to a mid-shrink state so the wall, outside
@@ -1132,6 +1378,29 @@ function present(dtReal: number): void {
   }
 
   const spectating = !m.player?.alive && m.phase !== 'results';
+  const presentationAlpha = THREE.MathUtils.clamp(accumulator / SIM.fixedDt, 0, 1);
+  presentationTransportPos.set(
+    THREE.MathUtils.lerp(m.previousTransportPos.x, m.transportPos.x, presentationAlpha),
+    THREE.MathUtils.lerp(m.previousTransportPos.y, m.transportPos.y, presentationAlpha),
+    THREE.MathUtils.lerp(m.previousTransportPos.z, m.transportPos.z, presentationAlpha),
+  );
+  if (spectating && !wasSpectating) {
+    // Death can occur while pause, map or inventory owns input. Spectator
+    // controls are a new interaction state, so close every overlay and
+    // explicitly re-enable its keyboard-only controls before showing it.
+    paused = false;
+    menus.hidePause();
+    hud.setInventoryOpen(false);
+    if (hud.isTacMapOpen()) hud.toggleTacMap(false);
+    player.enabled = true;
+    player.setSpectatorMode(true);
+    player.releaseLock();
+    rig.resetAimState();
+  } else if (!spectating && wasSpectating) {
+    player.setSpectatorMode(false);
+    rig.endSpectate();
+  }
+  wasSpectating = spectating;
   const playerAboard = !!m.player && !m.player.deployed;
   const inTransport = m.phase === 'transport' && !spectating && playerAboard;
   // Drop-rig slots: combatants hang in a row beneath the hull, spread along
@@ -1152,21 +1421,24 @@ function present(dtReal: number): void {
     const target = targets.find((t) => t.id === spectateTargetId) ?? targets[0];
     if (target) {
       spectateTargetId = target.id;
-      rig.updateSpectate(target, dtReal);
+      rig.updateSpectate(target, dtReal, m.phys);
       hud.showSpectate(target.name);
+    } else {
+      // Keep the explicit exit action reachable even after the final target
+      // disappears (including solo practice QA).
+      hud.showSpectate(t('hud.spectateNoTarget'));
+      rig.resetAimState();
+      const fallback = new THREE.Vector3(0, 65, 35);
+      rig.camera.position.lerp(fallback, 1 - Math.exp(-dtReal * 4));
+      rig.camera.lookAt(0, 0, 0);
     }
   } else if (inTransport && m.player) {
     const slot = slotOf(m.player);
-    rig.updateTransport(m.transportPos, slot, m.player.yaw, m.player.pitch, now() / 1000, dtReal);
+    rig.updateTransport(presentationTransportPos, slot, m.player.yaw, m.player.pitch, now() / 1000, dtReal);
     hud.hideSpectate();
   } else if (m.player) {
     if (wasInTransport) {
-      const slot = slotOf(m.player);
-      rig.beginGameplayBlend(new THREE.Vector3(
-        m.transportPos.x + slot.x,
-        m.transportPos.y - MATCH.transportHangOffset + slot.y + 1.6,
-        m.transportPos.z + slot.z,
-      ));
+      rig.beginGameplayBlend();
     }
     rig.update(m.player, dtReal, m.phys, {});
     hud.hideSpectate();
@@ -1193,9 +1465,9 @@ function present(dtReal: number): void {
       if (aboard) {
         const slot = slotOf(a);
         charRig.group.position.set(
-          m.transportPos.x + slot.x,
-          m.transportPos.y - MATCH.transportHangOffset + slot.y,
-          m.transportPos.z + slot.z,
+          presentationTransportPos.x + slot.x,
+          presentationTransportPos.y - MATCH.transportHangOffset + slot.y,
+          presentationTransportPos.z + slot.z,
         );
       } else {
         // CharBody.position is the capsule centre; character assets are
@@ -1213,6 +1485,23 @@ function present(dtReal: number): void {
         updateEliminationFx(charRig, dtReal);
       }
     }
+  }
+
+  if (!spectating && rig.mode === 'tps' && m.player?.alive) {
+    const p = m.player.body.position;
+    const towardCamera = presentationFillDirection.set(
+      rig.camera.position.x - p.x,
+      0,
+      rig.camera.position.z - p.z,
+    ).normalize();
+    characterFill.position.set(
+      p.x + towardCamera.x * 1.5,
+      feetYFromBodyCenter(p.y) + 1.65,
+      p.z + towardCamera.z * 1.5,
+    );
+    characterFill.visible = true;
+  } else {
+    characterFill.visible = false;
   }
 
   // Grapple ropes
@@ -1245,7 +1534,7 @@ function present(dtReal: number): void {
   }
 
   world.setViewPos(rig.camera.position);
-  world.update(dtReal, m);
+  world.update(dtReal, m, { position: presentationTransportPos });
   vfx.update(dtReal, rig.camera.position);
 
   {
@@ -1254,19 +1543,23 @@ function present(dtReal: number): void {
     const eyeUnder = world.isEyeUnderwater(rig.camera.position);
     audio.setEnvironmentState(eyeUnder ? 'underwater' : 'open');
   }
-  renderer.followSunTarget(new THREE.Vector3(m.player?.body.position.x ?? 0, 0, m.player?.body.position.z ?? 0));
+  renderer.followSunTarget(new THREE.Vector3(rig.camera.position.x, 0, rig.camera.position.z));
   renderer.followViewer(rig.camera.position);
 
   hud.syncPlayerState(m);
   hud.drawMinimap(m, () => hud.minimapContext());
   if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
-    const info = !spectating && m.player?.alive && !paused && !hud.isTacMapOpen() ? findInteractInfo(m) : null;
+    const info = !spectating && m.player?.alive && !paused && !hud.isTacMapOpen() && !hud.isInventoryOpen()
+      ? findInteractInfo(m)
+      : null;
     hud.interactPrompt(info && info.prompt ? info.prompt : null);
     hud.showLootPanel(info?.loot ?? null);
   }
 
   if (m.phase === 'results' && !resultsShown) {
+    rig.resetAimState();
+    renderer.setScopeActive(false);
     resultsShown = true;
     showResults(m);
   }
@@ -1282,30 +1575,29 @@ interface InteractInfo {
 function findInteractInfo(m: Match): InteractInfo | null {
   const p = m.player;
   if (!p) return null;
-  const pos = p.body.position;
-  for (const c of m.chests) {
-    if (c.opened) continue;
-    const d = Math.hypot(c.x - pos.x, c.y - pos.y, c.z - pos.z);
-    if (d < 3.4) {
-      const label =
-        c.kind === 'vault'
-          ? t('interact.openVault')
-          : c.kind === 'elite'
-            ? t('interact.openElite')
-            : t('interact.openChest');
-      return { prompt: label, loot: null };
-    }
+  const chest = m.nearestInteractableChest(p);
+  if (chest) {
+    const label =
+      chest.kind === 'vault'
+        ? t('interact.openVault')
+        : chest.kind === 'elite'
+          ? t('interact.openElite')
+          : t('interact.openChest');
+    return { prompt: label, loot: null };
   }
-  const item = m.loot.nearestItem(pos.x, pos.y + 1, pos.z, 4, (it) => it.kind !== 'ammo');
+  // Use the simulation's exact resolver so the card always describes the
+  // same closest item E will pick up, including stable ties in loot piles.
+  const item = m.nearestInteractableItem(p, 4);
   if (!item) return null;
 
-  const invFull = p.inv.selectedWeapon !== null && item.kind === 'weapon' && p.inv.slots.every((s) => s !== null);
+  const invFull = item.kind === 'weapon' && p.inv.slots.every((s) => s !== null);
   if (item.kind === 'weapon' && item.weapon) {
     const def = WEAPONS[item.weapon.weaponId];
     const rarityText = t(`rarity.${item.weapon.rarity}` as never);
     return {
       prompt: '',
       loot: {
+        iconId: item.weapon.weaponId,
         name: t(`wpn.${item.weapon.weaponId}` as never),
         typeText: t('loot.type.weapon'),
         rarityText: rarityText.toUpperCase(),
@@ -1321,6 +1613,7 @@ function findInteractInfo(m: Match): InteractInfo | null {
     return {
       prompt: '',
       loot: {
+        iconId: item.heal.itemId,
         name: med ? t('bind.useMedkit') : t('bind.useShield'),
         typeText: t('loot.type.heal'),
         rarityText: med ? t('rarity.rare').toUpperCase() : t('rarity.uncommon').toUpperCase(),

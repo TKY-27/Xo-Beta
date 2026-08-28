@@ -19,10 +19,12 @@ describe('persistent settings boundary', () => {
       quality: 'low',
       fov: 96,
       reducedMotion: true,
+      tpsCharacterSide: 'right',
+      playerSkin: 'specter',
       bindings: { forward: 'KeyI' },
     });
 
-    expect(getSettings()).toMatchObject({ quality: 'low', fov: 96, reducedMotion: true });
+    expect(getSettings()).toMatchObject({ quality: 'low', fov: 96, reducedMotion: true, tpsCharacterSide: 'right', playerSkin: 'specter' });
     expect(getSettings().bindings.forward).toBe('KeyI');
     expect(getSettings().bindings.back).toBe('KeyS');
   });
@@ -45,6 +47,9 @@ describe('persistent settings boundary', () => {
     expect(settings.crosshairColor).toBe('#eaf6ff');
     expect(settings.bindings.forward).toBe('KeyW');
     expect(settings.bindings.jump).toBe('Space');
+    expect(settings.tpsCharacterSide).toBe('left');
+    expect(settings.playerSkin).toBe('vanguard');
+    expect(settings.bindings.shoulderSwap).toBe('KeyZ');
   });
 
   it('falls back cleanly for arrays and null', async () => {

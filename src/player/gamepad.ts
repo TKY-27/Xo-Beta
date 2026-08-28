@@ -43,6 +43,7 @@ function deadzone(v: number, dz: number): number {
 
 export class GamepadInput {
   private prevButtons = new Array<boolean>(20).fill(false);
+  private prevFireDown = false;
   private lookX = 0;
   private lookY = 0;
   connected = false;
@@ -84,7 +85,12 @@ export class GamepadInput {
   applyTo(cmd: InputCommand, dt: number, adsScale: number): number {
     const pad = this.pad();
     this.connected = !!pad;
-    if (!pad) return 0;
+    if (!pad) {
+      // Treat a disconnected controller as released so reconnecting while RT
+      // is already down still produces one well-defined rising edge.
+      this.prevFireDown = false;
+      return 0;
+    }
 
     const s = getSettings();
     const dz = s.padDeadzone;
@@ -107,7 +113,13 @@ export class GamepadInput {
     // Triggers
     const rt = pad.buttons[BUTTON.RT]?.value ?? 0;
     const lt = pad.buttons[BUTTON.LT]?.value ?? 0;
-    if (rt > 0.35) cmd.fireHeld = true;
+    const fireDown = rt > 0.35;
+    if (fireDown) cmd.fireHeld = true;
+    // RT is an analog trigger; GamepadButton.pressed is not reliable across
+    // browsers for partially pressed triggers. Keep a thresholded edge so a
+    // short press is delivered to semi-auto/bolt/pump weapons once.
+    if (fireDown && !this.prevFireDown) cmd.firePressed = true;
+    this.prevFireDown = fireDown;
     if (lt > 0.35) cmd.adsHeld = true;
     void adsScale;
 

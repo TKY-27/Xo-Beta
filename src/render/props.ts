@@ -20,6 +20,23 @@ interface VariantSource {
   materials: (THREE.Material | null)[];
 }
 
+/** Commit a texture rewrite to every material that shared the original map. */
+export function applySharedTextureReplacements(
+  materials: (THREE.Material | null)[],
+  replacements: ReadonlyMap<THREE.Texture, THREE.Texture>,
+): void {
+  for (const material of materials) {
+    const mapped = material as (THREE.Material & { map?: THREE.Texture }) | null;
+    const replacement = mapped?.map ? replacements.get(mapped.map) : undefined;
+    if (mapped && replacement) {
+      mapped.map = replacement;
+      mapped.needsUpdate = true;
+    }
+  }
+  // Disposal is delayed until every owner has been redirected.
+  for (const source of replacements.keys()) source.dispose();
+}
+
 export class PropLibrary {
   private variants = new Map<string, VariantSource>();
   private templates = new Map<string, THREE.Object3D>();
@@ -31,7 +48,7 @@ export class PropLibrary {
     const addVariant = (key: string, rel: string) =>
       jobs.push(
         loadGltf(rel).then((a) => {
-          const v = neutralizeGreenBark(neutralizeRedBlossoms(extractGeometries(a.scene)));
+          const v = reviveCutoutFoliage(neutralizeGreenBark(neutralizeRedBlossoms(extractGeometries(a.scene))));
           for (const m of v.materials) {
             const std = m as THREE.MeshStandardMaterial;
             if (std?.color) std.color.multiplyScalar(1.3);
@@ -42,6 +59,11 @@ export class PropLibrary {
     const densifyCanopy = (v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }) => {
       const geoms: THREE.BufferGeometry[] = [];
       const materials: (THREE.Material | null)[] = [];
+      // Canopy copies are part of the authored map presentation. A runtime
+      // random source made the same map differ between loads and invalidated
+      // screenshots/replay comparisons, so derive all transforms from the
+      // source geometry index instead.
+      const rnd = seededRandom(v.geoms.length * 0x45d9f3b);
       for (let i = 0; i < v.geoms.length; i++) {
         const srcGeo = v.geoms[i];
         const srcMat = v.materials[i];
@@ -54,11 +76,11 @@ export class PropLibrary {
           const g = srcGeo.clone();
           const m4 = new THREE.Matrix4();
           const q = new THREE.Quaternion().setFromEuler(
-            new THREE.Euler((Math.random() - 0.5) * 0.9, (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 0.9),
+            new THREE.Euler((rnd() - 0.5) * 0.9, (rnd() - 0.5) * 1.6, (rnd() - 0.5) * 0.9),
           );
-          const sc = 0.5 + Math.random() * 0.5;
+          const sc = 0.5 + rnd() * 0.5;
           m4.compose(
-            new THREE.Vector3((Math.random() - 0.5) * 4.4, (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 4.4),
+            new THREE.Vector3((rnd() - 0.5) * 4.4, (rnd() - 0.5) * 1.6, (rnd() - 0.5) * 4.4),
             q,
             new THREE.Vector3(sc, sc, sc),
           );
@@ -73,11 +95,13 @@ export class PropLibrary {
     };
     for (const n of ['CommonTree_1', 'CommonTree_2', 'CommonTree_3', 'CommonTree_4', 'CommonTree_5']) {
       jobs.push(loadGltf(`nature/${n}.gltf`).then((a) => {
-        this.variants.set(`tree/${n}`, densifyCanopy(neutralizeGreenBark(neutralizeRedBlossoms(extractGeometries(a.scene)))));
+        this.variants.set(`tree/${n}`, densifyCanopy(reviveCutoutFoliage(neutralizeGreenBark(neutralizeRedBlossoms(extractGeometries(a.scene))))));
       }));
     }
     for (const n of ['Pine_1', 'Pine_2', 'Pine_3', 'Pine_4']) {
-      addVariant(`pine/${n}`, `nature/${n}.gltf`);
+      jobs.push(loadGltf(`nature/${n}.gltf`).then((a) => {
+        this.variants.set(`pine/${n}`, reviveCutoutFoliage(neutralizeGreenBark(neutralizeRedBlossoms(extractGeometries(a.scene)))));
+      }));
     }
     // Dead trees are bare — no foliage to protect — so remap their mossy
     // green bark textures to weathered brown across the whole map.
@@ -168,6 +192,9 @@ export class PropLibrary {
       const mesh = new THREE.InstancedMesh(geo, mat, count);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
+      // The caller may replace the instance matrices after construction;
+      // addInstancedByGrid recomputes the aggregate bounds before enabling
+      // culling. Keep this conservative until those matrices exist.
       mesh.frustumCulled = false;
       return mesh;
     });
@@ -200,10 +227,13 @@ export class PropLibrary {
  * a natural muted rose (works regardless of material color setup).
  */
 function muteFlowers(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
+  const replacements = new Map<THREE.Texture, THREE.Texture>();
   for (const m of v.materials) {
     const std = m as THREE.MeshStandardMaterial & { map?: THREE.Texture };
     if (!std?.map || !std.map.source?.data) continue;
-    const srcImg = std.map.source.data as ImageBitmap | HTMLImageElement;
+    const source = std.map;
+    if (replacements.has(source)) continue;
+    const srcImg = source.source.data as ImageBitmap | HTMLImageElement;
     const w = 'width' in srcImg ? srcImg.width : 0;
     const h = 'height' in srcImg ? srcImg.height : 0;
     if (!w || !h) continue;
@@ -236,14 +266,13 @@ function muteFlowers(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Mater
     }
     ctx.putImageData(img, 0, 0);
     const tex = new THREE.CanvasTexture(canvas);
-    tex.flipY = std.map.flipY;
-    tex.colorSpace = std.map.colorSpace;
-    tex.wrapS = std.map.wrapS;
-    tex.wrapT = std.map.wrapT;
-    std.map.dispose();
-    std.map = tex;
-    std.needsUpdate = true;
+    tex.flipY = source.flipY;
+    tex.colorSpace = source.colorSpace;
+    tex.wrapS = source.wrapS;
+    tex.wrapT = source.wrapT;
+    replacements.set(source, tex);
   }
+  applySharedTextureReplacements(v.materials, replacements);
   return v;
 }
 
@@ -261,11 +290,13 @@ function muteFlowers(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Mater
  */
 function reviveCutoutFoliage(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
   const seen = new Set<THREE.Texture>();
+  const replacements = new Map<THREE.Texture, THREE.Texture>();
   for (const m of v.materials) {
     const mat = m as THREE.MeshLambertMaterial & { map?: THREE.Texture };
     if (!mat?.map || !mat.alphaTest || seen.has(mat.map)) continue;
-    seen.add(mat.map);
-    const srcImg = mat.map.source?.data as ImageBitmap | HTMLImageElement | undefined;
+    const source = mat.map;
+    seen.add(source);
+    const srcImg = source.source?.data as ImageBitmap | HTMLImageElement | undefined;
     const w = srcImg && 'width' in srcImg ? srcImg.width : 0;
     const h = srcImg && 'height' in srcImg ? srcImg.height : 0;
     if (!srcImg || !w || !h || w > 2048) continue;
@@ -292,19 +323,24 @@ function reviveCutoutFoliage(v: { geoms: THREE.BufferGeometry[]; materials: (THR
     // Pass 1 — re-tone opaque texels.
     for (let y = 0; y < h; y++) {
       // Vertical gradient: canopy tops catch light, undersides stay deep.
-      const grad = 1.16 - 0.32 * (y / h);
+      // Keep it restrained; the earlier blue suppression produced neon lime
+      // pines under Eden's strong daylight.
+      const grad = 1.08 - 0.25 * (y / h);
       for (let x = 0; x < w; x++) {
         const i = (y * w + x) * 4;
         if (d[i + 3]! < 128) continue;
         const n1 = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
-        const jitter = 0.88 + 0.24 * (n1 - Math.floor(n1));
+        const jitter = 0.92 + 0.16 * (n1 - Math.floor(n1));
         const k = grad * jitter;
-        const r = d[i]! * 1.18 * k;
-        const g = d[i + 1]! * 1.18 * k;
-        const b = d[i + 2]! * 0.62 * k;
-        d[i] = Math.min(255, r);
-        d[i + 1] = Math.min(255, g);
-        d[i + 2] = Math.min(255, b);
+        const r = d[i]! * k;
+        const g = d[i + 1]! * k;
+        const b = d[i + 2]! * k;
+        const lum = r * 0.25 + g * 0.55 + b * 0.2;
+        // Gentle desaturation preserves species texture while pulling the
+        // chartreuse source art toward a believable evergreen/leaf value.
+        d[i] = Math.min(255, r * 0.82 + lum * 0.18);
+        d[i + 1] = Math.min(255, g * 0.76 + lum * 0.24);
+        d[i + 2] = Math.min(255, b * 0.88 + lum * 0.12);
       }
     }
     ctx.putImageData(img, 0, 0);
@@ -334,15 +370,17 @@ function reviveCutoutFoliage(v: { geoms: THREE.BufferGeometry[]; materials: (THR
     ctx.putImageData(bled, 0, 0);
 
     const tex = new THREE.CanvasTexture(canvas);
-    tex.flipY = mat.map.flipY;
-    tex.colorSpace = mat.map.colorSpace;
-    tex.wrapS = mat.map.wrapS;
-    tex.wrapT = mat.map.wrapT;
+    tex.flipY = source.flipY;
+    tex.colorSpace = source.colorSpace;
+    tex.wrapS = source.wrapS;
+    tex.wrapT = source.wrapT;
     tex.anisotropy = 4;
-    mat.map.dispose();
-    mat.map = tex;
-    mat.needsUpdate = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = true;
+    replacements.set(source, tex);
   }
+  applySharedTextureReplacements(v.materials, replacements);
   return v;
 }
 
@@ -354,11 +392,13 @@ function reviveCutoutFoliage(v: { geoms: THREE.BufferGeometry[]; materials: (THR
  */
 function neutralizeRedBlossoms(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
   const seen = new Set<THREE.Texture>();
+  const replacements = new Map<THREE.Texture, THREE.Texture>();
   for (const m of v.materials) {
     const std = m as THREE.MeshStandardMaterial & { map?: THREE.Texture };
     if (!std?.map || seen.has(std.map)) continue;
-    seen.add(std.map);
-    const srcImg = std.map.source?.data as ImageBitmap | HTMLImageElement | undefined;
+    const source = std.map;
+    seen.add(source);
+    const srcImg = source.source?.data as ImageBitmap | HTMLImageElement | undefined;
     const w = srcImg && 'width' in srcImg ? srcImg.width : 0;
     const h = srcImg && 'height' in srcImg ? srcImg.height : 0;
     if (!srcImg || !w || !h || w > 2048) continue;
@@ -379,23 +419,25 @@ function neutralizeRedBlossoms(v: { geoms: THREE.BufferGeometry[]; materials: (T
     for (let i = 0; i < d.length; i += 4) {
       const r = d[i]!, g = d[i + 1]!, b = d[i + 2]!;
       if (r > 130 && r > g * 1.55 && r > b * 1.5 && g < 140) {
-        d[i] = r * 0.34;
-        d[i + 1] = Math.min(255, g * 1.05 + 46);
-        d[i + 2] = b * 0.42;
+        // The common-bush atlas is almost pure dark red, so a relative-only
+        // transform produced near-black olive cards. Map that authored mask
+        // into a mid-value forest green while retaining its value variation.
+        d[i] = r * 0.36;
+        d[i + 1] = Math.min(255, 70 + r * 0.22 + g * 0.4);
+        d[i + 2] = Math.min(255, 38 + b * 0.2);
         touched = true;
       }
     }
     if (!touched) continue;
     ctx.putImageData(img, 0, 0);
     const tex = new THREE.CanvasTexture(canvas);
-    tex.flipY = std.map.flipY;
-    tex.colorSpace = std.map.colorSpace;
-    tex.wrapS = std.map.wrapS;
-    tex.wrapT = std.map.wrapT;
-    std.map.dispose();
-    std.map = tex;
-    std.needsUpdate = true;
+    tex.flipY = source.flipY;
+    tex.colorSpace = source.colorSpace;
+    tex.wrapS = source.wrapS;
+    tex.wrapT = source.wrapT;
+    replacements.set(source, tex);
   }
+  applySharedTextureReplacements(v.materials, replacements);
   return v;
 }
 
@@ -407,11 +449,13 @@ function neutralizeRedBlossoms(v: { geoms: THREE.BufferGeometry[]; materials: (T
  */
 function neutralizeGreenBark(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
   const seen = new Set<THREE.Texture>();
+  const replacements = new Map<THREE.Texture, THREE.Texture>();
   for (const m of v.materials) {
     const mat = m as THREE.MeshLambertMaterial & { map?: THREE.Texture };
     if (!mat?.map || seen.has(mat.map)) continue;
-    seen.add(mat.map);
-    const srcImg = mat.map.source?.data as ImageBitmap | HTMLImageElement | undefined;
+    const source = mat.map;
+    seen.add(source);
+    const srcImg = source.source?.data as ImageBitmap | HTMLImageElement | undefined;
     const w = srcImg && 'width' in srcImg ? srcImg.width : 0;
     const h = srcImg && 'height' in srcImg ? srcImg.height : 0;
     if (!srcImg || !w || !h || w > 2048) continue;
@@ -449,14 +493,13 @@ function neutralizeGreenBark(v: { geoms: THREE.BufferGeometry[]; materials: (THR
     if (touched < w * h * 0.005) continue;
     ctx.putImageData(img, 0, 0);
     const tex = new THREE.CanvasTexture(canvas);
-    tex.flipY = mat.map.flipY;
-    tex.colorSpace = mat.map.colorSpace;
-    tex.wrapS = mat.map.wrapS;
-    tex.wrapT = mat.map.wrapT;
-    mat.map.dispose();
-    mat.map = tex;
-    mat.needsUpdate = true;
+    tex.flipY = source.flipY;
+    tex.colorSpace = source.colorSpace;
+    tex.wrapS = source.wrapS;
+    tex.wrapT = source.wrapT;
+    replacements.set(source, tex);
   }
+  applySharedTextureReplacements(v.materials, replacements);
   return v;
 }
 
@@ -466,11 +509,13 @@ function neutralizeGreenBark(v: { geoms: THREE.BufferGeometry[]; materials: (THR
  */
 function degreenAll(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
   const seen = new Set<THREE.Texture>();
+  const replacements = new Map<THREE.Texture, THREE.Texture>();
   for (const m of v.materials) {
     const mat = m as THREE.MeshLambertMaterial & { map?: THREE.Texture };
     if (!mat?.map || seen.has(mat.map)) continue;
-    seen.add(mat.map);
-    const srcImg = mat.map.source?.data as ImageBitmap | HTMLImageElement | undefined;
+    const source = mat.map;
+    seen.add(source);
+    const srcImg = source.source?.data as ImageBitmap | HTMLImageElement | undefined;
     const w = srcImg && 'width' in srcImg ? srcImg.width : 0;
     const h = srcImg && 'height' in srcImg ? srcImg.height : 0;
     if (!srcImg || !w || !h || w > 2048) continue;
@@ -500,14 +545,13 @@ function degreenAll(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Materi
     if (touched < 64) continue;
     ctx.putImageData(img, 0, 0);
     const tex = new THREE.CanvasTexture(canvas);
-    tex.flipY = mat.map.flipY;
-    tex.colorSpace = mat.map.colorSpace;
-    tex.wrapS = mat.map.wrapS;
-    tex.wrapT = mat.map.wrapT;
-    mat.map.dispose();
-    mat.map = tex;
-    mat.needsUpdate = true;
+    tex.flipY = source.flipY;
+    tex.colorSpace = source.colorSpace;
+    tex.wrapS = source.wrapS;
+    tex.wrapT = source.wrapT;
+    replacements.set(source, tex);
   }
+  applySharedTextureReplacements(v.materials, replacements);
   return v;
 }
 
@@ -522,7 +566,7 @@ function tintMaterials(v: { materials: (THREE.Material | null)[] }, r: number, g
 }
 
 /** Split a GLTF scene into flat geometries + matching materials. */
-function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
+export function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
   const geoms: THREE.BufferGeometry[] = [];
   const materials: (THREE.Material | null)[] = [];
   root.updateMatrixWorld(true);
@@ -535,11 +579,7 @@ function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGeometry[
     for (const attr of ['skinIndex', 'skinWeight'] as const) {
       if (geo.getAttribute(attr)) geo.deleteAttribute(attr);
     }
-    // Normalize to y=0 base, keep authored scale.
     geo.computeBoundingBox();
-    const bb = geo.boundingBox!;
-    const min = bb.min.y;
-    geo.translate(0, -min, 0);
     geo.computeBoundingSphere();
     geoms.push(geo);
     let mat = Array.isArray(mesh.material) ? mesh.material[0] ?? null : mesh.material;
@@ -557,7 +597,31 @@ function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGeometry[
     }
     materials.push(mat);
   });
+  // GLTF trees are a hierarchy: the trunk and canopy occupy different mesh
+  // nodes. Normalizing each node independently moves leaves to the ground.
+  // Compute one minimum over the complete asset and apply one translation to
+  // every part, preserving the authored relative Y positions.
+  let minY = Infinity;
+  for (const geo of geoms) {
+    geo.computeBoundingBox();
+    minY = Math.min(minY, geo.boundingBox?.min.y ?? Infinity);
+  }
+  if (Number.isFinite(minY) && Math.abs(minY) > 1e-6) {
+    for (const geo of geoms) {
+      geo.translate(0, -minY, 0);
+      geo.computeBoundingSphere();
+    }
+  }
   return { geoms, materials };
+}
+
+function seededRandom(seed: number): () => number {
+  let state = (seed >>> 0) || 0x6d2b79f5;
+  return () => {
+    state = Math.imul(state ^ (state >>> 15), state | 1);
+    state ^= state + Math.imul(state ^ (state >>> 7), state | 61);
+    return ((state ^ (state >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 /**

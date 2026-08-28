@@ -100,6 +100,7 @@ export class Inventory {
   }
 
   removeSlot(slot: number): InventoryItem | null {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= INVENTORY_SLOTS) return null;
     const it = this.slots[slot];
     this.slots[slot] = null;
     if (this.selected === slot) {
@@ -107,6 +108,27 @@ export class Inventory {
       this.selected = MELEE_SLOT;
     }
     return it ?? null;
+  }
+
+  /**
+   * Swap two inventory slots, including an occupied slot with an empty one.
+   * Selection follows the item so dragging the equipped item never silently
+   * changes what is in the player's hands. Fists (-1) are not draggable.
+   */
+  swapSlots(from: number, to: number): boolean {
+    if (!Number.isInteger(from) || !Number.isInteger(to)
+      || from < 0 || from >= INVENTORY_SLOTS || to < 0 || to >= INVENTORY_SLOTS) {
+      return false;
+    }
+    if (from === to) return true;
+
+    const item = this.slots[from] ?? null;
+    this.slots[from] = this.slots[to] ?? null;
+    this.slots[to] = item;
+
+    if (this.selected === from) this.selected = to;
+    else if (this.selected === to) this.selected = from;
+    return true;
   }
 
   /** Switch to the permanent fists pseudo-slot. */
@@ -164,17 +186,21 @@ export class Inventory {
     return true;
   }
 
-  finishReload(w: WeaponInstance): void {
+  /**
+   * Transfer a discrete number of rounds from reserve into a magazine.
+   * Reloading is deliberately incremental: callers invoke this as the
+   * reload animation advances, so a cancelled reload keeps only rounds that
+   * were visibly loaded and never consumes the remainder up front.
+   */
+  loadReloadRounds(w: WeaponInstance, requested: number): number {
+    if (!Number.isFinite(requested) || requested <= 0) return 0;
     const def = WEAPONS[w.weaponId];
     const need = def.magSize - w.ammoInMag;
-    const take = Math.min(need, this.ammo[def.ammoType]);
+    const take = Math.min(Math.floor(requested), need, this.ammo[def.ammoType]);
+    if (take <= 0) return 0;
     w.ammoInMag += take;
     this.ammo[def.ammoType] -= take;
-  }
-
-  cancelReloadPreserve(w: WeaponInstance): void {
-    // Mag content is already authoritative; nothing to refund.
-    void w;
+    return take;
   }
 
   /** Can this item be stored without a forced swap? */

@@ -63,8 +63,12 @@ const SAMPLES: Array<[string, string]> = [
   ['mech/door_open', 'mech/doorOpen_001.wav'],
   ['mech/door_close', 'mech/doorClose_001.wav'],
   ['chest/open_a', 'chest/openchest.wav'],
-  ['shield/hit', 'lasers/laserSmall_0.wav'],
-  ['shield/break', 'lasers/forceField_001.wav'],
+  // Shield feedback is an impact, not a laser. The old laser aliases were
+  // the source of the out-of-place electronic "shun-shun" sound in normal
+  // firefights. Keep the logical keys so callers do not need to know the
+  // physical sample used for the effect.
+  ['shield/hit', 'impacts/impactPlate_light_000.wav'],
+  ['shield/break', 'impacts/impactMetal_heavy_001.wav'],
   ['grapple/fire', 'lasers/thrusterFire.wav'],
   ['ui/click', 'ui/click1.wav'],
   ['ui/hover', 'ui/rollover2.wav'],
@@ -82,14 +86,42 @@ const SAMPLES: Array<[string, string]> = [
   ['bed/river_loop', 'ambience/river_loop.wav'],
 ];
 
+/**
+ * Source-recording trims measured from the bundled CC0 WAVs. These assets
+ * have deliberately conservative peaks, but a few recordings (notably the
+ * chest reveal) have much lower programme level than their neighbours. Keep
+ * the correction at the sample boundary instead of raising the master bus;
+ * ambience, UI, and distance attenuation therefore retain their intended
+ * balance. Values are dB and are applied as linear gain at playback.
+ */
+export const AUDIO_SAMPLE_TRIM_DB: Readonly<Record<string, number>> = Object.freeze({
+  'gun/pistol_a': 4.5,
+  'gun/pistol_b': 4.5,
+  'gun/pistol_c': 4.5,
+  'gun/smg_a': 4.5,
+  'gun/smg_b': 4.5,
+  'gun/ar_a': 4.5,
+  'gun/ar_b': 4.5,
+  'gun/shotgun_a': 4.5,
+  'gun/sniper_a': 4.5,
+  // openchest.wav peaks at roughly -20 dBFS, unlike the mechanical layer.
+  'chest/open_a': 12,
+});
+
+export function sampleGainFor(key: string): number {
+  return 10 ** ((AUDIO_SAMPLE_TRIM_DB[key] ?? 0) / 20);
+}
+
 export class AudioEngine {
   private static listenerInstance: AudioEngine | null = null;
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private masterFilter: BiquadFilterNode | null = null;
+  private masterLimiter: DynamicsCompressorNode | null = null;
   private buses: Partial<Record<BusName, GainNode>> = {};
   private buffers = new Map<string, AudioBuffer>();
   private noiseBuffer: AudioBuffer | null = null;
+  private missingSampleWarnings = new Set<string>();
 
   // ambience beds
   private beds: Map<string, { src: AudioBufferSourceNode; gain: GainNode }> = new Map();
@@ -128,12 +160,21 @@ export class AudioEngine {
     this.masterFilter = ctx.createBiquadFilter();
     this.masterFilter.type = 'lowpass';
     this.masterFilter.frequency.value = 20000; // open air default
+    // Keep layered firearm reports and close chest reveals below clipping
+    // without flattening the individual distance/voice levels.
+    this.masterLimiter = ctx.createDynamicsCompressor();
+    this.masterLimiter.threshold.value = -3;
+    this.masterLimiter.knee.value = 0;
+    this.masterLimiter.ratio.value = 20;
+    this.masterLimiter.attack.value = 0.001;
+    this.masterLimiter.release.value = 0.08;
     for (const name of ['sfx', 'ui', 'ambience', 'music'] as BusName[]) {
       const g = ctx.createGain();
       g.connect(this.masterFilter);
       this.buses[name] = g;
     }
-    this.masterFilter.connect(this.master);
+    this.masterFilter.connect(this.masterLimiter);
+    this.masterLimiter.connect(this.master);
     this.master.connect(ctx.destination);
 
     const len = ctx.sampleRate * 1.0;
@@ -188,7 +229,19 @@ export class AudioEngine {
   /** Spatial one-shot buffer playback through a panner. */
   play(key: string, opts: PlayOpts = {}): void {
     const buf = this.buffers.get(key);
-    if (!buf || !this.ctx) return;
+    if (!this.ctx) return;
+    if (!buf) {
+      if (!this.missingSampleWarnings.has(key)) {
+        this.missingSampleWarnings.add(key);
+        console.warn('audio sample unavailable:', key);
+      }
+      return;
+    }
+    if (this.ctx.state !== 'running') {
+      // Playback initiated by a valid in-game input should recover a browser
+      // context suspended by tab/background policy instead of failing silently.
+      void this.ctx.resume().catch((err) => console.warn('audio resume failed', err));
+    }
     const bus = this.buses[opts.bus ?? 'sfx']!;
     let node: AudioNode = bus;
 
@@ -219,7 +272,7 @@ export class AudioEngine {
     src.buffer = buf;
     src.playbackRate.value = opts.rate ?? 1;
     const g = this.ctx.createGain();
-    g.gain.value = opts.vol ?? 1;
+    g.gain.value = (opts.vol ?? 1) * sampleGainFor(key);
     g.connect(out);
     src.connect(g);
     src.start(this.now() + (opts.delay ?? 0) + Math.random() * 0.008);
@@ -250,10 +303,12 @@ export class AudioEngine {
   // Gameplay SFX
   // -------------------------------------------------------------------------
 
-  gunshot(kind: string, x: number, y: number, z: number, dry = false): void {
+  gunshot(kind: string, x: number, y: number, z: number, dry = false, isLocal = false): void {
     if (!this.ctx) return;
     if (dry) {
-      this.play('ui/click', { x, y, z, vol: 0.35, rate: 1.8 });
+      // A dry chamber click belongs to the gameplay SFX bus. Routing the UI
+      // click here made an empty magazine sound like a menu interaction.
+      this.play('impact/metal_a', { x, y, z, vol: 0.2, rate: 1.8, refDist: 2.5 });
       return;
     }
     const table: Record<string, string[]> = {
@@ -267,7 +322,18 @@ export class AudioEngine {
     const key = keys[Math.floor(Math.random() * keys.length)]!;
     const dist = Math.hypot(x - cameraCenter.x, z - cameraCenter.z);
     const lp = Math.max(900, 18000 - dist * 90);
-    const nearVol = kind === 'pistol' && dist < 3 ? 0.55 : 1;
+    // Player shots originate just below the listener. The previous 0.55
+    // multiplier made the weapon deliberately quiet at the exact moment it
+    // should provide the clearest transient. Use a short near-field radius
+    // for the local report while preserving exponential attenuation for
+    // every other actor.
+    const nearField = Math.max(0, 1 - dist / 20);
+    const nearVol = isLocal ? 1.1 : 1 + nearField * 0.2;
+    // The local actor can be almost five metres from the listener in TPS.
+    // Keep its report inside the near-field radius; reducing refDistance here
+    // would reintroduce the quiet-own-gun defect as soon as TPS is selected.
+    const reportRefDist = 7;
+    const crackRefDist = 8;
     const profile = {
       pistol: { report: 0.92, crack: 0.12, body: 'boom/a', bodyVol: 0.055, bodyRate: 2.35, tail: 0.075 },
       smg: { report: 0.86, crack: 0.09, body: 'boom/a', bodyVol: 0.045, bodyRate: 2.55, tail: 0.055 },
@@ -284,9 +350,9 @@ export class AudioEngine {
       vol: profile.report * nearVol,
       rate: 0.94 + Math.random() * 0.12,
       lp,
-      refDist: 7,
+      refDist: reportRefDist,
     });
-    this.gunCrack(x, y, z, profile.crack);
+    this.gunCrack(x, y, z, profile.crack * (isLocal ? 1.1 : 1), crackRefDist);
     this.play(profile.body, {
       x, y, z,
       vol: profile.bodyVol,
@@ -317,12 +383,12 @@ export class AudioEngine {
   }
 
   /** Brief high-frequency muzzle crack layered over recorded firearm reports. */
-  private gunCrack(x: number, y: number, z: number, volume: number): void {
+  private gunCrack(x: number, y: number, z: number, volume: number, refDist: number): void {
     if (!this.ctx || !this.noiseBuffer) return;
     const p = this.ctx.createPanner();
     p.panningModel = 'HRTF';
     p.distanceModel = 'exponential';
-    p.refDistance = 8;
+    p.refDistance = refDist;
     p.rolloffFactor = 1.05;
     p.positionX.value = x;
     p.positionY.value = y;
@@ -390,11 +456,12 @@ export class AudioEngine {
     const keys = (table[surface] ?? table.stone!).slice();
     if (isSelf && surface === 'metal') keys.push('step/carpet_a');
     const key = keys[Math.floor(Math.random() * keys.length)]!;
-    // A restrained 10% reduction keeps material cues readable without
-    // competing with weapon reports and nearby threats.
-    const vol = (running ? 0.558 : 0.342) * (isSelf ? 0.85 : 1);
+    // Recorded steps peak close to full scale, but the old gain/ref-distance
+    // combination pushed another combatant below the ambience after only a
+    // few metres. Preserve headroom while keeping nearby movement actionable.
+    const vol = (running ? 0.68 : 0.44) * (isSelf ? 0.92 : 1);
     const rate = surface === 'metal' ? 1.12 : 0.94 + Math.random() * 0.14;
-    this.play(key, { x, y, z, vol, rate, refDist: 3, lp: running ? undefined : 5200 });
+    this.play(key, { x, y, z, vol, rate, refDist: 4.8, rolloff: 1.05, lp: running ? undefined : 6000 });
   }
 
   jumpLand(x: number, y: number, z: number, hard: boolean, surface = 'stone'): void {
@@ -402,25 +469,36 @@ export class AudioEngine {
     this.play('impact/soft_a', { x, y, z, vol: hard ? 0.8 : 0.4, rate: 0.8 });
   }
 
-  whoosh(x: number, _y: number, z: number, pitch = 1): void {
+  whoosh(x: number, y: number, z: number, pitch = 1): void {
     if (!this.ctx || !this.noiseBuffer) return;
     // Distance attenuation so distant actors' movement layers stay local.
     const d = Math.hypot(x - cameraCenter.x, z - cameraCenter.z);
     if (d > 55) return;
     const att = 1 / (1 + (d * d) / 420);
+    const p = this.ctx.createPanner();
+    p.panningModel = 'HRTF';
+    p.distanceModel = 'exponential';
+    p.refDistance = 3;
+    p.rolloffFactor = 1.15;
+    p.positionX.value = x;
+    p.positionY.value = y;
+    p.positionZ.value = z;
+    p.connect(this.buses.sfx!);
     const n = this.ctx.createBufferSource();
     n.buffer = this.noiseBuffer;
     n.loop = true;
     const bp = this.ctx.createBiquadFilter();
     bp.type = 'bandpass';
-    bp.Q.value = 1.3;
-    bp.frequency.setValueAtTime(420 * pitch, this.now());
-    bp.frequency.exponentialRampToValueAtTime(2100 * pitch, this.now() + 0.16);
+    // A broad low-frequency air rush reads as cloth/wind. The previous
+    // narrow 420->2100 Hz sweep was perceived as a synthetic projectile.
+    bp.Q.value = 0.55;
+    bp.frequency.setValueAtTime(180 * pitch, this.now());
+    bp.frequency.exponentialRampToValueAtTime(720 * pitch, this.now() + 0.16);
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, this.now());
-    g.gain.linearRampToValueAtTime(0.22 * att, this.now() + 0.03);
+    g.gain.linearRampToValueAtTime(0.1 * att, this.now() + 0.03);
     g.gain.exponentialRampToValueAtTime(0.0001, this.now() + 0.24);
-    n.connect(bp); bp.connect(g); g.connect(this.buses.sfx!);
+    n.connect(bp); bp.connect(g); g.connect(p);
     n.start(); n.stop(this.now() + 0.26);
   }
 
@@ -482,20 +560,21 @@ export class AudioEngine {
     // Mechanical lid, then a layered crystalline "shaan" reveal.
     // Bell + glass shimmer — deliberately non-electronic (treasure discovery).
     const bellRate = tier === 2 ? 1.42 : tier === 1 ? 1.62 : 1.86;
-    this.play('mech/door_open', { x, y, z, vol: 0.6, rate: tier === 2 ? 0.82 : tier === 1 ? 0.95 : 1.08 });
+    const spatial: Pick<PlayOpts, 'refDist' | 'rolloff'> = { refDist: 2.5, rolloff: 0.7 };
+    this.play('mech/door_open', { x, y, z, vol: 0.74, rate: tier === 2 ? 0.82 : tier === 1 ? 0.95 : 1.08, ...spatial });
     this.scheduleMatchEffect(() => {
-      this.play('chest/open_a', { x, y, z, vol: 0.9, rate: tier === 2 ? 0.88 : 1 });
-      this.play('impact/metal_b', { x, y, z, vol: 0.32, rate: 1.3 });
+      this.play('chest/open_a', { x, y, z, vol: 1.0, rate: tier === 2 ? 0.88 : 1, ...spatial });
+      this.play('impact/metal_b', { x, y, z, vol: 0.32, rate: 1.3, ...spatial });
     }, 240);
     this.scheduleMatchEffect(() => {
-      this.play('chest/bell', { x, y, z, vol: tier === 2 ? 0.5 : tier === 1 ? 0.4 : 0.3, rate: bellRate });
-      this.play('chest/bell', { x, y, z, vol: tier === 2 ? 0.34 : 0.24, rate: bellRate * 1.26 });
-      this.play('impact/glass_a', { x, y, z, vol: tier === 2 ? 0.42 : 0.3, rate: tier === 2 ? 1.7 : 1.95 });
+      this.play('chest/bell', { x, y, z, vol: tier === 2 ? 0.62 : tier === 1 ? 0.52 : 0.42, rate: bellRate, ...spatial });
+      this.play('chest/bell', { x, y, z, vol: tier === 2 ? 0.4 : 0.3, rate: bellRate * 1.26, ...spatial });
+      this.play('impact/glass_a', { x, y, z, vol: tier === 2 ? 0.42 : 0.3, rate: tier === 2 ? 1.7 : 1.95, ...spatial });
     }, 320);
     if (tier >= 1) {
       this.scheduleMatchEffect(() => {
-        this.play('chest/bell', { x, y, z, vol: 0.28, rate: bellRate * 1.5 });
-        this.play('impact/glass_b', { x, y, z, vol: 0.22, rate: 1.6 });
+        this.play('chest/bell', { x, y, z, vol: 0.32, rate: bellRate * 1.5, ...spatial });
+        this.play('impact/glass_b', { x, y, z, vol: 0.22, rate: 1.6, ...spatial });
       }, 520);
     }
   }
@@ -738,7 +817,7 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
   const offs: Array<() => void> = [];
   const on = <K extends keyof MatchEventsMap>(k: K, fn: (p: MatchEventsMap[K]) => void) => offs.push(bus.on(k, fn));
 
-  on('shotFired', (e) => audio.gunshot(e.weaponId, e.x, e.y, e.z, e.dry));
+  on('shotFired', (e) => audio.gunshot(e.weaponId, e.x, e.y, e.z, e.dry, e.actorId === match.player?.id));
   on('impact', (e) => audio.impact(e.x, e.y, e.z, e.material));
   on('ricochet', (e) => audio.ricochet(e.x, e.y, e.z));
   on('glassBreak', (e) => audio.glassBreak(e.x, e.y, e.z));
@@ -748,10 +827,9 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
     const a = match.actors.find((x) => x.id === e.actorId);
     if (a) audio.jumpLand(a.body.position.x, a.body.position.y, a.body.position.z, e.fallDamage > 0 || e.impactSpeed > 20, e.surface);
   });
-  on('jump', (e) => {
-    const a = match.actors.find((x) => x.id === e.actorId);
-    if (a) audio.whoosh(a.body.position.x, a.body.position.y, a.body.position.z, 1.2);
-  });
+  // A normal jump has no synthetic air-sweep layer. With several bots this
+  // event used to fill ordinary firefights with repeated electronic whooshes;
+  // landing material and footsteps provide the physical movement feedback.
   on('slide', (e) => {
     const a = match.actors.find((x) => x.id === e.actorId);
     if (a) audio.whoosh(a.body.position.x, a.body.position.y - 0.6, a.body.position.z, 0.8);
@@ -792,4 +870,5 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
 
 interface MatchLike {
   actors: Array<{ id: number; body: { position: { x: number; y: number; z: number } } }>;
+  player?: { id: number } | null;
 }

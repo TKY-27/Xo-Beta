@@ -35,11 +35,13 @@ Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, 
 | Ground pound | `C` |
 | Interact | `E` |
 | Reload | `R` |
-| Inventory slots | `1–5` |
+| Inventory slots / use selected heal | `1–5` / `LMB` |
 | Drop weapon | `X` |
 | Med Kit / Shield Cell | `G` / `H` |
 | FP/TPS camera | `V` |
+| TPS shoulder side | `Z` |
 | Full map info / Spectate switch | `M` / `←` `→` |
+| Exit spectator / close pause | `Esc` |
 
 ## Browser baseline
 

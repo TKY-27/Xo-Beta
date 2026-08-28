@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { Inventory, MELEE_SLOT, type WeaponInstance } from '../../src/sim/inventory';
+import { INVENTORY_SLOTS, Inventory, MELEE_SLOT, type WeaponInstance } from '../../src/sim/inventory';
 import { WEAPONS } from '../../src/core/balance';
 
 function weapon(id: 'pistol' | 'smg' | 'ar' | 'shotgun' | 'sniper', rarity: WeaponInstance['rarity'] = 'common'): WeaponInstance {
@@ -58,15 +58,26 @@ describe('heal stacking', () => {
 });
 
 describe('ammo & reload', () => {
-  it('reload pulls from reserve into the mag without exceeding capacity', () => {
+  it('staged reload pulls discrete rounds from reserve without exceeding capacity', () => {
     const inv = new Inventory();
     const w = weapon('ar');
     w.ammoInMag = 5;
     inv.add(w);
     inv.ammo.medium = 100;
-    inv.finishReload(w);
+    expect(inv.loadReloadRounds(w, 25)).toBe(25);
     expect(w.ammoInMag).toBe(WEAPONS.ar.magSize);
     expect(inv.ammo.medium).toBe(100 - (WEAPONS.ar.magSize - 5));
+  });
+
+  it('does not consume reserve when a staged request loads no round', () => {
+    const inv = new Inventory();
+    const w = weapon('pistol');
+    w.ammoInMag = 4;
+    inv.add(w);
+    inv.ammo.light = 10;
+    expect(inv.loadReloadRounds(w, 0.9)).toBe(0);
+    expect(w.ammoInMag).toBe(4);
+    expect(inv.ammo.light).toBe(10);
   });
 
   it('cannot reload with empty reserve', () => {
@@ -112,6 +123,32 @@ describe('selection', () => {
     inv.removeSlot(0);
     expect(inv.isMeleeSelected).toBe(true);
     expect(inv.selectedWeapon).toBeNull();
+  });
+
+  it('swaps occupied and empty slots while keeping selection on the item', () => {
+    const inv = new Inventory();
+    const ar = weapon('ar');
+    inv.add(ar, 0);
+    inv.select(0);
+
+    expect(inv.swapSlots(0, 3)).toBe(true);
+    expect(inv.slots[0]).toBeNull();
+    expect(inv.slots[3]).toBe(ar);
+    expect(inv.selected).toBe(3);
+  });
+
+  it('swaps two items and rejects non-inventory indices', () => {
+    const inv = new Inventory();
+    const ar = weapon('ar');
+    const pistol = weapon('pistol');
+    inv.add(ar, 0);
+    inv.add(pistol, 1);
+
+    expect(inv.swapSlots(0, 1)).toBe(true);
+    expect(inv.slots[0]).toBe(pistol);
+    expect(inv.slots[1]).toBe(ar);
+    expect(inv.swapSlots(MELEE_SLOT, 1)).toBe(false);
+    expect(inv.swapSlots(0, INVENTORY_SLOTS)).toBe(false);
   });
 
   it('never writes a hidden -1 slot when full while fists are selected', () => {

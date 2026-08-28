@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import { MELEE, MOVE } from '../../src/core/balance';
 import {
   CAPSULE_CENTER_OFFSET,
@@ -9,6 +10,7 @@ import {
   type CharBody as CharBodyType,
 } from '../../src/physics/physics';
 import { CameraRig } from '../../src/render/cameraRig';
+import { getSettings } from '../../src/core/settings';
 import { Actor } from '../../src/sim/actor';
 import { CombatSystem } from '../../src/sim/combat';
 import { emptyCommand } from '../../src/sim/input';
@@ -59,7 +61,7 @@ describe('authoritative character-space coordinates', () => {
     const feetY = 4.5;
     const actor = actorAtFeet('CAMERA', 2, feetY, -3);
     const rig = new CameraRig(16 / 9);
-    const noCollision = { raycast: () => null };
+    const noCollision = { cameraCast: () => null };
 
     rig.update(actor, 1 / 60, noCollision);
     expect(rig.camera.position.y).toBeCloseTo(feetY + MOVE.eyeHeight, 6);
@@ -71,10 +73,106 @@ describe('authoritative character-space coordinates', () => {
     actor.crouched = false;
     rig.mode = 'tps';
     rig.update(actor, 1, noCollision);
-    expect(rig.camera.position.y).toBeCloseTo(feetY + MOVE.eyeHeight + 0.25, 6);
+    expect(rig.camera.position.y).toBeCloseTo(feetY + MOVE.eyeHeight - 0.55, 6);
 
-    rig.updateSpectate(actor, 1 / 60);
+    rig.updateSpectate(actor, 1 / 60, noCollision);
     expect(rig.camera.position.y).toBeCloseTo(actor.eyeY - 0.2, 6);
+  });
+
+  it('ignores the owning actor during a TPS camera sweep and shortens only against scenery', () => {
+    const phys = new PhysicsWorld();
+    const body = new CharBody(phys, 1, 0, CAPSULE_CENTER_OFFSET, 0);
+    const actor = new Actor('TPS_OWNER', true, body, 0x5fd0ff);
+    phys.flush();
+
+    const rig = new CameraRig(16 / 9);
+    rig.mode = 'tps';
+    rig.update(actor, 1, phys);
+    expect(rig.camera.position.z).toBeGreaterThan(4.2);
+
+    phys.addStaticBox(0, 2, 3, 4, 2, 0.15, 0, 'stone');
+    phys.flush();
+    rig.update(actor, 1, phys);
+    expect(rig.camera.position.z).toBeGreaterThan(0.75);
+    expect(rig.camera.position.z).toBeLessThan(3);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('projects the full TPS character at the configured left or right composition', () => {
+    const actor = actorAtFeet('COMPOSE', 0, 0, 0);
+    const rig = new CameraRig(16 / 9);
+    const noCollision = { cameraCast: () => null };
+    rig.mode = 'tps';
+
+    const screenPosition = () => {
+      rig.camera.updateMatrixWorld(true);
+      const center = new THREE.Vector3(0, 0.93, 0).project(rig.camera);
+      const feet = new THREE.Vector3(0, 0, 0).project(rig.camera);
+      const head = new THREE.Vector3(0, 1.86, 0).project(rig.camera);
+      const cameraSpaceCenter = new THREE.Vector3(0, 0.93, 0).applyMatrix4(rig.camera.matrixWorldInverse);
+      return {
+        x: (center.x + 1) / 2,
+        feetY: (1 - feet.y) / 2,
+        headY: (1 - head.y) / 2,
+        cameraZ: cameraSpaceCenter.z,
+      };
+    };
+
+    getSettings().tpsCharacterSide = 'left';
+    rig.update(actor, 1, noCollision);
+    const left = screenPosition();
+    expect(left.x).toBeGreaterThan(0.32);
+    expect(left.x).toBeLessThan(0.39);
+    expect(left.headY).toBeGreaterThan(0);
+    expect(left.feetY).toBeLessThan(1);
+    expect(left.cameraZ).toBeLessThan(-0.1);
+
+    getSettings().tpsCharacterSide = 'right';
+    rig.update(actor, 1, noCollision);
+    const right = screenPosition();
+    expect(right.x).toBeGreaterThan(0.61);
+    expect(right.x).toBeLessThan(0.68);
+    expect(right.cameraZ).toBeLessThan(-0.1);
+    getSettings().tpsCharacterSide = 'left';
+  });
+
+  it('clears sniper scope and FOV state when camera ownership changes', () => {
+    const actor = actorAtFeet('SCOPE', 0, 0, 0);
+    actor.inv.slots[0] = { kind: 'weapon', weaponId: 'sniper', rarity: 'common', ammoInMag: 1 };
+    actor.inv.selected = 0;
+    actor.wpn.adsAmount = 1;
+    const rig = new CameraRig(16 / 9);
+    rig.update(actor, 1, { cameraCast: () => null });
+    expect(rig.scoped).toBe(true);
+    rig.resetAimState();
+    expect(rig.scoped).toBe(false);
+    expect(rig.camera.fov).toBe(getSettings().fov);
+  });
+
+  it('keeps the TPS transport camera at a stable overhead height with continuous free look', () => {
+    const rig = new CameraRig(16 / 9);
+    rig.mode = 'tps';
+    const transport = { x: 12, y: 120, z: -8 };
+    const slot = { x: 0, y: 0, z: 0 };
+
+    rig.updateTransport(transport, slot, 0, -0.4, 0, 1);
+    const first = rig.camera.position.clone();
+    expect(first.y).toBeCloseTo(transport.y + 22, 4);
+    expect(first.distanceTo(new THREE.Vector3(transport.x, transport.y - 2.5, transport.z)))
+      .toBeGreaterThan(35);
+    rig.camera.updateMatrixWorld(true);
+    const hullScreen = new THREE.Vector3(transport.x, transport.y - 2.5, transport.z).project(rig.camera);
+    expect((hullScreen.x + 1) / 2).toBeGreaterThan(0.4);
+    expect((hullScreen.x + 1) / 2).toBeLessThan(0.6);
+    expect((1 - hullScreen.y) / 2).toBeGreaterThan(0.55);
+    expect((1 - hullScreen.y) / 2).toBeLessThan(0.78);
+
+    rig.updateTransport(transport, slot, 0.02, 0.9, 0, 1);
+    const second = rig.camera.position.clone();
+    expect(second.y).toBeCloseTo(first.y, 4);
+    expect(second.distanceTo(first)).toBeGreaterThan(0.1);
+    expect(second.distanceTo(first)).toBeLessThan(1);
   });
 
   it('probes the support immediately below the soles for footstep material', () => {

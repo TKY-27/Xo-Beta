@@ -528,6 +528,19 @@ function parkingGarage(b: WorldBuilder, cx: number, cz: number): void {
       b.vehicle(cx - 8 + i * 12, cz + 4, y + 0.4, i % 2 ? 0 : Math.PI, 'sedan', 0x2b3038);
     }
   }
+  // The upper deck blocks the sky/IBL from the lower level. Give that enclosed
+  // combat space authored ceiling fixtures instead of raising the whole map's
+  // exposure (which would wash out the streets and neon). The emissive strips
+  // make the light sources legible while the nearby point lights reveal cars,
+  // loot and opponents without turning the garage into a flat bright box.
+  for (const ox of [-9, 0, 9]) {
+    b.box(cx + ox, 3.52, cz, 5.4, 0.08, 0.34, 'windowWarm', 0, { noCollide: true });
+    b.light(cx + ox, 3.18, cz, 0xffddb0, 1.55, 12.5);
+  }
+  // A cooler entrance fill preserves the blue-hour palette and prevents the
+  // open ramp/door threshold from collapsing to black at oblique camera angles.
+  b.box(cx, 3.5, cz + 7.4, 4.6, 0.08, 0.28, 'neonCyan', 0, { noCollide: true });
+  b.light(cx, 3.15, cz + 6.5, 0x8fdcff, 0.9, 10);
   b.chest(cx - 10, 0.6, cz - 6, 'standard');
   b.chest(cx + 8, 4.2, cz + 6, 'elite');
   b.loot(cx, 0.6, cz);
