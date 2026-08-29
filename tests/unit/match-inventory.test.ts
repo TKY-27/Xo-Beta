@@ -82,6 +82,28 @@ describe('player inventory UI simulation API', () => {
     match.dispose();
   }, 30_000);
 
+  it('does not let a full bot inventory swap one heal stack for another every tick', async () => {
+    const match = await makePractice();
+    const actor = match.player!;
+    for (let slot = 0; slot < 5; slot++) {
+      actor.inv.add({
+        kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: WEAPONS.pistol.magSize,
+      }, slot);
+    }
+    const p = actor.body.position;
+    const rejected = match.loot.spawnHeal(p.x, p.y, p.z, 'shieldpot', 1, match.rng);
+    expect(match.loot.pickup(rejected, actor, true)).toBe(false);
+    expect(match.loot.items).toContain(rejected);
+
+    actor.inv.removeSlot(0);
+    actor.inv.add({ kind: 'heal', itemId: 'shieldpot', count: 2 }, 0);
+    const stackable = match.loot.spawnHeal(p.x, p.y, p.z, 'shieldpot', 1, match.rng);
+    expect(match.loot.pickup(stackable, actor, true)).toBeNull();
+    expect(match.loot.items).not.toContain(stackable);
+    expect(actor.inv.slots[0]).toEqual({ kind: 'heal', itemId: 'shieldpot', count: 3 });
+    match.dispose();
+  }, 30_000);
+
   it('chooses the nearest floor item from feet with deterministic id tie-breaks', async () => {
     const match = await makePractice();
     const player = match.player!;

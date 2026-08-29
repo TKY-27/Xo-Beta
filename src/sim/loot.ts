@@ -233,7 +233,9 @@ export class LootSystem {
       return null;
     }
     if (item.kind === 'heal' && item.heal) {
-      const res = actor.inv.add({ kind: 'heal', itemId: item.heal.itemId, count: item.heal.count });
+      const inventoryItem = { kind: 'heal' as const, itemId: item.heal.itemId, count: item.heal.count };
+      if (swapIfBetterOnly && !actor.inv.canStore(inventoryItem)) return false;
+      const res = actor.inv.add(inventoryItem);
       if (!res.ok) return false;
       this.remove(item);
       this.events.onPickup(item, actor);

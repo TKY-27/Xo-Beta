@@ -137,8 +137,8 @@ describe('movement config sanity', () => {
     expect(MOVE.sprintJumpMultiplier).toBeLessThanOrEqual(1.1);
   });
 
-  it('double jump enabled with two charges', () => {
-    expect(MOVE.maxJumps).toBe(2);
+  it('allows one ordinary jump per airtime', () => {
+    expect(MOVE.maxJumps).toBe(1);
   });
   it('dash: two ground charges, regen exists', () => {
     expect(MOVE.dashChargesGround).toBe(2);

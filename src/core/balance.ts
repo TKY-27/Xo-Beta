@@ -236,8 +236,7 @@ export const MOVE = {
 
   jumpVel: 9.2,
   sprintJumpMultiplier: 1.06,
-  doubleJumpVel: 8.7,
-  maxJumps: 2,
+  maxJumps: 1,
   coyoteTime: 0.12,
   jumpBufferTime: 0.12,
 
@@ -268,6 +267,7 @@ export const MOVE = {
   mantleMaxLedge: 2.7,
   mantleMinDepth: 0.5,
   mantleDuration: 0.42,
+  mantleRecovery: 0.75,
 
   grappleRange: 72,
   grappleCooldown: 6.0,
@@ -286,7 +286,7 @@ export const MOVE = {
 
   fallDamageMinSpeed: 15,
   fallDamageMaxSpeed: 34,
-  fallDamageMax: 100,
+  fallDamageMax: 80,
 
   swimSurfaceSpeed: 5.2,
   swimDiveSpeed: 4.6,

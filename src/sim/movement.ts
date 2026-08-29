@@ -23,7 +23,7 @@ export { CAPSULE_CENTER_OFFSET, feetYFromBodyCenter } from '../physics/physics';
 export interface MovementEvents {
   onFootstep(actor: Actor, running: boolean): void;
   onLand(actor: Actor, impactSpeed: number, fallDamage: number): void;
-  onJump(actor: Actor, kind: 'jump' | 'double' | 'wall' | 'slide' | 'bhop'): void;
+  onJump(actor: Actor, kind: 'jump' | 'wall' | 'slide' | 'bhop'): void;
   onSlide(actor: Actor): void;
   onWallrunStart(actor: Actor): void;
   onMantle(actor: Actor): void;
@@ -132,6 +132,7 @@ export class MovementSystem {
       // floor. Preserve the just-computed contact state and locomotion state.
       a.body.body.setNextKinematicTranslation(p);
     }
+    this.capHorizontalVelocity(a);
     // Kill-plane failsafe: never fall forever below the world.
     if (p.y < -60) {
       const surf = this.phys.surfaceAt(p.x, p.z, 80, 200);
@@ -151,6 +152,7 @@ export class MovementSystem {
     if (a.jumpBuffered > 0) a.jumpBuffered -= dt;
     if (a.bhopWindow > 0) a.bhopWindow -= dt;
     if (a.wallrunCooldown > 0) a.wallrunCooldown -= dt;
+    if (a.mantleCooldown > 0) a.mantleCooldown = Math.max(0, a.mantleCooldown - dt);
     if (cmd.jumpPressed) a.jumpBuffered = MOVE.jumpBufferTime;
 
     // Dash charge regen (grounded only)
@@ -274,12 +276,12 @@ export class MovementSystem {
     if (a.inWater) wishSpeed *= 0.55;
 
     if (b.grounded) {
-      this.applyFriction(v, dt, MOVE.frictionGround);
+      if (a.dashTimer <= 0) this.applyFriction(v, dt, MOVE.frictionGround);
       this.accelerate(v, wx, wz, wishSpeed, MOVE.accelGround, dt);
 
       // Soft speed cap (anti infinite-bhop exploit)
       const hs = Math.hypot(v.x, v.z);
-      if (hs > MOVE.softSpeedCap) {
+      if (a.dashTimer <= 0 && hs > MOVE.softSpeedCap) {
         const excess = hs - MOVE.softSpeedCap;
         const damp = Math.max(0, 1 - (excess / MOVE.softSpeedCap) * dt * 3);
         v.x *= damp; v.z *= damp;
@@ -303,7 +305,9 @@ export class MovementSystem {
 
     // Integrate
     const preY = v.y;
+    const beforeMove = { ...b.position };
     b.move(v.x * dt, v.y * dt, v.z * dt);
+    this.reconcileHorizontalVelocity(a, beforeMove, dt);
     if (b.hitCeiling && preY > 0) v.y = 0;
     if (b.grounded && v.y < 0) v.y = 0;
     if (b.grounded && !wasGrounded) {
@@ -380,12 +384,6 @@ export class MovementSystem {
       a.jumpBuffered = 0;
       a.coyote = 0;
       a.bhopWindow = 0;
-    } else if (a.jumpsUsed < MOVE.maxJumps) {
-      v.y = MOVE.doubleJumpVel;
-      // Double jump refreshes a bit of horizontal control
-      a.jumpsUsed++;
-      a.jumpBuffered = 0;
-      this.events.onJump(a, 'double');
     }
   }
 
@@ -457,7 +455,9 @@ export class MovementSystem {
     this.applyFriction(v, dt, MOVE.slideFriction);
     v.y -= MOVE.gravity * dt;
 
+    const beforeMove = { ...b.position };
     b.move(v.x * dt, v.y * dt, v.z * dt);
+    this.reconcileHorizontalVelocity(a, beforeMove, dt);
     if (b.grounded && v.y < 0) v.y = 0;
 
     const hs = Math.hypot(v.x, v.z);
@@ -469,6 +469,7 @@ export class MovementSystem {
       // Slide jump: preserve slide momentum into the air
       a.jumpBuffered = 0;
       v.y = MOVE.jumpVel * 0.92;
+      a.jumpsUsed = 1;
       this.endSlide(a, false);
       this.events.onJump(a, 'slide');
       return;
@@ -616,7 +617,7 @@ export class MovementSystem {
   // -------------------------------------------------------------------------
 
   private tryMantle(a: Actor, cmd: InputCommand): boolean {
-    if (cmd.moveZ < 0.3 && a.jumpBuffered <= 0) return false;
+    if (cmd.moveZ < 0.3 || a.jumpBuffered <= 0 || a.mantleCooldown > 0) return false;
     if (a.inWater) return false;
     const b = a.body;
     const p = b.position;
@@ -628,14 +629,15 @@ export class MovementSystem {
     if (!wallHit || Math.abs(wallHit.normal.y) > 0.4) return false;
 
     // Ledge above and beyond the wall face?
-    const probeX = wallHit.point.x + fwd.x * 0.45;
-    const probeZ = wallHit.point.z + fwd.z * 0.45;
+    const targetInset = MOVE.capsuleRadius + 0.04;
+    const probeX = wallHit.point.x + fwd.x * targetInset;
+    const probeZ = wallHit.point.z + fwd.z * targetInset;
     const topHit = this.phys.raycast(probeX, eye + 1.1, probeZ, 0, -1, 0, 3.4, GROUPS.rayWorldOnly);
-    if (!topHit) return false;
+    if (!topHit || topHit.normal.y < 0.8) return false;
     const ledgeY = topHit.point.y;
     const feetY = feetYFromBodyCenter(p.y);
     const climb = ledgeY - feetY;
-    if (climb < 0.55 || climb > MOVE.mantleMaxLedge) return false;
+    if (climb <= MOVE.stepHeight + 0.02 || climb > MOVE.mantleMaxLedge) return false;
 
     // Clearance above ledge
     const clear = this.phys.raycast(probeX, ledgeY + 0.3, probeZ, 0, 1, 0, 2.2, GROUPS.rayWorldOnly);
@@ -650,10 +652,16 @@ export class MovementSystem {
    * centre ray cannot place an actor inside a ceiling, overhang or wall edge.
    */
   private startMantle(a: Actor, targetX: number, targetY: number, targetZ: number): boolean {
+    if (a.mantleCooldown > 0) return false;
     const from = a.body.position;
+    const ledgeY = targetY - CAPSULE_CENTER_OFFSET;
+    const climb = ledgeY - feetYFromBodyCenter(from.y);
+    if (climb <= MOVE.stepHeight + 0.02 || climb > MOVE.mantleMaxLedge) return false;
+    if (!this.hasStableMantleSupport(a, targetX, ledgeY, targetZ)) return false;
     const raised = { x: from.x, y: targetY, z: from.z };
     const target = { x: targetX, y: targetY, z: targetZ };
-    if (!this.phys.isCharacterSweepClear(from, raised, a.body.body) ||
+    if (!this.phys.isCharacterPositionClear(target.x, target.y, target.z, a.body.body) ||
+        !this.phys.isCharacterSweepClear(from, raised, a.body.body) ||
         !this.phys.isCharacterSweepClear(raised, target, a.body.body)) {
       return false;
     }
@@ -667,6 +675,45 @@ export class MovementSystem {
     a.peakFallSpeed = 0;
     this.events.onMantle(a);
     return true;
+  }
+
+  private hasStableMantleSupport(
+    a: Actor,
+    targetX: number,
+    ledgeY: number,
+    targetZ: number,
+  ): boolean {
+    const fwd = yawDir(a.yaw);
+    const right = rightOf(fwd);
+    const targetInset = MOVE.capsuleRadius + 0.04;
+    const farOffset = Math.max(0, MOVE.mantleMinDepth - targetInset);
+    const sideOffset = MOVE.capsuleRadius * 0.65;
+    const points = [
+      { x: targetX, z: targetZ },
+      { x: targetX + fwd.x * farOffset, z: targetZ + fwd.z * farOffset },
+      { x: targetX + right.x * sideOffset, z: targetZ + right.z * sideOffset },
+      { x: targetX - right.x * sideOffset, z: targetZ - right.z * sideOffset },
+    ];
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const point of points) {
+      const support = this.phys.raycast(
+        point.x,
+        ledgeY + 0.25,
+        point.z,
+        0,
+        -1,
+        0,
+        0.5,
+        GROUPS.rayWorldOnly,
+      );
+      if (!support || support.normal.y < 0.8 || Math.abs(support.point.y - ledgeY) > 0.12) {
+        return false;
+      }
+      minY = Math.min(minY, support.point.y);
+      maxY = Math.max(maxY, support.point.y);
+    }
+    return maxY - minY <= 0.12;
   }
 
   private updateMantle(a: Actor, dt: number): void {
@@ -701,6 +748,7 @@ export class MovementSystem {
     if (requestedDistance > 0.02 && movedDistance < Math.min(0.01, requestedDistance * 0.2)) {
       a.state = a.body.grounded ? 'ground' : 'air';
       a.body.velocity.x = 0; a.body.velocity.y = 0; a.body.velocity.z = 0;
+      a.mantleCooldown = MOVE.mantleRecovery;
       return;
     }
     if (t >= 1) {
@@ -731,7 +779,7 @@ export class MovementSystem {
       a.body.velocity.x = succeeded ? fwd.x * 3.4 : 0;
       a.body.velocity.z = succeeded ? fwd.z * 3.4 : 0;
       a.body.velocity.y = 0;
-      if (succeeded) a.jumpsUsed = 0;
+      a.mantleCooldown = MOVE.mantleRecovery;
     }
   }
 
@@ -906,7 +954,9 @@ export class MovementSystem {
         moved.x + fwdOnly.x * 0.8, movedFeetY + 1.6, moved.z + fwdOnly.z * 0.8,
         0, -1, 0, 2.2, GROUPS.rayWorldOnly,
       );
-      if (ledge && ledge.point.y > movedFeetY + 0.4 && ledge.point.y < movedFeetY + 2.6) {
+      if (cmd.moveZ >= 0.3 && a.jumpBuffered > 0 && a.mantleCooldown <= 0 &&
+          ledge && ledge.point.y > movedFeetY + MOVE.stepHeight + 0.02 &&
+          ledge.point.y < movedFeetY + MOVE.mantleMaxLedge) {
         if (this.startMantle(
           a,
           moved.x + fwdOnly.x * 0.8,
@@ -1038,6 +1088,33 @@ export class MovementSystem {
   // Helpers
   // -------------------------------------------------------------------------
 
+  private reconcileHorizontalVelocity(
+    a: Actor,
+    before: { x: number; z: number },
+    dt: number,
+  ): void {
+    if (a.body.slidAlongWall && dt > 0) {
+      a.body.velocity.x = (a.body.position.x - before.x) / dt;
+      a.body.velocity.z = (a.body.position.z - before.z) / dt;
+    }
+    this.capHorizontalVelocity(a);
+  }
+
+  private capHorizontalVelocity(a: Actor): void {
+    let limit: number = MOVE.softSpeedCap;
+    if (a.grappleActive) limit = MOVE.grappleMaxSpeed;
+    else if (a.dashTimer > 0) limit = MOVE.dashSpeed;
+    else if (a.state === 'slide') limit = MOVE.softSpeedCap + MOVE.slideBoostAdd;
+    else if (a.state === 'air' || a.state === 'wallrun') limit = MOVE.dashSpeed;
+
+    const v = a.body.velocity;
+    const speed = Math.hypot(v.x, v.z);
+    if (speed <= limit || speed < 1e-6) return;
+    const scale = limit / speed;
+    v.x *= scale;
+    v.z *= scale;
+  }
+
   private applyFriction(v: { x: number; y: number; z: number }, dt: number, friction: number): void {
     const hs = Math.hypot(v.x, v.z);
     if (hs < 1e-4) return;
@@ -1066,7 +1143,12 @@ export class MovementSystem {
     const speed = a.peakFallSpeed;
     let dmg = 0;
     if (speed > MOVE.fallDamageMinSpeed) {
-      const t = Math.min(1, (speed - MOVE.fallDamageMinSpeed) / (MOVE.fallDamageMaxSpeed - MOVE.fallDamageMinSpeed));
+      // With constant gravity, fall height is proportional to v². Interpolate
+      // kinetic energy rather than raw impact speed so equal added heights
+      // produce equal added damage and ordinary falls stay less punitive.
+      const minSquared = MOVE.fallDamageMinSpeed ** 2;
+      const maxSquared = MOVE.fallDamageMaxSpeed ** 2;
+      const t = Math.min(1, (speed ** 2 - minSquared) / (maxSquared - minSquared));
       dmg = Math.round(t * MOVE.fallDamageMax);
     }
     if (dmg > 0) {
