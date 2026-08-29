@@ -4,8 +4,9 @@
 
 - Node.js 22+
 - npm 10+
-- A desktop browser (Chrome/Edge recommended) for manual testing
-- Optional: Playwright chromium for browser QA (`npx playwright install chromium`)
+- Desktop Google Chrome for headed release/browser QA (`channel: 'chrome'`)
+- Playwright is installed through the repository dependencies; no bundled
+  Chromium download is required for the primary QA harnesses
 
 ## Quick start
 
@@ -20,7 +21,7 @@ npm run dev        # http://localhost:5173
 src/
   core/       balance config, RNG, events, settings
   physics/    Rapier wrapper, character bodies, queries
-  world/      map data model, builders, nav graph, the three maps
+  world/      map data model, builders, nav graph, the four maps
   sim/        fixed-timestep match simulation (headless-safe)
   ai/         perception, memory, navigation, combat, bot brains
   render/     three.js scene, materials, characters, VFX, camera

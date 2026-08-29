@@ -5,13 +5,19 @@
  */
 
 import type { MapDef } from './types';
+import {
+  buildTerrainGridMesh,
+  sampleTerrainGridMeshHeight,
+  sampleTerrainHeightfield,
+} from './terrainMesh';
 import { RAPIER_READY } from './rapierReady';
 import { initPhysics } from '../physics/physics';
 import { buildNeoCity } from './maps/neocity';
 import { buildOldFront } from './maps/oldfront';
 import { buildEdenFacility } from './maps/eden';
+import { buildAsharaReach } from './maps/desert';
 
-export type MapId = 'neocity' | 'oldfront' | 'eden';
+export type MapId = 'neocity' | 'oldfront' | 'eden' | 'ashara';
 
 export interface LoadedMap {
   def: MapDef;
@@ -22,11 +28,8 @@ const BUILDERS: Record<MapId, () => MapDef> = {
   neocity: buildNeoCity,
   oldfront: buildOldFront,
   eden: buildEdenFacility,
+  ashara: buildAsharaReach,
 };
-
-interface HeightfieldExt {
-  heightfield?: { n: number; heights: Float32Array };
-}
 
 export const MAP_LIST: Array<{
   id: MapId;
@@ -56,6 +59,13 @@ export const MAP_LIST: Array<{
     nameKey: 'map.eden.name',
     descKey: 'map.eden.desc',
   },
+  {
+    id: 'ashara',
+    name: 'ASHARA REACH',
+    description: 'Dense desert compounds, dry wadis, industrial yards and long-range ridges.',
+    nameKey: 'map.ashara.name',
+    descKey: 'map.ashara.desc',
+  },
 ];
 
 /** Must be awaited before constructing a Match (loads the Rapier WASM). */
@@ -67,25 +77,21 @@ export async function ensureWorldReady(): Promise<void> {
 export function loadMap(id: MapId): LoadedMap {
   const def = BUILDERS[id]();
 
-  const hf = (def as MapDef & HeightfieldExt).heightfield;
+  const hf = def.heightfield;
   if (hf) {
-    const n = hf.n;
-    def.terrainHeight = (x: number, z: number) => {
-      // Clamp the sample coordinate before interpolation. Clamping only the
-      // cell index left fx/fz outside 0..1 and extrapolated impossible terrain
-      // heights near/outside map edges (the former pond crossed that edge).
-      const gx = Math.max(0, Math.min(n - 1, ((x + def.size / 2) / def.size) * (n - 1)));
-      const gz = Math.max(0, Math.min(n - 1, ((z + def.size / 2) / def.size) * (n - 1)));
-      const x0 = Math.max(0, Math.min(n - 2, Math.floor(gx)));
-      const z0 = Math.max(0, Math.min(n - 2, Math.floor(gz)));
-      const fx = gx - x0;
-      const fz = gz - z0;
-      const h00 = hf.heights[z0 * n + x0]!;
-      const h10 = hf.heights[z0 * n + x0 + 1]!;
-      const h01 = hf.heights[(z0 + 1) * n + x0]!;
-      const h11 = hf.heights[(z0 + 1) * n + x0 + 1]!;
-      return h00 * (1 - fx) * (1 - fz) + h10 * fx * (1 - fz) + h01 * (1 - fx) * fz + h11 * fx * fz;
-    };
+    const half = def.size / 2;
+    const terrainMesh = buildTerrainGridMesh({
+      minX: -half,
+      maxX: half,
+      minZ: -half,
+      maxZ: half,
+      segmentsX: hf.n - 1,
+      segmentsZ: hf.n - 1,
+      heightAt: (x, z) => sampleTerrainHeightfield(hf, def.size, x, z),
+      removals: def.terrainCutouts ?? [],
+    });
+    def.terrainMesh = terrainMesh;
+    def.terrainHeight = (x: number, z: number) => sampleTerrainGridMeshHeight(terrainMesh, x, z);
   }
 
   const terrainHeight = def.terrainHeight ?? (() => 0);

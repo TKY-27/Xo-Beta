@@ -66,6 +66,7 @@
   --map-neocity: #53d8ff;
   --map-oldfront: #d8a04a;
   --map-eden: #52d97a;
+  --map-ashara: #e5a84b;
   --rarity-common: #9aa3ad;
   --rarity-uncommon: #4ecb6d;
   --rarity-rare: #4f9fe8;
@@ -345,6 +346,7 @@ html[lang='ja'] .diff-btn { letter-spacing: 0.1em; }
 .settings-rail {
   flex: 0 0 15rem; display: flex; flex-direction: column; gap: 0.35rem; align-items: stretch;
 }
+html[lang='ja'] .settings-rail { flex-basis: 18rem; }
 .rail-btn {
   font-family: var(--font-display);
   text-align: left; padding: 0.6rem 1rem; cursor: pointer;
@@ -427,6 +429,10 @@ html[lang='ja'] #loading-status { letter-spacing: 0.06em; }
 /* ------------------------------------------------------------------ */
 
 #hud { position: fixed; inset: 0; z-index: 20; pointer-events: none; }
+html[data-xo-qa-hero='1'] #hud,
+html[data-xo-qa-hero='1'] #tac-map-overlay,
+html[data-xo-qa-hero='1'] #captions,
+html[data-xo-qa-hero='1'] .interact-prompt { visibility: hidden !important; }
 
 #vignette, #storm-vignette {
   position: absolute; inset: 0; pointer-events: none; transition: opacity 0.4s ease;
@@ -642,7 +648,7 @@ html[lang='ja'] #minimap-label { letter-spacing: 0.06em; }
 
 /* Banners */
 #center-banner {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  position: absolute; left: 50%; top: 36%; transform: translate(-50%, -50%);
   font-family: var(--font-display);
   font-size: 1.15rem; font-weight: 700; letter-spacing: 0.3em; text-indent: 0.3em;
   color: #ffffff; text-shadow: var(--hud-shadow);
@@ -690,7 +696,7 @@ html[lang='ja'] #storm-warning { letter-spacing: 0.06em; text-indent: 0.06em; }
 
 /* Contextual loot panel */
 #loot-panel {
-  position: absolute; left: 50%; bottom: 37%; transform: translateX(-50%);
+  position: absolute; left: 34px; bottom: 104px;
   min-width: 280px; max-width: 360px;
   background: rgba(10, 13, 19, 0.92);
   border: 1px solid var(--loot-rarity, var(--panel-border));
@@ -699,7 +705,7 @@ html[lang='ja'] #storm-warning { letter-spacing: 0.06em; text-indent: 0.06em; }
   display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 13px; align-items: center;
   border-left-width: 4px;
   border-radius: 4px;
-  animation: promptIn 0.18s ease both;
+  animation: lootPanelIn 0.18s ease both;
 }
 #loot-panel.hidden { display: none; }
 #loot-panel .lp-icon {
@@ -728,6 +734,10 @@ html[lang='ja'] #loot-panel .lp-rarity { letter-spacing: 0.12em; }
 #loot-panel .lp-key kbd { font-size: 0.72rem; }
 #loot-panel .lp-full { grid-column: 1 / -1; margin-top: 0; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.08); font-size: 0.66rem; letter-spacing: 0.08em; color: var(--gold); font-weight: 700; }
 html[lang='ja'] #loot-panel .lp-full { letter-spacing: 0.05em; }
+@keyframes lootPanelIn {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
 
 /* Full inventory — functional desktop loadout surface, not a decorative modal. */
 #inventory-overlay {
@@ -794,6 +804,7 @@ body.inventory-open canvas { cursor: default; }
 body.scoped #loot-panel,
 body.scoped #interact-prompt { display: none; }
 @media (max-width: 900px) {
+  #loot-panel { left: 16px; bottom: 92px; max-width: min(360px, calc(100vw - 32px)); }
   .inventory-grid { grid-template-columns: 230px minmax(480px, 1fr); }
   .inventory-shell { width: calc(100vw - 24px); overflow-x: auto; }
 }

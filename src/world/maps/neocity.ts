@@ -4,18 +4,19 @@
  * underground level, alleys, vehicle cover, strong colored lighting.
  */
 
-import { WorldBuilder } from '../builder';
+import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, addGround } from './common';
+import { addBuilding, addGround, slabWithHole } from './common';
 
 const S = 500; // map size
+const TRANSIT_CUTOUT = { minX: 117.7, maxX: 121.3, minZ: -140, maxZ: -127, surfaceY: 0 };
 
 export function buildNeoCity(): MapDef {
   const rng = new Rng(0x0c17 + 7);
   const b = new WorldBuilder('neocity', 'NEO CITY', 'A rain-slicked neon district. Fight through streets, arcologies and rooftops.', S);
 
-  addGround(b, S, 'asphalt');
+  addGround(b, S, 'asphalt', 0, true, [TRANSIT_CUTOUT]);
 
   // Street grid: roads every 100u (visual strips), sidewalks
   for (let i = -2; i <= 2; i++) {
@@ -96,6 +97,22 @@ export function buildNeoCity(): MapDef {
   neonSigns(b, rng, [
     [108, 96, 0xff4fd8], [126, 150, 0x53ffe0], [152, 118, 0x7a5cff],
   ]);
+  // Mark the broad southern approach as an actual market threshold. The
+  // posts sit outside the clear road; the header and luminous inserts are
+  // presentation-only so the landmark gains scale without an overhead snag.
+  const marketGateZ = 92;
+  for (const side of [-1, 1]) {
+    const gateX = 120 + side * 9;
+    b.box(gateX, 2.15, marketGateZ, 0.48, 4.3, 0.48, 'metalExterior');
+    b.box(gateX, 0.22, marketGateZ, 1.1, 0.44, 1.1, 'concreteDark');
+    for (const bandY of [1.25, 2.15, 3.05]) {
+      b.box(gateX, bandY, marketGateZ - 0.27, 0.72, 0.12, 0.08,
+        side < 0 ? 'neonMagenta' : 'neonCyan', 0, { noCollide: true });
+    }
+  }
+  b.box(120, 4.18, marketGateZ, 18.5, 0.34, 0.62, 'metalExterior', 0, { noCollide: true });
+  b.box(120, 4.2, marketGateZ - 0.36, 7.4, 0.13, 0.08, 'signDimCyan', 0, { noCollide: true });
+  b.light(120, 4.25, marketGateZ - 0.6, 0x67dfff, 1.15, 18);
 
   // ------------------------------------------------------------------
   // POI: CYBERDOME ARENA (NW)
@@ -245,6 +262,7 @@ export function buildNeoCity(): MapDef {
   litWindows(b, rng);
   streetDressing(b, rng);
   lotDressing(b, rng);
+  removeRoadPaintUnderFoundations(b);
 
   return b.finish(
     {
@@ -257,18 +275,18 @@ export function buildNeoCity(): MapDef {
       sunColor: 0xa8c0e8,
       sunIntensity: 2.6,
       ambientColor: 0x93a9d4,
-      ambientIntensity: 0.92,
+      ambientIntensity: 1.08,
       hemisphereSky: 0x5f7cb8,
       hemisphereGround: 0x2e3646,
-      hemisphereIntensity: 1.7,
-      exposure: 1.22,
+      hemisphereIntensity: 1.9,
+      exposure: 1.16,
       envIntensity: 0.95,
       backgroundIntensity: 1.0,
       grade: {
         vignette: 0.34,
-        saturation: 1.1,
-        contrast: 1.05,
-        lift: [0.004, 0.008, 0.018],
+        saturation: 1.03,
+        contrast: 1.02,
+        lift: [0.012, 0.015, 0.025],
       },
     },
     { from: [-330, -80], to: [330, 60] },
@@ -436,10 +454,28 @@ function perimeterBand(b: WorldBuilder, rng: Rng): void {
 function rampTo(b: WorldBuilder, cx: number, cz: number, startR: number, topY: number, yaw: number): void {
   const steps = 14;
   const rise = topY / steps;
+  const treadD = 0.85;
+  const width = 3.2;
   for (let i = 0; i < steps; i++) {
-    const d = startR + 0.4 + i * 0.85;
-    b.box(cx + Math.cos(yaw) * d, rise * (i + 0.5), cz + Math.sin(yaw) * d, 3.2, rise * (i + 1), 0.9, 'metalDark', yaw);
-    b.platform(cx + Math.cos(yaw) * d - 1.6, cx + Math.cos(yaw) * d + 1.6, cz + Math.sin(yaw) * d - 0.5, cz + Math.sin(yaw) * d + 0.5, rise * (i + 1));
+    // Start low on the outside and finish flush with the arena ring. The old
+    // ordering climbed away from the destination and also swapped stair width
+    // with tread depth, leaving a narrow, disconnected strip.
+    const d = startR + (steps - i - 0.5) * treadD;
+    const x = cx + Math.cos(yaw) * d;
+    const z = cz + Math.sin(yaw) * d;
+    const treadTop = rise * (i + 1);
+    const alongX = Math.abs(Math.cos(yaw)) > 0.5;
+    const sx = alongX ? treadD + 0.05 : width;
+    const sz = alongX ? width : treadD + 0.05;
+    // Solid risers visually and physically support the exposed arena ramp.
+    b.box(x, treadTop / 2, z, sx, treadTop, sz, 'metalDark', 0, { preserveInTerrainCutout: true });
+    b.platform(x - sx / 2, x + sx / 2, z - sz / 2, z + sz / 2, treadTop, false, true);
+    if (i % 3 === 0 || i === steps - 1) {
+      const sideX = alongX ? 0 : width / 2 + 0.08;
+      const sideZ = alongX ? width / 2 + 0.08 : 0;
+      b.box(x + sideX, treadTop + 0.5, z + sideZ, 0.1, 1, 0.1, 'metalExterior', 0, { noCollide: true });
+      b.box(x - sideX, treadTop + 0.5, z - sideZ, 0.1, 1, 0.1, 'metalExterior', 0, { noCollide: true });
+    }
   }
 }
 
@@ -464,14 +500,28 @@ function courtyardProps(b: WorldBuilder, rng: Rng, cx: number, cz: number): void
 }
 
 function underpassStation(b: WorldBuilder, cx: number, cz: number): void {
-  // Shaft down to platform at y=-5
+  // Open cut-and-cover entrance west of the room. The former staircase sat
+  // below the unbroken global ground slab and intersected the room ceiling.
   const depth = 5;
-  b.stairs(cx - 8, 0, cz - 3, 0, 10, -depth / 10, 0.62, 2.2, 'concreteDark');
+  const entryX = cx - 5.5;
+  const entryZ = cz - 15;
+  b.stairs(entryX, 0, entryZ, 0, 10, -depth / 10, 0.78, 2.6, 'concreteDark');
+  b.box(entryX - 1.7, -2.5, entryZ + 4, 0.3, 5, 9.2, 'concreteDark');
+  b.box(entryX + 1.7, -2.5, entryZ + 4, 0.3, 5, 9.2, 'concreteDark');
+  b.slab(entryX, -depth, cz - 6.5, 3.2, 3.8, 0.35, 'concreteDark');
   // Platform box (hollow room underground)
   const py = -depth;
   b.slab(cx, py, cz, 30, 16, 0.5, 'concreteDark');
-  b.slab(cx, py + 4.4, cz, 30, 16, 0.5, 'concreteDark'); // ceiling
-  b.wallWithGaps(cx - 15, cz - 8, 32, 4.4, 0.5, 'x', 'concrete', [[14, 2.4]], 0, py);
+  slabWithHole(b, cx, py + 4.4, cz, 30, 16, 0.5, 'concreteDark', {
+    minX: entryX - 1.8,
+    maxX: entryX + 1.8,
+    minZ: cz - 9,
+    maxZ: cz - 2.5,
+  });
+  // Give the 2.6 m stair lane a full capsule margin at the room threshold.
+  // A 2.4 m gap was technically passable on centre but caught ordinary
+  // third-person movement only 2 cm from either jamb.
+  b.wallWithGaps(cx - 15, cz - 8, 32, 4.4, 0.5, 'x', 'concrete', [[8, 3]], 0, py);
   b.wallWithGaps(cx - 15, cz + 8, 32, 4.4, 0.5, 'x', 'concrete', [], 0, py);
   b.wallWithGaps(cx - 15, cz - 8, 16, 4.4, 0.5, 'z', 'concrete', [], 0, py);
   b.wallWithGaps(cx + 15, cz - 8, 16, 4.4, 0.5, 'z', 'concrete', [], 0, py);
@@ -511,18 +561,69 @@ function alleyFill(b: WorldBuilder, cx: number, cz: number): void {
 
 function parkingGarage(b: WorldBuilder, cx: number, cz: number): void {
   // Two open levels with ramps
+  const ramp = planStairs(8, 0.45, 0.65, 3);
+  const rampX = cx + 10;
+  const rampStartZ = cz - 8;
+  const rampEndZ = rampStartZ + ramp.run;
   for (let lvl = 0; lvl < 2; lvl++) {
     const y = lvl * 3.6;
-    b.slab(cx, y + 0.2, cz, 30, 20, 0.4, 'concreteDark');
+    if (lvl === 0) {
+      b.slab(cx, y + 0.4, cz, 30, 20, 0.4, 'concreteDark');
+    } else {
+      // Keep the complete normalized ramp volume open. The former continuous
+      // upper slab crossed the flight at head height, so the access looked
+      // plausible from outside but the character capsule hit a solid ceiling.
+      slabWithHole(b, cx, y + 0.4, cz, 30, 20, 0.4, 'concreteDark', {
+        minX: rampX - ramp.width / 2 - 0.48,
+        maxX: rampX + ramp.width / 2 + 0.48,
+        minZ: rampStartZ - 0.48,
+        maxZ: rampEndZ,
+      });
+    }
     for (const sx of [-1, 1]) {
       b.box(cx + sx * 15, y + 1.9, cz, 0.4, 3.6, 20, 'concrete');
     }
     b.box(cx, y + 1.9, cz - 10, 30, 3.6, 0.4, 'concrete');
     b.wallWithGaps(cx - 15, cz + 10, 30, 3.6, 0.4, 'x', 'concrete', [[12, 6]], 0, y);
-    b.platform(cx - 15, cx + 15, cz - 10, cz + 10, y + 0.4);
     // ramp between levels
     if (lvl === 0) {
-      b.stairs(cx + 10, y + 0.4, cz - 8, 0, 8, 0.45, 0.65, 3, 'concreteDark');
+      b.stairs(rampX, y + 0.4, rampStartZ, 0, ramp.steps, ramp.stepH, ramp.stepD, ramp.width, 'concreteDark');
+      // The open stairwell needs a readable fall edge. Keep the rails visual-only
+      // and just outside the three-metre walking lane so the existing capsule
+      // clearance and combat flow remain unchanged.
+      const rampSlope = Math.atan2(ramp.totalRise, ramp.run);
+      const railLength = Math.hypot(ramp.run, ramp.totalRise);
+      const railCentreZ = rampStartZ + ramp.run / 2;
+      for (const side of [-1, 1]) {
+        const railX = rampX + side * (ramp.width / 2 + 0.04);
+        for (const railHeight of [0.5, 0.9]) {
+          b.box(
+            railX,
+            y + 0.4 + ramp.totalRise / 2 + railHeight,
+            railCentreZ,
+            0.1,
+            0.1,
+            railLength,
+            'metalDark',
+            0,
+            { noCollide: true, pitch: -rampSlope },
+          );
+        }
+        for (let post = 0; post <= 4; post++) {
+          const t = post / 4;
+          b.box(
+            railX,
+            y + 0.4 + ramp.totalRise * t + 0.45,
+            rampStartZ + ramp.run * t,
+            0.1,
+            0.9,
+            0.1,
+            'metalDark',
+            0,
+            { noCollide: true },
+          );
+        }
+      }
     }
     for (let i = 0; i < 2; i++) {
       b.vehicle(cx - 8 + i * 12, cz + 4, y + 0.4, i % 2 ? 0 : Math.PI, 'sedan', 0x2b3038);
@@ -594,9 +695,16 @@ function overpass(b: WorldBuilder, cx: number, cz: number): void {
   }
   b.wallWithGaps(cx - 30, cz - 5, 60, 1.1, 0.3, 'x', 'concrete', [], 0, 6.4);
   b.wallWithGaps(cx - 30, cz + 5, 60, 1.1, 0.3, 'x', 'concrete', [], 0, 6.4);
-  // access stairs at both ends
-  b.stairs(cx - 30, 0, cz - 4.5, 0, 11, 0.58, 0.6, 2.6, 'concreteDark');
-  b.stairs(cx + 30, 0, cz + 4.5, 2, 11, 0.58, 0.6, 2.6, 'concreteDark');
+  // Access stairs climb along the bridge axis and meet its open end faces.
+  // The old flights started at the ends but climbed across the road width,
+  // finishing beside the deck instead of on it after stair normalization.
+  const access = planStairs(11, 6.8 / 11, 0.6, 2.6);
+  // Keep the north-side flights clear of the neighbouring upper-floor slabs.
+  // At z=cz the left flight passed through a building ceiling at x≈-74 and
+  // the right flight met another floor near x≈12, blocking real KCC ascent.
+  const accessZ = cz + 4.2;
+  b.stairs(cx - 30 - access.run, 0, accessZ, 1, access.steps, access.stepH, access.stepD, access.width, 'concreteDark');
+  b.stairs(cx + 30 + access.run, 0, accessZ, 3, access.steps, access.stepH, access.stepD, access.width, 'concreteDark');
   b.chest(cx, 6.8, cz, 'elite');
   b.loot(cx + 12, 6.9, cz + 2);
   b.crate(cx - 12, 6.6, cz - 2, 1);
@@ -630,7 +738,10 @@ function billboardSpot(b: WorldBuilder, cx: number, cz: number): void {
  */
 function litWindows(b: WorldBuilder, rng: Rng): void {
   const facadeMats: MatKey[] = ['facadeA', 'facadeB', 'facadeC', 'plasterOld'];
-  const warmMats: MatKey[] = ['windowWarm', 'windowWarm', 'windowWarm', 'neonCyan', 'neonBlue', 'neonOrange'];
+  const warmMats: MatKey[] = [
+    'windowWarm', 'windowWarm', 'windowWarm', 'windowWarm',
+    'windowWarm', 'windowWarm', 'windowCool', 'windowCool',
+  ];
   const geo = b.def.geo;
   const pushWindow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, mat: MatKey) =>
     geo.push({ kind: 'box', x, y, z, sx, sy, sz, yaw: 0, mat, noCollide: true });
@@ -744,6 +855,33 @@ function lotDressing(b: WorldBuilder, rng: Rng): void {
 }
 
 /**
+ * Road markings are thin decals above the asphalt. Buildings are authored
+ * later, so without this visibility pass those decals protrude through the
+ * lower foundation surface and continue across lobby floors. Remove only
+ * decal boxes actually covered by a building foundation; street segments and
+ * doorway collision remain untouched.
+ */
+function removeRoadPaintUnderFoundations(b: WorldBuilder): void {
+  const foundations = b.def.geo.filter((geo) => (
+    geo.kind === 'box'
+    && Math.abs(geo.sy - 2.2) < 1e-6
+    && geo.sx > 5
+    && geo.sz > 5
+  ));
+  b.def.geo = b.def.geo.filter((geo) => {
+    if (geo.kind !== 'box' || geo.mat !== 'paint' || !geo.noCollide) return true;
+    const paintTop = geo.y + geo.sy / 2;
+    return !foundations.some((foundation) => {
+      if (foundation.kind !== 'box') return false;
+      const foundationTop = foundation.y + foundation.sy / 2;
+      return paintTop > foundationTop + 1e-4
+        && Math.abs(geo.x - foundation.x) < (geo.sx + foundation.sx) / 2
+        && Math.abs(geo.z - foundation.z) < (geo.sz + foundation.sz) / 2;
+    });
+  });
+}
+
+/**
  * Street-level dressing: hanging cables between poles/buildings, neon
  * blade signs, AC units and rooftop clutter, traffic signal boxes,
  * barricades and debris piles. All noCollide decoration.
@@ -793,10 +931,32 @@ function streetDressing(b: WorldBuilder, rng: Rng): void {
     }
   }
 
+  // The north service boulevard is a common boundary approach, but the broad
+  // pavement previously reached the skyline without a single human-scale
+  // stopping point. Paired rain gardens, benches and low guide lights create
+  // a deliberate threshold while keeping the road and combat sightline open.
+  for (const z of [-232, -214]) {
+    for (const side of [-1, 1]) {
+      const planterX = side * 19;
+      b.box(planterX, 0.42, z, 4.8, 0.72, 1.15, 'concreteDark', 0, { noCollide: true });
+      b.box(planterX, 0.81, z, 4.25, 0.16, 0.72, 'grass', 0, { noCollide: true });
+      b.box(side * 14.8, 0.58, z, 3.2, 0.16, 0.72, 'woodDark', 0, { noCollide: true });
+      for (const offset of [-1.25, 1.25]) {
+        b.box(side * 14.8 + offset, 0.31, z, 0.12, 0.62, 0.52, 'metalDark', 0, { noCollide: true });
+      }
+      const lightX = side * 10.4;
+      b.cyl(lightX, 0.48, z, 0.1, 0.96, 'metalDark', { segments: 10, noCollide: true });
+      b.box(lightX, 0.98, z, 0.28, 0.08, 0.28, 'signDimCyan', 0, { noCollide: true });
+    }
+  }
+
   // Rooftop clutter on flat-roofed mid buildings (AC units, vents, water tanks)
-  for (const g of b.def.geo) {
+  // Snapshot the authored structures before appending rooftop detail. Iterating
+  // the live array recursively treated newly added posts/rails as buildings.
+  for (const g of [...b.def.geo]) {
     if (g.kind !== 'box') continue;
     if (g.sy < 6.5 || g.sy > 20) continue;
+    if (Math.min(g.sx, g.sz) < 3) continue;
     const topY = g.y + g.sy / 2;
     const units = rng.int(1, 3);
     for (let u = 0; u < units; u++) {

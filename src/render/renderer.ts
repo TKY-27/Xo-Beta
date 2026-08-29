@@ -18,6 +18,11 @@ import type { SkyConfig } from '../world/types';
 import { getSettings } from '../core/settings';
 import { loadHdri, clampHdriPeaks } from '../assets/assets';
 
+interface DebugRendererInfoExt {
+  UNMASKED_VENDOR_WEBGL: number;
+  UNMASKED_RENDERER_WEBGL: number;
+}
+
 /** Display-referred grading: vignette + gentle saturation/contrast shaping. */
 const GradingShader = {
   uniforms: {
@@ -183,8 +188,10 @@ export class GameRenderer {
   private fallbackSky: THREE.Mesh | null = null;
   private sunOffset = new THREE.Vector3(120, 220, 90);
   private grading = { vignette: 0.3, saturation: 1.05, contrast: 1.03, lift: new THREE.Vector3(0, 0, 0.004) };
+  private readonly gpuProfiling: boolean;
+  private gpuDevice = 'unavailable';
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, gpuProfiling = false) {
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: false,
@@ -198,6 +205,15 @@ export class GameRenderer {
     this.renderer.toneMappingExposure = 1.25;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.setPixelRatio(this.effectivePixelRatio());
+    this.gpuProfiling = gpuProfiling;
+    if (gpuProfiling) this.renderer.info.autoReset = false;
+    if (gpuProfiling) {
+      const gl = this.renderer.getContext() as WebGL2RenderingContext;
+      const debug = gl.getExtension('WEBGL_debug_renderer_info') as DebugRendererInfoExt | null;
+      if (debug) {
+        this.gpuDevice = `${String(gl.getParameter(debug.UNMASKED_VENDOR_WEBGL))} / ${String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL))}`;
+      }
+    }
 
     window.addEventListener('resize', this.onResize);
   }
@@ -234,6 +250,20 @@ export class GameRenderer {
     this.renderer.dispose();
   }
 
+  gpuDeviceLabel(): string {
+    return this.gpuDevice;
+  }
+
+  /** QA-only one-shot GPU completion measurement; intentionally stalls this frame. */
+  measureSynchronousFrame(dt = 0): number {
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    gl.finish();
+    const start = performance.now();
+    this.render(dt);
+    gl.finish();
+    return performance.now() - start;
+  }
+
   /** Enable the optical sniper view without replacing the primary camera. */
   setScopeActive(active: boolean, sourceCamera?: THREE.PerspectiveCamera): void {
     this.scopeActive = active;
@@ -247,7 +277,14 @@ export class GameRenderer {
       this.scopeTarget?.dispose();
       this.scopeTarget = null;
     }
-    this.scopePass?.setScope(this.scopeTarget?.texture ?? null, this.scopeActive, window.innerWidth / Math.max(1, window.innerHeight));
+    if (this.scopePass) {
+      this.scopePass.enabled = this.scopeActive;
+      this.scopePass.setScope(
+        this.scopeTarget?.texture ?? null,
+        this.scopeActive,
+        window.innerWidth / Math.max(1, window.innerHeight),
+      );
+    }
   }
 
   private resizeScopeTarget(width: number, height: number): void {
@@ -387,7 +424,8 @@ export class GameRenderer {
     this.scene.add(this.ambient);
     // Sky-fill from the opposite side of the sun: keeps sun-facing contrast but
     // lifts shaded facades so north walls don't read as near-black slabs.
-    const fill = new THREE.DirectionalLight(sky.hemisphereSky, 0.55);
+    const fillIntensity = sky.preset === 'bluehour' ? 0.92 : sky.preset === 'overcast' ? 0.22 : 0.72;
+    const fill = new THREE.DirectionalLight(sky.hemisphereSky, fillIntensity);
     fill.position.copy(sunPos).negate().setY(90);
     this.scene.add(fill);
   }
@@ -547,6 +585,10 @@ export class GameRenderer {
     // lens receives the same display treatment as the primary view. GTAO is
     // camera-depth dependent and therefore remains on the primary view only.
     this.scopePass = new ScopeCompositePass();
+    // The disabled shader returns the input unchanged, but executing it still
+    // costs a full-resolution draw and buffer swap. Skip the pass entirely
+    // until the optical scope is actually active.
+    this.scopePass.enabled = this.scopeActive;
     this.scopePass.setScope(
       this.scopeTarget?.texture ?? null,
       this.scopeActive,
@@ -651,6 +693,7 @@ export class GameRenderer {
   render(dt: number): void {
     const settings = getSettings();
     const usePost = settings.postProcessing || settings.aa !== 'off';
+    if (this.gpuProfiling) this.renderer.info.reset();
     this.renderScopeTarget();
     if (this.composer && (usePost || this.scopeActive) && this.renderPass) {
       this.composer.render(dt);

@@ -13,6 +13,13 @@ actual=$(mktemp)
 checksum_rows=$(mktemp)
 trap 'rm -f -- "$expected" "$actual" "$checksum_rows"' EXIT HUP INT TERM
 
+for map in neocity oldfront eden ashara; do
+  if [ ! -f "$asset_root/maps/$map.jpg" ]; then
+    echo "asset audit FAILED — missing generated map hero: maps/$map.jpg"
+    exit 1
+  fi
+done
+
 awk 'NF >= 2 && $1 !~ /^#/ { print $2 }' "$checksum_file" | LC_ALL=C sort > "$expected"
 find "$asset_root/sky" "$asset_root/textures" "$asset_root/models" \
   "$asset_root/audio" "$asset_root/fonts" -type f -print \

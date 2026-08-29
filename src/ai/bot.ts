@@ -15,6 +15,7 @@ import type { WorldItem } from '../sim/loot';
 import { Perception } from './perception';
 import { BotNavigator } from './navigator';
 import { BotCombat } from './combat';
+import { feetYFromBodyCenter } from '../physics/physics';
 
 export type BotMode = 'drop' | 'loot' | 'combat' | 'heal' | 'rotate' | 'thirdparty' | 'ambush' | 'wander' | 'search';
 
@@ -454,7 +455,7 @@ export class BotController {
     // Patrol locally: random nav node near current position (keeps bots in
     // their area early game; the storm handles global convergence later).
     const p = this.actor.body.position;
-    const list = this.match.nav.nodesWithin(p.x, p.z, 62, p.y, 8);
+    const list = this.match.nav.nodesWithin(p.x, p.z, 62, feetYFromBodyCenter(p.y), 8);
     if (list.length) {
       const node = list[this.rng.int(0, list.length - 1)]!;
       this.goalPos = { x: node.x, y: node.y, z: node.z };
@@ -582,7 +583,7 @@ export class BotController {
         this.lastCombatEnd = this.match.time;
         this.mode = 'wander';
         const p2 = a.body.position;
-        const list = this.match.nav.nodesWithin(p2.x, p2.z, 90, p2.y, 9)
+        const list = this.match.nav.nodesWithin(p2.x, p2.z, 90, feetYFromBodyCenter(p2.y), 9)
           .filter((n) => Math.hypot(n.x - p2.x, n.z - p2.z) > 45);
         if (list.length) {
           const node = list[this.rng.int(0, list.length - 1)]!;

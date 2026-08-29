@@ -56,6 +56,14 @@ export interface ChestEntity {
   openT: number;
 }
 
+/** Test a point against the complete finite water volume, including its bed. */
+export function waterVolumeContains(w: WaterVolume, x: number, y: number, z: number): boolean {
+  return x >= w.minX && x <= w.maxX
+    && z >= w.minZ && z <= w.maxZ
+    && y >= w.surfaceY - w.depth
+    && y <= w.surfaceY + 0.2;
+}
+
 export type GroundSurface = 'stone' | 'metal' | 'wood' | 'grass' | 'water';
 
 /** Resolve the material directly under the soles, never under the capsule centre. */
@@ -334,7 +342,7 @@ export class Match {
       ? this.mapDef.pois[this.rng.int(0, this.mapDef.pois.length - 1)]
       : undefined;
     const candidates = poi
-      ? this.nav.nodesWithin(poi.x, poi.z, poi.radius).filter((node) => !node.water)
+      ? this.nav.nodesWithin(poi.x, poi.z, poi.radius).filter((node) => !node.water && node.edges.length > 0)
       : [];
     // Practice should open into a readable exploration space, not a narrow
     // interior where the TPS boom immediately collapses against a wall. Rank
@@ -365,7 +373,7 @@ export class Match {
 
   waterAt(x: number, y: number, z: number): WaterVolume | null {
     for (const w of this.waterVolumes) {
-      if (x >= w.minX && x <= w.maxX && z >= w.minZ && z <= w.maxZ && y <= w.surfaceY + 0.2) return w;
+      if (waterVolumeContains(w, x, y, z)) return w;
     }
     return null;
   }
@@ -878,6 +886,23 @@ export class Match {
    * reach is horizontal from the actor's feet, with a floor-height guard so a
    * chest above or below the player cannot steal the prompt through a ceiling.
    */
+  chestHasLineOfSightFrom(x: number, eyeY: number, z: number, chest: ChestEntity): boolean {
+    // Chests have a real static collider. Aim the visibility segment at the
+    // near face instead of its centre, otherwise the target chest blocks its
+    // own interaction ray. Any wall before that face still rejects it.
+    const towardActorX = x - chest.x;
+    const towardActorZ = z - chest.z;
+    const faceDistance = Math.max(
+      Math.abs(towardActorX) / 0.55,
+      Math.abs(towardActorZ) / 0.38,
+    );
+    if (faceDistance < 1e-6) return false;
+    const faceScale = 1 / faceDistance;
+    const targetX = chest.x + towardActorX * faceScale;
+    const targetZ = chest.z + towardActorZ * faceScale;
+    return !this.phys.losBlocked(x, eyeY, z, targetX, chest.y + 0.45, targetZ);
+  }
+
   nearestInteractableChest(a: Actor, maxDist = GAMEPLAY.interactionRange): ChestEntity | null {
     const p = a.body.position;
     const feetY = feetYFromBodyCenter(p.y);
@@ -890,6 +915,7 @@ export class Match {
       const dz = chest.z - p.z;
       const distance = dx * dx + dz * dz;
       if (distance > maxDistSq) continue;
+      if (!this.chestHasLineOfSightFrom(p.x, a.eyeY, p.z, chest)) continue;
       if (distance < bestDistance || (distance === bestDistance && (best === null || chest.id < best.id))) {
         best = chest;
         bestDistance = distance;
@@ -920,7 +946,8 @@ export class Match {
         const dz = item.z - p.z;
         return { item, distance: dx * dx + dy * dy + dz * dz };
       })
-      .filter(({ distance }) => distance <= maxDistSq)
+      .filter(({ item, distance }) => distance <= maxDistSq
+        && !this.phys.losBlocked(p.x, a.eyeY, p.z, item.x, item.y, item.z))
       .sort((a, b) => a.distance - b.distance || a.item.id - b.item.id)
       .map(({ item }) => item);
   }
@@ -1028,7 +1055,7 @@ export class Match {
       if (tooClose(spawn.x, spawn.z)) continue;
       // Authored heights drift out of sync as maps are rebuilt — re-snap every
       // authored spawn to the real surface so nothing floats or buries.
-      const node = this.nav.nearest(spawn.x, spawn.z, 14);
+      const node = this.nav.nearest(spawn.x, spawn.y, spawn.z, 14);
       let y = spawn.y;
       const refY = node ? Math.max(spawn.y, node.y) : spawn.y;
       const surf = this.phys.surfaceAt(spawn.x, spawn.z, refY + 2.5, 7);
@@ -1052,7 +1079,8 @@ export class Match {
       const rad = Math.sqrt(this.rng.next()) * poi.radius;
       const x = poi.x + Math.cos(ang) * rad;
       const z = poi.z + Math.sin(ang) * rad;
-      const node = this.nav.nearest(x, z, 18);
+      const approximateY = this.phys.surfaceAt(x, z, 300, 500) ?? 0;
+      const node = this.nav.nearest(x, approximateY, z, 18);
       if (!node || node.water) continue;
       // Controlled randomness: never sit exactly on the nav lattice. Offset
       // each item, then re-snap to the real surface so nothing floats or

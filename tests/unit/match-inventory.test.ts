@@ -3,13 +3,14 @@ import { RAPIER_READY } from '../../src/world/rapierReady';
 import { loadMap } from '../../src/world';
 import { Match } from '../../src/sim/match';
 import { WEAPONS } from '../../src/core/balance';
+import { feetYFromBodyCenter } from '../../src/physics/physics';
 
 beforeAll(async () => {
   await RAPIER_READY();
 });
 
-async function makePractice(): Promise<Match> {
-  const loaded = await loadMap('eden');
+async function makePractice(mapId: 'neocity' | 'oldfront' | 'eden' | 'ashara' = 'eden'): Promise<Match> {
+  const loaded = await loadMap(mapId);
   return new Match({
     mapDef: loaded.def,
     seed: 120034,
@@ -85,10 +86,11 @@ describe('player inventory UI simulation API', () => {
     const match = await makePractice();
     const player = match.player!;
     const p = player.body.position;
-    const first = match.loot.spawnWeapon(p.x + 1.1, p.y - 1.35, p.z, {
+    const feetY = feetYFromBodyCenter(p.y);
+    const first = match.loot.spawnWeapon(p.x + 1.1, feetY, p.z, {
       kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: WEAPONS.pistol.magSize,
     }, match.rng);
-    const second = match.loot.spawnWeapon(p.x + 1.1, p.y - 1.35, p.z, {
+    const second = match.loot.spawnWeapon(p.x + 1.1, feetY, p.z, {
       kind: 'weapon', weaponId: 'ar', rarity: 'rare', ammoInMag: WEAPONS.ar.magSize,
     }, match.rng);
     expect(match.nearestInteractableItem(player)?.id).toBe(first.id);
@@ -102,7 +104,7 @@ describe('player inventory UI simulation API', () => {
     const match = await makePractice();
     const player = match.player!;
     const p = player.body.position;
-    const feetY = p.y - 1.35;
+    const feetY = feetYFromBodyCenter(p.y);
     match.chests.splice(0, match.chests.length,
       { id: 20, kind: 'vault', x: p.x + 0.25, y: feetY + 3.1, z: p.z, opened: false, openT: 0 },
       { id: 10, kind: 'standard', x: p.x + 1.25, y: feetY, z: p.z, opened: false, openT: 0 },
@@ -112,6 +114,71 @@ describe('player inventory UI simulation API', () => {
     match.tryInteract(player);
     expect(match.chests.find((chest) => chest.id === 10)?.opened).toBe(true);
     expect(match.chests.find((chest) => chest.id === 20)?.opened).toBe(false);
+    match.dispose();
+  }, 30_000);
+
+  it('blocks chest prompts, chest opening and floor-item pickup through solid walls', async () => {
+    const match = await makePractice();
+    const player = match.player!;
+    const p = player.body.position;
+    const feetY = feetYFromBodyCenter(p.y);
+    const clearDirection = [
+      { x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 },
+    ].find((dir) => !match.phys.losBlocked(
+      p.x, player.eyeY, p.z,
+      p.x + dir.x * 2.4, feetY + 0.45, p.z + dir.z * 2.4,
+    ));
+    expect(clearDirection).toBeDefined();
+    const dir = clearDirection!;
+    const chest = {
+      id: 10,
+      kind: 'standard' as const,
+      x: p.x + dir.x * 2.4,
+      y: feetY,
+      z: p.z + dir.z * 2.4,
+      opened: false,
+      openT: 0,
+    };
+    match.chests.splice(0, match.chests.length, chest);
+    const item = match.loot.spawnWeapon(chest.x, feetY + 0.35, chest.z, {
+      kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: WEAPONS.pistol.magSize,
+    }, match.rng);
+
+    expect(match.nearestInteractableChest(player)).toBe(chest);
+    expect(match.nearestInteractableItem(player)).toBe(item);
+
+    match.phys.addStaticBox(
+      p.x + dir.x * 1.2,
+      feetY + 1.1,
+      p.z + dir.z * 1.2,
+      dir.x === 0 ? 1.1 : 0.12,
+      1.1,
+      dir.z === 0 ? 1.1 : 0.12,
+    );
+    match.phys.flush();
+
+    expect(match.nearestInteractableChest(player)).toBeNull();
+    expect(match.nearestInteractableItem(player)).toBeNull();
+    match.tryInteract(player);
+    expect(chest.opened).toBe(false);
+    expect(match.loot.items).toContain(item);
+    match.dispose();
+  }, 30_000);
+
+  it('does not let a visible chest block its own interaction ray', async () => {
+    const match = await makePractice('oldfront');
+    const player = match.player!;
+    const chest = match.chests.find((candidate) =>
+      Math.abs(candidate.x + 220) < 0.01 && Math.abs(candidate.z + 30) < 0.01);
+    expect(chest).toBeDefined();
+    const support = match.phys.surfaceAt(-217.9, -27.9, chest!.y + 2, 4);
+    expect(support).not.toBeNull();
+    const placement = match.phys.findClearStandingPlacement(-217.9, support!, -27.9, player.body.body);
+    expect(placement).not.toBeNull();
+    player.body.teleport(placement!.x, placement!.y, placement!.z);
+    match.chests.splice(0, match.chests.length, chest!);
+
+    expect(match.nearestInteractableChest(player)).toBe(chest);
     match.dispose();
   }, 30_000);
 });

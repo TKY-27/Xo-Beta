@@ -8,9 +8,9 @@ import { loadMap, MAP_LIST, ensureWorldReady } from './world';
 import { Match } from './sim/match';
 import { GROUPS as PHYS_GROUPS } from './physics/physics';
 import { BotController } from './ai/bot';
-import { MATCH, RARITY_CSS, SIM, WEAPONS } from './core/balance';
+import { MATCH, MOVE, RARITY_CSS, SIM, WEAPONS } from './core/balance';
 import type { WeaponId, Rarity } from './core/balance';
-import { CAPSULE_CENTER_OFFSET, feetYFromBodyCenter } from './sim/movement';
+import { feetYFromBodyCenter } from './sim/movement';
 import type { WeaponInstance } from './sim/inventory';
 import type { Actor } from './sim/actor';
 import { Rng } from './core/rng';
@@ -52,6 +52,7 @@ interface LiveGame {
   characterFill: THREE.PointLight;
   player: PlayerController;
   mats: MaterialLibrary;
+  qaSceneCensus: string;
   cleanup: Array<() => void>;
 }
 
@@ -77,6 +78,35 @@ function ensureCurrentStart(generation: number): void {
 function registerStartCleanup(generation: number, cleanup: () => void): void {
   ensureCurrentStart(generation);
   pendingStart!.cleanup.push(cleanup);
+}
+
+function buildQaSceneCensus(root: THREE.Object3D): string {
+  const count = (object: THREE.Object3D) => {
+    let renderables = 0;
+    let instanced = 0;
+    let triangles = 0;
+    let shadowCasters = 0;
+    object.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh && !(child as THREE.Points).isPoints && !(child as THREE.Line).isLine) return;
+      renderables++;
+      if (mesh.castShadow) shadowCasters++;
+      const instances = (mesh as THREE.InstancedMesh).isInstancedMesh
+        ? Math.max(0, (mesh as THREE.InstancedMesh).count)
+        : 1;
+      if ((mesh as THREE.InstancedMesh).isInstancedMesh) instanced++;
+      const geometry = mesh.geometry;
+      if (!geometry) return;
+      const primitiveCount = geometry.index
+        ? geometry.index.count / 3
+        : (geometry.getAttribute('position')?.count ?? 0) / 3;
+      triangles += primitiveCount * instances;
+    });
+    return { renderables, instanced, shadowCasters, triangles: Math.round(triangles) };
+  };
+  const groups = root.children.map((child) => ({ name: child.name || child.type, ...count(child) }));
+  groups.sort((a, b) => b.triangles - a.triangles || b.renderables - a.renderables);
+  return JSON.stringify({ total: count(root), groups: groups.slice(0, 12) });
 }
 
 function runCleanups(cleanups: Array<() => void>): void {
@@ -113,6 +143,9 @@ let spikes50 = 0;
 let worstFrameMs = 0;
 const recentSpikes: { t: number; ms: number; sim: number; pres: number; heapMB: number }[] = [];
 let lastQaDomUpdate = 0;
+let lastQaTeleportRequest = '';
+let lastQaPerfResetRequest = '';
+let lastQaGpuSyncRequest = '';
 
 function recordFrameMs(ms: number): void {
   frameRing[frameRingIdx] = ms;
@@ -178,7 +211,46 @@ const WEAPON_ICONS: Record<string, string> = {
 // Powerful browser-inspection hooks must never be reachable from a production
 // deployment merely by adding a query parameter. Vite replaces DEV with false
 // during build, allowing Rollup to remove the entire QA surface.
-const QA_MODE = import.meta.env.DEV && new URLSearchParams(location.search).has('qa');
+const QA_PARAMS = new URLSearchParams(location.search);
+const QA_MODE = import.meta.env.DEV && QA_PARAMS.has('qa');
+const QA_HERO_MODE = QA_MODE && QA_PARAMS.has('hero');
+if (QA_HERO_MODE) document.documentElement.dataset.xoQaHero = '1';
+
+interface QaConsoleCapture {
+  issues: string[];
+}
+
+function installQaConsoleCapture(): string[] {
+  if (!QA_MODE) return [];
+  const host = window as unknown as Record<string, unknown>;
+  const existing = host.__xoQaConsoleCapture as QaConsoleCapture | undefined;
+  if (existing) return existing.issues;
+  const issues: string[] = [];
+  const record = (kind: string, args: unknown[]): void => {
+    const text = args.map((arg) => {
+      if (arg instanceof Error) {
+        // Keep the first stack frames in the headed-QA ledger. A message-only
+        // capture made recurring render/simulation faults impossible to map
+        // back to their source when Chrome kept the game loop alive.
+        return arg.stack ?? `${arg.name}: ${arg.message}`;
+      }
+      if (typeof arg === 'string') return arg;
+      try { return JSON.stringify(arg); } catch { return String(arg); }
+    }).join(' ');
+    issues.push(`${kind}: ${text}`.slice(0, 500));
+    if (issues.length > 40) issues.shift();
+  };
+  const originalWarn = console.warn.bind(console);
+  const originalError = console.error.bind(console);
+  console.warn = (...args: unknown[]) => { record('warn', args); originalWarn(...args); };
+  console.error = (...args: unknown[]) => { record('error', args); originalError(...args); };
+  window.addEventListener('error', (event) => record('pageerror', [event.error ?? event.message]));
+  window.addEventListener('unhandledrejection', (event) => record('rejection', [event.reason]));
+  host.__xoQaConsoleCapture = { issues } satisfies QaConsoleCapture;
+  return issues;
+}
+
+const qaRuntimeIssues = installQaConsoleCapture();
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -376,7 +448,7 @@ async function startMatchImpl(
 
   // Presentation stack
   const canvas = $canvas();
-  const renderer = new GameRenderer(canvas);
+  const renderer = new GameRenderer(canvas, QA_MODE);
   registerStartCleanup(generation, () => renderer.dispose());
   await renderer.setupSkyAndLights(loaded.def.sky);
   ensureCurrentStart(generation);
@@ -655,6 +727,7 @@ async function startMatchImpl(
     characterFill,
     player,
     mats: sharedMats,
+    qaSceneCensus: QA_MODE ? buildQaSceneCensus(world.group) : '',
     cleanup,
   };
 
@@ -666,6 +739,45 @@ async function startMatchImpl(
     const setQaAds = (held: boolean) => {
       qaAdsLatched = held;
       window.dispatchEvent(new MouseEvent(held ? 'mousedown' : 'mouseup', { button: 2, bubbles: true }));
+    };
+    const placeQaSwimmerAtShore = (): boolean => {
+      const p = match.player;
+      if (!p) return false;
+      const candidates = match.nav.nodes.flatMap((source) => {
+        if (!source.water) return [];
+        return source.edges
+          .filter((edge) => edge.type === 'shore')
+          .map((edge) => ({ source, target: match.nav.nodes[edge.to]! }));
+      }).sort((a, b) => {
+        const aDist = Math.hypot(a.target.x - a.source.x, a.target.z - a.source.z);
+        const bDist = Math.hypot(b.target.x - b.source.x, b.target.z - b.source.z);
+        return Math.abs(a.target.y - a.source.y) + aDist * 0.08
+          - Math.abs(b.target.y - b.source.y) - bDist * 0.08;
+      });
+      for (const { source, target } of candidates) {
+        const water = match.waterAt(source.x, source.y, source.z);
+        if (!water) continue;
+        const placement = match.phys.findClearSwimmingPlacement(
+          source.x,
+          water.surfaceY,
+          source.z,
+          p.body.body,
+        );
+        if (!placement) continue;
+        p.body.teleport(placement.x, placement.y, placement.z);
+        p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
+        p.state = 'swim';
+        p.inWater = true;
+        p.submerged = false;
+        p.waterSurfaceY = water.surfaceY;
+        p.peakFallSpeed = 0;
+        player.resetLook(
+          Math.atan2(-(target.x - source.x), -(target.z - source.z)),
+          -0.08,
+        );
+        return true;
+      }
+      return false;
     };
     const onQaKey = (e: KeyboardEvent) => {
       const p = match.player;
@@ -692,6 +804,7 @@ async function startMatchImpl(
             const z = chest.z + outwardZ * 3.0;
             const surface = match.phys.surfaceAt(x, z, chest.y + 1.8, 4);
             if (surface === null || Math.abs(surface - chest.y) > 1.2) return null;
+            if (!match.chestHasLineOfSightFrom(x, surface + MOVE.eyeHeight, z, chest)) return null;
             const obstruction = match.phys.raycast(
               x, surface + 1.45, z, outwardX, 0, outwardZ, 5.2, PHYS_GROUPS.rayWorldOnly,
             );
@@ -705,11 +818,18 @@ async function startMatchImpl(
           // far above selected a roof in multi-storey NeoCity and made the
           // mandatory flicker recording stare at a wall instead of the chest.
           const surface = approach?.surface ?? match.phys.surfaceAt(x, z, chest.y + 1.8, 4) ?? chest.y;
-          p.body.teleport(x, surface + CAPSULE_CENTER_OFFSET + 0.05, z);
+          const placement = match.phys.findClearStandingPlacement(x, surface, z, p.body.body);
+          if (!placement) return;
+          p.body.teleport(placement.x, placement.y, placement.z);
           p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
+          if (p.state !== 'swim') p.state = 'air';
           player.resetLook(Math.atan2(-(chest.x - x), -(chest.z - z)), -0.08);
         }
       } else if (e.code === 'F7') {
+        if (e.shiftKey) {
+          placeQaSwimmerAtShore();
+          return;
+        }
         const water = match.mapDef.water[0];
         if (water) {
           // Stand just outside the nearest authored water edge and face the
@@ -717,8 +837,11 @@ async function startMatchImpl(
           const x = (water.minX + water.maxX) * 0.5;
           const z = water.minZ - 3.2;
           const surface = match.phys.surfaceAt(x, z, water.surfaceY + 8, 30) ?? water.surfaceY;
-          p.body.teleport(x, surface + CAPSULE_CENTER_OFFSET + 0.05, z);
+          const placement = match.phys.findClearStandingPlacement(x, surface, z, p.body.body);
+          if (!placement) return;
+          p.body.teleport(placement.x, placement.y, placement.z);
           p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
+          if (p.state !== 'swim') p.state = 'air';
           player.resetLook(Math.PI, -0.18);
         }
       } else if (e.code === 'F8') {
@@ -779,7 +902,7 @@ async function startMatchImpl(
     if (!sel.practice) {
       hud.banner(t('banner.drop', { jump: prettyBind(getSettings().bindings.jump) }), 5.5);
     }
-    else hud.banner(t('menu.practice'), 2.4);
+    else hud.banner(t('menu.practice'), 1.35);
     // Measure live interaction only; lobby, map loading and shader warm-up
     // must not pollute the gameplay p95/p99/worst-frame regression signal.
     resetPerfStats();
@@ -802,6 +925,23 @@ function teardownMatch(): void {
       '__xoRigs', '__xoAerial', '__xoState', '__xoTeleport', '__xoStress',
       '__xoGive', '__xoQaInput', '__xoStorm',
     ]) delete qaWindow[key];
+    delete document.documentElement.dataset.xoQaTeleportRequest;
+    delete document.documentElement.dataset.xoQaTeleportResult;
+    delete document.documentElement.dataset.xoQaPerfResetRequest;
+    delete document.documentElement.dataset.xoQaPerfResetResult;
+    delete document.documentElement.dataset.xoQaPerfDetail;
+    delete document.documentElement.dataset.xoQaPerfSpikes;
+    delete document.documentElement.dataset.xoQaGpuDevice;
+    delete document.documentElement.dataset.xoQaGpuSyncResult;
+    delete document.documentElement.dataset.xoQaCensus;
+    delete document.documentElement.dataset.xoQaWorld;
+    delete document.documentElement.dataset.xoQaRuntime;
+    document.getElementById('xo-qa-teleport-command')?.remove();
+    document.getElementById('xo-qa-perf-command')?.remove();
+    document.getElementById('xo-qa-gpu-sync-command')?.remove();
+    lastQaTeleportRequest = '';
+    lastQaPerfResetRequest = '';
+    lastQaGpuSyncRequest = '';
   }
   for (const d of disposers) d();
   disposers.length = 0;
@@ -1131,6 +1271,40 @@ function present(dtReal: number): void {
   // Debug/QA introspection hook. Development-only because the related helpers
   // below can mutate match state and must not ship as a production backdoor.
   if (QA_MODE) {
+    const qaPlayerPosition = m.player?.body.position;
+    const qaPenetrations = m.player && qaPlayerPosition
+      ? m.phys.characterPenetrationsAt(
+        qaPlayerPosition.x,
+        qaPlayerPosition.y,
+        qaPlayerPosition.z,
+        m.player.body.body,
+      )
+      : [];
+    const qaMaxPenetration = qaPenetrations.reduce((max, hit) => Math.max(max, hit.depth), 0);
+    const qaFeetY = qaPlayerPosition ? feetYFromBodyCenter(qaPlayerPosition.y) : null;
+    const qaSupportY = qaPlayerPosition && qaFeetY !== null
+      ? m.phys.surfaceAt(qaPlayerPosition.x, qaPlayerPosition.z, qaFeetY + 0.6, 1.5)
+      : null;
+    const qaSupportError = qaFeetY !== null && qaSupportY !== null ? qaFeetY - qaSupportY : null;
+    const qaTerrainY = qaPlayerPosition
+      ? m.phys.terrainSurfaceAt(qaPlayerPosition.x, qaPlayerPosition.z)
+      : null;
+    const qaTerrainDelta = qaFeetY !== null && qaTerrainY !== null ? qaFeetY - qaTerrainY : null;
+    const qaTerrainSide = qaTerrainDelta === null
+      ? 'none'
+      : qaTerrainDelta < -0.08 ? 'below' : qaTerrainDelta > 0.18 ? 'above' : 'on';
+    const qaCameraForward = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
+    const qaCameraHit = m.phys.cameraCast(
+      rig.camera.position.x,
+      rig.camera.position.y,
+      rig.camera.position.z,
+      qaCameraForward.x,
+      qaCameraForward.y,
+      qaCameraForward.z,
+      8,
+      0.08,
+    );
+    const qaCameraForwardClearance = qaCameraHit?.dist ?? null;
     (window as unknown as Record<string, unknown>).__xoState = {
       map: m.mapDef.id,
       seed: m.seed,
@@ -1218,6 +1392,11 @@ function present(dtReal: number): void {
             z: +m.player.body.position.z.toFixed(1),
             state: m.player.state,
             grounded: m.player.body.grounded,
+            inWater: m.player.inWater,
+            submerged: m.player.submerged,
+            waterSurfaceY: Number.isFinite(m.player.waterSurfaceY)
+              ? +m.player.waterSurfaceY.toFixed(4)
+              : null,
             weapon: m.player.inv.selectedWeapon?.weaponId ?? null,
             ads: +m.player.wpn.adsAmount.toFixed(2),
             spread: +m.player.wpn.currentSpread.toFixed(4),
@@ -1228,6 +1407,15 @@ function present(dtReal: number): void {
             jumpsUsed: m.player.jumpsUsed,
             coyote: +m.player.coyote.toFixed(2),
             jumpBuffered: +m.player.jumpBuffered.toFixed(2),
+            penetrationCount: qaPenetrations.length,
+            maxPenetration: +qaMaxPenetration.toFixed(4),
+            supportError: qaSupportError === null ? null : +qaSupportError.toFixed(4),
+            terrainY: qaTerrainY === null ? null : +qaTerrainY.toFixed(4),
+            terrainDelta: qaTerrainDelta === null ? null : +qaTerrainDelta.toFixed(4),
+            terrainSide: qaTerrainSide,
+            cameraForwardClearance: qaCameraForwardClearance === null
+              ? null
+              : +qaCameraForwardClearance.toFixed(4),
             fov: Math.round(rig.camera.fov),
             anim: rigs.get(m.player.id)?.animName ?? null,
           }
@@ -1252,8 +1440,17 @@ function present(dtReal: number): void {
         ? `${m.player.yaw.toFixed(2)},${m.player.pitch.toFixed(2)},${rig.mode}`
         : '';
       data.xoQaMovement = m.player
-        ? `${rigs.get(m.player.id)?.animName ?? 'none'}|vy=${m.player.body.velocity.y.toFixed(2)}|dash=${m.player.dashTimer.toFixed(2)}`
+        ? `${m.player.state}|${rigs.get(m.player.id)?.animName ?? 'none'}|hs=${Math.hypot(m.player.body.velocity.x, m.player.body.velocity.z).toFixed(2)}|vx=${m.player.body.velocity.x.toFixed(2)}|vy=${m.player.body.velocity.y.toFixed(2)}|vz=${m.player.body.velocity.z.toFixed(2)}|jumps=${m.player.jumpsUsed}|wallChains=${m.player.wallrunChains}|wallLanded=${m.player.wallrunLanded ? 1 : 0}|dash=${m.player.dashTimer.toFixed(2)}`
         : '';
+      data.xoQaWater = m.player
+        ? `in=${m.player.inWater ? 1 : 0}|submerged=${m.player.submerged ? 1 : 0}|surface=${Number.isFinite(m.player.waterSurfaceY) ? m.player.waterSurfaceY.toFixed(4) : 'none'}`
+        : 'none';
+      data.xoQaCollision = m.player
+        ? `count=${qaPenetrations.length}|depth=${qaMaxPenetration.toFixed(4)}|support=${qaSupportError?.toFixed(4) ?? 'none'}|grounded=${m.player.body.grounded ? 1 : 0}`
+        : 'none';
+      data.xoQaWorld = m.player
+        ? `terrain=${qaTerrainY?.toFixed(4) ?? 'none'}|delta=${qaTerrainDelta?.toFixed(4) ?? 'none'}|side=${qaTerrainSide}|view=${qaCameraForwardClearance?.toFixed(4) ?? 'clear'}`
+        : 'none';
       data.xoQaStart = start
         ? `${start.poi}|${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)}`
         : '';
@@ -1271,45 +1468,185 @@ function present(dtReal: number): void {
         ? `${m.player.inv.selectedWeapon?.weaponId ?? m.player.inv.selectedItem?.kind ?? 'empty'}|shots=${m.player.stats.shotsFired}|hp=${Math.round(m.player.health)}|shield=${Math.round(m.player.shield)}|heal=${m.player.healing?.itemId ?? 'none'}`
         : 'none';
       data.xoQaPerf = `${framePercentile(0.95).toFixed(1)},${framePercentile(0.99).toFixed(1)},${worstFrameMs.toFixed(1)}`;
+      data.xoQaPerfDetail = `frames=${framesTotal}|gt33=${spikes33}|gt50=${spikes50}`;
+      data.xoQaPerfSpikes = JSON.stringify(recentSpikes.slice(-8));
+      data.xoQaGpuDevice = renderer.gpuDeviceLabel();
+      data.xoQaCensus = live.qaSceneCensus;
+      data.xoQaRuntime = qaRuntimeIssues.length === 0
+        ? 'count=0'
+        : `count=${qaRuntimeIssues.length}|last=${qaRuntimeIssues.at(-1)}`;
       data.xoQaRender = `${renderer.renderer.info.render.calls},${renderer.renderer.info.render.triangles}|sim=${perfStats.simMs.toFixed(2)}|present=${perfStats.presentMs.toFixed(2)}`;
     }
   }
 
   // QA-only teleport hook (?qa=1) for screenshot navigation.
   if (QA_MODE) {
-    (window as unknown as Record<string, unknown>).__xoTeleport = (x: number, z: number, yaw = 0, refY?: number) => {
+    const performQaTeleport = (
+      x: number,
+      z: number,
+      yaw = 0,
+      refY?: number,
+      pitch = -0.12,
+      mode: 'standing' | 'swim' = 'standing',
+    ): boolean => {
       const p = m.player;
-      if (!p || !p.alive) return;
+      if (!p || !p.alive) return false;
+      if (mode === 'swim') {
+        const water = m.mapDef.water.find((candidate) => (
+          x >= candidate.minX && x <= candidate.maxX
+          && z >= candidate.minZ && z <= candidate.maxZ
+        ));
+        if (!water) return false;
+        const placement = m.phys.findClearSwimmingPlacement(x, water.surfaceY, z, p.body.body);
+        if (!placement) return false;
+        p.body.teleport(placement.x, placement.y, placement.z);
+        p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
+        p.state = 'swim';
+        p.inWater = true;
+        p.submerged = false;
+        p.waterSurfaceY = water.surfaceY;
+        p.peakFallSpeed = 0;
+        live?.player.resetLook(yaw, THREE.MathUtils.clamp(pitch, -1.25, 1.25));
+        return true;
+      }
       // Snap to the surface so the capsule never spawns inside terrain.
       // Optional refY anchors the downward query near a known height
       // (e.g. a loot item) instead of landing on the highest roof/canopy.
       const anchored = typeof refY === 'number';
       const surf = anchored ? m.phys.surfaceAt(x, z, refY + 2.5, 80) : m.phys.surfaceAt(x, z, 400, 500);
-      if (surf !== null) {
-        p.body.teleport(x, surf + CAPSULE_CENTER_OFFSET + 0.05, z);
-      } else if (anchored) {
-        p.body.teleport(x, refY + CAPSULE_CENTER_OFFSET + 0.05, z);
-      } else {
-        p.body.position.x = x;
-        p.body.position.z = z;
-      }
+      // Anchors are a selection hint, not a synthetic floor. Failing closed
+      // here prevents a stale/incorrect QA reference height from placing the
+      // actor below a one-sided terrain heightfield.
+      if (surf === null) return false;
+      const placement = m.phys.findClearStandingPlacement(x, surf, z, p.body.body);
+      if (!placement) return false;
+      p.body.teleport(placement.x, placement.y, placement.z);
       p.body.velocity.x = 0;
       p.body.velocity.y = 0;
       p.body.velocity.z = 0;
-      if (live && p.state !== 'swim') {
-        if (p.state === 'freefall' || p.state === 'glide') p.state = 'ground';
-        live.player.resetLook(yaw, -0.12);
-      }
+      p.state = 'air';
+      p.inWater = false;
+      p.submerged = false;
+      live?.player.resetLook(yaw, THREE.MathUtils.clamp(pitch, -1.25, 1.25));
+      return true;
     };
+    (window as unknown as Record<string, unknown>).__xoTeleport = performQaTeleport;
+
+    // The headed Codex browser runs evaluation in an isolated JS world, so
+    // window expandos and direct dataset writes are intentionally unavailable.
+    // A normal off-screen input can still be filled through browser semantics;
+    // accept its nonce-tagged JSON and mirror a small result so landmark QA can
+    // target roads, stairs and façades instead of random Practice spawns. This
+    // bridge exists only in DEV + ?qa=1.
+    const qaData = document.documentElement.dataset;
+    qaData.xoQaTeleportRequest ??= '';
+    qaData.xoQaTeleportResult ??= '';
+    let qaTeleportInput = document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null;
+    if (!qaTeleportInput) {
+      qaTeleportInput = document.createElement('input');
+      qaTeleportInput.id = 'xo-qa-teleport-command';
+      qaTeleportInput.type = 'text';
+      qaTeleportInput.tabIndex = -1;
+      qaTeleportInput.setAttribute('aria-hidden', 'true');
+      Object.assign(qaTeleportInput.style, {
+        position: 'fixed', left: '1px', top: '1px', width: '1px', height: '1px',
+        opacity: '0', pointerEvents: 'none', zIndex: '-1',
+      });
+      document.body.appendChild(qaTeleportInput);
+    }
+    let qaPerfInput = document.getElementById('xo-qa-perf-command') as HTMLInputElement | null;
+    if (!qaPerfInput) {
+      qaPerfInput = document.createElement('input');
+      qaPerfInput.id = 'xo-qa-perf-command';
+      qaPerfInput.type = 'text';
+      qaPerfInput.tabIndex = -1;
+      qaPerfInput.setAttribute('aria-hidden', 'true');
+      Object.assign(qaPerfInput.style, {
+        position: 'fixed', left: '1px', top: '1px', width: '1px', height: '1px',
+        opacity: '0', pointerEvents: 'none', zIndex: '-1',
+      });
+      document.body.appendChild(qaPerfInput);
+    }
+    let qaGpuSyncInput = document.getElementById('xo-qa-gpu-sync-command') as HTMLInputElement | null;
+    if (!qaGpuSyncInput) {
+      qaGpuSyncInput = document.createElement('input');
+      qaGpuSyncInput.id = 'xo-qa-gpu-sync-command';
+      qaGpuSyncInput.type = 'text';
+      qaGpuSyncInput.tabIndex = -1;
+      qaGpuSyncInput.setAttribute('aria-hidden', 'true');
+      Object.assign(qaGpuSyncInput.style, {
+        position: 'fixed', left: '1px', top: '1px', width: '1px', height: '1px',
+        opacity: '0', pointerEvents: 'none', zIndex: '-1',
+      });
+      document.body.appendChild(qaGpuSyncInput);
+    }
+    const gpuSyncRequest = qaGpuSyncInput.value;
+    if (gpuSyncRequest && gpuSyncRequest !== lastQaGpuSyncRequest) {
+      lastQaGpuSyncRequest = gpuSyncRequest;
+      qaGpuSyncInput.value = '';
+      const ms = renderer.measureSynchronousFrame();
+      qaData.xoQaGpuSyncResult = JSON.stringify({ nonce: gpuSyncRequest, ms: +ms.toFixed(2) });
+    }
+    const perfResetRequest = qaPerfInput.value || qaData.xoQaPerfResetRequest || '';
+    if (perfResetRequest && perfResetRequest !== lastQaPerfResetRequest) {
+      lastQaPerfResetRequest = perfResetRequest;
+      qaPerfInput.value = '';
+      resetPerfStats();
+      qaData.xoQaPerfResetResult = perfResetRequest;
+    }
+    const request = qaTeleportInput.value || qaData.xoQaTeleportRequest;
+    if (request && request !== lastQaTeleportRequest) {
+      lastQaTeleportRequest = request;
+      qaTeleportInput.value = '';
+      let nonce = '';
+      let ok = false;
+      try {
+        const parsed = JSON.parse(request) as {
+          nonce?: unknown;
+          x?: unknown;
+          z?: unknown;
+          yaw?: unknown;
+          refY?: unknown;
+          pitch?: unknown;
+          mode?: unknown;
+        };
+        nonce = typeof parsed.nonce === 'string' ? parsed.nonce : '';
+        const x = Number(parsed.x);
+        const z = Number(parsed.z);
+        const yaw = parsed.yaw === undefined ? 0 : Number(parsed.yaw);
+        const refY = parsed.refY === undefined ? undefined : Number(parsed.refY);
+        const pitch = parsed.pitch === undefined ? -0.12 : Number(parsed.pitch);
+        const mode = parsed.mode === 'swim' ? 'swim' : parsed.mode === undefined ? 'standing' : null;
+        if (nonce && Number.isFinite(x) && Number.isFinite(z) && Number.isFinite(yaw)
+          && Number.isFinite(pitch) && mode !== null
+          && (refY === undefined || Number.isFinite(refY))) {
+          ok = performQaTeleport(x, z, yaw, refY, pitch, mode);
+        }
+      } catch {
+        // Invalid QA commands fail closed and are acknowledged as unsuccessful.
+      }
+      const resolved = ok && m.player
+        ? {
+            x: +m.player.body.position.x.toFixed(4),
+            y: +m.player.body.position.y.toFixed(4),
+            z: +m.player.body.position.z.toFixed(4),
+          }
+        : null;
+      qaData.xoQaTeleportResult = JSON.stringify({ nonce, ok, resolved });
+    }
     // QA stress hook: ring all living bots tightly around the player to
     // force maximum concurrent AI/combat/VFX load. Dev builds only.
     (window as unknown as Record<string, unknown>).__xoStress = () => {
       const p = m.player;
-      if (!p) return;
+      if (!p) return {
+        ok: false, expected: 0, placed: 0, rejected: 0, placedIds: [], rejectedIds: [],
+      };
       p.deployed = true;
-      p.state = 'ground';
+      p.state = p.body.grounded ? 'ground' : 'air';
       p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
       const alive = m.actors.filter((a) => a.alive && !a.isPlayer);
+      const placedIds: number[] = [];
+      const rejectedIds: number[] = [];
       alive.forEach((a, i) => {
         // Put the first opponent in the player's current view and spread the
         // rest around a wider ring. Probe near the player's floor layer so a
@@ -1322,10 +1659,16 @@ function present(dtReal: number): void {
         const z = p.body.position.z + Math.sin(ang) * radius;
         const surf = m.phys.surfaceAt(x, z, p.body.position.y + 5, 14);
         const floorY = surf ?? feetYFromBodyCenter(p.body.position.y);
-        a.body.teleport(x, floorY + CAPSULE_CENTER_OFFSET + 0.05, z);
+        const placement = m.phys.findClearStandingPlacement(x, floorY, z, a.body.body);
+        if (!placement) {
+          rejectedIds.push(a.id);
+          return;
+        }
+        a.body.teleport(placement.x, placement.y, placement.z);
+        placedIds.push(a.id);
         a.body.velocity.x = 0; a.body.velocity.y = 0; a.body.velocity.z = 0;
         a.deployed = true;
-        a.state = 'ground';
+        a.state = 'air';
         if (!a.inv.slots.some((slot) => slot?.kind === 'weapon')) {
           const def = WEAPONS.ar;
           const result = a.inv.add({
@@ -1335,6 +1678,14 @@ function present(dtReal: number): void {
           a.inv.ammo[def.ammoType] = Math.max(a.inv.ammo[def.ammoType], def.reserveMax);
         }
       });
+      return {
+        ok: rejectedIds.length === 0 && placedIds.length === alive.length,
+        expected: alive.length,
+        placed: placedIds.length,
+        rejected: rejectedIds.length,
+        placedIds,
+        rejectedIds,
+      };
     };
     // QA helper: grant + equip a weapon by id ('pistol'|'smg'|'ar'|
     // 'shotgun'|'sniper', optional rarity). Dev/QA builds only.
@@ -1532,6 +1883,7 @@ function present(dtReal: number): void {
     viewmodel.update(null, dtReal, 0, 0, 0);
     viewmodel.group.visible = false;
   }
+  if (QA_HERO_MODE) viewmodel.group.visible = false;
 
   world.setViewPos(rig.camera.position);
   world.update(dtReal, m, { position: presentationTransportPos });
@@ -1546,7 +1898,7 @@ function present(dtReal: number): void {
   renderer.followSunTarget(new THREE.Vector3(rig.camera.position.x, 0, rig.camera.position.z));
   renderer.followViewer(rig.camera.position);
 
-  hud.syncPlayerState(m);
+  hud.syncPlayerState(m, dtReal);
   hud.drawMinimap(m, () => hud.minimapContext());
   if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
