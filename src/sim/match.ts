@@ -195,6 +195,7 @@ export class Match {
   finished = false;
 
   private waterVolumes: WaterVolume[];
+  private commands = new Map<number, InputCommand>();
   private pendingEliminations: Array<{ victim: Actor; killer: Actor | null; weaponId: WeaponId | null; headshot: boolean; storm: boolean }> = [];
   private processedEliminations = new Set<number>();
 
@@ -552,7 +553,8 @@ export class Match {
     this.previousTransportPos.z = this.transportPos.z;
 
     // Controllers produce commands
-    const commands = new Map<number, InputCommand>();
+    const commands = this.commands;
+    commands.clear();
     for (const a of this.actors) {
       if (!a.alive) continue;
       const ctrl = this.controllers.get(a.id);
@@ -611,7 +613,6 @@ export class Match {
       const cmd = commands.get(a.id)!;
       a.yaw = cmd.yaw;
       a.pitch = cmd.pitch;
-      a.body.teleport(this.transportPos.x, this.transportPos.y, this.transportPos.z);
       const forced = t >= 1;
       if ((cmd.jumpPressed && this.transportGateOpen) || forced) {
         a.body.teleport(this.transportPos.x, this.transportPos.y - MATCH.transportHangOffset, this.transportPos.z);

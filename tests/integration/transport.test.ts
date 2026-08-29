@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { Match, type ActorController } from '../../src/sim/match';
 import type { Actor } from '../../src/sim/actor';
 import { loadMap } from '../../src/world';
@@ -64,6 +64,36 @@ describe('transport / drop lifecycle', () => {
     const current = { ...m.transportPos };
     m.fixedUpdate(STEP);
     expect(m.previousTransportPos).toEqual(current);
+    m.dispose();
+  }, TRANSPORT_TEST_TIMEOUT);
+
+  it('keeps aboard physics bodies parked until their one deployment placement', () => {
+    const m = makeMatch();
+    const player = m.player!;
+    const stub = new StubController();
+    m.controllers.set(player.id, stub);
+    const parked = { ...player.body.position };
+
+    for (let i = 0; i < 30; i++) m.fixedUpdate(STEP);
+    expect(player.body.position.x).toBeCloseTo(parked.x, 6);
+    expect(player.body.position.y).toBeCloseTo(parked.y, 6);
+    expect(player.body.position.z).toBeCloseTo(parked.z, 6);
+    expect(m.transportPos.x).not.toBeCloseTo(parked.x, 3);
+
+    const gate = m as unknown as { transportGateOpen: boolean };
+    let guard = 0;
+    while (!gate.transportGateOpen && guard++ < 2000) m.fixedUpdate(STEP);
+    const deployTeleport = vi.spyOn(player.body, 'teleport');
+    stub.jumpQueued = true;
+    m.fixedUpdate(STEP);
+    expect(player.deployed).toBe(true);
+    expect(deployTeleport).toHaveBeenCalledTimes(1);
+    expect(deployTeleport.mock.calls[0]?.[0]).toBeCloseTo(m.transportPos.x, 6);
+    expect(deployTeleport.mock.calls[0]?.[2]).toBeCloseTo(m.transportPos.z, 6);
+    expect(Math.hypot(
+      player.body.position.x - m.transportPos.x,
+      player.body.position.z - m.transportPos.z,
+    )).toBeLessThan(12);
     m.dispose();
   }, TRANSPORT_TEST_TIMEOUT);
 

@@ -639,6 +639,7 @@ export class Hud {
   private bannerTimer = 0;
   private elimTimer = 0;
   private hitmarkerTimer = 0;
+  private minimapTimer = 1 / 12;
   private stormWarningTimer: number | null = null;
   private dmgNumbers: DamageNumberEntry[] = [];
   private captionEls = new Map<TextKey | string, HTMLElement>();
@@ -846,11 +847,19 @@ export class Hud {
     // Healing channel bar
     const channel = $('heal-channel');
     if (p.healing) {
+      const progress = Math.max(0, Math.min(1, 1 - p.healing.remaining / p.healing.total));
       channel.classList.remove('hidden');
+      channel.dataset.item = p.healing.itemId;
       $('heal-label').textContent = p.healing.itemId === 'medkit' ? t('heal.medkit') : t('heal.shieldpot');
-      $('heal-fill').style.width = `${(1 - p.healing.remaining / p.healing.total) * 100}%`;
+      $('heal-time').textContent = `${Math.max(0, p.healing.remaining).toFixed(1)}s`;
+      $('heal-fill').style.width = `${progress * 100}%`;
+      channel.setAttribute('aria-valuenow', String(Math.round(progress * 100)));
+      channel.setAttribute('aria-valuetext', `${$('heal-label').textContent ?? ''} ${$('heal-time').textContent ?? ''}`);
     } else {
       channel.classList.add('hidden');
+      delete channel.dataset.item;
+      channel.removeAttribute('aria-valuenow');
+      channel.removeAttribute('aria-valuetext');
     }
 
     // Storm timer text
@@ -1345,7 +1354,10 @@ export class Hud {
   }
 
   /** Minimap: player-centered crop of the real aerial render plus safe overlays. */
-  drawMinimap(match: Match, ctxProvider: () => CanvasRenderingContext2D | null): void {
+  drawMinimap(match: Match, ctxProvider: () => CanvasRenderingContext2D | null, dt = 1 / 60): void {
+    this.minimapTimer += Math.max(0, Math.min(dt, 0.1));
+    if (this.minimapTimer < 1 / 12) return;
+    this.minimapTimer = 0;
     const ctx = ctxProvider();
     if (!ctx) return;
     const size = 188;

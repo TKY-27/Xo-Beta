@@ -24,6 +24,7 @@ import { buildVista, type VistaHandle } from './vista';
 import type { Match } from '../sim/match';
 import { RARITY_COLORS } from '../core/balance';
 import { buildTerrainRibbonIndices } from '../world/terrainMesh';
+import { getSettings } from '../core/settings';
 
 export interface PresentationTransport {
   position: THREE.Vector3;
@@ -446,7 +447,7 @@ export class WorldView {
   private waterMats: THREE.ShaderMaterial[] = [];
   private waterVolumes: import('../world/types').WaterVolume[] = [];
   private weaponFactory: WeaponModelFactory;
-  private lightPool = new StaticLightPool(22);
+  private lightPool: StaticLightPool;
   private viewPos = new THREE.Vector3();
   /** Beyond-bounds landscape + boundary barrier (see vista.ts). */
   readonly vista: VistaHandle;
@@ -467,6 +468,15 @@ export class WorldView {
     match: Match | null,
     props: PropLibrary,
   ) {
+    const quality = getSettings().quality;
+    const lightCount = quality === 'cinematic' || quality === 'ultra'
+      ? 22
+      : quality === 'high'
+        ? 12
+        : quality === 'medium'
+          ? 8
+          : 4;
+    this.lightPool = new StaticLightPool(lightCount);
     this.weaponFactory = new WeaponModelFactory(props);
     this.applyWetGround(def);
     this.buildStatic(def);

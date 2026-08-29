@@ -70,10 +70,10 @@ const ScopeCompositeShader = {
     tDiffuse: { value: null as THREE.Texture | null },
     tScope: { value: null as THREE.Texture | null },
     uAspect: { value: 1 },
-    // Match the 54.8vmin physical lens aperture in the DOM housing. Keeping
+    // Match the 72vmin physical lens aperture in the DOM housing. Keeping
     // the optical composite and bezel on the same radius prevents a second,
     // larger magnified circle from leaking under the scope body.
-    uRadius: { value: 0.274 },
+    uRadius: { value: 0.36 },
     uEnabled: { value: 0 },
   },
   vertexShader: /* glsl */ `
@@ -97,11 +97,11 @@ const ScopeCompositeShader = {
       // Subtle blue/green lens cast, restrained so the scene remains legible.
       optics.rgb *= vec3(0.94, 0.98, 1.03);
       vec3 color = mix(base.rgb, optics.rgb, lens);
-      // A dark mechanical bezel and a fine glass edge surround the lens.
-      float bezel = 1.0 - smoothstep(uRadius - 0.028, uRadius + 0.018, d);
+      // Preserve the unzoomed peripheral view. Only a fine optical edge marks
+      // the lens; the old near-black outside mask obscured situational awareness.
       float edge = 1.0 - smoothstep(0.0, 0.012, abs(d - uRadius));
-      color = mix(color, color * 0.12, (1.0 - bezel) * 0.82);
-      color += vec3(0.22, 0.28, 0.31) * edge;
+      color = mix(color, color * 0.52, edge * 0.42);
+      color += vec3(0.16, 0.21, 0.23) * edge;
       // Reticle in lens-space; central gap avoids hiding the target point.
       float lineX = 1.0 - smoothstep(0.0015, 0.004, abs(p.x));
       float lineY = 1.0 - smoothstep(0.0015, 0.004, abs(p.y));
@@ -119,7 +119,8 @@ const ScopeCompositeShader = {
           * (1.0 - smoothstep(0.0012, 0.0035, abs(p.y + 0.22)));
         reticle = max(reticle, rangeTick * lens * 0.7);
       }
-      color += vec3(0.77, 0.9, 0.82) * reticle;
+      // A dark duplex-style cross remains legible over both sky and emitters.
+      color = mix(color, vec3(0.01, 0.016, 0.014), clamp(reticle, 0.0, 1.0) * 0.92);
       // A small reflection streak provides a glass cue without hiding the view.
       float reflection = (1.0 - smoothstep(0.0, 0.035, abs(p.y + p.x * 0.44 - 0.24))) * lens * 0.055;
       color += vec3(0.8, 0.93, 1.0) * reflection;

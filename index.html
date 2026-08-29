@@ -180,6 +180,7 @@
         <i class="scope-line top"></i><i class="scope-line bottom"></i>
         <i class="scope-line left"></i><i class="scope-line right"></i>
         <i class="scope-mil mil-h"></i><i class="scope-mil mil-v"></i>
+        <i class="scope-center-dot"></i>
         <span class="scope-range">2 · 4 · 6 · 8</span>
       </div>
     </div>
@@ -195,7 +196,10 @@
         <div class="bar shield"><div id="shield-fill"></div><span id="shield-text">100</span></div>
         <div class="bar health"><div id="health-fill"></div><span id="health-text">100</span></div>
       </div>
-      <div id="heal-channel" class="hidden"><span id="heal-label">Healing…</span><div class="bar tiny"><div id="heal-fill"></div></div></div>
+      <div id="heal-channel" class="hidden" role="progressbar" aria-live="polite" aria-valuemin="0" aria-valuemax="100">
+        <div class="heal-channel-head"><span id="heal-label">Healing…</span><span id="heal-time">0.0s</span></div>
+        <div class="bar tiny"><div id="heal-fill"></div></div>
+      </div>
     </div>
 
     <div id="hud-bottom-right">

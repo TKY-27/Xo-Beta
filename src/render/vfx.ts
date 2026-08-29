@@ -16,7 +16,7 @@ interface Tracer {
 
 interface Flash {
   sprite: THREE.Sprite;
-  light: THREE.PointLight;
+  light: THREE.PointLight | null;
   life: number;
   maxLife: number;
   /** Star-petal texture variant (shotgun/sniper-class). */
@@ -36,6 +36,7 @@ interface Particle {
 
 const MAX_TRACERS = 128;
 const MAX_FLASHES = 24;
+const MAX_FLASH_LIGHTS = 6;
 const MAX_PARTICLES = 512;
 const MAX_SHOCKWAVES = 8;
 
@@ -70,21 +71,33 @@ export class VfxSystem {
   private particleMeshes: THREE.InstancedMesh[] = [];
   private ropes = new Map<number, { line: THREE.Line; points: number }>();
   private shockwaves: Shockwave[] = [];
-  private shockwavePool: THREE.Mesh[] = [];
+  private shockwavePools: Record<'normal' | 'additive', THREE.Mesh[]> = {
+    normal: [],
+    additive: [],
+  };
   private time = 0;
 
   constructor() {
-    // Pooled shockwave rings (pound + shield-break reuse these).
+    // Keep blending variants in separate fixed pools. Changing blending and
+    // material.needsUpdate during gameplay forced a cold shader/program stall
+    // on the first shield break.
     const ringGeo = new THREE.RingGeometry(0.8, 1.15, 32);
     ringGeo.rotateX(-Math.PI / 2);
-    for (let i = 0; i < MAX_SHOCKWAVES; i++) {
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0xcfd8e2, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false,
-      });
-      const mesh = new THREE.Mesh(ringGeo, mat);
-      mesh.visible = false;
-      this.group.add(mesh);
-      this.shockwavePool.push(mesh);
+    for (const variant of ['normal', 'additive'] as const) {
+      for (let i = 0; i < MAX_SHOCKWAVES; i++) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0xcfd8e2,
+          transparent: true,
+          opacity: 0,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          blending: variant === 'additive' ? THREE.AdditiveBlending : THREE.NormalBlending,
+        });
+        const mesh = new THREE.Mesh(ringGeo, mat);
+        mesh.visible = false;
+        this.group.add(mesh);
+        this.shockwavePools[variant].push(mesh);
+      }
     }
 
     // Tracer pool: ONE instanced mesh, per-instance color fade (additive)
@@ -124,8 +137,9 @@ export class VfxSystem {
       });
       const sprite = new THREE.Sprite(mat);
       sprite.visible = false;
-      const light = new THREE.PointLight(0xffc878, 0, 12, 2);
-      this.group.add(sprite, light);
+      const light = i < MAX_FLASH_LIGHTS ? new THREE.PointLight(0xffc878, 0, 12, 2) : null;
+      this.group.add(sprite);
+      if (light) this.group.add(light);
       this.flashes.push({ sprite, light, life: 0, maxLife: 1, star: i % 3 === 2 });
     }
 
@@ -219,9 +233,11 @@ export class VfxSystem {
     f.sprite.material.rotation = Math.random() * Math.PI * 2;
     f.sprite.material.opacity = 1;
     f.sprite.visible = true;
-    f.light.position.copy(f.sprite.position);
-    f.light.intensity = (heavy ? 5.5 : 3.2) * scale;
-    f.light.color.setHex(heavy ? 0xffb060 : 0xffc878);
+    if (f.light) {
+      f.light.position.copy(f.sprite.position);
+      f.light.intensity = (heavy ? 5.5 : 3.2) * scale;
+      f.light.color.setHex(heavy ? 0xffb060 : 0xffc878);
+    }
     f.life = heavy ? 0.055 : 0.04;
     f.maxLife = f.life;
   }
@@ -288,20 +304,21 @@ export class VfxSystem {
   /** Acquire a pooled ring mesh for an expanding shockwave. */
   private spawnShockwave(x: number, y: number, z: number, life: number, color: number, additive: boolean): void {
     if (!finite(x, y, z, life, color) || life <= 0) return;
-    let mesh = this.shockwavePool.find((m) => !m.visible);
+    const pool = this.shockwavePools[additive ? 'additive' : 'normal'];
+    let mesh = pool.find((m) => !m.visible);
     let entry: Shockwave | undefined;
     if (!mesh) {
       // Recycle the effect closest to expiry. Never create two active records
       // for one pooled mesh; competing updates caused flicker under bursts.
-      entry = this.shockwaves.reduce((oldest, current) => (
-        current.life < oldest.life ? current : oldest
-      ), this.shockwaves[0]!);
+      for (const current of this.shockwaves) {
+        if (!pool.includes(current.mesh)) continue;
+        if (!entry || current.life < entry.life) entry = current;
+      }
+      if (!entry) return;
       mesh = entry.mesh;
     }
     const mat = mesh.material as THREE.MeshBasicMaterial;
     mat.color.setHex(color);
-    mat.blending = additive ? THREE.AdditiveBlending : THREE.NormalBlending;
-    mat.needsUpdate = true;
     mesh.position.set(x, y + 0.15, z);
     mesh.scale.setScalar(1);
     mesh.visible = true;
@@ -439,11 +456,11 @@ export class VfxSystem {
     for (const f of this.flashes) {
       if (f.life > 0) {
         f.life -= frameDt;
-        f.light.intensity *= Math.exp(-frameDt * 26);
+        if (f.light) f.light.intensity *= Math.exp(-frameDt * 26);
         f.sprite.material.opacity = Math.max(0, Math.min(1, f.life / f.maxLife));
         if (f.life <= 0) {
           f.sprite.visible = false;
-          f.light.intensity = 0;
+          if (f.light) f.light.intensity = 0;
         }
       }
     }

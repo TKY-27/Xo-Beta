@@ -627,13 +627,27 @@ async function startMatchImpl(
 
   // Character rigs (skinned GLB combatants)
   const females = ['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX'];
+  const deathPipelineActors = new Set<number>();
+  const firstFemaleBot = match.actors.find((actor) => !actor.isPlayer && females.includes(actor.name));
+  const firstMaleBot = match.actors.find((actor) => !actor.isPlayer && !females.includes(actor.name));
+  if (firstFemaleBot) deathPipelineActors.add(firstFemaleBot.id);
+  if (firstMaleBot) deathPipelineActors.add(firstMaleBot.id);
   const rigs = new Map<number, CharacterRig>();
   for (const actor of match.actors) {
     const skinId = actor.isPlayer ? getSettings().playerSkin : skinForName(actor.name);
     const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name), null, skinId);
+    // Keep one representative of each body archetype on the death pipeline
+    // from loading onward. Opacity 1 remains visually opaque, while avoiding
+    // transparent sorting overhead on every living actor.
+    for (const material of [...charRig.baseMats, ...charRig.accentMats]) {
+      material.transparent = deathPipelineActors.has(actor.id);
+      material.opacity = 1;
+      material.needsUpdate = true;
+    }
     // QA metadata (read-only; used by the automated browser harness).
     charRig.group.userData.isCharacterRig = true;
     charRig.group.userData.isPlayerRig = actor.isPlayer;
+    charRig.prewarmDeath?.();
     rigs.set(actor.id, charRig);
     world.group.add(charRig.group);
   }
@@ -697,9 +711,88 @@ async function startMatchImpl(
   // Compile all shader programs before gameplay starts. Rigs are made visible
   // for the pass so first TPS reveal never stalls on program compilation
   // (V-switch freeze). present() restores per-mode visibility each frame.
+  const rigPrewarmStates = [...rigs.values()].map((characterRig) => ({
+    group: characterRig.group,
+    visible: characterRig.group.visible,
+    position: characterRig.group.position.clone(),
+  }));
   try {
-    for (const r of rigs.values()) r.group.visible = true;
+    const cameraForward = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
+    const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(rig.camera.quaternion);
+    rigPrewarmStates.forEach(({ group }, index) => {
+      group.visible = true;
+      group.position.copy(rig.camera.position)
+        .addScaledVector(cameraForward, 6 + Math.floor(index / 5) * 2)
+        .addScaledVector(cameraRight, (index % 5 - 2) * 1.1);
+    });
     viewmodel.group.visible = true;
+    const prewarmObjects: Array<{
+      object: THREE.Object3D;
+      visible: boolean;
+      scale: THREE.Vector3;
+    }> = [];
+    const prewarmedVfxVariants = new Set<string>();
+    vfx.group.traverse((object) => {
+      const renderable = object as THREE.Object3D & {
+        isMesh?: boolean;
+        isSprite?: boolean;
+        isLine?: boolean;
+        isInstancedMesh?: boolean;
+        material?: THREE.Material | THREE.Material[];
+      };
+      if (!renderable.isMesh && !renderable.isSprite && !renderable.isLine) return;
+      const material = Array.isArray(renderable.material) ? renderable.material[0] : renderable.material;
+      if (!material) return;
+      const variantKey = `${material.type}:${material.blending}:${renderable.isSprite ? 'sprite' : renderable.isInstancedMesh ? 'instanced' : 'mesh'}`;
+      if (prewarmedVfxVariants.has(variantKey)) return;
+      prewarmedVfxVariants.add(variantKey);
+      prewarmObjects.push({ object, visible: object.visible, scale: object.scale.clone() });
+      object.visible = true;
+      object.scale.setScalar(0.001);
+    });
+    const vfxPosition = vfx.group.position.clone();
+    const transportVisible = world.transportGroup.visible;
+    const transportPosition = world.transportGroup.position.clone();
+    vfx.group.position.copy(rig.camera.position).addScaledVector(cameraForward, 2);
+    world.transportGroup.visible = true;
+    world.transportGroup.position.copy(rig.camera.position).addScaledVector(cameraForward, 12);
+    const deathMaterials = new Set<THREE.MeshStandardMaterial>();
+    const representativeDeathRig = rigs.get(match.actors.find((actor) => !actor.isPlayer)?.id ?? -1);
+    if (representativeDeathRig) {
+      const characterRig = representativeDeathRig;
+      for (const material of [...characterRig.baseMats, ...characterRig.accentMats]) deathMaterials.add(material);
+    }
+    const deathStates = [...deathMaterials].map((material) => ({
+      material,
+      transparent: material.transparent,
+      opacity: material.opacity,
+    }));
+    for (const { material } of deathStates) {
+      material.transparent = true;
+      material.opacity = 0;
+      material.needsUpdate = true;
+    }
+    try {
+      // Compile pooled impact/shield/elimination renderables and the death
+      // transparency variant while the loading screen owns the frame.
+      await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+      ensureCurrentStart(generation);
+      renderer.renderer.render(renderer.scene, rig.camera);
+    } finally {
+      for (const { object, visible, scale } of prewarmObjects) {
+        object.visible = visible;
+        object.scale.copy(scale);
+      }
+      vfx.group.position.copy(vfxPosition);
+      world.transportGroup.visible = transportVisible;
+      world.transportGroup.position.copy(transportPosition);
+      for (const { material, transparent, opacity } of deathStates) {
+        material.transparent = transparent;
+        material.opacity = opacity;
+        material.needsUpdate = true;
+      }
+    }
+    // Restore and compile the normal opaque gameplay variants last.
     await renderer.renderer.compileAsync(renderer.scene, rig.camera);
     ensureCurrentStart(generation);
     // Warm the shadow/depth program variants too — compileAsync only covers
@@ -708,6 +801,11 @@ async function startMatchImpl(
     renderer.renderer.render(renderer.scene, rig.camera);
   } catch {
     /* parallel shader compile unsupported — runtime compile still works */
+  } finally {
+    for (const { group, visible, position } of rigPrewarmStates) {
+      group.visible = visible;
+      group.position.copy(position);
+    }
   }
   viewmodel.group.visible = rig.mode === 'fps';
 
@@ -1899,7 +1997,7 @@ function present(dtReal: number): void {
   renderer.followViewer(rig.camera.position);
 
   hud.syncPlayerState(m, dtReal);
-  hud.drawMinimap(m, () => hud.minimapContext());
+  hud.drawMinimap(m, () => hud.minimapContext(), dtReal);
   if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
     const info = !spectating && m.player?.alive && !paused && !hud.isTacMapOpen() && !hud.isInventoryOpen()
