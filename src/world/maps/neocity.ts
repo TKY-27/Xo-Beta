@@ -7,10 +7,29 @@
 import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, addGround, slabWithHole } from './common';
+import { addBuilding as addBaseBuilding, addGround, slabWithHole, type BuildingOpts } from './common';
 
 const S = 500; // map size
 const TRANSIT_CUTOUT = { minX: 117.7, maxX: 121.3, minZ: -140, maxZ: -127, surfaceY: 0 };
+
+function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
+  addBaseBuilding(b, o);
+  const height = (o.floors ?? 1) * (o.floorHeight ?? 3.6);
+  const baseY = o.baseY ?? 0;
+  const yaw = o.yaw ?? 0;
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  for (const localX of [-o.w / 2 - 0.08, o.w / 2 + 0.08]) {
+    for (const localZ of [-o.d / 2 - 0.08, o.d / 2 + 0.08]) {
+      const x = o.x + localX * c - localZ * s;
+      const z = o.z + localX * s + localZ * c;
+      b.box(x, baseY + height / 2, z, 0.22, height, 0.22, 'metalExterior', yaw, {
+        noCollide: true,
+        castShadow: false,
+      });
+    }
+  }
+}
 
 export function buildNeoCity(): MapDef {
   const rng = new Rng(0x0c17 + 7);
@@ -28,6 +47,18 @@ export function buildNeoCity(): MapDef {
     b.box(c - 17, 0.1, 0, 20, 0.2, S, 'paving', 0, { floor: true });
     b.box(0, 0.1, c + 17, S, 0.2, 20, 'paving', 0, { floor: true });
     b.box(0, 0.1, c - 17, S, 0.2, 20, 'paving', 0, { floor: true });
+    // Continuous curb lips define the road edge without adding collision
+    // snags; the walkable sidewalk slab remains the sole gameplay surface.
+    for (const side of [-1, 1]) {
+      b.box(c + side * 7.1, 0.19, 0, 0.28, 0.18, S, 'metalExterior', 0, {
+        noCollide: true,
+        castShadow: false,
+      });
+      b.box(0, 0.19, c + side * 7.1, S, 0.18, 0.28, 'metalExterior', 0, {
+        noCollide: true,
+        castShadow: false,
+      });
+    }
     // road lane markings (dashed centerline both directions) — above road top (0.12)
     for (let d = -S / 2 + 6; d < S / 2 - 6; d += 9) {
       b.box(c, 0.132, d, 0.35, 0.02, 3.4, 'paint', 0, { noCollide: true });
@@ -44,6 +75,20 @@ export function buildNeoCity(): MapDef {
     for (let d = -S / 2 + 22; d < S / 2 - 22; d += 47) {
       b.cyl(c + 4.2, 0.14, d + ((i + 2) % 3) * 13, 0.55, 0.04, 'metalDark');
       b.cyl(d + ((i + 3) % 4) * 11, 0.14, c - 4.2, 0.55, 0.04, 'metalDark');
+      b.box(c + 6.1, 0.135, d, 0.7, 0.03, 1.35, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(d, 0.135, c - 6.1, 1.35, 0.03, 0.7, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(c - 2.8, 0.134, d + 9, 3.8, 0.018, 6.2, 'concreteDark', ((i * 17 + d) % 5) * 0.045 - 0.09, {
+        noCollide: true,
+        castShadow: false,
+      });
+    }
+    // A sparse bollard pair protects each outer crossing while leaving the
+    // full pedestrian and vehicle lane clear.
+    for (const side of [-1, 1]) {
+      b.box(c + side * 9.2, 0.52, c + 10.5, 0.18, 0.84, 0.18, 'metalExterior', 0, {
+        noCollide: true,
+        castShadow: false,
+      });
     }
   }
 
@@ -86,15 +131,18 @@ export function buildNeoCity(): MapDef {
     const sx = 122 + (i % 3) * 12;
     const sz = 124 + Math.floor(i / 3) * 10;
     b.box(sx, 1.1, sz, 4.4, 0.25, 2.4, 'metal');
-    b.cyl(sx - 2, 0.55, sz, 0.09, 1.1, 'metalDark');
-    b.cyl(sx + 2, 0.55, sz, 0.09, 1.1, 'metalDark');
-    b.box(sx, 2.5, sz, 5, 0.18, 3, i % 2 ? 'neonMagenta' : 'neonCyan', 0, { noCollide: true });
+    b.cyl(sx - 2, 1.25, sz, 0.09, 2.5, 'metalDark');
+    b.cyl(sx + 2, 1.25, sz, 0.09, 2.5, 'metalDark');
+    b.box(sx, 2.5, sz, 5, 0.18, 3, i % 2 ? 'neonMagenta' : 'neonCyan', 0, {
+      noCollide: true,
+      castShadow: false,
+    });
     b.crate(sx + 1.4, 0.2, sz + 1.6, 0.9);
     b.loot(sx - 1.5, 1.45, sz);
   }
   b.chest(130, 0.3, 132, 'standard');
   b.chest(148, 0.3, 140, 'vault');
-  neonSigns(b, rng, [
+  neonSigns(b, [
     [108, 96, 0xff4fd8], [126, 150, 0x53ffe0], [152, 118, 0x7a5cff],
   ]);
   // Mark the broad southern approach as an actual market threshold. The
@@ -262,6 +310,7 @@ export function buildNeoCity(): MapDef {
   litWindows(b, rng);
   streetDressing(b, rng);
   lotDressing(b, rng);
+  applyNeoCityShadowBudget(b);
   removeRoadPaintUnderFoundations(b);
 
   return b.finish(
@@ -292,6 +341,19 @@ export function buildNeoCity(): MapDef {
     { from: [-330, -80], to: [330, 60] },
     { wetGround: true },
   );
+}
+
+function applyNeoCityShadowBudget(b: WorldBuilder): void {
+  const emissiveMats = new Set<MatKey>([
+    'neonCyan', 'neonMagenta', 'neonOrange', 'neonGreen', 'neonBlue',
+    'windowWarm', 'windowCool', 'signDimCyan', 'signDimMagenta', 'signDimOrange',
+  ]);
+  for (const geo of b.def.geo) {
+    if (geo.kind !== 'box' || !geo.noCollide) continue;
+    if (emissiveMats.has(geo.mat) || Math.min(geo.sx, geo.sy, geo.sz) <= 0.18) {
+      geo.castShadow = false;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -479,13 +541,30 @@ function rampTo(b: WorldBuilder, cx: number, cz: number, startR: number, topY: n
   }
 }
 
-function neonSigns(b: WorldBuilder, rng: Rng, spots: Array<[number, number, number]>): void {
+function neonSigns(b: WorldBuilder, spots: Array<[number, number, number]>): void {
   const signMats: Record<number, MatKey> = { 0xff4fd8: 'neonMagenta', 0x53ffe0: 'neonGreen', 0x7a5cff: 'neonBlue' };
-  for (const [x, z, color] of spots) {
-    const h = rng.range(7, 11);
-    b.box(x, h, z, 0.5, 3.2, 6.5, 'metalDark');
-    b.box(x + 0.4, h, z, 0.2, 2.4, 5.4, signMats[color] ?? 'neonCyan', 0, { noCollide: true });
-    b.light(x + 1, h, z, color, 2.4, 30);
+  for (let index = 0; index < spots.length; index++) {
+    const [x, z, color] = spots[index]!;
+    const h = index === 0 ? 6.4 : 5.4;
+    const postHeight = h + 1.1;
+    for (const offset of [-2.2, 2.2]) {
+      b.box(x + 0.18, 0.18, z + offset, 1.05, 0.36, 1.15, 'concreteDark', 0, {
+        noCollide: true,
+        castShadow: false,
+      });
+      b.box(x + 0.18, postHeight / 2, z + offset, 0.3, postHeight, 0.3, 'metalDark', 0, {
+        noCollide: true,
+        castShadow: false,
+      });
+    }
+    b.box(x, h - 1.45, z, 0.34, 0.28, 5.6, 'metalDark', 0, { noCollide: true, castShadow: false });
+    b.box(x + 0.18, h, z, 0.3, 2.9, 6, 'metalDark', 0, { noCollide: true, castShadow: false });
+    b.box(x + 0.42, h, z, 0.18, 2.4, 5.4, signMats[color] ?? 'neonCyan', 0, {
+      noCollide: true,
+      castShadow: false,
+    });
+    const landmark = index === 0;
+    b.light(x + 0.42, h, z, color, landmark ? 2.2 : 1.2, landmark ? 26 : 18);
   }
 }
 
@@ -743,8 +822,28 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
     'windowWarm', 'windowWarm', 'windowCool', 'windowCool',
   ];
   const geo = b.def.geo;
-  const pushWindow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, mat: MatKey) =>
-    geo.push({ kind: 'box', x, y, z, sx, sy, sz, yaw: 0, mat, noCollide: true });
+  let windowIndex = 0;
+  let storefrontIndex = 0;
+  const pushWindow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, mat: MatKey) => {
+    // A sampled deep reveal is enough to break the flat facade silhouette;
+    // framing every lit pane would add thousands of world specs and slow
+    // headless physics/map setup even though the frames are non-colliding.
+    if (windowIndex % 12 === 0) {
+      const thinX = sx < sz;
+      geo.push({
+        kind: 'box', x, y, z,
+        sx: thinX ? Math.max(0.04, sx - 0.02) : sx + 0.2,
+        sy: sy + 0.2,
+        sz: thinX ? sz + 0.2 : Math.max(0.04, sz - 0.02),
+        yaw: 0,
+        mat: 'metalDark',
+        noCollide: true,
+        castShadow: false,
+      });
+    }
+    windowIndex++;
+    geo.push({ kind: 'box', x, y, z, sx, sy, sz, yaw: 0, mat, noCollide: true, castShadow: false });
+  };
 
   for (const g of b.def.geo) {
     if (g.kind !== 'box') continue;
@@ -788,10 +887,23 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
       if (g.y - g.sy / 2 < 1.4 && rng.bool(0.6)) {
         const wy = g.y - g.sy / 2 + 1.35;
         const bandLen = span * 0.62;
+        const addAwning = storefrontIndex++ % 6 === 0;
         if (face.axis === 'x') {
           pushWindow(g.x + face.sign * (g.sx / 2 + 0.09), wy, g.z, 0.1, 0.85, bandLen, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
+          if (addAwning) {
+            b.box(g.x + face.sign * (g.sx / 2 + 0.36), wy + 0.72, g.z, 0.72, 0.14, bandLen + 0.45, 'metalExterior', 0, {
+              noCollide: true,
+              castShadow: false,
+            });
+          }
         } else {
           pushWindow(g.x, wy, g.z + face.sign * (g.sz / 2 + 0.09), bandLen, 0.85, 0.1, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
+          if (addAwning) {
+            b.box(g.x, wy + 0.72, g.z + face.sign * (g.sz / 2 + 0.36), bandLen + 0.45, 0.14, 0.72, 'metalExterior', 0, {
+              noCollide: true,
+              castShadow: false,
+            });
+          }
         }
       }
     }
@@ -924,10 +1036,19 @@ function streetDressing(b: WorldBuilder, rng: Rng): void {
       const sz = j * 100 + rng.range(-8, 8);
       const h = rng.range(4.2, 7.5);
       const mat = signMats[rng.int(0, signMats.length - 1)]!;
-      // mounting bracket + vertical double-sided blade
-      b.box(sx, h, sz, 0.16, 0.16, 1.4, 'metalDark', 0, { noCollide: true });
-      b.box(sx + 0.14, h, sz, 0.22, 2.6, 1.05, mat, 0, { noCollide: true });
-      b.light(sx + 0.4, h, sz, NEON_HEX[mat] ?? 0x53e0ff, 1.4, 16);
+      // Grounded post + mounting bracket + vertical double-sided blade. These
+      // remain visual-only so the street corner's movement lane is unchanged.
+      const postHeight = h + 1.3;
+      b.box(sx, 0.16, sz, 0.62, 0.32, 0.62, 'concreteDark', 0, { noCollide: true, castShadow: false });
+      b.box(sx, postHeight / 2, sz, 0.16, postHeight, 0.16, 'metalDark', 0, {
+        noCollide: true,
+        castShadow: false,
+      });
+      b.box(sx, h, sz, 0.16, 0.16, 1.4, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(sx + 0.14, h, sz, 0.22, 2.6, 1.05, mat, 0, { noCollide: true, castShadow: false });
+      if (Math.abs(i * 5 + j) % 3 === 0) {
+        b.light(sx + 0.14, h, sz, NEON_HEX[mat] ?? 0x53e0ff, 0.85, 12);
+      }
     }
   }
 
