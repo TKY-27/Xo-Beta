@@ -40,10 +40,12 @@ describe('persistent settings boundary', () => {
     });
     const settings = getSettings();
 
-    expect(settings.quality).toBe('ultra');
+    expect(settings.quality).toBe('high');
     expect(settings.fov).toBe(110);
     expect(settings.masterVolume).toBe(0);
-    expect(settings.resolutionScale).toBe(1);
+    expect(settings.resolutionScale).toBe(0.5);
+    expect(settings.shadowQuality).toBe('medium');
+    expect(settings.aa).toBe('fxaa');
     expect(settings.crosshairColor).toBe('#eaf6ff');
     expect(settings.bindings.forward).toBe('KeyW');
     expect(settings.bindings.jump).toBe('Space');
@@ -59,6 +61,6 @@ describe('persistent settings boundary', () => {
 
     vi.resetModules();
     module = await loadWith(null);
-    expect(module.getSettings().quality).toBe('ultra');
+    expect(module.getSettings().quality).toBe('high');
   });
 });

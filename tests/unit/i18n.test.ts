@@ -22,6 +22,9 @@ describe('localization contract', () => {
     expect(html).toContain('data-i18n="hud.spectateExit"');
     expect(html).toContain('class="scope-housing"');
     expect(html).toContain('class="scope-mil mil-h"');
+    expect(html).toContain('class="scope-center-dot"');
+    expect(html).toContain('id="heal-channel" class="hidden" role="progressbar"');
+    expect(html).toContain('id="heal-time"');
   });
 
   it('localizes every authored POI on all four maps', () => {
