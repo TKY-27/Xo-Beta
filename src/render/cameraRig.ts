@@ -152,7 +152,10 @@ export class CameraRig {
       const boomLength = desired.length();
       desired.multiplyScalar(1 / Math.max(boomLength, 1e-6));
       const hit = phys.cameraCast(pivot.x, pivot.y, pivot.z, desired.x, desired.y, desired.z, boomLength, 0.2);
-      const dist = hit ? Math.max(0.75, hit.dist - 0.12) : boomLength;
+      // Never force the camera past a near obstruction. The former 0.75 m
+      // minimum could exceed the sweep hit distance beside an indoor wall,
+      // placing the TPS camera inside/behind that wall and filling the frame.
+      const dist = hit ? Math.max(this.camera.near + 0.02, hit.dist - 0.08) : boomLength;
       this.camera.position.copy(pivot).addScaledVector(desired, dist);
       this.camera.position.y += shY;
       this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shY * 0.4, yaw + shX * 0.4, 0, 'YXZ'));
@@ -200,7 +203,7 @@ export class CameraRig {
     const pivot = new THREE.Vector3(p.x, target.eyeY - 0.2, p.z);
     const back = dir.clone().multiplyScalar(-1);
     const hit = phys.cameraCast(pivot.x, pivot.y, pivot.z, back.x, back.y, back.z, 5, 0.2);
-    const dist = hit ? Math.max(0.75, hit.dist - 0.12) : 5;
+    const dist = hit ? Math.max(this.camera.near + 0.02, hit.dist - 0.08) : 5;
     _tv.copy(pivot).addScaledVector(back, dist);
     if (!this.spectateInitialized) {
       this.camera.position.copy(_tv);

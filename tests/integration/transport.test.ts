@@ -14,6 +14,13 @@ beforeAll(async () => {
 });
 
 const STEP = 1 / 60;
+// Each case constructs the full Neo City physics/nav world. Keep the normal
+// parallel full-suite load from turning a correct simulation assertion into a
+// five-second infrastructure timeout.
+// Each case constructs a complete production-map Nav graph. Parallel all-map
+// integration runs can legitimately exceed the old 15 s ceiling even though
+// the same assertions complete quickly in isolation.
+const TRANSPORT_TEST_TIMEOUT = 60_000;
 
 /**
  * Deterministic input source driven through the REAL command pipeline
@@ -57,7 +64,8 @@ describe('transport / drop lifecycle', () => {
     const current = { ...m.transportPos };
     m.fixedUpdate(STEP);
     expect(m.previousTransportPos).toEqual(current);
-  });
+    m.dispose();
+  }, TRANSPORT_TEST_TIMEOUT);
 
   it('landed player keeps full control while other actors are still aboard', () => {
     const m = makeMatch();
@@ -91,6 +99,27 @@ describe('transport / drop lifecycle', () => {
     expect(player.state).not.toBe('freefall');
     expect(player.state).not.toBe('glide');
     expect(m.phase).toBe('transport');
+    // Glide touchdown uses a safe teleport, which deliberately invalidates
+    // contact state. It must remain air for this exact frame instead of
+    // publishing a false `ground && !grounded` combination.
+    expect(player.state).toBe('air');
+    expect(player.body.grounded).toBe(false);
+    expect(m.phys.characterPenetrationsAt(
+      player.body.position.x,
+      player.body.position.y,
+      player.body.position.z,
+      player.body.body,
+    )).toEqual([]);
+    expect(player.state === 'ground' && !player.body.grounded).toBe(false);
+    m.fixedUpdate(STEP);
+    expect(player.body.grounded).toBe(true);
+    expect(player.state).toBe('ground');
+    expect(m.phys.characterPenetrationsAt(
+      player.body.position.x,
+      player.body.position.y,
+      player.body.position.z,
+      player.body.body,
+    )).toEqual([]);
 
     // The landed player must respond to movement input on the very next
     // simulation updates, even though no other actor has jumped yet.
@@ -117,7 +146,8 @@ describe('transport / drop lifecycle', () => {
     expect(player.deployed).toBe(true);
     expect(player.body.position.y).toBeLessThan(groundY + 30);
     stub.moving = false;
-  });
+    m.dispose();
+  }, TRANSPORT_TEST_TIMEOUT);
 
   it('force-deploys every remaining actor exactly once at route end', () => {
     const m = makeMatch();
@@ -133,5 +163,6 @@ describe('transport / drop lifecycle', () => {
       expect(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)).toBe(true);
     }
     expect(['drop', 'live']).toContain(m.phase);
-  });
+    m.dispose();
+  }, TRANSPORT_TEST_TIMEOUT);
 });

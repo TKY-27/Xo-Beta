@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   await page.click('#btn-play');
   await page.waitForTimeout(300);
   if (map !== 'neocity') {
-    const idx = ['neocity', 'oldfront', 'eden'].indexOf(map) + 1;
+    const idx = ['neocity', 'oldfront', 'eden', 'ashara'].indexOf(map) + 1;
     await page.click(`#map-list .map-card:nth-child(${idx})`);
   }
   await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());

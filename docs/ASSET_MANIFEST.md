@@ -85,7 +85,7 @@ each alias is recorded here so the files can be independently re-audited.
 | Favicon mark (X/O geometric) | public/assets/branding/favicon.svg | hand-authored SVG, 2026-08-24 |
 | Apple touch icon | public/assets/branding/apple-touch-icon.png | tests/browser/gen-branding.ts (headless render of the mark), 2026-08-24 |
 | Social share card 1200x630 | public/assets/branding/og-card.jpg | tests/browser/gen-branding.ts over a NEO CITY in-engine capture, 2026-08-24 |
-| Map browser hero cards 1600x900 | public/assets/maps/{neocity,oldfront,eden}.jpg | tests/browser/qa-heroes.ts in-engine captures (HUD/viewmodel hidden), 2026-08-24 |
+| Map browser hero cards 1600x900 | public/assets/maps/{neocity,oldfront,eden,ashara}.jpg | tests/browser/qa-heroes.ts in-engine captures (HUD/viewmodel hidden), 2026-08-24 through 2026-08-29 |
 
 ## Verification
 

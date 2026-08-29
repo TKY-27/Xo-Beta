@@ -107,9 +107,7 @@ export class MovementSystem {
 
   /**
    * Absolute map boundary: no walking, sprinting, dashing, bunny hopping,
-   * sliding, wall-running or swimming out of the playable world. Position is
-   * corrected immediately (teleport) so render, camera and AI agree with
-   * physics on the same side of the boundary.
+   * sliding, wall-running or swimming out of the playable world.
    */
   private clampToBounds(a: Actor): void {
     const p = a.body.position;
@@ -126,15 +124,22 @@ export class MovementSystem {
     if (p.z >= lim && v.z > 0) v.z = 0;
     if (p.z <= -lim && v.z < 0) v.z = 0;
     if (clamped) {
-      // Sync immediately so render, camera and AI agree with physics.
-      a.body.teleport(p.x, p.y, p.z);
+      // move() already computed valid floor/wall contact and queued an
+      // unconstrained kinematic target. Replacing that pending translation is
+      // sufficient. teleport() clears the KCC contact flags; doing it on every
+      // outward input tick left a supported boundary actor permanently in
+      // state='air' / grounded=false even though its capsule never left the
+      // floor. Preserve the just-computed contact state and locomotion state.
+      a.body.body.setNextKinematicTranslation(p);
     }
     // Kill-plane failsafe: never fall forever below the world.
     if (p.y < -60) {
       const surf = this.phys.surfaceAt(p.x, p.z, 80, 200);
-      p.y = (surf ?? 0) + CAPSULE_CENTER_OFFSET + 0.05;
       v.x = 0; v.y = 0; v.z = 0;
-      a.body.teleport(p.x, p.y, p.z);
+      const placement = this.phys.findClearStandingPlacement(p.x, surf ?? 0, p.z, a.body.body);
+      if (placement) a.body.teleport(placement.x, placement.y, placement.z);
+      else a.body.teleport(p.x, Math.max(surf ?? 0, 0) + 30, p.z);
+      a.state = 'air';
       a.peakFallSpeed = 0;
     }
   }
@@ -181,12 +186,15 @@ export class MovementSystem {
     const torsoY = feetY + 1.0;
     const vol = this.waterAt(p.x, torsoY, p.z);
     if (vol && torsoY < vol.surfaceY - 0.55) {
+      // Publish the finite authored surface before emitting entry effects.
+      // Actors initialize this field to -Infinity; emitting first forwarded
+      // that sentinel to WebAudio's panner and threw an AudioParam exception.
+      a.waterSurfaceY = vol.surfaceY;
       if (!a.inWater && a.state !== 'freefall' && a.state !== 'glide') {
         this.events.onSplash(a, Math.hypot(a.body.velocity.x, a.body.velocity.z, a.body.velocity.y) > 14);
       }
       a.inWater = true;
       a.submerged = feetY + 1.9 < vol.surfaceY;
-      a.waterSurfaceY = vol.surfaceY;
       if (a.state !== 'swim' && a.state !== 'freefall' && a.state !== 'glide' &&
           a.state !== 'mantle' && a.state !== 'poundFall') {
         this.enterSwim(a);
@@ -196,7 +204,18 @@ export class MovementSystem {
       a.inWater = false;
       a.submerged = false;
       if (shallow) a.waterSurfaceY = vol!.surfaceY;
-      if (a.state === 'swim' && !shallow) a.state = a.body.grounded ? 'ground' : 'air';
+      if (a.state === 'swim' && !shallow) {
+        const ground = this.phys.surfaceAt(p.x, p.z, feetY + 2.4, 4);
+        const supported = ground !== null
+          && Math.abs(feetY - ground) <= 0.12
+          && a.body.grounded
+          && this.phys.isCharacterPositionClear(p.x, p.y, p.z, a.body.body);
+        a.state = supported ? 'ground' : 'air';
+        if (supported) {
+          a.body.velocity.y = 0;
+          a.peakFallSpeed = 0;
+        }
+      }
     }
   }
 
@@ -213,9 +232,10 @@ export class MovementSystem {
     if (this.tryMantle(a, cmd)) return;
 
     // Slide entry
-    if (cmd.crouchPressed && !a.crouched) {
-      this.tryStartSlide(a);
-    }
+    // A successful entry owns this tick. Continuing through ordinary ground
+    // movement immediately overwrote `slide` with `ground`/`air`, leaving the
+    // boost but never running the slide state on the following tick.
+    if (cmd.crouchPressed && this.tryStartSlide(a)) return;
 
     // Jump handling
     this.handleJump(a, cmd);
@@ -254,20 +274,7 @@ export class MovementSystem {
     if (a.inWater) wishSpeed *= 0.55;
 
     if (b.grounded) {
-      // Bhop: skip friction if within window after landing and jumping
-      const justLanded = !wasGrounded;
-      if (justLanded) {
-        a.jumpsUsed = 0;
-        a.wallrunLanded = true;
-        a.wallrunChains = 0;
-        if (a.peakFallSpeed > MOVE.fallDamageMinSpeed) {
-          this.applyLanding(a);
-        }
-        a.peakFallSpeed = 0;
-      }
-      if (!(justLanded && a.bhopWindow > 0 && a.jumpBuffered > 0)) {
-        this.applyFriction(v, dt, MOVE.frictionGround);
-      }
+      this.applyFriction(v, dt, MOVE.frictionGround);
       this.accelerate(v, wx, wz, wishSpeed, MOVE.accelGround, dt);
 
       // Soft speed cap (anti infinite-bhop exploit)
@@ -278,8 +285,10 @@ export class MovementSystem {
         v.x *= damp; v.z *= damp;
       }
 
-      if (v.y <= 0) v.y = Math.min(v.y, 0) - 0; // grounded, controller handles snap
-      v.y -= MOVE.gravity * dt * 0.25; // light stick force
+      // Snap-to-ground already maintains support. Reapplying a negative
+      // "stick" displacement every tick made Rapier's KCC accumulate support
+      // error until grounded actors sank deeply through otherwise flat boxes.
+      if (v.y <= 0) v.y = 0;
     } else {
       a.coyote = Math.max(0, a.coyote - 0); // decremented in timers
       if (a.peakFallSpeed < -v.y) a.peakFallSpeed = -v.y;
@@ -297,6 +306,16 @@ export class MovementSystem {
     b.move(v.x * dt, v.y * dt, v.z * dt);
     if (b.hitCeiling && preY > 0) v.y = 0;
     if (b.grounded && v.y < 0) v.y = 0;
+    if (b.grounded && !wasGrounded) {
+      // Contact can only become grounded after the KCC move. The previous
+      // pre-move check compared b.grounded with its own snapshot, making this
+      // transition unreachable and leaving wall-run/jump state stale.
+      a.jumpsUsed = 0;
+      a.wallrunLanded = true;
+      a.wallrunChains = 0;
+      if (a.peakFallSpeed > MOVE.fallDamageMinSpeed) this.applyLanding(a);
+      a.peakFallSpeed = 0;
+    }
     if (!b.grounded && wasGrounded) {
       a.coyote = MOVE.coyoteTime;
       // Landing owns its own impact sample. Resetting the gait phase prevents
@@ -503,6 +522,7 @@ export class MovementSystem {
         a.wallNormalZ = wall.nz;
         a.wallrunTimer = 0;
         a.wallrunChains++;
+        a.wallrunLanded = false;
         // Entering a run must not convert upward momentum into free lift.
         v.y = Math.min(v.y, 1.2);
         a.jumpsUsed = 1; // wall jump counts as first jump for chain rules
@@ -536,12 +556,19 @@ export class MovementSystem {
     const align = tx * fwd.x + tz * fwd.z >= 0 ? 1 : -1;
     const dirX = tx * align, dirZ = tz * align;
 
-    const hs = Math.hypot(v.x, v.z);
-    const targetSpeed = Math.max(hs, MOVE.wallRunMinSpeed + 2.5);
-    // Blend velocity toward tangent direction
+    // Only real motion along the wall may feed the next frame's run speed.
+    // The previous implementation measured hypot(vx, vz) after adding the
+    // wall-stick force to velocity. Repeated wall contact could therefore
+    // convert an otherwise blocked normal component into tangential speed,
+    // especially while jump was spammed across land/re-entry transitions.
+    const tangentSpeed = Math.abs(v.x * dirX + v.z * dirZ);
+    const targetSpeed = Math.max(tangentSpeed, MOVE.wallRunMinSpeed + 2.5);
+    // Blend the signed wall tangent and discard any stored into-wall velocity.
     const blend = Math.min(1, dt * 10);
-    v.x += (dirX * targetSpeed - v.x) * blend;
-    v.z += (dirZ * targetSpeed - v.z) * blend;
+    const currentTangent = v.x * dirX + v.z * dirZ;
+    const blendedTangent = currentTangent + (targetSpeed - currentTangent) * blend;
+    v.x = dirX * blendedTangent;
+    v.z = dirZ * blendedTangent;
 
     // Reduced gravity that strengthens over the run (runs arc downward),
     // plus a small initial carry so runs feel fluid.
@@ -549,15 +576,11 @@ export class MovementSystem {
     v.y -= MOVE.gravity * gScale * dt;
     if (a.wallrunTimer < 0.22 && v.y < 1.6) v.y = 1.6;
 
-    // Stick to wall
-    v.x += -wall.nx * MOVE.wallRunStickAccel * dt;
-    v.z += -wall.nz * MOVE.wallRunStickAccel * dt;
-
     // Wall jump
     if (a.jumpBuffered > 0) {
       a.jumpBuffered = 0;
-      v.x = wall.nx * MOVE.wallJumpOutVel + dirX * Math.max(hs * 0.72, 7);
-      v.z = wall.nz * MOVE.wallJumpOutVel + dirZ * Math.max(hs * 0.72, 7);
+      v.x = wall.nx * MOVE.wallJumpOutVel + dirX * Math.max(targetSpeed * 0.72, 7);
+      v.z = wall.nz * MOVE.wallJumpOutVel + dirZ * Math.max(targetSpeed * 0.72, 7);
       v.y = MOVE.wallJumpUpVel;
       a.jumpsUsed = 1;
       a.state = 'air';
@@ -568,11 +591,21 @@ export class MovementSystem {
       return;
     }
 
-    b.move(v.x * dt, v.y * dt, v.z * dt);
+    // Stick is a collision-controller request, not momentum. Keeping it out
+    // of velocity prevents a blocked normal from becoming reusable speed.
+    b.move(
+      (v.x - wall.nx * MOVE.wallRunStickAccel) * dt,
+      v.y * dt,
+      (v.z - wall.nz * MOVE.wallRunStickAccel) * dt,
+    );
     if (b.grounded) {
       a.state = 'ground';
+      v.y = 0;
+      a.jumpsUsed = 0;
       a.wallrunLanded = true;
       a.wallrunChains = 0;
+      if (a.peakFallSpeed > MOVE.fallDamageMinSpeed) this.applyLanding(a);
+      a.peakFallSpeed = 0;
       return;
     }
     if (a.peakFallSpeed < -v.y) a.peakFallSpeed = -v.y;
@@ -608,11 +641,30 @@ export class MovementSystem {
     const clear = this.phys.raycast(probeX, ledgeY + 0.3, probeZ, 0, 1, 0, 2.2, GROUPS.rayWorldOnly);
     if (clear) return false;
 
+    return this.startMantle(a, probeX, ledgeY + CAPSULE_CENTER_OFFSET, probeZ);
+  }
+
+  /**
+   * Begin a collision-safe two-part mantle: rise beside the obstacle, then
+   * cross its top. Both complete capsule sweeps are validated up front so a
+   * centre ray cannot place an actor inside a ceiling, overhang or wall edge.
+   */
+  private startMantle(a: Actor, targetX: number, targetY: number, targetZ: number): boolean {
+    const from = a.body.position;
+    const raised = { x: from.x, y: targetY, z: from.z };
+    const target = { x: targetX, y: targetY, z: targetZ };
+    if (!this.phys.isCharacterSweepClear(from, raised, a.body.body) ||
+        !this.phys.isCharacterSweepClear(raised, target, a.body.body)) {
+      return false;
+    }
     a.state = 'mantle';
-    a.mantleFrom = { ...p };
-    a.mantleTo = { x: probeX, y: ledgeY + CAPSULE_CENTER_OFFSET, z: probeZ };
+    a.mantleFrom = { ...from };
+    a.mantleTo = target;
     a.mantleTimer = 0;
     a.body.velocity.x = 0; a.body.velocity.y = 0; a.body.velocity.z = 0;
+    a.jumpBuffered = 0;
+    a.coyote = 0;
+    a.peakFallSpeed = 0;
     this.events.onMantle(a);
     return true;
   }
@@ -620,18 +672,66 @@ export class MovementSystem {
   private updateMantle(a: Actor, dt: number): void {
     a.mantleTimer += dt;
     const t = Math.min(1, a.mantleTimer / MOVE.mantleDuration);
-    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-    const fx = a.mantleFrom.x + (a.mantleTo.x - a.mantleFrom.x) * ease;
-    const fy = a.mantleFrom.y + (a.mantleTo.y - a.mantleFrom.y) * Math.min(1, ease * 1.35);
-    const fz = a.mantleFrom.z + (a.mantleTo.z - a.mantleFrom.z) * ease;
-    a.body.teleport(fx, fy, fz);
+    const riseEnd = 0.55;
+    let fx: number;
+    let fy: number;
+    let fz: number;
+    if (t < riseEnd) {
+      const u = t / riseEnd;
+      const ease = u * u * (3 - 2 * u);
+      fx = a.mantleFrom.x;
+      fy = a.mantleFrom.y + (a.mantleTo.y - a.mantleFrom.y) * ease;
+      fz = a.mantleFrom.z;
+    } else {
+      const u = (t - riseEnd) / (1 - riseEnd);
+      const ease = u * u * (3 - 2 * u);
+      fx = a.mantleFrom.x + (a.mantleTo.x - a.mantleFrom.x) * ease;
+      fy = a.mantleTo.y;
+      fz = a.mantleFrom.z + (a.mantleTo.z - a.mantleFrom.z) * ease;
+    }
+    const before = { ...a.body.position };
+    const requested = { x: fx - before.x, y: fy - before.y, z: fz - before.z };
+    a.body.move(requested.x, requested.y, requested.z);
+    const requestedDistance = Math.hypot(requested.x, requested.y, requested.z);
+    const movedDistance = Math.hypot(
+      a.body.position.x - before.x,
+      a.body.position.y - before.y,
+      a.body.position.z - before.z,
+    );
+    if (requestedDistance > 0.02 && movedDistance < Math.min(0.01, requestedDistance * 0.2)) {
+      a.state = a.body.grounded ? 'ground' : 'air';
+      a.body.velocity.x = 0; a.body.velocity.y = 0; a.body.velocity.z = 0;
+      return;
+    }
     if (t >= 1) {
-      a.state = 'ground';
+      const miss = Math.hypot(
+        a.body.position.x - a.mantleTo.x,
+        a.body.position.y - a.mantleTo.y,
+        a.body.position.z - a.mantleTo.z,
+      );
+      const supportDistance = this.phys.groundBelow(
+        a.body.position.x,
+        a.body.position.y,
+        a.body.position.z,
+        CAPSULE_CENTER_OFFSET + 0.3,
+      );
+      const succeeded = miss <= 0.12 && supportDistance !== null
+        && Math.abs(supportDistance - CAPSULE_CENTER_OFFSET) <= 0.12
+        && a.body.grounded
+        && this.phys.isCharacterPositionClear(
+          a.body.position.x,
+          a.body.position.y,
+          a.body.position.z,
+          a.body.body,
+        );
+      // Geometry may change after the preflight sweep (for example a
+      // destructible transition). Never force the endpoint when KCC blocks.
+      a.state = succeeded ? 'ground' : (a.body.grounded ? 'ground' : 'air');
       const fwd = yawDir(a.yaw);
-      a.body.velocity.x = fwd.x * 3.4;
-      a.body.velocity.z = fwd.z * 3.4;
+      a.body.velocity.x = succeeded ? fwd.x * 3.4 : 0;
+      a.body.velocity.z = succeeded ? fwd.z * 3.4 : 0;
       a.body.velocity.y = 0;
-      a.jumpsUsed = 0;
+      if (succeeded) a.jumpsUsed = 0;
     }
   }
 
@@ -786,29 +886,36 @@ export class MovementSystem {
     b.move(v.x * dt, v.y * dt, v.z * dt);
 
     // Exit water: walk onto shore or mantle out
-    if (!this.waterAt(p.x, feetY + 1.0, p.z)) {
-      const ground = this.phys.surfaceAt(p.x, p.z, feetY + 2.4, 4);
-      if (ground !== null && ground <= feetY + 0.6) {
+    const moved = b.position;
+    const movedFeetY = feetYFromBodyCenter(moved.y);
+    if (!this.waterAt(moved.x, movedFeetY + 1.0, moved.z)) {
+      const ground = this.phys.surfaceAt(moved.x, moved.z, movedFeetY + 2.4, 4);
+      const supported = ground !== null
+        && Math.abs(movedFeetY - ground) <= 0.12
+        && b.grounded
+        && this.phys.isCharacterPositionClear(moved.x, moved.y, moved.z, b.body);
+      if (supported) {
         a.state = 'ground';
+        v.y = 0;
+        a.peakFallSpeed = 0;
         return;
       }
       // ledge nearby? try mantle assist
       const fwdOnly = yawDir(a.yaw);
       const ledge = this.phys.raycast(
-        p.x + fwdOnly.x * 0.8, feetY + 1.6, p.z + fwdOnly.z * 0.8,
+        moved.x + fwdOnly.x * 0.8, movedFeetY + 1.6, moved.z + fwdOnly.z * 0.8,
         0, -1, 0, 2.2, GROUPS.rayWorldOnly,
       );
-      if (ledge && ledge.point.y > feetY + 0.4 && ledge.point.y < feetY + 2.6) {
-        a.state = 'mantle';
-        a.mantleFrom = { ...p };
-        a.mantleTo = { x: p.x + fwdOnly.x * 0.8, y: ledge.point.y + CAPSULE_CENTER_OFFSET, z: p.z + fwdOnly.z * 0.8 };
-        a.mantleTimer = 0;
-        return;
+      if (ledge && ledge.point.y > movedFeetY + 0.4 && ledge.point.y < movedFeetY + 2.6) {
+        if (this.startMantle(
+          a,
+          moved.x + fwdOnly.x * 0.8,
+          ledge.point.y + CAPSULE_CENTER_OFFSET,
+          moved.z + fwdOnly.z * 0.8,
+        )) return;
       }
       a.state = 'air';
     }
-
-    if (b.grounded) a.state = 'ground';
 
     // Swim footsteps (soft paddles) for AI hearing
     a.footstepAccum += Math.hypot(v.x, v.z) * dt;
@@ -871,6 +978,14 @@ export class MovementSystem {
     if (p.x < -lim) { p.x = -lim; if (v.x < 0) v.x = 0; clamped = true; }
     if (p.z > lim) { p.z = lim; if (v.z > 0) v.z = 0; clamped = true; }
     if (p.z < -lim) { p.z = -lim; if (v.z < 0) v.z = 0; clamped = true; }
+    if (clamped) {
+      // move() already queued the unconstrained kinematic target. Replacing
+      // only the presentation-space position leaves Rapier advancing beyond
+      // the boundary on the next step and permanently desynchronizes both
+      // coordinate copies. Flight contact state stays untouched; only replace
+      // the pending x/z-constrained translation.
+      a.body.body.setNextKinematicTranslation(p);
+    }
     // Failsafe: fell out of the world — redeploy above safe ground.
     if (p.y < -80 || (clamped && p.y < 0)) {
       const surf = this.phys.surfaceAt(p.x, p.z, 400, 500) ?? 0;
@@ -904,10 +1019,14 @@ export class MovementSystem {
     if (groundDist !== null && groundDist < 2.6) {
       // Touch down
       const surf = this.phys.surfaceAt(p.x, p.z, p.y + 1, 4);
-      if (surf !== null) {
-        b.teleport(p.x, surf + CAPSULE_CENTER_OFFSET, p.z);
-      }
-      a.state = 'ground';
+      if (surf === null) return;
+      const placement = this.phys.findClearStandingPlacement(p.x, surf, p.z, b.body);
+      if (!placement) return;
+      b.teleport(placement.x, placement.y, placement.z);
+      // Teleport deliberately invalidates contact state. Stay airborne for
+      // this frame; the next normal KCC tick establishes support before the
+      // actor is allowed to report `ground`.
+      a.state = 'air';
       a.deployed = true;
       v.y = 0;
       v.x *= 0.35; v.z *= 0.35;

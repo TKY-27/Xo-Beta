@@ -7,6 +7,7 @@ import type { NavGraph, NavPath } from '../world/nav';
 import { gameNext } from '../core/rng';
 import type { Actor } from '../sim/actor';
 import type { InputCommand } from '../sim/input';
+import { feetYFromBodyCenter } from '../physics/physics';
 
 export interface NavGoal {
   x: number;
@@ -54,7 +55,7 @@ export class BotNavigator {
 
   requestPath(goal: NavGoal): void {
     const p = this.actor.body.position;
-    this.path = this.nav.findPath(p.x, p.y, p.z, goal.x, goal.y, goal.z);
+    this.path = this.nav.findPath(p.x, feetYFromBodyCenter(p.y), p.z, goal.x, goal.y, goal.z);
     this.pathIndex = this.path ? 1 : 0; // skip current node
     this.repathTimer = REPATH_INTERVAL;
     this.lastGoal = goal;
@@ -92,7 +93,7 @@ export class BotNavigator {
     const wp = this.path.points[this.pathIndex]!;
     const dx = wp.x - p.x;
     const dz = wp.z - p.z;
-    const dy = wp.y - p.y;
+    const dy = wp.y - feetYFromBodyCenter(p.y);
     const distH = Math.hypot(dx, dz);
 
     const edgeType = this.path.entryTypes[Math.min(this.pathIndex, this.path.entryTypes.length - 1)] ?? 'walk';
@@ -129,6 +130,17 @@ export class BotNavigator {
       // just walk off
     } else if (edgeType === 'swim') {
       cmd.moveZ = 1;
+    } else if (edgeType === 'shore') {
+      // Surface into the bank; updateSwim will either establish supported
+      // ground contact or reuse the collision-safe mantle path at a ledge.
+      cmd.moveZ = 1;
+      if (a.state === 'swim') {
+        cmd.jumpHeld = true;
+        if (this.jumpCooldown <= 0) {
+          cmd.jumpPressed = true;
+          this.jumpCooldown = 0.9;
+        }
+      }
     }
 
     // Stuck detection & recovery

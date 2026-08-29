@@ -33,6 +33,10 @@ Full headless matches through the real simulation + Rapier + nav graph:
 - **determinism**: the same seed twice produces identical elimination counts,
   headshots and pickups within a capped window
 - combatant count is exactly ten
+- **character/world penetration**: every standing or swimming navigation node
+  on all production maps fits the real capsule; building doors and stair paths,
+  long-idle support, mantle blockers, swim exits and glide landings exercise the
+  same Rapier/KCC paths used by matches
 
 They are the primary regression net for gameplay and physics integration.
 
@@ -48,13 +52,13 @@ kill timelines. Used to validate balance/AI changes before merging.
 
 ## 4. Browser QA (`tests/browser/qa-maps.ts`)
 
-Playwright drives the real dev server through menu → match start → transport →
-jump → landing on all three maps with low graphics settings (headless GPU is
-slow), asserting HUD appearance, landing state, storm timers and zero console
-errors; captures screenshots for visual review.
+Playwright drives system Chrome through menu → match start → transport → jump →
+landing → real movement on all four maps (NEO CITY, OLD FRONT, EDEN FACILITY
+and ASHARA REACH). Headed mode uses Ultra settings; `HEADLESS=1` is diagnostic
+only. The harness fails closed on HUD/phase/landing/movement/collision/world
+composition/runtime-console state and captures screenshots for visual review.
 
 ```bash
-npx playwright install chromium   # once
 npx tsx tests/browser/qa-maps.ts
 ```
 

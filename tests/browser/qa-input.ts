@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   });
   const map = process.argv[2] ?? 'neocity';
   // Flat, open test spots per map (wide POI areas)
-  const spot = { neocity: [20, 20], oldfront: [150, 170], eden: [225, 100] }[map] ?? [20, 20];
+  const spot = { neocity: [20, 20], oldfront: [150, 170], eden: [225, 100], ashara: [0, 44] }[map] ?? [20, 20];
   const sx: number = spot[0] ?? 20;
   const sz: number = spot[1] ?? 20;
   log('goto…');
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   await page.waitForTimeout(800);
   await page.click('#btn-play');
   await page.waitForTimeout(300);
-  if (map !== 'neocity') await page.click(`#map-list .map-card:nth-child(${['neocity','oldfront','eden'].indexOf(map)+1})`);
+  if (map !== 'neocity') await page.click(`#map-list .map-card:nth-child(${['neocity','oldfront','eden','ashara'].indexOf(map)+1})`);
   await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
   await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 }); log('hud up');
 

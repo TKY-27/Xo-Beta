@@ -22,7 +22,7 @@ const TILE_DENSITY: Record<string, number> = {
   metal: 2.6, metalDark: 2.6, rust: 2.8, corrugated: 2.2,
   wood: 2.4, woodDark: 2.4, stoneBrick: 3, bricksOld: 3,
   plaster: 4, plasterOld: 4, dirt: 3.2, rock: 3,
-  roofTile: 2.6, marble: 4, facadeA: 6, facilityFloor: 2,
+  roofTile: 2.6, marble: 4, facadeA: 6,
 };
 
 /** Tints applied on top of base color maps (white = untouched). */
@@ -174,7 +174,6 @@ export async function createMaterials(): Promise<MaterialLibrary> {
     stoneBrick: 'stoneBrick', bricksOld: 'bricksOld', plaster: 'plaster',
     plasterOld: 'plasterOld', grass: 'grass', dirt: 'dirt', rock: 'rock',
     roofTile: 'roofTile', marble: 'marble', facadeA: 'facadeA',
-    facilityFloor: 'facilityFloor',
   };
 
   const sets = new Map<string, Awaited<ReturnType<typeof loadTextureSet>>>();
@@ -238,9 +237,27 @@ export async function createMaterials(): Promise<MaterialLibrary> {
     a.normalScale.set(0.35, 0.35);
     a.roughness = 0.98;
   }
+  // ASHARA is a high-noon desert. Reusing the blue-hour city asphalt made
+  // its highway collapse to a featureless black ribbon. Keep this surface
+  // untextured and matte so it retains a warm aggregate value under direct
+  // sun; road wear and lane breakup are authored as separate geometry.
+  mats.set('asphaltDesert', new THREE.MeshStandardMaterial({
+    color: 0x4f4a43,
+    roughness: 0.97,
+    metalness: 0,
+    envMapIntensity: 0.24,
+  }));
   mats.set('sidewalk', std('sidewalk', 'sidewalk', { roughness: 1 }));
   mats.set('metal', std('metal', 'metal', { metalness: 0.85, roughness: 0.65 }));
   mats.set('metalDark', std('metalDark', 'metalDark', { metalness: 0.8, roughness: 0.7 }));
+  mats.set('metalExterior', new THREE.MeshStandardMaterial({
+    color: 0x78838c,
+    emissive: 0x151b20,
+    emissiveIntensity: 0.12,
+    roughness: 0.74,
+    metalness: 0.62,
+    envMapIntensity: 0.72,
+  }));
   mats.set('rust', std('rust', 'rust', { metalness: 0.45 }));
   mats.set('corrugated', std('corrugated', 'corrugated', { metalness: 0.55 }));
   mats.set('wood', std('wood', 'wood'));
@@ -257,6 +274,39 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('facadeA', std('facadeA', 'facadeA'));
   mats.set('facadeB', std('facadeB', 'bricksOld'));
   mats.set('facadeC', std('facadeC', 'corrugated', { metalness: 0.15 }));
+  {
+    // The legacy facilityFloor image is a small green pool-mosaic sheet; at
+    // building scale it produced noisy checkerboards on both slab faces. Use
+    // the restrained concrete set under the dedicated key, with a cooler tint
+    // and matte non-metal response suitable for a research/utility interior.
+    const floor = std('facilityFloor', 'concrete', {
+      roughness: 0.94,
+      metalness: 0,
+      envMapIntensity: 0.24,
+      color: 0x78838c,
+      metersPerTile: 3.6,
+      normalScale: 0.45,
+    }) as THREE.MeshStandardMaterial;
+    floor.roughnessMap = null;
+    floor.roughness = 0.94;
+    floor.metalness = 0;
+    floor.envMapIntensity = 0.24;
+  mats.set('facilityFloor', floor);
+  }
+  // A ceiling needs to remain legible under the deliberately sparse world
+  // lighting used inside enterable buildings. Reusing exterior concrete or
+  // roof tiles made their high-contrast projected textures collapse into a
+  // black checker/grid at grazing angles. Keep this finish matte and mostly
+  // untextured, with only a restrained ambient lift; authored beams still
+  // carry the building's structural material and provide the visible rhythm.
+  mats.set('interiorCeiling', new THREE.MeshStandardMaterial({
+    color: 0xb8b1a5,
+    emissive: 0x2f2c27,
+    emissiveIntensity: 0.34,
+    roughness: 0.96,
+    metalness: 0,
+    envMapIntensity: 0.18,
+  }));
   // Modern-city paving: same concrete set, lighter + denser so sidewalks and
   // plazas read as poured slabs rather than the grassy cobblestone 'sidewalk'.
   // Modern-city paving: concrete set retinted dark — the raw concrete albedo
@@ -268,6 +318,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // stay readable at grazing angles).
   mats.set('paint', new THREE.MeshStandardMaterial({ color: 0xd9dbd2, roughness: 0.82, metalness: 0 }));
   mats.set('sandbag', new THREE.MeshStandardMaterial({ color: 0x9c8b62, roughness: 0.98 }));
+  mats.set('hay', new THREE.MeshStandardMaterial({ color: 0xb89a55, roughness: 1, metalness: 0 }));
   mats.set('gold', new THREE.MeshStandardMaterial({ color: 0xd8b45a, roughness: 0.32, metalness: 0.95 }));
   // NOTE: plain alpha-blend glass. MeshPhysicalMaterial.transmission forces
   // three.js to re-render the whole scene into a refraction buffer every
@@ -290,7 +341,20 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // Lit rooms should read as luminous panes, not white bloom cards. Large
   // window surfaces stay below the bloom threshold so frame detail survives
   // indoors and at street distance; dedicated neon remains the bloom source.
-  mats.set('windowWarm', neon(0xffd9a0, 0.72));
+  mats.set('windowWarm', new THREE.MeshStandardMaterial({
+    color: 0x33291b,
+    emissive: 0xffc47d,
+    emissiveIntensity: 0.38,
+    roughness: 0.68,
+    metalness: 0.02,
+  }));
+  mats.set('windowCool', new THREE.MeshStandardMaterial({
+    color: 0x18242d,
+    emissive: 0x86b9d2,
+    emissiveIntensity: 0.24,
+    roughness: 0.7,
+    metalness: 0.02,
+  }));
   // Large sign panels: emissive just above the 1.62 bloom threshold so big
   // surfaces glow without blowing out into white slabs.
   mats.set('signDimCyan', neon(0x53e0ff, 1.05));

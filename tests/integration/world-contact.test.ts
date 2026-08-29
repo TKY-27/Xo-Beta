@@ -14,6 +14,8 @@ import { CAPSULE_CENTER_OFFSET, feetYFromBodyCenter } from '../../src/sim/moveme
 import { MovementSystem } from '../../src/sim/movement';
 import { Actor } from '../../src/sim/actor';
 import { emptyCommand } from '../../src/sim/input';
+import { MOVE } from '../../src/core/balance';
+import { ROCK_COLLIDER_HEIGHT, ROCK_COLLIDER_RADIUS } from '../../src/world/types';
 
 beforeAll(async () => {
   await ensureWorldReady();
@@ -30,7 +32,7 @@ function occupiedAt(def: ReturnType<typeof loadMap>['def'], x: number, z: number
   return def.vehicles.some((v) => Math.hypot(v.x - x, v.z - z) < 8);
 }
 
-function movementFor(phys: PhysicsWorld): MovementSystem {
+function movementFor(phys: PhysicsWorld, onSplash: (actor: Actor, heavy: boolean) => void = () => undefined): MovementSystem {
   return new MovementSystem(phys, {
     onFootstep: () => undefined,
     onLand: () => undefined,
@@ -42,11 +44,523 @@ function movementFor(phys: PhysicsWorld): MovementSystem {
     onGrappleRelease: () => undefined,
     onPoundImpact: () => undefined,
     onDash: () => undefined,
-    onSplash: () => undefined,
+    onSplash,
   });
 }
 
 describe('rendered terrain and physics ground alignment', () => {
+  it('resolves a ray-selected wall-edge landing to a clear point on the same floor', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 5, 0.25, 5, 0, 'stone');
+    phys.addStaticBox(0.35, 1, 0, 0.2, 1, 1, 0, 'stone');
+    phys.flush();
+    const requestedY = CAPSULE_CENTER_OFFSET + 0.05;
+    expect(phys.isCharacterPositionClear(0, requestedY, 0)).toBe(false);
+    const placement = phys.findClearStandingPlacement(0, 0, 0);
+    expect(placement).not.toBeNull();
+    expect(phys.characterPenetrationsAt(placement!.x, placement!.y, placement!.z)).toEqual([]);
+    expect(feetYFromBodyCenter(placement!.y)).toBeCloseTo(0.05, 2);
+    phys.dispose();
+  });
+
+  it('rejects an unproven support layer below a one-sided terrain surface', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, 9.75, 0, 5, 0.25, 5, 0, 'dirt');
+    phys.flush();
+    expect(phys.findClearStandingPlacement(0, 0, 0)).toBeNull();
+    const placement = phys.findClearStandingPlacement(0, 10, 0);
+    expect(placement).not.toBeNull();
+    expect(feetYFromBodyCenter(placement!.y)).toBeCloseTo(10.05, 2);
+    expect(phys.characterPenetrationsAt(placement!.x, placement!.y, placement!.z)).toEqual([]);
+    phys.dispose();
+  });
+
+  it('rejects a swimming capsule hidden below one-sided terrain', () => {
+    const phys = new PhysicsWorld();
+    const heights = new Float32Array(9).fill(0);
+    phys.addHeightfield(-5, -5, 5, 5, heights, 3, 3, 'dirt');
+    phys.flush();
+
+    expect(phys.isCharacterPositionClear(0, -0.3, 0)).toBe(true);
+    expect(phys.findClearSwimmingPlacement(0, -0.3, 0)).toBeNull();
+    expect(phys.findClearSwimmingPlacement(0, 2, 0)).toEqual({
+      x: 0,
+      y: 2 - MOVE.swimSurfaceCenterDepth,
+      z: 0,
+    });
+    phys.dispose();
+  });
+
+  it('reports the finished terrain separately from roofs and authored floors', () => {
+    const phys = new PhysicsWorld();
+    const heights = new Float32Array(9).fill(10);
+    phys.addHeightfield(-5, -5, 5, 5, heights, 3, 3, 'dirt');
+    phys.addStaticBox(0, 20, 0, 2, 0.5, 2, 0, 'metal');
+    phys.flush();
+
+    expect(phys.surfaceAt(0, 0, 30, 40)).toBeCloseTo(20.5, 4);
+    expect(phys.terrainSurfaceAt(0, 0, 30, 40)).toBeCloseTo(10, 4);
+    expect(phys.terrainSurfaceAt(8, 0, 30, 40)).toBeNull();
+    phys.addStaticBox(8, 4.5, 0, 2, 0.5, 2, 0, 'dirt', true);
+    phys.flush();
+    expect(phys.terrainSurfaceAt(8, 0, 30, 40)).toBeCloseTo(5, 4);
+    phys.dispose();
+  });
+
+  it('matches cylinder and sphere collision footprints to their rendered radii', () => {
+    const builder = new WorldBuilder('round-colliders', 'Round colliders', 'Visual parity fixture', 100);
+    builder.cyl(0, 1, 0, 1, 2, 'metal');
+    builder.sphere(4, 1, 0, 1, 'rock');
+    const phys = new PhysicsWorld();
+    buildColliders(builder.def, phys);
+    phys.flush();
+    expect(phys.surfaceAt(0.95, 0, 3, 4)).toBeCloseTo(2, 2);
+    expect(phys.surfaceAt(1.01, 0, 3, 4)).toBeNull();
+    expect(phys.surfaceAt(4.95, 0, 3, 4)).not.toBeNull();
+    expect(phys.surfaceAt(5.01, 0, 3, 4)).toBeNull();
+    phys.dispose();
+  });
+
+  it('keeps cameras and characters outside the visible medium-rock footprint', () => {
+    const builder = new WorldBuilder('rock-collider', 'Rock collider', 'Visual parity fixture', 100);
+    builder.rock(0, 0, 0, 1);
+    const phys = new PhysicsWorld();
+    buildColliders(builder.def, phys);
+    phys.flush();
+    const hit = phys.cameraCast(0, 1, ROCK_COLLIDER_RADIUS + 1, 0, 0, -1, 4, 0.2);
+    expect(hit).not.toBeNull();
+    expect(hit!.dist).toBeLessThan(1);
+    expect(phys.isCharacterPositionClear(
+      ROCK_COLLIDER_RADIUS - 0.1,
+      CAPSULE_CENTER_OFFSET,
+      0,
+    )).toBe(false);
+    phys.dispose();
+  });
+
+  it('does not accumulate grounded penetration while idling on a flat collider', () => {
+    for (const [x, z] of [[-242, -242], [-100, -100], [4, 4], [100, 100]] as const) {
+      const phys = new PhysicsWorld();
+      phys.addStaticBox(0, -1, 0, 350, 1, 350, 0, 'stone');
+      phys.flush();
+      const body = new CharBody(phys, 80, x, CAPSULE_CENTER_OFFSET + 0.05, z);
+      const actor = new Actor('IDLE SUPPORT TEST', true, body, 0x5fd0ff);
+      const movement = movementFor(phys);
+      for (let frame = 0; frame < 180; frame++) {
+        movement.update(actor, emptyCommand(), 1 / 60);
+        phys.fixedStep(1 / 60);
+        expect(phys.characterPenetrationsAt(x, body.position.y, z, body.body)).toEqual([]);
+      }
+      expect(body.grounded).toBe(true);
+      expect(feetYFromBodyCenter(body.position.y)).toBeCloseTo(0, 2);
+      body.dispose();
+      phys.dispose();
+    }
+  });
+
+  it('keeps the queued Rapier translation synchronized when flight hits map bounds', () => {
+    const phys = new PhysicsWorld();
+    const body = new CharBody(phys, 991, 0, 20, 0);
+    const actor = new Actor('Boundary glide', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    movement.bounds = { half: 1 };
+    actor.state = 'glide';
+    body.velocity.x = 100;
+
+    movement.update(actor, emptyCommand(), 1 / 60);
+    expect(body.position.x).toBeCloseTo(1, 8);
+    expect(body.velocity.x).toBe(0);
+    phys.step();
+    expect(body.body.translation().x).toBeCloseTo(body.position.x, 8);
+    expect(Math.abs(body.body.translation().x)).toBeLessThanOrEqual(1);
+  });
+
+  it('does not convert blocked wall-stick velocity into jump-spam speed', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, 10, 0, 0.25, 10, 100, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 992, -0.72, CAPSULE_CENTER_OFFSET + 10, 40);
+    const actor = new Actor('Wall speed regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    actor.state = 'wallrun';
+    actor.wallSide = 1;
+    actor.wallNormalX = -1;
+    body.velocity.x = MOVE.sprintSpeed; // blocked, directly into the wall
+    body.velocity.z = -MOVE.sprintSpeed; // genuine along-wall momentum
+
+    let preJumpMax = 0;
+    let overallMax = 0;
+    for (let frame = 0; frame < 60; frame++) {
+      const cmd = emptyCommand();
+      cmd.moveZ = 1;
+      cmd.yaw = 0;
+      cmd.jumpPressed = frame === 30;
+      movement.update(actor, cmd, 1 / 60);
+      phys.fixedStep(1 / 60);
+      const speed = Math.hypot(body.velocity.x, body.velocity.z);
+      if (frame < 30) preJumpMax = Math.max(preJumpMax, speed);
+      overallMax = Math.max(overallMax, speed);
+    }
+
+    // The blocked X component must be discarded, not rotated into Z by the
+    // wall-run blend. The explicit wall jump may add its authored outward
+    // impulse, but repeated input cannot create an unbounded launch.
+    expect(preJumpMax).toBeLessThanOrEqual(MOVE.sprintSpeed + 0.01);
+    expect(overallMax).toBeLessThan(11.55);
+    expect(actor.state).toBe('air');
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('keeps a successful slide entry active for the following movement tick', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 996, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Slide state regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+    expect(body.grounded).toBe(true);
+    body.velocity.z = MOVE.slideMinEntrySpeed + 1;
+
+    const entry = emptyCommand();
+    entry.crouchPressed = true;
+    entry.crouchHeld = true;
+    entry.moveZ = 1;
+    movement.update(actor, entry, 1 / 60);
+    expect(actor.state).toBe('slide');
+
+    const sliding = emptyCommand();
+    sliding.crouchHeld = true;
+    sliding.moveZ = 1;
+    movement.update(actor, sliding, 1 / 60);
+    phys.fixedStep(1 / 60);
+    expect(actor.state).toBe('slide');
+    expect(phys.characterPenetrationsAt(
+      body.position.x,
+      body.position.y,
+      body.position.z,
+      body.body,
+    )).toEqual([]);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('resets wall-run and jump state on the actual KCC landing tick', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 993, 0, CAPSULE_CENTER_OFFSET + 2, 0);
+    const actor = new Actor('Landing reset regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    actor.state = 'air';
+    actor.jumpsUsed = MOVE.maxJumps;
+    actor.wallrunLanded = false;
+    actor.wallrunChains = MOVE.wallRunMaxChains;
+    body.velocity.y = -1;
+
+    for (let frame = 0; frame < 120 && !body.grounded; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    expect(body.grounded).toBe(true);
+    expect(actor.state).toBe('ground');
+    expect(actor.jumpsUsed).toBe(0);
+    expect(actor.wallrunLanded).toBe(true);
+    expect(actor.wallrunChains).toBe(0);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('marks a wall run airborne so the same-wall guard can activate', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, 5, 0, 0.25, 5, 30, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 994, -0.72, CAPSULE_CENTER_OFFSET + 3, 8);
+    const actor = new Actor('Wall re-entry regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    actor.state = 'air';
+    actor.wallrunLanded = true;
+    body.velocity.z = -8;
+    const cmd = emptyCommand();
+    cmd.moveZ = 1;
+
+    movement.update(actor, cmd, 1 / 60);
+
+    expect(actor.state).toBe('wallrun');
+    expect(actor.wallrunLanded).toBe(false);
+    expect(actor.wallrunChains).toBe(1);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('clears jump and wall-chain state when a wall run lands directly', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.addStaticBox(0, 3, 0, 0.25, 3, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 995, -0.72, CAPSULE_CENTER_OFFSET + 1.2, 6);
+    const actor = new Actor('Wall landing regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    actor.state = 'wallrun';
+    actor.wallSide = 1;
+    actor.wallNormalX = -1;
+    actor.jumpsUsed = 1;
+    actor.wallrunLanded = false;
+    actor.wallrunChains = 1;
+    body.velocity.z = -8;
+    body.velocity.y = -4;
+
+    for (let frame = 0; frame < 60 && !body.grounded; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    expect(actor.state).toBe('ground');
+    expect(body.grounded).toBe(true);
+    expect(body.velocity.y).toBe(0);
+    expect(actor.jumpsUsed).toBe(0);
+    expect(actor.wallrunLanded).toBe(true);
+    expect(actor.wallrunChains).toBe(0);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('mantles with capsule sweeps and never teleports through the ledge', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 90, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('MANTLE TEST', true, body, 0x5fd0ff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    const command = emptyCommand();
+    command.moveZ = 1;
+    command.yaw = 0;
+    movement.update(actor, command, 1 / 60);
+    phys.fixedStep(1 / 60);
+    expect(actor.state).toBe('mantle');
+
+    for (let frame = 0; frame < 32; frame++) {
+      movement.update(actor, command, 1 / 60);
+      phys.fixedStep(1 / 60);
+      expect(phys.characterPenetrationsAt(
+        body.position.x,
+        body.position.y,
+        body.position.z,
+        body.body,
+      )).toEqual([]);
+    }
+    expect(feetYFromBodyCenter(body.position.y)).toBeCloseTo(1.8, 1);
+    expect(body.position.z).toBeLessThan(-0.8);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('keeps a grounded actor grounded while outward input presses against map bounds', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -1, 0, 10, 1, 10, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 992, 0.9, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+    expect(body.grounded).toBe(true);
+
+    const actor = new Actor('Ground boundary', true, body, 0xffffff);
+    actor.state = 'ground';
+    const movement = movementFor(phys);
+    movement.bounds = { half: 1 };
+    const cmd = emptyCommand();
+    cmd.moveZ = 1;
+    cmd.yaw = -Math.PI / 2; // forward = +X
+
+    for (let frame = 0; frame < 120; frame++) {
+      movement.update(actor, cmd, 1 / 60);
+      phys.fixedStep(1 / 60);
+      expect(body.position.x, `frame ${frame}`).toBeLessThanOrEqual(1);
+      expect(body.body.translation().x, `frame ${frame}`).toBeCloseTo(body.position.x, 6);
+      expect(body.grounded, `frame ${frame}`).toBe(true);
+      expect(actor.state, `frame ${frame}`).toBe('ground');
+      expect(phys.characterPenetrationsAt(
+        body.position.x,
+        body.position.y,
+        body.position.z,
+        body.body,
+      ), `frame ${frame}`).toEqual([]);
+    }
+
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('refuses a mantle target that only a centre ray considers clear', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
+    // The old centre headroom ray misses this side jamb, but the full capsule
+    // radius at the target would overlap it materially.
+    phys.addStaticBox(0.55, 2.9, -1, 0.2, 1.1, 0.5, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 91, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('BLOCKED MANTLE TEST', true, body, 0x5fd0ff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    const command = emptyCommand();
+    command.moveZ = 1;
+    command.yaw = 0;
+    movement.update(actor, command, 1 / 60);
+    phys.fixedStep(1 / 60);
+    expect(actor.state).not.toBe('mantle');
+    expect(phys.characterPenetrationsAt(body.position.x, body.position.y, body.position.z, body.body)).toEqual([]);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('aborts a mantle without a launch or jump reset when geometry blocks after preflight', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 92, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('DYNAMIC MANTLE TEST', true, body, 0x5fd0ff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    // Seed the value after the initial KCC landing, which now correctly owns
+    // the ordinary jump/wall-run reset.
+    actor.jumpsUsed = 1;
+    const command = emptyCommand();
+    command.moveZ = 1;
+    movement.update(actor, command, 1 / 60);
+    phys.fixedStep(1 / 60);
+    expect(actor.state).toBe('mantle');
+
+    phys.addStaticBox(0, 2.4, 0, 1, 0.1, 1, 0, 'stone');
+    phys.flush();
+    for (let frame = 0; frame < 32 && actor.state === 'mantle'; frame++) {
+      movement.update(actor, command, 1 / 60);
+      phys.fixedStep(1 / 60);
+      expect(phys.characterPenetrationsAt(body.position.x, body.position.y, body.position.z, body.body)).toEqual([]);
+    }
+    expect(actor.state).not.toBe('mantle');
+    expect(body.velocity).toEqual({ x: 0, y: 0, z: 0 });
+    expect(actor.jumpsUsed).toBe(1);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('exits water without false ground state or stale vertical velocity', () => {
+    for (const initialVy of [5, -3]) {
+      const phys = new PhysicsWorld();
+      phys.addStaticBox(0, -0.25, 0, 4, 0.25, 4, 0, 'stone');
+      phys.flush();
+      const body = new CharBody(phys, 93, 0, CAPSULE_CENTER_OFFSET + 0.05, -0.45);
+      const actor = new Actor('SWIM EXIT TEST', true, body, 0x5fd0ff);
+      const movement = movementFor(phys);
+      for (let frame = 0; frame < 12; frame++) {
+        movement.update(actor, emptyCommand(), 1 / 60);
+        phys.fixedStep(1 / 60);
+      }
+      expect(body.grounded).toBe(true);
+      actor.state = 'swim';
+      actor.inWater = true;
+      actor.waterSurfaceY = 2;
+      body.velocity.y = initialVy;
+      movement.waterAt = (_x, y, z) => z < 0 && y <= 2.2
+        ? { minX: -4, maxX: 4, minZ: -4, maxZ: 0, surfaceY: 2, depth: 3 }
+        : null;
+
+      const command = emptyCommand();
+      command.moveZ = 1;
+      command.yaw = Math.PI;
+      for (let frame = 0; frame < 90 && actor.state === 'swim'; frame++) {
+        movement.update(actor, command, 1 / 60);
+        phys.fixedStep(1 / 60);
+        expect(phys.characterPenetrationsAt(
+          body.position.x,
+          body.position.y,
+          body.position.z,
+          body.body,
+        )).toEqual([]);
+        const observedState: string = actor.state;
+        if (observedState === 'ground') {
+          expect(body.grounded).toBe(true);
+          expect(body.velocity.y).toBe(0);
+          expect(feetYFromBodyCenter(body.position.y)).toBeCloseTo(0, 2);
+        }
+      }
+      if (initialVy > 0) {
+        expect(actor.state).toBe('air');
+        expect(body.grounded).toBe(false);
+        expect(body.velocity.y).toBeGreaterThan(0);
+      } else {
+        expect(actor.state).toBe('ground');
+        expect(body.grounded).toBe(true);
+        expect(body.velocity.y).toBe(0);
+        expect(feetYFromBodyCenter(body.position.y)).toBeCloseTo(0, 2);
+      }
+      body.dispose();
+      phys.dispose();
+    }
+  });
+
+  it('publishes a finite water surface before emitting the entry splash', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 4, 0.25, 4, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 95, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('SPLASH SURFACE TEST', true, body, 0x5fd0ff);
+    let emittedSurface = -Infinity;
+    const movement = movementFor(phys, (entering) => { emittedSurface = entering.waterSurfaceY; });
+    movement.waterAt = () => ({ minX: -4, maxX: 4, minZ: -4, maxZ: 4, surfaceY: 2, depth: 3 });
+    movement.update(actor, emptyCommand(), 1 / 60);
+    expect(Number.isFinite(emittedSurface)).toBe(true);
+    expect(emittedSurface).toBe(2);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('clears swim velocity when a supported actor starts the tick outside water', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 4, 0.25, 4, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 94, 0, CAPSULE_CENTER_OFFSET + 0.05, 0.5);
+    const actor = new Actor('PRE-TICK SWIM EXIT TEST', true, body, 0x5fd0ff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    actor.state = 'swim';
+    actor.inWater = true;
+    body.velocity.y = 5;
+    movement.waterAt = (_x, y, z) => z < 0 && y <= 2.2
+      ? { minX: -4, maxX: 4, minZ: -4, maxZ: 0, surfaceY: 2, depth: 3 }
+      : null;
+    movement.update(actor, emptyCommand(), 1 / 60);
+    phys.fixedStep(1 / 60);
+    expect(actor.state).toBe('ground');
+    expect(body.grounded).toBe(true);
+    expect(body.velocity.y).toBe(0);
+    expect(phys.characterPenetrationsAt(body.position.x, body.position.y, body.position.z, body.body)).toEqual([]);
+    body.dispose();
+    phys.dispose();
+  });
+
   it('lets the real character controller follow a normalized stair run without floating or embedding', () => {
     const builder = new WorldBuilder('stairs', 'Stairs', 'Traversal fixture', 100);
     builder.slab(0, 0, -3, 5, 6, 0.5, 'concreteDark');
@@ -122,7 +636,7 @@ describe('rendered terrain and physics ground alignment', () => {
     expect(reachedBottom, JSON.stringify(body.position)).toBe(true);
   });
 
-  for (const id of ['oldfront', 'eden'] satisfies MapId[]) {
+  for (const id of ['oldfront', 'eden', 'ashara'] satisfies MapId[]) {
     it(`${id} keeps the heightfield sampler aligned with physical contact`, () => {
       const loaded = loadMap(id);
       const phys = new PhysicsWorld();
@@ -135,15 +649,15 @@ describe('rendered terrain and physics ground alignment', () => {
         for (let x = -220; x <= 220; x += 29) {
           if (occupiedAt(loaded.def, x, z)) continue;
           const visualY = loaded.terrainHeight(x, z);
-          const physicalY = phys.surfaceAt(x, z, 10, 30);
-          expect(physicalY).not.toBeNull();
+          const physicalY = phys.terrainSurfaceAt(x, z, 20, 50);
+          if (physicalY === null) continue;
           worstError = Math.max(worstError, Math.abs(visualY - physicalY!));
           samples++;
         }
       }
 
       expect(samples).toBeGreaterThan(70);
-      expect(worstError).toBeLessThan(0.1);
+      expect(worstError).toBeLessThan(0.002);
     }, 30_000);
 
     it(`${id} seats every building foundation through the slope without terrain piercing the floor`, () => {
@@ -176,7 +690,7 @@ describe('rendered terrain and physics ground alignment', () => {
     });
   }
 
-  for (const id of ['neocity', 'oldfront', 'eden'] satisfies MapId[]) {
+  for (const id of ['neocity', 'oldfront', 'eden', 'ashara'] satisfies MapId[]) {
     it(`${id} emits only finite, non-degenerate world records`, () => {
       const { def } = loadMap(id);
       const allGeometry = [...def.geo, ...def.destructibles.map((item) => item.geo)];
@@ -214,6 +728,14 @@ describe('rendered terrain and physics ground alignment', () => {
         expect(platform.minZ).toBeLessThanOrEqual(platform.maxZ);
         expect([platform.minX, platform.maxX, platform.minZ, platform.maxZ, platform.y]
           .every(Number.isFinite), JSON.stringify(platform)).toBe(true);
+      }
+      for (const path of def.surfacePaths) {
+        expect(path.points.length, JSON.stringify(path)).toBeGreaterThan(1);
+        expect(Number.isFinite(path.yOffset), JSON.stringify(path)).toBe(true);
+        for (const point of path.points) {
+          expect([point.x, point.z, point.width].every(Number.isFinite), JSON.stringify(point)).toBe(true);
+          expect(point.width, JSON.stringify(point)).toBeGreaterThan(0);
+        }
       }
       for (const water of def.water) {
         const half = def.size / 2;
@@ -313,6 +835,54 @@ describe('rendered terrain and physics ground alignment', () => {
     expect(loaded.terrainHeight(-220, -205)).toBeGreaterThan(-2);
   });
 
+  it('keeps both Water Treatment chest anchors on their authored floors', () => {
+    const { def } = loadMap('eden');
+    const treatmentChests = def.chests.filter((chest) =>
+      Math.abs(chest.x + 165) < 0.01
+      && (Math.abs(chest.z + 116) < 0.01 || Math.abs(chest.z + 124) < 0.01));
+
+    expect(treatmentChests).toHaveLength(2);
+    expect(treatmentChests.some((chest) => chest.y > -1)).toBe(true);
+    expect(treatmentChests.some((chest) => chest.y < -4)).toBe(true);
+  });
+
+  it('gives the Eden Watch Rock a physical deck and a connected exterior stair', () => {
+    const { def } = loadMap('eden');
+    const rock = def.rocks.find((candidate) => (
+      Math.abs(candidate.x - 60) < 0.01 && Math.abs(candidate.z + 60) < 0.01
+    ));
+    expect(rock).toEqual(expect.objectContaining({ scale: 1 }));
+    if (!rock) throw new Error('Eden Watch Rock missing');
+    const deck = def.geo.find((g) => (
+      g.kind === 'box'
+      && g.mat === 'rock'
+      && Math.abs(g.x - 60) < 0.01
+      && Math.abs(g.z + 60) < 0.01
+      && Math.abs(g.sx - 5) < 0.01
+      && Math.abs(g.sz - 5) < 0.01
+    ));
+    expect(deck?.kind).toBe('box');
+    if (!deck || deck.kind !== 'box') throw new Error('Eden Watch Rock deck missing');
+    const deckTop = deck.y + deck.sy / 2;
+    const rockTop = rock.y + ROCK_COLLIDER_HEIGHT * rock.scale;
+    expect(rockTop).toBeGreaterThanOrEqual(deck.y - deck.sy / 2);
+    expect(rockTop).toBeLessThan(deckTop);
+
+    const treads = def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'rock'
+      && Math.abs(g.z + 60) < 0.01
+      && Math.abs(g.sz - 2.2) < 0.01
+      && g.sx < 1
+    ));
+    expect(treads.length).toBeGreaterThan(5);
+    const topTread = [...treads].sort((a, b) => b.y - a.y)[0];
+    expect(topTread?.kind).toBe('box');
+    if (!topTread || topTread.kind !== 'box') throw new Error('Eden Watch Rock stair missing');
+    expect(topTread.y + topTread.sy / 2).toBeCloseTo(deckTop, 6);
+    expect(topTread.x - topTread.sx / 2).toBeCloseTo(deck.x + deck.sx / 2, 6);
+  });
+
   it('clamps terrain sampling at map bounds instead of extrapolating edge cells', () => {
     const loaded = loadMap('eden');
     expect(loaded.terrainHeight(-500, 40)).toBeCloseTo(loaded.terrainHeight(-250, 40), 8);
@@ -324,5 +894,392 @@ describe('rendered terrain and physics ground alignment', () => {
     const elevatedWalls = def.geo.filter((g) => g.kind === 'box' && g.mat === 'concrete' && g.sy > 1);
     expect(elevatedWalls.some((g) => g.kind === 'box' && Math.abs(g.y - 5.4) < 0.01)).toBe(true);
     expect(elevatedWalls.filter((g) => g.kind === 'box' && Math.abs(g.y - 6.95) < 0.01)).toHaveLength(2);
+  });
+
+  it('opens the Neo City parking deck around its ramp and joins both elevations', () => {
+    const { def } = loadMap('neocity');
+    const treads = def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'concreteDark'
+      && Math.abs(g.x - 40) < 0.01
+      && g.z > 156 && g.z < 167
+      && Math.abs(g.sx - 3) < 0.01
+      && g.sz < 1
+    )).sort((a, b) => a.z - b.z);
+    expect(treads).toHaveLength(11);
+    const first = treads[0];
+    const last = treads.at(-1);
+    expect(first?.kind).toBe('box');
+    expect(last?.kind).toBe('box');
+    if (!first || first.kind !== 'box' || !last || last.kind !== 'box') {
+      throw new Error('Neo City parking ramp missing');
+    }
+    expect(first.z - first.sz / 2).toBeCloseTo(157, 6);
+    expect(last.z + last.sz / 2).toBeCloseTo(165.58, 6);
+    expect(last.y + last.sy / 2).toBeCloseTo(4, 6);
+
+    const upperDeck = def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'concreteDark'
+      && Math.abs(g.y + g.sy / 2 - 4) < 0.01
+      && Math.abs(g.sy - 0.4) < 0.01
+      && g.x > 14 && g.x < 46
+      && g.z > 154 && g.z < 176
+    ));
+    expect(upperDeck.length).toBeGreaterThan(2);
+    for (const slab of upperDeck) {
+      if (slab.kind !== 'box') continue;
+      // Ignore exact shared edges; only positive-area intrusion closes the hole.
+      const overlapsRampX = slab.x + slab.sx / 2 > 38.04 && slab.x - slab.sx / 2 < 41.96;
+      const overlapsRampZ = slab.z + slab.sz / 2 > 156.54 && slab.z - slab.sz / 2 < 165.56;
+      expect(overlapsRampX && overlapsRampZ, JSON.stringify(slab)).toBe(false);
+    }
+  });
+
+  it('runs both Neo City overpass stairs along the bridge axis into its end faces', () => {
+    const { def } = loadMap('neocity');
+    const flights = [
+      def.geo.filter((g) => g.kind === 'box' && g.mat === 'concreteDark'
+        && Math.abs(g.z - 234.2) < 0.01 && g.x < -60 && Math.abs(g.sz - 2.6) < 0.01),
+      def.geo.filter((g) => g.kind === 'box' && g.mat === 'concreteDark'
+        && Math.abs(g.z - 234.2) < 0.01 && g.x > 0 && Math.abs(g.sz - 2.6) < 0.01),
+    ];
+    for (const [index, flight] of flights.entries()) {
+      expect(flight).toHaveLength(20);
+      const top = [...flight].sort((a, b) => b.y - a.y)[0];
+      expect(top?.kind).toBe('box');
+      if (!top || top.kind !== 'box') throw new Error('Neo City overpass stair missing');
+      expect(top.y + top.sy / 2).toBeCloseTo(6.8, 6);
+      const bridgeFacingEdge = index === 0 ? top.x + top.sx / 2 : top.x - top.sx / 2;
+      expect(bridgeFacingEdge).toBeCloseTo(index === 0 ? -60 : 0, 6);
+    }
+  });
+
+  it('seats every Old Front cathedral buttress into its local slope', () => {
+    const loaded = loadMap('oldfront');
+    const buttresses = loaded.def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'stoneBrick'
+      && Math.abs(Math.abs(g.x - 20) - 11.4) < 0.01
+      && [-67, -55, -43].some((z) => Math.abs(g.z - z) < 0.01)
+      && Math.abs(g.sx - 1.6) < 0.01
+      && Math.abs(g.sz - 1.6) < 0.01
+    ));
+    expect(buttresses).toHaveLength(6);
+    for (const buttress of buttresses) {
+      if (buttress.kind !== 'box') continue;
+      let lowestTerrain = Infinity;
+      for (const dx of [-0.8, 0, 0.8]) {
+        for (const dz of [-0.8, 0, 0.8]) {
+          lowestTerrain = Math.min(
+            lowestTerrain,
+            loaded.terrainHeight(buttress.x + dx, buttress.z + dz),
+          );
+        }
+      }
+      expect(buttress.y - buttress.sy / 2, JSON.stringify(buttress))
+        .toBeLessThanOrEqual(lowestTerrain - 0.1);
+    }
+  });
+
+  it('connects the Neo City Cyberdome ramp to the ring with supported treads', () => {
+    const { def } = loadMap('neocity');
+    const treads = def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'metalDark'
+      && Math.abs(g.z - 110) < 0.01
+      && g.x > -95 && g.x < -80
+      && Math.abs(g.sz - 3.2) < 0.01
+      && g.sx < 1
+    )).sort((a, b) => b.x - a.x);
+    expect(treads).toHaveLength(14);
+    for (let i = 0; i < treads.length; i++) {
+      const tread = treads[i]!;
+      if (tread.kind !== 'box') continue;
+      expect(tread.y - tread.sy / 2).toBeCloseTo(0, 6);
+      expect(tread.y + tread.sy / 2).toBeCloseTo(8.8 * (i + 1) / 14, 6);
+      if (i > 0) {
+        const prior = treads[i - 1]!;
+        if (prior.kind !== 'box') throw new Error('Cyberdome ramp tread is not a box');
+        expect(Math.abs(prior.x - tread.x)).toBeLessThanOrEqual((prior.sx + tread.sx) / 2 + 0.01);
+      }
+    }
+    const highest = treads.at(-1)!;
+    if (highest.kind !== 'box') throw new Error('Cyberdome ramp tread is not a box');
+    expect(Math.abs(highest.x + 130) - highest.sx / 2).toBeLessThanOrEqual(36.5 + 0.01);
+    expect(highest.y + highest.sy / 2).toBeCloseTo(8.8, 6);
+  });
+
+  it('embeds every Old Front keep curtain-wall segment into the hill', () => {
+    const loaded = loadMap('oldfront');
+    const walls = loaded.def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'stoneBrick'
+      && g.x >= -176.1 && g.x <= -123.9
+      && g.z >= -176.1 && g.z <= -123.9
+      && Math.abs(Math.min(g.sx, g.sz) - 1.6) < 0.01
+      && (Math.abs(g.x + 176) < 0.01 || Math.abs(g.x + 124) < 0.01
+        || Math.abs(g.z + 176) < 0.01 || Math.abs(g.z + 124) < 0.01)
+    ));
+    expect(walls.length).toBeGreaterThan(5);
+    for (const wall of walls) {
+      if (wall.kind !== 'box') continue;
+      const bottom = wall.y - wall.sy / 2;
+      for (let i = 0; i <= 8; i++) {
+        const x = wall.x - wall.sx / 2 + wall.sx * i / 8;
+        const z = wall.z - wall.sz / 2 + wall.sz * i / 8;
+        expect(bottom, JSON.stringify(wall)).toBeLessThanOrEqual(loaded.terrainHeight(x, wall.z) + 0.01);
+        expect(bottom, JSON.stringify(wall)).toBeLessThanOrEqual(loaded.terrainHeight(wall.x, z) + 0.01);
+      }
+    }
+  });
+
+  it('keeps Old Front quarry boulders supported outside its terrain cutouts', () => {
+    const loaded = loadMap('oldfront');
+    const quarryCutouts = (loaded.def.terrainCutouts ?? []).filter((cutout) => (
+      cutout.minX >= -102 && cutout.maxX <= -67
+      && cutout.minZ >= -49 && cutout.maxZ <= -31
+    ));
+    expect(quarryCutouts).toHaveLength(2);
+    const quarryRocks = loaded.def.rocks.filter((rock) => Math.hypot(rock.x + 90, rock.z + 40) < 34);
+    expect(quarryRocks.length).toBeGreaterThanOrEqual(8);
+    for (const rock of quarryRocks) {
+      const radius = ROCK_COLLIDER_RADIUS * rock.scale;
+      for (const cutout of quarryCutouts) {
+        const dx = Math.max(cutout.minX - rock.x, 0, rock.x - cutout.maxX);
+        const dz = Math.max(cutout.minZ - rock.z, 0, rock.z - cutout.maxZ);
+        expect(dx * dx + dz * dz, JSON.stringify({ rock, cutout })).toBeGreaterThanOrEqual(radius * radius);
+      }
+      expect(rock.y).toBeCloseTo(loaded.terrainHeight(rock.x, rock.z), 6);
+    }
+  });
+
+  it('seats both Old Front bridge parapets directly on the deck', () => {
+    const { def } = loadMap('oldfront');
+    const deck = def.geo.find((g) => (
+      g.kind === 'box'
+      && g.mat === 'stoneBrick'
+      && Math.abs(g.x) < 0.01
+      && Math.abs(g.z - 120) < 0.01
+      && Math.abs(g.sx - 8) < 0.01
+      && Math.abs(g.sz - 26) < 0.01
+    ));
+    expect(deck?.kind).toBe('box');
+    if (!deck || deck.kind !== 'box') throw new Error('Old Front bridge deck missing');
+    const deckTop = deck.y + deck.sy / 2;
+    const parapets = def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'stoneBrick'
+      && Math.abs(Math.abs(g.x) - 4) < 0.01
+      && Math.abs(g.z - 120) < 0.01
+      && Math.abs(g.sz - 26) < 0.01
+    ));
+    expect(parapets).toHaveLength(2);
+    for (const parapet of parapets) {
+      if (parapet.kind !== 'box') continue;
+      expect(parapet.y - parapet.sy / 2).toBeCloseTo(deckTop, 6);
+    }
+  });
+
+  it('anchors both Old Front stone-bridge approaches to the deck', () => {
+    const loaded = loadMap('oldfront');
+    const deck = loaded.def.geo.find((g) => g.kind === 'box' && g.mat === 'stoneBrick'
+      && Math.abs(g.x) < 0.01 && Math.abs(g.z - 120) < 0.01
+      && Math.abs(g.sx - 8) < 0.01 && Math.abs(g.sz - 26) < 0.01);
+    expect(deck?.kind).toBe('box');
+    if (!deck || deck.kind !== 'box') throw new Error('Old Front stone bridge missing');
+    const deckTop = deck.y + deck.sy / 2;
+    const flights = [
+      loaded.def.geo.filter((g) => g.kind === 'box' && g.mat === 'stoneBrick'
+        && Math.abs(g.x) < 0.01 && Math.abs(g.sx - 8) < 0.01 && g.z < 107),
+      loaded.def.geo.filter((g) => g.kind === 'box' && g.mat === 'stoneBrick'
+        && Math.abs(g.x) < 0.01 && Math.abs(g.sx - 8) < 0.01 && g.z > 133),
+    ];
+    for (const [index, flight] of flights.entries()) {
+      expect(flight.length).toBeGreaterThan(8);
+      const top = [...flight].sort((a, b) => b.y - a.y)[0];
+      expect(top?.kind).toBe('box');
+      if (!top || top.kind !== 'box') throw new Error('Old Front bridge stair missing');
+      expect(top.y + top.sy / 2).toBeCloseTo(deckTop, 6);
+      const bridgeFacingEdge = index === 0 ? top.z + top.sz / 2 : top.z - top.sz / 2;
+      expect(bridgeFacingEdge).toBeCloseTo(index === 0 ? 107 : 133, 6);
+    }
+  });
+
+  it('joins the Old Front watchtower stairs, deck and guards without vertical gaps', () => {
+    const { def } = loadMap('oldfront');
+    const deck = def.geo.find((g) => (
+      g.kind === 'box'
+      && g.mat === 'woodDark'
+      && Math.abs(g.x + 184) < 0.01
+      && Math.abs(g.z - 80) < 0.01
+      && Math.abs(g.sx - 6) < 0.01
+      && Math.abs(g.sz - 6) < 0.01
+    ));
+    expect(deck?.kind).toBe('box');
+    if (!deck || deck.kind !== 'box') throw new Error('Old Front watchtower deck missing');
+    const deckTop = deck.y + deck.sy / 2;
+    const guards = def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'woodDark'
+      && Math.abs(g.sy - 1.1) < 0.01
+      && Math.hypot(g.x + 184, g.z - 80) < 5
+    ));
+    expect(guards.length).toBeGreaterThanOrEqual(4);
+    expect(guards.every((guard) => guard.kind === 'box'
+      && Math.abs(guard.y - guard.sy / 2 - deckTop) < 1e-6)).toBe(true);
+    const topTread = def.geo.filter((g) => (
+      g.kind === 'box'
+      && g.mat === 'woodDark'
+      && Math.abs(g.x + 184) < 0.01
+      && Math.abs(g.sx - 2.2) < 0.01
+      && Math.abs(g.sz - 0.78) < 0.01
+    )).sort((a, b) => b.y - a.y)[0];
+    expect(topTread?.kind).toBe('box');
+    if (!topTread || topTread.kind !== 'box') throw new Error('Old Front watchtower stair missing');
+    expect(topTread.y + topTread.sy / 2).toBeCloseTo(deckTop, 6);
+    expect(topTread.z + topTread.sz / 2).toBeCloseTo(deck.z - deck.sz / 2, 6);
+    const southGuardBlocksOpening = guards.some((guard) => guard.kind === 'box'
+      && Math.abs(guard.z - (deck.z - deck.sz / 2)) < 0.01
+      && Math.abs(guard.x - topTread.x) < guard.sx / 2 + topTread.sx / 2);
+    expect(southGuardBlocksOpening).toBe(false);
+  });
+
+  it('embeds every Ashara compound-wall segment into its rolling perimeter', () => {
+    const loaded = loadMap('ashara');
+    const compounds = [
+      { x: -158, z: 86, w: 46, d: 42 },
+      { x: 184, z: 150, w: 44, d: 36 },
+    ];
+    for (const compound of compounds) {
+      const walls = loaded.def.geo.filter((g) => (
+        g.kind === 'box'
+        && g.mat === 'concrete'
+        && Math.abs(Math.min(g.sx, g.sz) - 0.55) < 0.001
+        && g.sy > 3.2
+        && g.x >= compound.x - compound.w / 2 - 0.01
+        && g.x <= compound.x + compound.w / 2 + 0.01
+        && g.z >= compound.z - compound.d / 2 - 0.01
+        && g.z <= compound.z + compound.d / 2 + 0.01
+      ));
+      expect(walls.length).toBeGreaterThanOrEqual(4);
+      for (const wall of walls) {
+        if (wall.kind !== 'box') continue;
+        const bottom = wall.y - wall.sy / 2;
+        for (let i = 0; i <= 12; i++) {
+          const x = wall.x - wall.sx / 2 + wall.sx * i / 12;
+          const z = wall.z - wall.sz / 2 + wall.sz * i / 12;
+          expect(bottom, JSON.stringify(wall)).toBeLessThanOrEqual(loaded.terrainHeight(x, wall.z) + 0.01);
+          expect(bottom, JSON.stringify(wall)).toBeLessThanOrEqual(loaded.terrainHeight(wall.x, z) + 0.01);
+        }
+      }
+    }
+  });
+
+  it('keeps Ashara road boxes for collision while reserving the welded surface for rendering', () => {
+    const { def } = loadMap('ashara');
+    const roadColliders = def.geo.filter((g) => g.kind === 'box' && g.mat === 'asphaltDesert');
+    const segmentedShoulders = def.geo.filter((g) => (
+      g.kind === 'box' && g.mat === 'dirt' && Math.abs(g.sy - 0.045) < 0.001
+    ));
+    expect(roadColliders.length).toBeGreaterThan(20);
+    expect(roadColliders.every((road) => road.noRender === true)).toBe(true);
+    expect(segmentedShoulders.length).toBe(roadColliders.length);
+    expect(segmentedShoulders.every((shoulder) => shoulder.noRender === true)).toBe(true);
+    for (const road of roadColliders) {
+      if (road.kind !== 'box') continue;
+      expect(def.platforms.some((platform) => (
+        platform.minX <= road.x && platform.maxX >= road.x
+        && platform.minZ <= road.z && platform.maxZ >= road.z
+        && Math.abs(platform.y - (road.y + road.sy / 2)) < 0.001
+      ))).toBe(true);
+    }
+  });
+
+  it('keeps Ashara scatter rocks out of both authored road corridors', () => {
+    const { def } = loadMap('ashara');
+    for (const rock of def.rocks) {
+      const radius = ROCK_COLLIDER_RADIUS * rock.scale;
+      const insideHighway = rock.x >= -250 && rock.x <= 250
+        && Math.abs(rock.z + 5) < 4.5 + radius;
+      const insideFeeder = rock.z >= 62 && rock.z <= 248
+        && Math.abs(rock.x - 42) < 3.5 + radius;
+      expect(insideHighway || insideFeeder, JSON.stringify(rock)).toBe(false);
+    }
+  });
+
+  it('seats every Ashara Dry Canals bed on its local terrain sample', () => {
+    const loaded = loadMap('ashara');
+    const beds = loaded.def.geo.filter((g) => (
+      g.kind === 'box' && g.mat === 'concreteDark'
+      && Math.abs(g.sx - 4.7) < 0.01 && Math.abs(g.sz - 2) < 0.01
+      && g.x > -220 && g.x < -150 && g.z > 145 && g.z < 215
+    ));
+    expect(beds).toHaveLength(91);
+    for (const bed of beds) {
+      if (bed.kind !== 'box') continue;
+      expect(
+        Math.abs((bed.y + bed.sy / 2) - loaded.terrainHeight(bed.x, bed.z)),
+        JSON.stringify(bed),
+      ).toBeLessThan(0.2);
+    }
+  });
+
+  it('seats each Eden meadow tent on its own local terrain height', () => {
+    const loaded = loadMap('eden');
+    const tents = loaded.def.geo.filter((g) => (
+      g.kind === 'box' && g.mat === 'plasterOld'
+      && Math.abs(g.sx - 2.6) < 0.01 && Math.abs(g.sy - 1.8) < 0.01
+      && g.x > 215 && g.x < 235 && g.z > 90 && g.z < 110
+    ));
+    expect(tents).toHaveLength(3);
+    for (const tent of tents) {
+      if (tent.kind !== 'box') continue;
+      expect(tent.y - tent.sy / 2).toBeCloseTo(loaded.terrainHeight(tent.x, tent.z), 2);
+    }
+  });
+
+  it('keeps the normalized Old Front quarry flight inside its terrain opening', () => {
+    const { def } = loadMap('oldfront');
+    const treads = def.geo.filter((g) => (
+      g.kind === 'box' && g.mat === 'dirt' && Math.abs(g.z + 40) < 0.01
+      && g.x > -82 && g.x < -60 && Math.abs(g.sz - 4) < 0.01
+    ));
+    expect(treads).toHaveLength(10);
+    const upperEdge = Math.max(...treads.map((tread) => (
+      tread.kind === 'box' ? tread.x + tread.sx / 2 : -Infinity
+    )));
+    expect(upperEdge).toBeLessThanOrEqual(-67.4);
+  });
+
+  it('removes positive-volume crate overlaps from every production map', () => {
+    for (const id of ['neocity', 'oldfront', 'eden', 'ashara'] satisfies MapId[]) {
+      const { def } = loadMap(id);
+      filterInvalidCrates(def);
+      for (let i = 0; i < def.destructibles.length; i++) {
+        for (let j = i + 1; j < def.destructibles.length; j++) {
+          const a = def.destructibles[i]!;
+          const b = def.destructibles[j]!;
+          if (a.type !== 'crate' || b.type !== 'crate' || a.geo.kind !== 'box' || b.geo.kind !== 'box') continue;
+          const overlaps = Math.abs(a.geo.x - b.geo.x) < (a.geo.sx + b.geo.sx) / 2 - 0.01
+            && Math.abs(a.geo.y - b.geo.y) < (a.geo.sy + b.geo.sy) / 2 - 0.01
+            && Math.abs(a.geo.z - b.geo.z) < (a.geo.sz + b.geo.sz) / 2 - 0.01;
+          expect(overlaps, `${id} crates ${i}/${j}`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('authors Old Front and Eden roads as continuous terrain ribbons', () => {
+    const oldFront = loadMap('oldfront').def.surfacePaths;
+    expect(oldFront).toHaveLength(9);
+    expect(oldFront.every((path) => path.mat === 'dirt')).toBe(true);
+
+    const eden = loadMap('eden').def.surfacePaths;
+    expect(eden).toHaveLength(19);
+    expect(eden.filter((path) => path.mat === 'dirt')).toHaveLength(9);
+    expect(eden.filter((path) => path.mat === 'concrete')).toHaveLength(7);
+    expect(eden.filter((path) => path.mat === 'metalDark')).toHaveLength(2);
+    expect(eden.filter((path) => path.mat === 'concreteDark')).toHaveLength(1);
   });
 });

@@ -6,8 +6,19 @@
  * built by the render pass consuming the same specs.
  */
 
-import { vehicleColliderBox, type MapDef, type MatKey, type ChestSpawn, type LootSpawn } from './types';
+import {
+  vehicleColliderCenter,
+  vehicleColliderBox,
+  ROCK_COLLIDER_HEIGHT,
+  ROCK_COLLIDER_RADIUS,
+  type MapDef,
+  type MatKey,
+  type ChestSpawn,
+  type LootSpawn,
+  type TerrainCutout,
+} from './types';
 import { GROUPS, PhysicsWorld } from '../physics/physics';
+import { buildTerrainGridMesh, sampleTerrainHeightfield } from './terrainMesh';
 
 /** Human-scale stair limits shared by every authored map. */
 export const STAIR_MAX_RISE = 0.34;
@@ -29,6 +40,67 @@ const CHEST_SUPPORT_PROBE_ABOVE = 0.75;
 const CHEST_SUPPORT_MAX_DROP = 1.5;
 const CHEST_SUPPORT_TOLERANCE = 0.75;
 const PROP_SUPPORT_TOLERANCE = 0.65;
+
+interface FlatRect {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+function subtractRect(rect: FlatRect, hole: FlatRect): FlatRect[] {
+  const ix0 = Math.max(rect.minX, hole.minX);
+  const ix1 = Math.min(rect.maxX, hole.maxX);
+  const iz0 = Math.max(rect.minZ, hole.minZ);
+  const iz1 = Math.min(rect.maxZ, hole.maxZ);
+  if (ix1 <= ix0 || iz1 <= iz0) return [rect];
+  const pieces: FlatRect[] = [];
+  if (ix0 - rect.minX > 0.05) pieces.push({ ...rect, maxX: ix0 });
+  if (rect.maxX - ix1 > 0.05) pieces.push({ ...rect, minX: ix1 });
+  if (iz0 - rect.minZ > 0.05) pieces.push({ minX: ix0, maxX: ix1, minZ: rect.minZ, maxZ: iz0 });
+  if (rect.maxZ - iz1 > 0.05) pieces.push({ minX: ix0, maxX: ix1, minZ: iz1, maxZ: rect.maxZ });
+  return pieces;
+}
+
+/** Apply terrain openings to later-authored pavement/floor strips and nav. */
+function applyTerrainCutouts(def: MapDef): void {
+  const cutouts = def.terrainCutouts ?? [];
+  if (cutouts.length === 0) return;
+  def.geo = def.geo.flatMap((geo) => {
+    if (geo.kind !== 'box' || geo.preserveInTerrainCutout ||
+        Math.abs(geo.yaw) > 1e-5 || geo.sy > 2.1) return [geo];
+    const topY = geo.y + geo.sy / 2;
+    const relevant = cutouts.filter((hole) => Math.abs(topY - hole.surfaceY) <= 0.55);
+    if (relevant.length === 0) return [geo];
+    let pieces: FlatRect[] = [{
+      minX: geo.x - geo.sx / 2,
+      maxX: geo.x + geo.sx / 2,
+      minZ: geo.z - geo.sz / 2,
+      maxZ: geo.z + geo.sz / 2,
+    }];
+    for (const hole of relevant) pieces = pieces.flatMap((piece) => subtractRect(piece, hole));
+    return pieces.map((piece) => ({
+      ...geo,
+      x: (piece.minX + piece.maxX) / 2,
+      z: (piece.minZ + piece.maxZ) / 2,
+      sx: piece.maxX - piece.minX,
+      sz: piece.maxZ - piece.minZ,
+    }));
+  });
+  def.platforms = def.platforms.flatMap((platform) => {
+    if (platform.preserveInTerrainCutout) return [platform];
+    const relevant = cutouts.filter((hole) => Math.abs(platform.y - hole.surfaceY) <= 0.55);
+    if (relevant.length === 0) return [platform];
+    let pieces: FlatRect[] = [{
+      minX: platform.minX,
+      maxX: platform.maxX,
+      minZ: platform.minZ,
+      maxZ: platform.maxZ,
+    }];
+    for (const hole of relevant) pieces = pieces.flatMap((piece) => subtractRect(piece, hole));
+    return pieces.map((piece) => ({ ...piece, y: platform.y, water: platform.water }));
+  });
+}
 
 /**
  * Normalize authored stairs without changing their requested total elevation.
@@ -145,7 +217,70 @@ export function isCratePlacementClear(def: MapDef, prop: MapDef['destructibles']
 }
 
 export function filterInvalidCrates(def: MapDef): void {
-  def.destructibles = def.destructibles.filter((prop) => isCratePlacementClear(def, prop));
+  const accepted: MapDef['destructibles'] = [];
+  for (const prop of def.destructibles) {
+    if (!isCratePlacementClear(def, prop)) continue;
+    if (prop.type === 'crate' && prop.geo.kind === 'box') {
+      const crate = prop.geo;
+      const overlapsAccepted = accepted.some((other) => {
+        if (other.type !== 'crate' || other.geo.kind !== 'box') return false;
+        const box = other.geo;
+        // Crates are axis-aligned today. Shared faces and deliberate stacked
+        // contact are valid; only reject positive-volume intersections.
+        return Math.abs(crate.x - box.x) < (crate.sx + box.sx) / 2 - 0.01
+          && Math.abs(crate.y - box.y) < (crate.sy + box.sy) / 2 - 0.01
+          && Math.abs(crate.z - box.z) < (crate.sz + box.sz) / 2 - 0.01;
+      });
+      if (overlapsAccepted) continue;
+    }
+    accepted.push(prop);
+  }
+  def.destructibles = accepted;
+}
+
+/** Keep authored/parked vehicle cover out of buildings and other solids. */
+export function isVehiclePlacementClear(
+  def: MapDef,
+  vehicle: MapDef['vehicles'][number],
+  ignore?: MapDef['vehicles'][number],
+): boolean {
+  const box = vehicleColliderBox(vehicle.variant, vehicle.x, vehicle.z);
+  const center = vehicleColliderCenter(vehicle);
+  const vc = Math.abs(Math.cos(vehicle.yaw));
+  const vs = Math.abs(Math.sin(vehicle.yaw));
+  const vhx = box.ex * vc + box.ez * vs;
+  const vhz = box.ex * vs + box.ez * vc;
+  // Match the full shared render/physics envelope. Only ignore the support
+  // face itself so a parked vehicle may rest on its authored ground plane;
+  // the old 0.05/0.1 inset could accept thin geometry clipping into the
+  // visible roof or underbody.
+  const minY = vehicle.y + 0.01;
+  const maxY = vehicle.y + box.h - 0.01;
+  const overlapsY = (lo: number, hi: number) => hi > minY && lo < maxY;
+  for (const geo of def.geo) {
+    if (geo.noCollide) continue;
+    if (geo.kind === 'box') {
+      const c = Math.abs(Math.cos(geo.yaw));
+      const s = Math.abs(Math.sin(geo.yaw));
+      const hx = (geo.sx * c + geo.sz * s) / 2;
+      const hz = (geo.sx * s + geo.sz * c) / 2;
+      if (Math.abs(center.x - geo.x) < vhx + hx
+        && Math.abs(center.z - geo.z) < vhz + hz
+        && overlapsY(geo.y - geo.sy / 2, geo.y + geo.sy / 2)) return false;
+    } else if (geo.kind === 'cyl') {
+      if (Math.hypot(center.x - geo.x, center.z - geo.z) < Math.max(vhx, vhz) + geo.r
+        && overlapsY(geo.y - geo.h / 2, geo.y + geo.h / 2)) return false;
+    } else if (Math.hypot(center.x - geo.x, center.z - geo.z) < Math.max(vhx, vhz) + geo.r
+      && overlapsY(geo.y - geo.r, geo.y + geo.r)) return false;
+  }
+  for (const other of def.vehicles) {
+    if (other === vehicle || other === ignore) continue;
+    const otherBox = vehicleColliderBox(other.variant, other.x, other.z);
+    const otherCenter = vehicleColliderCenter(other);
+    if (Math.hypot(center.x - otherCenter.x, center.z - otherCenter.z)
+      < Math.max(vhx, vhz) + Math.max(otherBox.ex, otherBox.ez)) return false;
+  }
+  return true;
 }
 
 /** A street fixture may touch its support but must not grow through solids. */
@@ -206,14 +341,15 @@ export function isChestPlacementClear(def: MapDef, chest: ChestSpawn): boolean {
       && overlapsY(tree.y, tree.y + 2.5 * tree.scale)) return false;
   }
   for (const rock of def.rocks) {
-    if (Math.hypot(chest.x - rock.x, chest.z - rock.z) < 0.7 * rock.scale + 0.55
-      && overlapsY(rock.y, rock.y + 0.9 * rock.scale)) return false;
+    if (Math.hypot(chest.x - rock.x, chest.z - rock.z) < ROCK_COLLIDER_RADIUS * rock.scale + 0.55
+      && overlapsY(rock.y, rock.y + ROCK_COLLIDER_HEIGHT * rock.scale)) return false;
   }
   for (const vehicle of def.vehicles) {
-    const box = vehicleColliderBox(vehicle.variant);
-    if (Math.abs(chest.x - vehicle.x) < Math.max(box.ex, box.ez) + 0.55
-      && Math.abs(chest.z - vehicle.z) < Math.max(box.ex, box.ez) + 0.38
-      && overlapsY(vehicle.y - 0.1, vehicle.y + box.h - 0.1)) return false;
+    const box = vehicleColliderBox(vehicle.variant, vehicle.x, vehicle.z);
+    const center = vehicleColliderCenter(vehicle);
+    if (Math.abs(chest.x - center.x) < Math.max(box.ex, box.ez) + 0.55
+      && Math.abs(chest.z - center.z) < Math.max(box.ex, box.ez) + 0.38
+      && overlapsY(vehicle.y, vehicle.y + box.h)) return false;
   }
   return true;
 }
@@ -250,14 +386,15 @@ export function isTreePlacementClear(def: MapDef, tree: MapDef['trees'][number])
       && overlapsY(g.y - g.r, g.y + g.r)) return false;
   }
   for (const rock of def.rocks) {
-    if (Math.hypot(tree.x - rock.x, tree.z - rock.z) < 0.7 * rock.scale + trunkRadius
-      && overlapsY(rock.y, rock.y + 0.9 * rock.scale)) return false;
+    if (Math.hypot(tree.x - rock.x, tree.z - rock.z) < ROCK_COLLIDER_RADIUS * rock.scale + trunkRadius
+      && overlapsY(rock.y, rock.y + ROCK_COLLIDER_HEIGHT * rock.scale)) return false;
   }
   for (const vehicle of def.vehicles) {
-    const box = vehicleColliderBox(vehicle.variant);
-    if (Math.abs(tree.x - vehicle.x) < Math.max(box.ex, box.ez) + trunkRadius
-      && Math.abs(tree.z - vehicle.z) < Math.max(box.ex, box.ez) + trunkRadius
-      && overlapsY(vehicle.y - 0.1, vehicle.y + box.h - 0.1)) return false;
+    const box = vehicleColliderBox(vehicle.variant, vehicle.x, vehicle.z);
+    const center = vehicleColliderCenter(vehicle);
+    if (Math.abs(tree.x - center.x) < Math.max(box.ex, box.ez) + trunkRadius
+      && Math.abs(tree.z - center.z) < Math.max(box.ex, box.ez) + trunkRadius
+      && overlapsY(vehicle.y, vehicle.y + box.h)) return false;
   }
   return true;
 }
@@ -269,6 +406,7 @@ export class WorldBuilder {
     this.def = {
       id, name, description, size,
       sky: null as never,
+      surfacePaths: [],
       geo: [],
       destructibles: [],
       vehicles: [],
@@ -297,16 +435,33 @@ export class WorldBuilder {
       noRender?: boolean;
       hint?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage';
       floor?: boolean;
+      terrain?: boolean;
+      preserveInTerrainCutout?: boolean;
+      /** Visual-only tilt; use with noCollide unless physics gains full 3-axis boxes. */
+      pitch?: number;
+      roll?: number;
     },
   ): void {
     this.def.geo.push({
       kind: 'box', x, y, z, sx, sy, sz, yaw, mat,
+      pitch: opts?.pitch,
+      roll: opts?.roll,
       noCollide: opts?.noCollide,
       noRender: opts?.noRender,
+      terrain: opts?.terrain,
+      preserveInTerrainCutout: opts?.preserveInTerrainCutout,
       materialHint: opts?.hint,
     });
     if (opts?.floor && !opts.noCollide) {
-      this.platform(x - sx / 2, x + sx / 2, z - sz / 2, z + sz / 2, y + sy / 2);
+      const c = Math.abs(Math.cos(yaw));
+      const s = Math.abs(Math.sin(yaw));
+      const halfX = (sx * c + sz * s) / 2;
+      const halfZ = (sx * s + sz * c) / 2;
+      this.platform(
+        x - halfX, x + halfX, z - halfZ, z + halfZ, y + sy / 2,
+        false,
+        opts.preserveInTerrainCutout,
+      );
     }
   }
 
@@ -315,16 +470,40 @@ export class WorldBuilder {
     this.box(x, yTop - thickness / 2, z, sx, thickness, sz, mat, 0, { floor: true });
   }
 
-  cyl(x: number, y: number, z: number, r: number, h: number, mat: MatKey, opts?: { segments?: number; noCollide?: boolean }): void {
-    this.def.geo.push({ kind: 'cyl', x, y, z, r, h, mat, segments: opts?.segments, noCollide: opts?.noCollide });
+  cyl(
+    x: number, y: number, z: number, r: number, h: number, mat: MatKey,
+    opts?: { segments?: number; noCollide?: boolean; yaw?: number; pitch?: number; roll?: number },
+  ): void {
+    this.def.geo.push({
+      kind: 'cyl', x, y, z, r, h, mat,
+      segments: opts?.segments,
+      noCollide: opts?.noCollide,
+      yaw: opts?.yaw,
+      pitch: opts?.pitch,
+      roll: opts?.roll,
+    });
   }
 
   sphere(x: number, y: number, z: number, r: number, mat: MatKey, opts?: { noCollide?: boolean }): void {
     this.def.geo.push({ kind: 'sphere', x, y, z, r, mat, noCollide: opts?.noCollide });
   }
 
-  platform(minX: number, maxX: number, minZ: number, maxZ: number, y: number, water = false): void {
-    this.def.platforms.push({ minX, maxX, minZ, maxZ, y, water });
+  platform(
+    minX: number, maxX: number, minZ: number, maxZ: number, y: number,
+    water = false,
+    preserveInTerrainCutout = false,
+  ): void {
+    this.def.platforms.push({ minX, maxX, minZ, maxZ, y, water, preserveInTerrainCutout });
+  }
+
+  terrainCutout(cutout: TerrainCutout): void {
+    (this.def.terrainCutouts ??= []).push(cutout);
+  }
+
+  /** Record a continuous visual road/path without adding duplicate collision. */
+  surfacePath(points: Array<{ x: number; z: number; width: number }>, mat: MatKey, yOffset = 0.04): void {
+    if (points.length < 2) return;
+    this.def.surfacePaths.push({ points, mat, yOffset });
   }
 
   // -- composite helpers -----------------------------------------------------
@@ -338,10 +517,9 @@ export class WorldBuilder {
     axis: 'x' | 'z', mat: MatKey,
     gaps: Array<[number, number]> = [], sillHeight = 0,
     baseY = 0,
+    sillGaps?: Array<[number, number]>,
   ): void {
-    const segs: Array<[number, number]> = [];
-    let cursor = 0;
-    const sorted = gaps
+    const normalizeGaps = (source: Array<[number, number]>): Array<[number, number]> => source
       .map(([start, width]) => {
         const clampedStart = Math.max(0, Math.min(length, start));
         const clampedEnd = Math.max(clampedStart, Math.min(length, start + Math.max(0, width)));
@@ -349,6 +527,9 @@ export class WorldBuilder {
       })
       .filter(([, width]) => width >= 0.05)
       .sort((a, b) => a[0] - b[0]);
+    const segs: Array<[number, number]> = [];
+    let cursor = 0;
+    const sorted = normalizeGaps(gaps);
     for (const [start, width] of sorted) {
       if (start > cursor) segs.push([cursor, start - cursor]);
       cursor = Math.max(cursor, start + width);
@@ -364,7 +545,7 @@ export class WorldBuilder {
       }
     }
     if (sillHeight > 0.05) {
-      for (const [start, width] of sorted) {
+      for (const [start, width] of normalizeGaps(sillGaps ?? gaps)) {
         if (axis === 'x') {
           this.box(x0 + start + width / 2, baseY + sillHeight / 2, z0, width, sillHeight, thickness, mat);
         } else {
@@ -380,14 +561,13 @@ export class WorldBuilder {
     dir: 0 | 1 | 2 | 3, steps: number, stepH: number, stepD: number, width: number, mat: MatKey,
   ): StairPlan {
     const plan = planStairs(steps, stepH, stepD, width);
-    const lowerY = y + Math.min(0, plan.totalRise);
-    // A descending run ends exactly at `lowerY`. Give its final tread a real
-    // slab thickness; using lowerY itself as every box bottom produced a
-    // zero-height final collider and an unstable gap at the lower landing.
-    const boxBottomY = plan.totalRise < 0 ? lowerY - 0.18 : lowerY;
+    // Each tread includes one riser and a small overlap with its neighbour.
+    // Building every tread down to the flight's base created a solid stepped
+    // pyramid; on stacked flights that mass occupied the headroom of the
+    // staircase below and made upper floors unreachable to a human capsule.
+    const treadHeight = Math.abs(plan.stepH) + 0.06;
     for (let i = 0; i < plan.steps; i++) {
       const topY = y + plan.stepH * (i + 1);
-      const h = topY - boxBottomY;
       const off = plan.stepD * (i + 0.5);
       let cx = x, cz = z, sx = plan.width, sz = plan.stepD;
       if (dir === 0) cz = z + off;
@@ -395,9 +575,96 @@ export class WorldBuilder {
       else if (dir === 2) cz = z - off;
       else cx = x - off;
       if (dir === 1 || dir === 3) { sx = plan.stepD; sz = plan.width; }
-      this.box(cx, boxBottomY + h / 2, cz, sx, h, sz, mat);
-      this.platform(cx - sx / 2, cx + sx / 2, cz - sz / 2, cz + sz / 2, topY);
+      this.box(cx, topY - treadHeight / 2, cz, sx, treadHeight, sz, mat, 0, {
+        preserveInTerrainCutout: true,
+      });
+      let navMinX = cx - sx / 2;
+      let navMaxX = cx + sx / 2;
+      let navMinZ = cz - sz / 2;
+      let navMaxZ = cz + sz / 2;
+      // A capsule centred on a minimum-depth tread can overlap the next
+      // riser by a few centimetres (tread 0.78 vs capsule diameter 0.84).
+      // Bias the navigation sample down-run while keeping the rendered and
+      // physical stair geometry unchanged.
+      const navBackoff = Math.min(0.08, plan.stepD * 0.2);
+      if (dir === 0) navMaxZ -= navBackoff;
+      else if (dir === 1) navMaxX -= navBackoff;
+      else if (dir === 2) navMinZ += navBackoff;
+      else navMinX += navBackoff;
+      this.platform(navMinX, navMaxX, navMinZ, navMaxZ, topY, false, true);
     }
+    // Thin independent treads expose a jagged underside that reads as
+    // floating geometry indoors. Give masonry flights a continuous soffit and
+    // metal flights two real side stringers. These are visual supports only;
+    // the KCC continues to use the exact tread/riser colliders above.
+    const dirX = dir === 1 ? 1 : dir === 3 ? -1 : 0;
+    const dirZ = dir === 0 ? 1 : dir === 2 ? -1 : 0;
+    const yaw = dir === 0 ? 0 : dir === 1 ? Math.PI / 2 : dir === 2 ? Math.PI : -Math.PI / 2;
+    const slopeAngle = Math.atan2(plan.totalRise, plan.run);
+    const slopeLength = Math.hypot(plan.run, plan.totalRise);
+    const supportY = y + plan.totalRise / 2 - Math.abs(plan.stepH) / 2 - 0.11;
+    const supportX = x + dirX * plan.run / 2;
+    const supportZ = z + dirZ * plan.run / 2;
+    const solidSoffit = mat === 'concrete' || mat === 'concreteDark' || mat === 'stoneBrick'
+      || mat === 'marble' || mat === 'rock';
+    const supportOffsets = solidSoffit
+      ? [0]
+      : [-(plan.width / 2 - 0.12), plan.width / 2 - 0.12];
+    const supportWidth = solidSoffit ? Math.max(0.12, plan.width - 0.08) : 0.12;
+    for (const offset of supportOffsets) {
+      const crossX = -dirZ * offset;
+      const crossZ = dirX * offset;
+      this.box(
+        supportX + crossX,
+        supportY,
+        supportZ + crossZ,
+        supportWidth,
+        0.14,
+        slopeLength,
+        mat,
+        yaw,
+        { noCollide: true, pitch: -slopeAngle },
+      );
+    }
+    // Explicit landing anchors keep a narrow stair connected to the room
+    // grids at both ends even when their unrelated sampling phases do not
+    // happen to place a point beside the first or last tread.
+    const anchorHalf = 0.05;
+    // Keep anchor capsules outside the first/last riser volume. The former
+    // 0.15 m offset was smaller than the 0.42 m character radius, so the
+    // anchor was rejected and every otherwise-valid stair component pruned.
+    const landingOffset = 0.55;
+    const lowerX = x - dirX * landingOffset;
+    const lowerZ = z - dirZ * landingOffset;
+    const upperX = x + dirX * (plan.run + landingOffset);
+    const upperZ = z + dirZ * (plan.run + landingOffset);
+    this.platform(lowerX - anchorHalf, lowerX + anchorHalf, lowerZ - anchorHalf, lowerZ + anchorHalf, y, false, true);
+    // A narrow flight can consume the room grid's nearest floor sample. Give
+    // the lower landing two lateral approach anchors outside the stair width;
+    // wall-side candidates are rejected by NavGraph, while the room-side one
+    // preserves a real capsule-clear connection into the floor network.
+    const sideLandingOffset = plan.width / 2 + landingOffset;
+    const crossX = -dirZ;
+    const crossZ = dirX;
+    for (const side of [-1, 1]) {
+      const approachX = lowerX + crossX * sideLandingOffset * side;
+      const approachZ = lowerZ + crossZ * sideLandingOffset * side;
+      this.platform(
+        approachX - anchorHalf,
+        approachX + anchorHalf,
+        approachZ - anchorHalf,
+        approachZ + anchorHalf,
+        y,
+        false,
+        true,
+      );
+    }
+    this.platform(
+      upperX - anchorHalf, upperX + anchorHalf, upperZ - anchorHalf, upperZ + anchorHalf,
+      y + plan.totalRise,
+      false,
+      true,
+    );
     return plan;
   }
 
@@ -472,11 +739,15 @@ export class WorldBuilder {
     this.def.sky = sky;
     this.def.transportRoute = transportRoute;
     if (opts.wetGround) this.def.wetGround = true;
+    applyTerrainCutouts(this.def);
     const authoredTrees = this.def.trees;
     this.def.trees = [];
     for (const tree of authoredTrees) {
       if (isTreePlacementClear(this.def, tree)) this.def.trees.push(tree);
     }
+    // Late street dressing can place a car before a subsequently-authored
+    // kiosk, planter or stair. Resolve the finished scene, not insertion order.
+    this.def.vehicles = this.def.vehicles.filter((vehicle) => isVehiclePlacementClear(this.def, vehicle));
     // Recheck after late environment dressing so trees, rocks or vehicles
     // authored after a chest cannot silently grow through it.
     this.def.chests = this.def.chests.filter((chest) => isChestPlacementClear(this.def, chest));
@@ -497,10 +768,6 @@ export class WorldBuilder {
 // Collider construction
 // ---------------------------------------------------------------------------
 
-interface HeightfieldExt {
-  heightfield?: { n: number; heights: Float32Array };
-}
-
 /** Build ALL static colliders for a MapDef (geometry + heightfield) into a PhysicsWorld. */
 export function buildColliders(def: MapDef, phys: PhysicsWorld): void {
   for (const g of def.geo) {
@@ -509,18 +776,40 @@ export function buildColliders(def: MapDef, phys: PhysicsWorld): void {
       // `sx`/`sz` are local dimensions. Rapier rotates the fixed body by the
       // authored yaw, matching the rendered box exactly; pre-expanding to a
       // world AABB here would make diagonal walls and roofs far too thick.
-      phys.addStaticBox(g.x, g.y, g.z, g.sx / 2, g.sy / 2, g.sz / 2, g.yaw, g.materialHint ?? matToHint(g.mat));
+      phys.addStaticBox(
+        g.x, g.y, g.z,
+        g.sx / 2, g.sy / 2, g.sz / 2,
+        g.yaw,
+        g.materialHint ?? matToHint(g.mat),
+        g.terrain === true,
+      );
     } else if (g.kind === 'cyl') {
       if (g.noCollide) continue;
-      phys.addStaticBox(g.x, g.y, g.z, g.r * 0.85, g.h / 2, g.r * 0.85, 0, g.materialHint ?? matToHint(g.mat));
+      phys.addStaticCylinder(g.x, g.y, g.z, g.h / 2, g.r, g.materialHint ?? matToHint(g.mat));
     } else if (g.kind === 'sphere') {
       if (g.noCollide) continue;
-      phys.addStaticBox(g.x, g.y, g.z, g.r * 0.7, g.r * 0.7, g.r * 0.7, 0, g.materialHint ?? matToHint(g.mat));
+      phys.addStaticSphere(g.x, g.y, g.z, g.r, g.materialHint ?? matToHint(g.mat));
     }
   }
-  const hf = (def as MapDef & HeightfieldExt).heightfield;
+  const hf = def.heightfield;
   if (hf) {
-    phys.addHeightfield(-def.size / 2, -def.size / 2, def.size / 2, def.size / 2, hf.heights, hf.n, hf.n, 'dirt');
+    const cutouts = def.terrainCutouts ?? [];
+    if (cutouts.length === 0) {
+      phys.addHeightfield(-def.size / 2, -def.size / 2, def.size / 2, def.size / 2, hf.heights, hf.n, hf.n, 'dirt');
+    } else {
+      const min = -def.size / 2;
+      const mesh = def.terrainMesh ?? buildTerrainGridMesh({
+        minX: min,
+        maxX: -min,
+        minZ: min,
+        maxZ: -min,
+        segmentsX: hf.n - 1,
+        segmentsZ: hf.n - 1,
+        heightAt: (x, z) => sampleTerrainHeightfield(hf, def.size, x, z),
+        removals: cutouts,
+      });
+      phys.addStaticTrimesh(mesh.positions, mesh.indices, 'dirt', true);
+    }
   }
 
   // Tree trunks and rocks are solid: actors, bots and projectiles must not
@@ -530,15 +819,26 @@ export function buildColliders(def: MapDef, phys: PhysicsWorld): void {
     phys.addStaticBox(t.x, t.y + 1.25 * s, t.z, 0.26 * s, 1.25 * s, 0.26 * s, 0, 'wood');
   }
   for (const r of def.rocks) {
-    phys.addStaticBox(r.x, r.y + 0.45 * r.scale, r.z, 0.7 * r.scale, 0.45 * r.scale, 0.7 * r.scale, 0, 'stone');
+    phys.addStaticBox(
+      r.x,
+      r.y + ROCK_COLLIDER_HEIGHT * r.scale / 2,
+      r.z,
+      ROCK_COLLIDER_RADIUS * r.scale,
+      ROCK_COLLIDER_HEIGHT * r.scale / 2,
+      ROCK_COLLIDER_RADIUS * r.scale,
+      0,
+      'stone',
+    );
   }
 
   // Vehicles are real cover: static collider boxes matching the scaled
   // presentation models (see VEHICLE_SCALE in types.ts).
   for (const v of def.vehicles) {
-    const box = vehicleColliderBox(v.variant);
-    // v.y is the render spawn height; rest the box on it.
-    phys.addStaticBox(v.x, v.y + box.h / 2 - 0.1, v.z, box.ex, box.h / 2, box.ez, v.yaw, 'metal');
+    const box = vehicleColliderBox(v.variant, v.x, v.z);
+    const center = vehicleColliderCenter(v);
+    // v.y is the shared visual/physical support plane. The collider encloses
+    // the exact scaled GLB bounds selected for this authored position.
+    phys.addStaticBox(center.x, v.y + box.h / 2, center.z, box.ex, box.h / 2, box.ez, v.yaw, 'metal');
   }
 
   // Invisible world boundary: four tall slabs just inside the hard movement

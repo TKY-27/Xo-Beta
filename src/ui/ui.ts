@@ -201,6 +201,7 @@ export class Menus {
       neocity: 'var(--map-neocity)',
       oldfront: 'var(--map-oldfront)',
       eden: 'var(--map-eden)',
+      ashara: 'var(--map-ashara)',
     };
     for (const m of this.maps) {
       const card = document.createElement('button');
@@ -749,7 +750,7 @@ export class Hud {
     document.body.classList.toggle('scoped', scoped);
   }
 
-  syncPlayerState(match: Match): void {
+  syncPlayerState(match: Match, dt = 1 / 60): void {
     const p = match.player;
     if (!p) return;
 
@@ -871,9 +872,10 @@ export class Hud {
     const stormVig = $('storm-vignette');
     stormVig.style.opacity = match.storm.isOutside(p.body.position.x, p.body.position.z) ? '0.8' : '0';
 
-    this.bannerTimer -= 1 / 60;
-    this.elimTimer -= 1 / 60;
-    this.hitmarkerTimer -= 1 / 60;
+    const uiDt = Math.min(0.1, Math.max(0, dt));
+    this.bannerTimer -= uiDt;
+    this.elimTimer -= uiDt;
+    this.hitmarkerTimer -= uiDt;
     if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
     if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
     if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');

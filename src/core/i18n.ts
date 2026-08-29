@@ -32,6 +32,8 @@ const en = {
   'map.oldfront.desc': 'A worn frontier town: cathedral square, keep ruins and war remnants.',
   'map.eden.name': 'EDEN FACILITY',
   'map.eden.desc': 'Lakeside research station swallowed by green. Water routes and cliffs.',
+  'map.ashara.name': 'ASHARA REACH',
+  'map.ashara.desc': 'Dense desert compounds, dry wadis, industrial yards and long-range ridges.',
   'diff.normal': 'NORMAL',
   'diff.hard': 'HARD',
   'diff.elite': 'ELITE',
@@ -244,6 +246,8 @@ const ja: Dict = {
   'map.oldfront.desc': '風化した辺境の町：大聖堂広場、要塞跡、戦争の名残。',
   'map.eden.name': 'エデン施設',
   'map.eden.desc': '緑に吞まれた湖畔の研究施設。水路と崖が広がる。',
+  'map.ashara.name': 'アシャラ・リーチ',
+  'map.ashara.desc': '密集した砂漠の拠点、乾いたワジ、工業区、遠距離戦向けの稜線。',
   'diff.normal': 'ノーマル',
   'diff.hard': 'ハード',
   'diff.elite': 'エリート',
@@ -473,6 +477,18 @@ const POI_JA: Readonly<Record<string, string>> = {
   'East Meadow': '東の草原',
   'Pump House': 'ポンプ棟',
   'Watch Rock': '見張り岩',
+
+  // Ashara Reach
+  'Sunwall Market': 'サンウォール市場',
+  'Relay Mesa': '中継メサ',
+  'Dustline Works': 'ダストライン工業区',
+  'Wadi Crossing': 'ワジ渡河点',
+  'Kestrel Compound': 'ケストレル拠点',
+  'Dry Canals': '乾いた水路群',
+  'Fuel Court': '燃料ヤード',
+  'South Checkpoint': '南部検問所',
+  'Ridge Bunkers': '稜線バンカー群',
+  'Old Caravanserai': '古い隊商宿',
 };
 
 let currentLang: Lang = 'en';

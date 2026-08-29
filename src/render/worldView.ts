@@ -9,18 +9,38 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { VEHICLE_SCALE, type MapDef, type MatKey } from '../world/types';
+import {
+  ROCK_COLLIDER_RADIUS,
+  vehicleRenderSpec,
+  type GeoBox,
+  type MapDef,
+  type MatKey,
+  type WaterVolume,
+} from '../world/types';
 import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
 import { WeaponModelFactory } from './weaponModels';
 import { buildVista, type VistaHandle } from './vista';
 import type { Match } from '../sim/match';
 import { RARITY_COLORS } from '../core/balance';
+import { buildTerrainRibbonIndices } from '../world/terrainMesh';
 
 export interface PresentationTransport {
   position: THREE.Vector3;
   /** Optional interpolated yaw; falls back to the route direction. */
   yaw?: number;
+}
+
+/** Merge authored chest parts without allowing a silent null geometry. */
+function mergeChestParts(parts: THREE.BufferGeometry[], label: string): THREE.BufferGeometry {
+  const firstIsIndexed = parts[0]?.index !== null;
+  const mixedIndexing = parts.some((part) => (part.index !== null) !== firstIsIndexed);
+  const compatible = mixedIndexing
+    ? parts.map((part) => (part.index ? part.toNonIndexed() : part))
+    : parts;
+  const merged = mergeGeometries(compatible);
+  if (!merged) throw new Error(`failed to merge ${label} chest geometry`);
+  return merged;
 }
 
 const STORM_VERT = /* glsl */ `
@@ -104,31 +124,167 @@ const WATER_FRAG = /* glsl */ `
   varying vec3 vNormalW;
 
   void main() {
-    vec3 n = normalize(vNormalW);
+    // Add two fragment-scale wave fields to the displaced surface normal.
+    // The old single mesh normal produced a nearly uniform grey sheet from
+    // the gameplay camera; crossed directions keep highlights readable at
+    // both shore and vista distances without increasing mesh density.
+    float phaseA = vWPos.x * 0.83 + vWPos.z * 0.31 + uTime * 1.55;
+    float phaseB = vWPos.x * -0.27 + vWPos.z * 1.18 - uTime * 1.12;
+    float phaseC = (vWPos.x + vWPos.z) * 0.19 + uTime * 0.46;
+    vec2 slope = vec2(
+      cos(phaseA) * 0.075 - cos(phaseB) * 0.028 + cos(phaseC) * 0.022,
+      cos(phaseA) * 0.028 + cos(phaseB) * 0.095 + cos(phaseC) * 0.022
+    );
+    vec3 detailNormal = normalize(vec3(-slope.x, 1.0, -slope.y));
+    vec3 n = normalize(mix(normalize(vNormalW), detailNormal, 0.58));
     vec3 v = normalize(cameraPosition - vWPos);
-    float fres = pow(1.0 - max(dot(n, v), 0.0), 4.0);
+    float facing = max(dot(n, v), 0.0);
+    float fres = pow(1.0 - facing, 3.2);
 
-    // sun glint (blinn) — tight lobe, modest gain so grazing water never
-    // blows out to a white sheet
-    vec3 h = normalize(uSunDir + v);
-    float spec = pow(max(dot(n, h), 0.0), 900.0);
+    // Two sun lobes: a readable broad reflection with a restrained hot core.
+    // Map sunDirection is the direction light travels. The renderer places
+    // the light at its negation, so the surface-to-sun vector is -uSunDir.
+    vec3 h = normalize(-uSunDir + v);
+    float nh = max(dot(n, h), 0.0);
+    float specBroad = pow(nh, 54.0);
+    float specCore = pow(nh, 260.0);
 
-    // ripple sparkle bands
-    float ripple = sin(vWPos.x * 2.4 + uTime * 1.8) * sin(vWPos.z * 2.1 - uTime * 1.3);
-    float sparkle = smoothstep(0.88, 1.0, ripple) * 0.22;
+    // Sparse capillary glints break up the surface without a tiled texture.
+    float ripple = sin(vWPos.x * 6.7 + vWPos.z * 1.9 + uTime * 2.4)
+      * sin(vWPos.z * 5.9 - vWPos.x * 1.25 - uTime * 1.8);
+    float sparkle = smoothstep(0.985, 1.0, ripple) * (0.035 + specBroad * 0.06);
 
     vec2 local = abs(vWPos.xz - uWaterCenter);
     float edgeDistance = min(uHalfSize.x - local.x, uHalfSize.y - local.y);
     float shoreline = 1.0 - smoothstep(0.0, 4.5, edgeDistance);
-    vec3 base = mix(uDeepColor, uShallowColor, shoreline * 0.82 + 0.08);
-    vec3 sky = mix(base, uSkyColor, 0.12 + fres * 0.48);
-    vec3 col = sky + uSunColor * spec * 0.26 + uSkyColor * sparkle * 0.42;
-    col += uShallowColor * shoreline * 0.12;
+    float depthVariation = sin(vWPos.x * 0.036 + vWPos.z * 0.021)
+      * sin(vWPos.z * 0.029 - vWPos.x * 0.017) * 0.5 + 0.5;
+    vec3 base = mix(uDeepColor, uShallowColor, shoreline * 0.68 + depthVariation * 0.08);
+    vec3 reflected = mix(base, uSkyColor, 0.035 + fres * 0.38);
+    vec3 col = reflected;
+    col += uSunColor * (specBroad * 0.2 + specCore * 0.42);
+    col += uSkyColor * sparkle;
+    col += uShallowColor * shoreline * 0.08;
+    col *= 0.9 + clamp(slope.x + slope.y, -0.08, 0.1) * 0.8;
 
-    float alpha = mix(0.82, 0.94, fres);
+    float alpha = mix(0.94, 0.98, fres);
     gl_FragColor = vec4(col, alpha);
   }
 `;
+
+export interface WaterlineSegment {
+  ax: number;
+  az: number;
+  bx: number;
+  bz: number;
+  y: number;
+}
+
+/**
+ * Trace the actual terrain/water intersection instead of decorating the
+ * rectangular water-volume bounds. The lake is exposed by a curved terrain
+ * basin, so perimeter-only foam produced a floating rectangle far from the
+ * visible bank.
+ */
+export function traceWaterline(
+  heightAt: (x: number, z: number) => number,
+  water: WaterVolume,
+  spacing = 3,
+): WaterlineSegment[] {
+  const nx = Math.max(1, Math.ceil((water.maxX - water.minX) / spacing));
+  const nz = Math.max(1, Math.ceil((water.maxZ - water.minZ) / spacing));
+  const dx = (water.maxX - water.minX) / nx;
+  const dz = (water.maxZ - water.minZ) / nz;
+  const segments: WaterlineSegment[] = [];
+  const crossing = (
+    ax: number,
+    az: number,
+    ah: number,
+    bx: number,
+    bz: number,
+    bh: number,
+  ): { x: number; z: number } | null => {
+    const a = ah - water.surfaceY;
+    const b = bh - water.surfaceY;
+    if ((a < 0) === (b < 0) || Math.abs(a - b) < 1e-6) return null;
+    const t = a / (a - b);
+    return { x: ax + (bx - ax) * t, z: az + (bz - az) * t };
+  };
+  for (let iz = 0; iz < nz; iz++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const x0 = water.minX + ix * dx;
+      const x1 = x0 + dx;
+      const z0 = water.minZ + iz * dz;
+      const z1 = z0 + dz;
+      const h00 = heightAt(x0, z0);
+      const h10 = heightAt(x1, z0);
+      const h11 = heightAt(x1, z1);
+      const h01 = heightAt(x0, z1);
+      const points = [
+        crossing(x0, z0, h00, x1, z0, h10),
+        crossing(x1, z0, h10, x1, z1, h11),
+        crossing(x1, z1, h11, x0, z1, h01),
+        crossing(x0, z1, h01, x0, z0, h00),
+      ].filter((point): point is { x: number; z: number } => point !== null);
+      // Ordinary marching cells produce two crossings. For the rare saddle,
+      // pair adjacent crossings; short local pieces are visually stable and
+      // avoid inventing a long diagonal across the cell.
+      for (let i = 0; i + 1 < points.length; i += 2) {
+        const a = points[i]!;
+        const b = points[i + 1]!;
+        if (Math.hypot(b.x - a.x, b.z - a.z) < 0.05) continue;
+        segments.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, y: water.surfaceY });
+      }
+    }
+  }
+  return segments;
+}
+
+export function buildWaterlineRibbonPositions(
+  segments: WaterlineSegment[],
+  width: number,
+  yOffset: number,
+): number[] {
+  const positions: number[] = [];
+  for (const segment of segments) {
+    const dx = segment.bx - segment.ax;
+    const dz = segment.bz - segment.az;
+    const length = Math.hypot(dx, dz);
+    const nx = -dz / length * width / 2;
+    const nz = dx / length * width / 2;
+    const y = segment.y + yOffset;
+    positions.push(
+      segment.ax - nx, y, segment.az - nz,
+      segment.bx + nx, y, segment.bz + nz,
+      segment.bx - nx, y, segment.bz - nz,
+      segment.ax - nx, y, segment.az - nz,
+      segment.ax + nx, y, segment.az + nz,
+      segment.bx + nx, y, segment.bz + nz,
+    );
+  }
+  return positions;
+}
+
+function waterlineRibbonGeometry(segments: WaterlineSegment[], width: number, yOffset: number): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(buildWaterlineRibbonPositions(segments, width, yOffset), 3),
+  );
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+/**
+ * WorldItem Y is a lightweight settling centre kept 0.35 m above support.
+ * Render meshes use their own bounds, so subtract that simulation clearance
+ * instead of stacking an additional bob on top of it.
+ */
+export function lootRenderY(itemY: number, kind: 'weapon' | 'consumable'): number {
+  return itemY + (kind === 'weapon' ? -0.30 : -0.17);
+}
 
 /**
  * A restrained rarity treatment for floor weapons.  The old presentation
@@ -314,11 +470,14 @@ export class WorldView {
     this.weaponFactory = new WeaponModelFactory(props);
     this.applyWetGround(def);
     this.buildStatic(def);
+    this.buildSurfacePaths(def);
+    this.buildTerrainRoadStrips(def);
     this.vista = buildVista(def, mats);
     this.group.add(this.vista.group);
     this.buildScatter(def, props);
     this.buildVehicles(def, props);
     this.buildWater(def);
+    this.buildShorelineDetail(def);
     if (match) {
       this.trackDestructibles(match, props);
       this.trackChests(match);
@@ -360,18 +519,28 @@ export class WorldView {
 
   private buildStatic(def: MapDef): void {
     const byKind = new Map<string, Map<MatKey, THREE.Matrix4[]>>();
+    const desertDaylightMat: Partial<Record<MatKey, MatKey>> = {
+      concreteDark: 'concrete',
+      metalDark: 'metal',
+      woodDark: 'wood',
+    };
     for (const g of def.geo) {
       if (g.noRender) continue;
-      const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), g.kind === 'box' ? g.yaw : 0);
+      const q = g.kind === 'box'
+        ? new THREE.Quaternion().setFromEuler(new THREE.Euler(g.pitch ?? 0, g.yaw, g.roll ?? 0, 'YXZ'))
+        : g.kind === 'cyl'
+          ? new THREE.Quaternion().setFromEuler(new THREE.Euler(g.pitch ?? 0, g.yaw ?? 0, g.roll ?? 0, 'YXZ'))
+          : new THREE.Quaternion();
       let scale: THREE.Vector3;
       if (g.kind === 'box') scale = new THREE.Vector3(g.sx, g.sy, g.sz);
       else if (g.kind === 'cyl') scale = new THREE.Vector3(g.r, g.h, g.r);
       else scale = new THREE.Vector3(g.r, g.r, g.r);
       const key = g.kind;
+      const renderMat = def.id === 'ashara' ? desertDaylightMat[g.mat] ?? g.mat : g.mat;
       if (!byKind.has(key)) byKind.set(key, new Map());
       const byMat = byKind.get(key)!;
-      if (!byMat.has(g.mat)) byMat.set(g.mat, []);
-      byMat.get(g.mat)!.push(new THREE.Matrix4().compose(new THREE.Vector3(g.x, g.y, g.z), q, scale));
+      if (!byMat.has(renderMat)) byMat.set(renderMat, []);
+      byMat.get(renderMat)!.push(new THREE.Matrix4().compose(new THREE.Vector3(g.x, g.y, g.z), q, scale));
     }
 
     const geos: Record<string, THREE.BufferGeometry> = {
@@ -379,10 +548,16 @@ export class WorldView {
       cyl: new THREE.CylinderGeometry(1, 1, 1, 14),
       sphere: new THREE.SphereGeometry(1, 12, 10),
     };
+    // Bales retain conservative box colliders, but their presentation uses a
+    // softened unit profile so farm stacks no longer read as unfinished wall
+    // blocks. Keeping the special case material-driven preserves one shared
+    // instanced draw instead of allocating a mesh per bale.
+    const hayBox = new RoundedBoxGeometry(1, 1, 1, 3, 0.12);
 
     for (const [kind, byMat] of byKind) {
       for (const [mat, matrices] of byMat) {
-        const inst = new THREE.InstancedMesh(geos[kind]!, this.mats.get(mat), matrices.length);
+        const geometry = kind === 'box' && mat === 'hay' ? hayBox : geos[kind]!;
+        const inst = new THREE.InstancedMesh(geometry, this.mats.get(mat), matrices.length);
         matrices.forEach((m, i) => inst.setMatrixAt(i, m));
         inst.instanceMatrix.needsUpdate = true;
         inst.frustumCulled = false;
@@ -390,6 +565,107 @@ export class WorldView {
         inst.receiveShadow = true;
         this.group.add(inst);
       }
+    }
+  }
+
+  /** Build smooth terrain-following ribbons for roads that do not need colliders. */
+  private buildSurfacePaths(def: MapDef): void {
+    if (!def.terrainHeight) return;
+    def.surfacePaths.forEach((path, pathIndex) => {
+      if (path.points.length < 2) return;
+      const positions: number[] = [];
+      const uvs: number[] = [];
+      let distance = 0;
+      for (let i = 0; i < path.points.length; i++) {
+        const point = path.points[i]!;
+        const previous = path.points[Math.max(0, i - 1)]!;
+        const next = path.points[Math.min(path.points.length - 1, i + 1)]!;
+        const dx = next.x - previous.x;
+        const dz = next.z - previous.z;
+        const invLength = 1 / Math.max(1e-5, Math.hypot(dx, dz));
+        const nx = -dz * invLength;
+        const nz = dx * invLength;
+        if (i > 0) distance += Math.hypot(point.x - previous.x, point.z - previous.z);
+        for (const side of [-1, 1]) {
+          const x = point.x + nx * point.width * 0.5 * side;
+          const z = point.z + nz * point.width * 0.5 * side;
+          positions.push(x, def.terrainHeight!(x, z) + path.yOffset + pathIndex * 0.0004, z);
+          uvs.push(distance / 8, side < 0 ? 0 : 1);
+        }
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+      geometry.setIndex(new THREE.BufferAttribute(buildTerrainRibbonIndices(path.points.length - 1), 1));
+      geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geometry, this.mats.get(path.mat));
+      mesh.receiveShadow = true;
+      mesh.castShadow = false;
+      this.group.add(mesh);
+    });
+  }
+
+  /** Render terrain-following roads as continuous strips over segmented colliders. */
+  private buildTerrainRoadStrips(def: MapDef): void {
+    if (def.id !== 'ashara' || !def.terrainHeight) return;
+    const boxes = def.geo.filter((g): g is GeoBox => g.kind === 'box' && g.mat === 'asphaltDesert');
+    const groups = new Map<string, typeof boxes>();
+    for (const box of boxes) {
+      const alongX = Math.abs(Math.cos(box.yaw)) >= Math.abs(Math.sin(box.yaw));
+      const fixed = alongX ? box.z : box.x;
+      const key = `${alongX ? 'x' : 'z'}:${fixed.toFixed(2)}`;
+      const group = groups.get(key) ?? [];
+      group.push(box);
+      groups.set(key, group);
+    }
+
+    for (const [key, group] of groups) {
+      if (group.length === 0) continue;
+      const alongX = key.startsWith('x:');
+      const fixed = alongX ? group[0]!.z : group[0]!.x;
+      const start = Math.min(...group.map((box) => (
+        alongX ? box.x - box.sx / 2 : box.z - box.sx / 2
+      )));
+      const end = Math.max(...group.map((box) => (
+        alongX ? box.x + box.sx / 2 : box.z + box.sx / 2
+      )));
+      // roadSegment stores local X as length and local Z as width. Yaw rotates
+      // those axes in world space but does not swap the stored dimensions.
+      const width = Math.max(...group.map((box) => box.sz));
+      const steps = Math.max(2, Math.ceil((end - start) / 2));
+      const addStrip = (stripWidth: number, yOffset: number, mat: MatKey) => {
+        const positions: number[] = [];
+        const uvs: number[] = [];
+        for (let i = 0; i <= steps; i++) {
+          const t = i / steps;
+          const along = THREE.MathUtils.lerp(start, end, t);
+          for (const side of [-1, 1]) {
+            const x = alongX ? along : fixed + side * stripWidth / 2;
+            const z = alongX ? fixed + side * stripWidth / 2 : along;
+            positions.push(x, def.terrainHeight!(x, z) + yOffset, z);
+            uvs.push(t * (end - start) / 8, side < 0 ? 0 : 1);
+          }
+        }
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        geometry.setIndex(new THREE.BufferAttribute(buildTerrainRibbonIndices(steps), 1));
+        geometry.computeVertexNormals();
+        geometry.computeBoundingBox();
+        geometry.computeBoundingSphere();
+        const mesh = new THREE.Mesh(geometry, this.mats.get(mat));
+        mesh.receiveShadow = true;
+        mesh.castShadow = false;
+        this.group.add(mesh);
+      };
+      // Segment-level shoulder boxes were flat at each centre height. Their
+      // uphill edges pierced the welded asphalt as pale transverse bands.
+      // Render both layers from the same sampled ribbon instead: a wider,
+      // lower dirt shoulder followed by the continuous asphalt surface.
+      addStrip(width + 1.8, 0.064, 'dirt');
+      addStrip(width, 0.116, 'asphaltDesert');
     }
   }
 
@@ -402,11 +678,12 @@ export class WorldView {
     const treeVariantKeys: Record<string, string[]> = {
       oak: ['tree/CommonTree_1', 'tree/CommonTree_2', 'tree/CommonTree_3', 'tree/CommonTree_4', 'tree/CommonTree_5'],
       pine: ['pine/Pine_1', 'pine/Pine_2', 'pine/Pine_3', 'pine/Pine_4'],
-      palm: ['tree/CommonTree_3'], // nearest available silhouette
       dead: ['dead/DeadTree_1', 'dead/DeadTree_2', 'dead/DeadTree_4'],
     };
+    const palms = def.trees.filter((tree) => tree.variant === 'palm');
     const buckets = new Map<string, THREE.Matrix4[]>();
     for (const t of def.trees) {
+      if (t.variant === 'palm') continue;
       const keys = treeVariantKeys[t.variant] ?? treeVariantKeys.oak!;
       const key = keys[Math.abs(Math.round(t.x * 13.7 + t.z * 7.3)) % keys.length]!;
       if (!buckets.has(key)) buckets.set(key, []);
@@ -426,9 +703,127 @@ export class WorldView {
       // make their shadows invisible while the extra depth pass costs a full
       // scene traversal of the dominant triangle budget.
       const isTree = key.startsWith('tree/') || key === 'palm';
-      const isSoft = key.startsWith('fern') || key.startsWith('clover') || key.startsWith('bush');
-      const tint = def.id === 'oldfront' ? (isTree ? moorTint : isSoft ? moorTintSoft : undefined) : undefined;
+      const tint = def.id === 'oldfront' && isTree ? moorTint : undefined;
       this.addInstancedByGrid(key, matrices, props, 4096, def.sky.preset !== 'overcast', tint);
+    }
+
+    // The bundled nature pack has no palm silhouette. Reusing a temperate
+    // broadleaf tree made the desert read as a green forest, so palms use a
+    // light procedural trunk/crown assembled into two instanced draw calls.
+    if (palms.length > 0) {
+      const trunkGeometry = new THREE.CylinderGeometry(1, 1.35, 1, 9, 6);
+      const trunkMaterial = new THREE.MeshStandardMaterial({
+        color: 0x75563b,
+        roughness: 0.96,
+        metalness: 0,
+      });
+      const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, palms.length);
+      const crownGeometry = new THREE.SphereGeometry(1, 9, 6);
+      const crowns = new THREE.InstancedMesh(crownGeometry, trunkMaterial, palms.length);
+
+      // A palm frond is a curved central rachis with paired leaflets, not one
+      // triangular billboard. Build a compact feathered mesh once and fan it
+      // around every crown. Geometry carries the droop so instances only need
+      // a yaw and mild scale variation.
+      const frondGeometry = new THREE.BufferGeometry();
+      const frondVertices: number[] = [];
+      const frondIndices: number[] = [];
+      const addFrondQuad = (
+        a: [number, number, number],
+        b: [number, number, number],
+        c: [number, number, number],
+        d: [number, number, number],
+      ) => {
+        const base = frondVertices.length / 3;
+        frondVertices.push(...a, ...b, ...c, ...d);
+        frondIndices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      };
+      const frondCenter = (t: number): [number, number] => [
+        -0.14 * t - 1.05 * t * t,
+        4.9 * t,
+      ];
+      const rachisSegments = 10;
+      for (let i = 0; i < rachisSegments; i++) {
+        const t0 = i / rachisSegments;
+        const t1 = (i + 1) / rachisSegments;
+        const [y0, z0] = frondCenter(t0);
+        const [y1, z1] = frondCenter(t1);
+        const w0 = 0.055 * (1 - t0 * 0.55);
+        const w1 = 0.055 * (1 - t1 * 0.55);
+        addFrondQuad([-w0, y0, z0], [w0, y0, z0], [w1, y1, z1], [-w1, y1, z1]);
+      }
+      for (let i = 1; i <= 8; i++) {
+        const t = 0.08 + i * 0.092;
+        const [y, z] = frondCenter(t);
+        const leafLength = 0.72 * Math.pow(Math.sin(t * Math.PI), 0.62) * (1 - t * 0.16);
+        const back = 0.13 + t * 0.08;
+        const forward = 0.28 + t * 0.15;
+        addFrondQuad(
+          [-0.025, y, z - back],
+          [-0.025, y, z + back],
+          [-leafLength, y - 0.08, z + forward],
+          [-leafLength * 0.88, y - 0.045, z + 0.03],
+        );
+        addFrondQuad(
+          [0.025, y, z + back],
+          [0.025, y, z - back],
+          [leafLength * 0.88, y - 0.045, z + 0.03],
+          [leafLength, y - 0.08, z + forward],
+        );
+      }
+      const [tipY, tipZ] = frondCenter(1);
+      addFrondQuad([-0.035, tipY, tipZ - 0.38], [0.035, tipY, tipZ - 0.38], [0.015, tipY - 0.08, tipZ + 0.2], [-0.015, tipY - 0.08, tipZ + 0.2]);
+      frondGeometry.setAttribute('position', new THREE.Float32BufferAttribute(frondVertices, 3));
+      frondGeometry.setIndex(frondIndices);
+      frondGeometry.computeVertexNormals();
+      const frondMaterial = new THREE.MeshStandardMaterial({
+        color: 0x647d40,
+        emissive: 0x18220f,
+        emissiveIntensity: 0.12,
+        roughness: 0.92,
+        metalness: 0,
+        side: THREE.DoubleSide,
+      });
+      const frondsPerPalm = 10;
+      const fronds = new THREE.InstancedMesh(frondGeometry, frondMaterial, palms.length * frondsPerPalm);
+      const matrix = new THREE.Matrix4();
+      const position = new THREE.Vector3();
+      const quaternion = new THREE.Quaternion();
+      const scale = new THREE.Vector3();
+      palms.forEach((tree, palmIndex) => {
+        const height = tree.scale * 7.2;
+        const width = tree.scale * 0.22;
+        position.set(tree.x, tree.y + height / 2, tree.z);
+        quaternion.setFromEuler(new THREE.Euler(0.015 * Math.sin(tree.x), tree.x + tree.z, 0.02 * Math.cos(tree.z)));
+        scale.set(width, height, width);
+        matrix.compose(position, quaternion, scale);
+        trunks.setMatrixAt(palmIndex, matrix);
+
+        position.set(tree.x, tree.y + height - tree.scale * 0.02, tree.z);
+        quaternion.identity();
+        scale.setScalar(tree.scale * 0.38);
+        matrix.compose(position, quaternion, scale);
+        crowns.setMatrixAt(palmIndex, matrix);
+
+        for (let i = 0; i < frondsPerPalm; i++) {
+          const yaw = i / frondsPerPalm * Math.PI * 2 + tree.x * 0.13 + tree.z * 0.07;
+          position.set(tree.x, tree.y + height - tree.scale * 0.08, tree.z);
+          quaternion.setFromEuler(new THREE.Euler(0, yaw, (i % 2 ? 1 : -1) * 0.035, 'YXZ'));
+          const leafScale = tree.scale * (0.88 + (i % 2) * 0.12);
+          scale.set(leafScale, leafScale * (0.9 + (i % 3) * 0.08), leafScale);
+          matrix.compose(position, quaternion, scale);
+          fronds.setMatrixAt(palmIndex * frondsPerPalm + i, matrix);
+        }
+      });
+      trunks.instanceMatrix.needsUpdate = true;
+      trunks.castShadow = true;
+      trunks.receiveShadow = true;
+      crowns.instanceMatrix.needsUpdate = true;
+      crowns.castShadow = true;
+      crowns.receiveShadow = true;
+      fronds.instanceMatrix.needsUpdate = true;
+      fronds.castShadow = false;
+      this.group.add(trunks, crowns, fronds);
     }
 
     // Undergrowth: bushes / ferns / clover / flowers near tree clusters
@@ -441,7 +836,7 @@ export class WorldView {
       return (s1 & 0x7fffffff) / 0x7fffffff;
     };
     for (const t of def.trees) {
-      const count = def.id === 'eden' ? 6 : 3;
+      const count = def.id === 'ashara' ? 0 : def.id === 'eden' ? 6 : 3;
       for (let i = 0; i < count; i++) {
         const a = rnd() * Math.PI * 2;
         const r = 1.6 + rnd() * 3.4;
@@ -460,7 +855,7 @@ export class WorldView {
       // and tiny water features like fountains.
       if (!underMatrices.has(key)) underMatrices.set(key, []);
     }
-    if (def.terrainHeight && def.id !== 'neocity') {
+    if (def.terrainHeight && def.id !== 'neocity' && def.id !== 'ashara') {
       const shoreKeys = ['fern/1', 'clover/1', 'fern/1', 'bush/common'];
       const smp = def.terrainHeight;
       for (const w of def.water) {
@@ -493,7 +888,7 @@ export class WorldView {
       for (const r of def.rocks) {
         if (rnd() > 0.55) continue;
         const a = rnd() * Math.PI * 2;
-        const d = r.scale * 0.9 + 0.6 + rnd() * 1.4;
+        const d = ROCK_COLLIDER_RADIUS * r.scale + 0.6 + rnd() * 1.4;
         const x = r.x + Math.cos(a) * d;
         const z = r.z + Math.sin(a) * d;
         const y = def.terrainHeight ? def.terrainHeight(x, z) : r.y;
@@ -524,28 +919,128 @@ export class WorldView {
     for (const key of undergrowthKeys) {
       const ms = underMatrices.get(key)!;
       if (!ms.length || !props.hasVariant(key)) continue;
-      this.addInstancedByGrid(key, ms, props, 4096, false);
+      const softTint = def.id === 'oldfront'
+        ? moorTintSoft
+        : def.id === 'eden' ? wetlandTintSoft : undefined;
+      this.addInstancedByGrid(key, ms, props, 4096, false, softTint);
     }
 
-    // Rocks → Quaternius rock models
+    // Rocks → Quaternius rock models. Each authored collider owns one primary
+    // boulder plus a smaller companion kept inside the same physical radius;
+    // this breaks the repeated single-mesh silhouette without inventing
+    // non-colliding visual mass around the obstacle.
     const rockKeys = ['rock/medium1', 'rock/medium2'];
     const rockBuckets = new Map<string, THREE.Matrix4[]>();
     def.rocks.forEach((r, i) => {
-      const key = rockKeys[i % rockKeys.length]!;
-      if (!rockBuckets.has(key)) rockBuckets.set(key, []);
-      const tiltZ = Math.sin(r.x * 9.1 + r.z * 5.3) * 0.28;
-      const tiltX = Math.cos(r.x * 3.7 + r.z * 13.1) * 0.24;
-      rockBuckets.get(key)!.push(
+      const phase = r.x * 7.7 + r.z * 3.3;
+      const keyIndex = Math.abs(Math.round(phase * 1.73 + i * 2.31)) % rockKeys.length;
+      const key = rockKeys[keyIndex]!;
+      const addRock = (bucketKey: string, matrix: THREE.Matrix4) => {
+        if (!rockBuckets.has(bucketKey)) rockBuckets.set(bucketKey, []);
+        rockBuckets.get(bucketKey)!.push(matrix);
+      };
+      const tiltZ = Math.sin(r.x * 9.1 + r.z * 5.3) * 0.06;
+      const tiltX = Math.cos(r.x * 3.7 + r.z * 13.1) * 0.05;
+      const heightVariation = 0.96 + Math.sin(phase * 0.63) * 0.08;
+      // Prop extraction normalises both source bottoms to y=0. Bury the broad
+      // irregular footprint far enough to cover terrain slope and the small
+      // authored tilt; a positive lift left a dark daylight gap under large
+      // ASHARA boulders.
+      const baseOffset = -0.22;
+      addRock(
+        key,
         new THREE.Matrix4().compose(
-          new THREE.Vector3(r.x, r.y + r.scale * 0.12, r.z),
-          new THREE.Quaternion().setFromEuler(new THREE.Euler(tiltX, r.x * 7.7 + r.z * 3.3, tiltZ)),
-          new THREE.Vector3(r.scale * 1.15, r.scale * 0.85, r.scale * 1.05),
+          new THREE.Vector3(r.x, r.y + r.scale * baseOffset, r.z),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(tiltX, phase, tiltZ)),
+          new THREE.Vector3(r.scale * 1.12, r.scale * heightVariation, r.scale * 1.04),
+        ),
+      );
+
+      const clusterAngle = phase * 1.91 + 0.7;
+      const companionScale = r.scale * (0.24 + (Math.sin(phase * 2.3) * 0.5 + 0.5) * 0.12);
+      const clusterDistance = r.scale * (0.8 + (Math.cos(phase * 1.4) * 0.5 + 0.5) * 0.22);
+      const companionX = r.x + Math.cos(clusterAngle) * clusterDistance;
+      const companionZ = r.z + Math.sin(clusterAngle) * clusterDistance;
+      const companionKeyIndex = (keyIndex + 1) % rockKeys.length;
+      addRock(
+        rockKeys[companionKeyIndex]!,
+        new THREE.Matrix4().compose(
+          new THREE.Vector3(
+            companionX,
+            r.y - companionScale * 0.18,
+            companionZ,
+          ),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler(
+            -tiltZ * 0.7,
+            phase + 1.9,
+            tiltX * 0.65,
+          )),
+          new THREE.Vector3(companionScale * 1.18, companionScale * 0.68, companionScale * 1.05),
         ),
       );
     });
     for (const [key, matrices] of rockBuckets) {
       if (!props.hasVariant(key)) continue;
-      this.addInstancedByGrid(key, matrices, props, 4096);
+      const tintRock = def.id === 'ashara'
+        ? desertRockTint
+        : def.id === 'eden'
+          ? wetlandRockTint
+          : def.id === 'oldfront'
+            ? moorRockTint
+            : undefined;
+      this.addInstancedByGrid(
+        key,
+        matrices,
+        props,
+        4096,
+        true,
+        tintRock,
+      );
+    }
+
+    // Small angular scree visually seats boulders into the terrain. All
+    // fragments stay within the already-solid authored rock cylinder, so the
+    // detail cannot become a walk-through visual obstruction.
+    if (def.rocks.length > 0) {
+      const fragmentsPerRock = 5;
+      const screeGeo = new THREE.IcosahedronGeometry(1, 0);
+      const screeColor = def.id === 'ashara' ? 0x846a51
+        : def.id === 'eden' ? 0x626b62
+          : def.id === 'oldfront' ? 0x716a60 : 0x696967;
+      const screeMat = new THREE.MeshStandardMaterial({
+        color: screeColor,
+        roughness: 0.98,
+        metalness: 0,
+      });
+      const scree = new THREE.InstancedMesh(screeGeo, screeMat, def.rocks.length * fragmentsPerRock);
+      const fragmentMatrix = new THREE.Matrix4();
+      const fragmentPosition = new THREE.Vector3();
+      const fragmentRotation = new THREE.Quaternion();
+      const fragmentScale = new THREE.Vector3();
+      let fragmentIndex = 0;
+      def.rocks.forEach((rock, rockIndex) => {
+        for (let j = 0; j < fragmentsPerRock; j++) {
+          const phase = rock.x * 3.17 + rock.z * 5.83 + rockIndex * 1.37 + j * 2.41;
+          const angle = phase * 1.73;
+          const distance = rock.scale * (1.05 + (Math.sin(phase) * 0.5 + 0.5) * 0.48);
+          const scale = rock.scale * (0.075 + (Math.cos(phase * 1.9) * 0.5 + 0.5) * 0.085);
+          fragmentPosition.set(
+            rock.x + Math.cos(angle) * distance,
+            rock.y + scale * 0.42,
+            rock.z + Math.sin(angle) * distance,
+          );
+          fragmentRotation.setFromEuler(new THREE.Euler(phase * 0.7, phase, phase * 0.37));
+          fragmentScale.set(scale * 1.35, scale * 0.65, scale);
+          fragmentMatrix.compose(fragmentPosition, fragmentRotation, fragmentScale);
+          scree.setMatrixAt(fragmentIndex++, fragmentMatrix);
+        }
+      });
+      scree.instanceMatrix.needsUpdate = true;
+      scree.computeBoundingBox();
+      scree.computeBoundingSphere();
+      scree.castShadow = false;
+      scree.receiveShadow = true;
+      this.group.add(scree);
     }
 
     // Lamps: authored street fixtures, instanced per part (draw-call budget)
@@ -681,46 +1176,71 @@ export class WorldView {
   // -------------------------------------------------------------------------
 
   private buildVehicles(def: MapDef, props: PropLibrary): void {
-    const pick: Record<string, string[]> = {
-      sedan: ['sedan', 'sedan-sports', 'hatchback-sports'],
-      van: ['van', 'delivery-flat'],
-      truck: ['truck'],
-      wrecked: ['police', 'suv'],
-    };
+    const buckets = new Map<string, Array<{ vehicle: (typeof def.vehicles)[number]; key: string }>>();
     for (let i = 0; i < def.vehicles.length; i++) {
       const v = def.vehicles[i]!;
-      const options = pick[v.variant] ?? pick.sedan!;
-      const key = options[Math.abs(Math.round(v.x * 7.9 + v.z * 3.7)) % options.length]!;
+      const key = vehicleRenderSpec(v.variant, v.x, v.z).asset;
+      const bucketKey = `${key}:${v.variant === 'wrecked' ? 'wrecked' : 'live'}`;
+      const bucket = buckets.get(bucketKey) ?? [];
+      bucket.push({ vehicle: v, key });
+      buckets.set(bucketKey, bucket);
+    }
+
+    const rootInverse = new THREE.Matrix4();
+    const localMatrix = new THREE.Matrix4();
+    const vehicleMatrix = new THREE.Matrix4();
+    const instanceMatrix = new THREE.Matrix4();
+    const vehicleQuaternion = new THREE.Quaternion();
+    const vehiclePosition = new THREE.Vector3();
+    const sourceScale = new THREE.Vector3();
+
+    for (const [bucketName, entries] of buckets) {
+      const key = entries[0]!.key;
       const tmpl = props.cloneTemplate(`vehicle/${key}`);
       if (!tmpl) continue;
-      const tint = new THREE.Color(v.color ?? 0x88929c);
+      tmpl.updateMatrixWorld(true);
+      rootInverse.copy(tmpl.matrixWorld).invert();
       tmpl.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (!mesh.isMesh || !mesh.material) return;
-        const src = Array.isArray(mesh.material) ? mesh.material[0]! : mesh.material;
+        const sourceMesh = o as THREE.Mesh;
+        if (!sourceMesh.isMesh || !sourceMesh.material || !sourceMesh.geometry) return;
+        const src = Array.isArray(sourceMesh.material) ? sourceMesh.material[0]! : sourceMesh.material;
         const m = src.clone() as THREE.MeshStandardMaterial;
         delete m.userData.externalShared;
-        if (m.map && !v.explodable) m.color.copy(new THREE.Color(1, 1, 1));
-        if (v.variant === 'wrecked') {
-          m.color.multiply(tint).multiplyScalar(0.32);
+        const wrecked = entries[0]!.vehicle.variant === 'wrecked';
+        const tintable = wrecked || Boolean(m.map);
+        if (wrecked) {
           m.metalness = 0.4;
           m.roughness = 0.95;
-        } else if (m.map) {
-          // Kenney colormap cars are white-bodied: tint toward the spec color.
-          m.color.multiplyScalar(0.25).lerp(tint, 0.85);
         }
-        mesh.material = m;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
+        const instanced = new THREE.InstancedMesh(sourceMesh.geometry, m, entries.length);
+        localMatrix.multiplyMatrices(rootInverse, sourceMesh.matrixWorld);
+        for (let i = 0; i < entries.length; i++) {
+          const v = entries[i]!.vehicle;
+          const spec = vehicleRenderSpec(v.variant, v.x, v.z);
+          const vs = spec.scale;
+          vehiclePosition.set(v.x, v.y + spec.yOffset, v.z);
+          vehicleQuaternion.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, v.yaw);
+          sourceScale.setScalar(vs);
+          vehicleMatrix.compose(vehiclePosition, vehicleQuaternion, sourceScale);
+          instanceMatrix.multiplyMatrices(vehicleMatrix, localMatrix);
+          instanced.setMatrixAt(i, instanceMatrix);
+          if (tintable) {
+            const tint = new THREE.Color(v.color ?? 0x88929c);
+            if (wrecked) tint.multiplyScalar(0.32);
+            else tint.multiplyScalar(0.85).addScalar(0.0375);
+            instanced.setColorAt(i, tint);
+          }
+        }
+        instanced.instanceMatrix.needsUpdate = true;
+        if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
+        instanced.computeBoundingBox();
+        instanced.computeBoundingSphere();
+        instanced.frustumCulled = true;
+        instanced.castShadow = true;
+        instanced.receiveShadow = true;
+        instanced.name = `vehicle:${bucketName}`;
+        this.group.add(instanced);
       });
-      const g = new THREE.Group();
-      const vs = VEHICLE_SCALE[key] ?? 1.5;
-      tmpl.scale.setScalar(vs);
-      g.add(tmpl);
-      // Keep the same slight wheel-sink as authored (GLB base sits at -0.3).
-      g.position.set(v.x, v.y + 0.3 * (vs - 1), v.z);
-      g.rotation.y = v.yaw;
-      this.group.add(g);
     }
   }
 
@@ -742,9 +1262,9 @@ export class WorldView {
         premultipliedAlpha: false,
         uniforms: {
           uTime: { value: 0 },
-          uDeepColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x0a1a2e : 0x14486b) },
-          uShallowColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x123248 : 0x2f7d9e) },
-          uSkyColor: { value: new THREE.Color(def.sky.preset === 'day' ? 0x8fb6cc : def.sky.fogColor) },
+          uDeepColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x06121e : 0x06283b) },
+          uShallowColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x102b3c : 0x19596b) },
+          uSkyColor: { value: new THREE.Color(def.sky.preset === 'day' ? 0x5f879e : def.sky.fogColor) },
           uSunDir: { value: new THREE.Vector3(...def.sky.sunDirection).normalize() },
           uSunColor: { value: new THREE.Color(def.sky.sunColor) },
           uWaterCenter: { value: new THREE.Vector2((w.minX + w.maxX) / 2, (w.minZ + w.maxZ) / 2) },
@@ -758,6 +1278,49 @@ export class WorldView {
       this.waterMats.push(mat);
       this.group.add(mesh);
     }
+  }
+
+  private buildShorelineDetail(def: MapDef): void {
+    if (def.id !== 'eden' || !def.terrainHeight) return;
+    const segments = def.water.flatMap((water) => traceWaterline(def.terrainHeight!, water));
+    if (segments.length === 0) return;
+
+    // A broad, low-contrast sediment band grounds the bank; a broken narrow
+    // foam trace gives the waterline motion-scale without drawing a perfect
+    // procedural outline around the whole lake.
+    const sediment = new THREE.Mesh(
+      waterlineRibbonGeometry(segments, 0.42, 0.012),
+      new THREE.MeshStandardMaterial({
+        color: 0x34463b,
+        roughness: 0.96,
+        metalness: 0,
+        transparent: true,
+        opacity: 0.2,
+        depthWrite: false,
+      }),
+    );
+    sediment.name = 'shoreline:sediment';
+    sediment.receiveShadow = true;
+    sediment.renderOrder = 3.5;
+    this.group.add(sediment);
+
+    const brokenFoam = segments.filter((segment, index) => (
+      index % 4 === 1
+      && Math.sin(segment.ax * 0.37 + segment.az * 0.19) > 0.38
+    ));
+    const foam = new THREE.Mesh(
+      waterlineRibbonGeometry(brokenFoam, 0.07, 0.026),
+      new THREE.MeshBasicMaterial({
+        color: 0x8fa69c,
+        transparent: true,
+        opacity: 0.08,
+        depthWrite: false,
+        toneMapped: true,
+      }),
+    );
+    foam.name = 'shoreline:foam';
+    foam.renderOrder = 4;
+    this.group.add(foam);
   }
 
   animateWater(t: number): void {
@@ -828,73 +1391,119 @@ export class WorldView {
     for (const c of match.chests) counts[c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0]!++;
     for (let tier = 0; tier < 3; tier++) {
       if (this.chestInst[tier] || counts[tier] === 0) continue;
-      const glowHex = tier === 2 ? 0xffa632 : tier === 1 ? 0xb878f0 : 0xffc45c;
+      const glowHex = tier === 2 ? 0xffb441 : tier === 1 ? 0xb88cff : 0xffc766;
       let cached = this.chestMats.get(tier);
       if (!cached) {
         const trimMat = new THREE.MeshStandardMaterial({
-          color: 0x24211c, emissive: glowHex, emissiveIntensity: 0.55 + tier * 0.2, roughness: 0.35, metalness: 0.5,
+          color: tier === 2 ? 0xb0833f : tier === 1 ? 0x77798a : 0x98713d,
+          emissive: glowHex,
+          emissiveIntensity: 0.055,
+          roughness: tier === 2 ? 0.34 : 0.42,
+          metalness: 0.78,
         });
-        const accentMat = trimMat.clone();
-        // Weathered metal bodies remain readable in unlit interiors. Standard
-        // crates use the familiar warm-gold language of a valuable chest;
-        // higher tiers retain distinct gunmetal/bronze bodies.
-        const bodyColor = tier === 2 ? 0x51402c : tier === 1 ? 0x34313d : 0x5b492b;
+        const accentMat = new THREE.MeshStandardMaterial({
+          color: glowHex,
+          emissive: glowHex,
+          emissiveIntensity: 0.82 + tier * 0.14,
+          roughness: 0.24,
+          metalness: 0.22,
+        });
+        // Keep the large surfaces material-led rather than emissive. The old
+        // bright bands flattened the silhouette into a glowing cage and made
+        // the chest read as black-and-yellow plastic in direct sunlight.
+        const bodyColor = tier === 2 ? 0x4b301a : tier === 1 ? 0x343744 : 0x5d3b20;
         const bodyMat = new THREE.MeshStandardMaterial({
           color: bodyColor,
           emissive: new THREE.Color(bodyColor),
-          emissiveIntensity: 0.38,
-          roughness: 0.62,
-          metalness: 0.38,
+          emissiveIntensity: 0.09,
+          roughness: tier === 1 ? 0.57 : 0.72,
+          metalness: tier === 1 ? 0.24 : 0.06,
         });
         for (const m of [trimMat, accentMat, bodyMat]) (m.userData as { shared?: boolean }).shared = true;
         cached = { body: bodyMat, trim: trimMat, accent: accentMat };
         this.chestMats.set(tier, cached);
       }
       const n = counts[tier]!;
-      // static base (body) — lid pivot at (0,0.72,0), children baked relative
-      const baseGeo = new RoundedBoxGeometry(1.46, 0.68, 0.96, 3, 0.055);
-      baseGeo.translate(0, 0.38, 0);
-      // static trim: base skirt + 4 corner brackets, merged
-      const skirt = new THREE.BoxGeometry(1.52, 0.09, 1.02);
-      skirt.translate(0, 0.09, 0);
+      // The render volume stays inside the authored 1.10 x .80 x .76 static
+      // collider. This prevents the previous oversized lid and corner bands
+      // from appearing penetrable even when physics correctly stopped actors.
+      const baseGeo = new RoundedBoxGeometry(1.06, 0.5, 0.72, 4, 0.045);
+      baseGeo.translate(0, 0.29, 0);
+      // Static aged-metal frame: grounded skirt, top rail, corner guards and
+      // small feet. The pieces are merged so detail costs one draw per tier.
+      const skirt = new THREE.BoxGeometry(1.1, 0.07, 0.76);
+      skirt.translate(0, 0.065, 0);
+      const upperRailFront = new THREE.BoxGeometry(1.1, 0.065, 0.055);
+      upperRailFront.translate(0, 0.515, -0.365);
+      const upperRailBack = upperRailFront.clone();
+      upperRailBack.translate(0, 0, 0.73);
       const brackets: THREE.BufferGeometry[] = [];
       for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-        const b = new THREE.BoxGeometry(0.12, 0.72, 0.12);
-        b.translate(sx * 0.67, 0.38, sz * 0.42);
+        const b = new THREE.BoxGeometry(0.075, 0.5, 0.075);
+        b.translate(sx * 0.49, 0.29, sz * 0.33);
         brackets.push(b);
+        const foot = new THREE.CylinderGeometry(0.065, 0.075, 0.05, 8);
+        foot.translate(sx * 0.45, 0.025, sz * 0.29);
+        brackets.push(foot);
       }
-      // Recessed face bands catch highlights and break up the old featureless
-      // box silhouette while remaining one instanced draw.
-      for (const y of [0.3, 0.52]) {
-        const band = new THREE.BoxGeometry(1.18, 0.055, 0.055);
-        band.translate(0, y, -0.495);
+      // Narrow rails frame three believable front planks without covering the
+      // wood grain/readable body mass in emissive metal.
+      for (const y of [0.225, 0.39]) {
+        const band = new THREE.BoxGeometry(0.88, 0.035, 0.035);
+        band.translate(0, y, -0.372);
         brackets.push(band);
       }
-      const trimGeo = mergeGeometries([skirt, ...brackets])!;
-      // lock cylinder (static, accent)
-      const lockGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.08, 10);
-      lockGeo.rotateX(Math.PI / 2);
-      lockGeo.translate(0, 0.62, -0.5);
-      // Classic arched coffer lid. A half-cylinder creates a continuous
-      // silhouette and readable specular roll instead of stacked cuboids.
-      // Geometry remains relative to the hinge pivot at (0, 0.72, 0).
-      const lidArch = new THREE.CylinderGeometry(0.47, 0.47, 1.5, 18, 1, false, 0, Math.PI);
-      lidArch.rotateZ(Math.PI / 2);
-      const lidBase = new THREE.BoxGeometry(1.5, 0.08, 0.94);
-      lidBase.translate(0, 0.035, 0);
-      const lidBodyGeo = mergeGeometries([lidArch, lidBase])!;
-      const lidFrontBand = new THREE.BoxGeometry(1.54, 0.1, 0.08);
-      lidFrontBand.translate(0, 0.1, -0.46);
-      const lidRibs: THREE.BufferGeometry[] = [];
-      for (const x of [-0.48, 0, 0.48]) {
-        const rib = new THREE.TorusGeometry(0.48, 0.035, 6, 18, Math.PI);
-        rib.rotateY(Math.PI / 2);
-        rib.translate(x, 0, 0);
-        lidRibs.push(rib);
+      const trimGeo = mergeChestParts([skirt, upperRailFront, upperRailBack, ...brackets], 'frame');
+      // Lock plate, raised escutcheon, shackle and rivets. All are authored on
+      // the near face so the interaction target reads from gameplay distance.
+      const lockParts: THREE.BufferGeometry[] = [];
+      const lockPlate = new RoundedBoxGeometry(0.19, 0.22, 0.035, 3, 0.018);
+      lockPlate.translate(0, 0.47, -0.385);
+      lockParts.push(lockPlate);
+      const shackle = new THREE.TorusGeometry(0.068, 0.016, 6, 12, Math.PI);
+      shackle.translate(0, 0.59, -0.405);
+      lockParts.push(shackle);
+      for (const x of [-0.075, 0.075]) for (const y of [0.395, 0.545]) {
+        const rivet = new THREE.SphereGeometry(0.012, 6, 4);
+        rivet.translate(x, y, -0.407);
+        lockParts.push(rivet);
       }
-      const lidTrimGeo = mergeGeometries([lidFrontBand, ...lidRibs])!;
-      const coreGeo = new RoundedBoxGeometry(0.3 + tier * 0.03, 0.1, 0.045, 2, 0.018);
-      coreGeo.translate(0, 0.12, -0.485);
+      const lockGeo = mergeChestParts(lockParts, 'lock');
+      // Lid geometry is local to a real rear hinge at z=+0.38. Its centre is
+      // offset toward the front, so opening raises the front instead of
+      // rotating the whole chest top through its centre like a seesaw.
+      const lidBodyGeo = new RoundedBoxGeometry(1.08, 0.27, 0.74, 4, 0.065);
+      lidBodyGeo.translate(0, 0.135, -0.37);
+      const lidTrimParts: THREE.BufferGeometry[] = [];
+      const lidFrontRail = new THREE.BoxGeometry(1.1, 0.075, 0.045);
+      lidFrontRail.translate(0, 0.08, -0.742);
+      lidTrimParts.push(lidFrontRail);
+      for (const x of [-0.38, 0, 0.38]) {
+        const topStrap = new THREE.BoxGeometry(0.05, 0.035, 0.68);
+        topStrap.translate(x, 0.282, -0.37);
+        lidTrimParts.push(topStrap);
+        const frontStrap = new THREE.BoxGeometry(0.05, 0.21, 0.035);
+        frontStrap.translate(x, 0.13, -0.748);
+        lidTrimParts.push(frontStrap);
+      }
+      for (const x of [-0.38, 0.38]) {
+        const hinge = new THREE.CylinderGeometry(0.035, 0.035, 0.16, 8);
+        hinge.rotateZ(Math.PI / 2);
+        hinge.translate(x, 0.035, -0.015);
+        lidTrimParts.push(hinge);
+      }
+      const lidTrimGeo = mergeChestParts(lidTrimParts, 'lid trim');
+      // A restrained rarity beacon and a lining glow become visible when the
+      // lid opens. This concentrates emission in believable light sources.
+      const badge = new THREE.OctahedronGeometry(0.055 + tier * 0.006, 0);
+      badge.scale(1, 1.25, 0.45);
+      badge.translate(0, 0.465, -0.415);
+      const innerGlow = new RoundedBoxGeometry(0.42, 0.018, 0.18, 2, 0.008);
+      innerGlow.translate(0, 0.555, 0);
+      // Mixed indexed/non-indexed parts must be normalised before merging.
+      // Passing a null merge result into InstancedMesh crashes Three's render
+      // traversal every frame, so the shared helper also fails descriptively.
+      const coreGeo = mergeChestParts([badge, innerGlow], 'rarity core');
       const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, shadow: boolean) => {
         const im = new THREE.InstancedMesh(geo, mat, n);
         im.castShadow = shadow;
@@ -942,11 +1551,11 @@ export class WorldView {
       inst.body.setMatrixAt(s.idx, m4);
       inst.trim.setMatrixAt(s.idx, m4);
       inst.lock.setMatrixAt(s.idx, m4);
+      inst.core.setMatrixAt(s.idx, m4);
       if (inst.halo) inst.halo.setMatrixAt(s.idx, m4);
-      const lidM = m4.clone().multiply(new THREE.Matrix4().makeTranslation(0, 0.72, 0));
+      const lidM = m4.clone().multiply(new THREE.Matrix4().makeTranslation(0, 0.54, 0.38));
       inst.lidBody.setMatrixAt(s.idx, lidM);
       inst.lidTrim.setMatrixAt(s.idx, lidM);
-      inst.core.setMatrixAt(s.idx, lidM);
     }
     for (let tier = 0; tier < 3; tier++) {
       const inst = this.chestInst[tier];
@@ -962,13 +1571,13 @@ export class WorldView {
     const m4 = new THREE.Matrix4();
     const qy = new THREE.Quaternion();
     const qx = new THREE.Quaternion();
-    const pivot = new THREE.Vector3(0, 0.72, 0);
+    const pivot = new THREE.Vector3(0, 0.54, 0.38);
     const one = new THREE.Vector3(1, 1, 1);
     for (const c of match.chests) {
       const s = this.chestSlots.get(c.id);
       if (!s) continue;
       const inst = this.chestInst[s.tier]!;
-      const targetLid = -Math.min(1, c.openT * 1.6) * 1.85;
+      const targetLid = Math.min(1, c.openT * 1.6) * 1.82;
       s.lidAngle += (targetLid - s.lidAngle) * 0.14;
       s.opened = c.opened;
       qy.setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw);
@@ -979,24 +1588,22 @@ export class WorldView {
       lidM.multiply(new THREE.Matrix4().makeRotationFromQuaternion(qx));
       inst.lidBody.setMatrixAt(s.idx, lidM);
       inst.lidTrim.setMatrixAt(s.idx, lidM);
-      inst.core.setMatrixAt(s.idx, lidM);
     }
     for (let tier = 0; tier < 3; tier++) {
       const inst = this.chestInst[tier];
       if (!inst) continue;
       inst.lidBody.instanceMatrix.needsUpdate = true;
       inst.lidTrim.instanceMatrix.needsUpdate = true;
-      inst.core.instanceMatrix.needsUpdate = true;
       if (inst.halo) inst.halo.instanceMatrix.needsUpdate = true;
       // Tier materials are shared and intentionally stable. Open-state
       // animation is expressed only through the per-instance lid transform.
-      inst.mats.trim.emissiveIntensity = 0.55 + tier * 0.2;
-      inst.mats.accent.emissiveIntensity = 0.55 + tier * 0.2;
+      inst.mats.trim.emissiveIntensity = 0.055;
+      inst.mats.accent.emissiveIntensity = 0.82 + tier * 0.14;
     }
   }
 
   // -------------------------------------------------------------------------
-  // Loot presentation: floating items and model-attached rarity highlights.
+  // Loot presentation: grounded items and model-attached rarity highlights.
   // Ammo/heals render through shared instanced pools (draw-call budget);
   // weapons keep individual models with a subtle geometry-following shell.
   // -------------------------------------------------------------------------
@@ -1066,10 +1673,9 @@ export class WorldView {
     };
     for (const item of match.loot.items) {
       seen.add(item.id);
-      const bob = Math.sin(this.time * 2.1 + item.id * 1.7) * 0.05 + 0.42;
       if (item.kind !== 'weapon') {
         const key = item.kind === 'ammo' ? 'ammo' : item.heal?.itemId === 'medkit' ? 'med' : 'shield';
-        instBuckets[key]!.push({ x: item.x, y: item.y + bob, z: item.z, spin: item.yaw });
+        instBuckets[key]!.push({ x: item.x, y: lootRenderY(item.y, 'consumable'), z: item.z, spin: item.yaw });
         continue;
       }
       let view = this.lootViews.get(item.id);
@@ -1091,7 +1697,10 @@ export class WorldView {
       if (view.hologram) view.hologram.visible = nearby;
       // Fixed believable orientation — floor loot never spins.
       view.root.rotation.y = item.yaw;
-      view.root.position.y = item.y + bob;
+      // Pop-out simulation updates all three axes. Keeping only Y in sync
+      // left the rendered gun at its spawn point while pickup/LOS logic used
+      // its moving world position.
+      view.root.position.set(item.x, lootRenderY(item.y, 'weapon'), item.z);
     }
     // Flush consumable loot into the shared instanced pools.
     const m4 = new THREE.Matrix4();
@@ -1333,13 +1942,24 @@ export class WorldView {
 function moorTint(m: THREE.Material): void {
   const std = m as THREE.MeshStandardMaterial;
   if (!std.color) return;
-  // Only tint foliage-ish (green) materials; leave trunks/bark alone.
+  // Only tint foliage cutouts/green materials; white-mapped bark buckets must
+  // retain their brown atlas colour.
   const c = std.color;
-  if (c.g > c.r && c.g > c.b) {
-    c.lerp(new THREE.Color(0x6e7452), 0.62).multiplyScalar(0.9);
-  } else if (std.map && c.r > 0.85 && c.g > 0.85 && c.b > 0.85) {
-    // Green lives in the albedo texture (ferns/clover) — multiply toward moor.
-    c.setRGB(0.78, 0.82, 0.66);
+  // The source kit marks bark as MASK too, despite an opaque bark atlas.
+  // Identify leaves by their texture/material name so bark does not receive
+  // foliage emissive fill or a pale green tint.
+  const materialIdentity = `${std.name ?? ''}|${std.map?.name ?? ''}`;
+  const foliageCutout = /leaf/i.test(materialIdentity);
+  const explicitGreen = c.g > c.r * 1.04 && c.g > c.b * 1.04;
+  if (!foliageCutout && !explicitGreen) return;
+  if (explicitGreen) c.lerp(new THREE.Color(0x7f8763), 0.46);
+  else c.setRGB(1.02, 1.05, 0.94);
+  // Overcast leaf cards receive little direct light and formerly collapsed
+  // into black rectangles. A restrained indirect-value floor restores the
+  // canopy volume without turning it into a self-lit prop.
+  if (std.emissive) {
+    std.emissive.set(0x182014);
+    std.emissiveIntensity = Math.max(std.emissiveIntensity ?? 0, 0.08);
   }
   if (std.roughness !== undefined) std.roughness = Math.min(1, std.roughness + 0.05);
 }
@@ -1354,6 +1974,130 @@ function moorTintSoft(m: THREE.Material): void {
   } else if (std.map && c.r > 0.85 && c.g > 0.85 && c.b > 0.85) {
     c.setRGB(1.22, 1.28, 1.1);
   }
+  if (std.emissive) {
+    std.emissive.set(0x182014);
+    std.emissiveIntensity = Math.max(std.emissiveIntensity ?? 0, 0.1);
+  }
+}
+
+/** Preserve wetland undergrowth colour while preventing black card undersides. */
+function wetlandTintSoft(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  const c = std.color;
+  if (c.g > c.r && c.g > c.b) c.lerp(new THREE.Color(0x768960), 0.18);
+  if (std.emissive) {
+    std.emissive.set(0x122014);
+    std.emissiveIntensity = Math.max(std.emissiveIntensity ?? 0, 0.07);
+  }
+}
+
+/** Warm shared rock assets into ASHARA's dry sandstone/basalt range. */
+function desertRockTint(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  retoneRockMap(std, 0xa48466, 0.88);
+  std.emissive.set(0x392819);
+  std.emissiveIntensity = 0.24;
+  if (std.roughness !== undefined) std.roughness = Math.max(0.92, std.roughness);
+  if (std.metalness !== undefined) std.metalness = Math.min(0.02, std.metalness);
+}
+
+/** Lift shared rocks out of EDEN's black-green foliage while keeping a damp tone. */
+function wetlandRockTint(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  retoneRockMap(std, 0x879088, 0.82);
+  std.emissive.set(0x283029);
+  std.emissiveIntensity = 0.22;
+  if (std.roughness !== undefined) std.roughness = Math.max(0.94, std.roughness);
+  if (std.metalness !== undefined) std.metalness = Math.min(0.01, std.metalness);
+}
+
+/** Warm shared rocks toward OLD FRONT's weathered stone and moor palette. */
+function moorRockTint(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  retoneRockMap(std, 0x9c9489, 0.86);
+  std.emissive.set(0x514c45);
+  std.emissiveIntensity = 0.3;
+  if (std.roughness !== undefined) std.roughness = Math.max(0.96, std.roughness);
+  if (std.metalness !== undefined) std.metalness = Math.min(0.01, std.metalness);
+}
+
+/**
+ * The bundled rock atlas contains dark moss-green albedo baked into many UV
+ * islands. Material colour can only multiply that texture, so a warm tint
+ * still rendered as a near-black green silhouette. Rebuild the owned map by
+ * retaining the source luminance/detail and mapping its hue into the biome.
+ */
+function retoneRockMap(std: THREE.MeshStandardMaterial, color: number, amount: number): void {
+  const source = std.map;
+  const srcImg = source?.source?.data as ImageBitmap | HTMLImageElement | undefined;
+  const width = srcImg && 'width' in srcImg ? srcImg.width : 0;
+  const height = srcImg && 'height' in srcImg ? srcImg.height : 0;
+  if (!source || !srcImg || !width || !height) {
+    std.color.lerp(new THREE.Color(color), amount);
+    return;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return;
+  ctx.drawImage(srcImg, 0, 0);
+  let image: ImageData;
+  try {
+    image = ctx.getImageData(0, 0, width, height);
+  } catch {
+    std.color.lerp(new THREE.Color(color), amount);
+    return;
+  }
+
+  const target = new THREE.Color(color);
+  const d = image.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i]!;
+    const g = d[i + 1]!;
+    const b = d[i + 2]!;
+    const luminance = (r * 0.22 + g * 0.64 + b * 0.14) / 255;
+    // Preserve cracks and broad planes, but keep the darkest authored moss
+    // above silhouette-black so the indirect-light side remains readable.
+    const pixel = i / 4;
+    const px = pixel % width;
+    const py = Math.floor(pixel / width);
+    // Two cheap deterministic scales retain atlas detail even on UV islands
+    // whose authored moss colour was nearly uniform.
+    const coarse = ((((Math.floor(px / 48) * 73) ^ (Math.floor(py / 48) * 151)) & 255) / 255 - 0.5) * 0.12;
+    const fine = ((((Math.floor(px / 9) * 29) ^ (Math.floor(py / 9) * 61)) & 255) / 255 - 0.5) * 0.035;
+    const value = 0.76 + Math.min(1, Math.max(0, luminance)) * 0.4 + coarse + fine;
+    const tr = target.r * 255 * value;
+    const tg = target.g * 255 * value;
+    const tb = target.b * 255 * value;
+    d[i] = r + (tr - r) * amount;
+    d[i + 1] = g + (tg - g) * amount;
+    d[i + 2] = b + (tb - b) * amount;
+  }
+  ctx.putImageData(image, 0, 0);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.flipY = source.flipY;
+  texture.colorSpace = source.colorSpace;
+  texture.wrapS = source.wrapS;
+  texture.wrapT = source.wrapT;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.anisotropy = 4;
+  texture.userData.worldViewOwned = true;
+  std.map = texture;
+  // The source atlas contains useful cracks and strata but previously only
+  // affected albedo. Reusing it at restrained strength gives grazing light a
+  // material response without fabricating a normal map or changing geometry.
+  std.bumpMap = texture;
+  std.bumpScale = 0.085;
+  std.color.set(0xffffff);
+  std.needsUpdate = true;
 }
 
 /**

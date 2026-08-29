@@ -3,7 +3,8 @@
  * Every tunable gameplay number lives here (or in map data), never scattered.
  *
  * World scale convention: 1 unit ~= one character step (~0.75 m).
- * Character height ~2.3u. Maps are ~500x500 units.
+ * Rendered character height ~1.86u; standing collider height 1.99u.
+ * Maps are ~500x500 units.
  */
 
 export type Rarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
@@ -290,11 +291,20 @@ export const MOVE = {
   swimSurfaceSpeed: 5.2,
   swimDiveSpeed: 4.6,
   waterDrag: 3.2,
+  // A surface swimmer's capsule centre stays below the water plane far enough
+  // for the torso probe (feet + 1.0 m) to remain in water on the next tick.
+  swimSurfaceCenterDepth: 0.65,
 
-  eyeHeight: 2.05,
+  // The camera/aim origin is measured from the soles and must remain below
+  // both the 1.86 m rig crown and the 1.99 m capsule top. 1.72 m matches the
+  // eye line of the authored standing model instead of floating above it.
+  eyeHeight: 1.72,
   crouchEyeHeight: 1.35,
   capsuleRadius: 0.42,
-  capsuleHalfHeight: 1.15,
+  // Rapier's capsule argument is the half-height of its cylindrical section,
+  // not the total capsule height. 0.575 yields a 1.99 m standing collider,
+  // matching the 1.86 m rendered body and ~1.94 m hit-region envelope.
+  capsuleHalfHeight: 0.575,
   stepHeight: 0.68,
 } as const;
 

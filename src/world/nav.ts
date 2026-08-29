@@ -8,13 +8,15 @@
  *  mantle— ledge climb (bot mantles toward next waypoint)
  *  drop  — controlled fall
  *  swim  — water traversal
+ *  shore — leave water while surfacing toward dry support
  */
 
 import type { MapDef } from './types';
-import type { PhysicsWorld } from '../physics/physics';
+import { CAPSULE_CENTER_OFFSET, GROUPS, type PhysicsWorld } from '../physics/physics';
+import { MOVE } from '../core/balance';
 import { Rng } from '../core/rng';
 
-export type NavEdgeType = 'walk' | 'jump' | 'mantle' | 'drop' | 'swim';
+export type NavEdgeType = 'walk' | 'jump' | 'mantle' | 'drop' | 'swim' | 'shore';
 
 export interface NavEdge {
   to: number;
@@ -38,7 +40,15 @@ export interface NavPath {
   entryTypes: NavEdgeType[];
 }
 
-const HEADROOM = 2.35;
+function sampleAxis(min: number, max: number, spacing: number): number[] {
+  const length = max - min;
+  if (length <= spacing) return [(min + max) / 2];
+  const out: number[] = [];
+  for (let value = min + spacing / 2; value <= max - spacing / 2 + 0.01; value += spacing) {
+    out.push(value);
+  }
+  return out.length > 0 ? out : [(min + max) / 2];
+}
 
 export class NavGraph {
   nodes: NavNode[] = [];
@@ -74,15 +84,26 @@ export class NavGraph {
         const ws = Math.max(spacing, 8);
         for (let x = plat.minX + ws / 2; x < plat.maxX; x += ws) {
           for (let z = plat.minZ + ws / 2; z < plat.maxZ; z += ws) {
+            // Water platforms can overlap piers, foundations and boathouses.
+            // Use the swimming body centre at the authored surface layer and
+            // omit nodes whose full capsule already occupies scenery. A
+            // one-sided heightfield does not report a capsule placed beneath
+            // its top surface as overlapping, so prove that the lake bed is
+            // also below the swimmer's capsule bottom.
+            if (!phys.findClearSwimmingPlacement(x, plat.y, z)) continue;
             this.addNode(x, plat.y, z, true);
           }
         }
         continue;
       }
-      for (let x = plat.minX + spacing / 2; x <= plat.maxX - spacing / 2 + 0.01; x += spacing) {
-        for (let z = plat.minZ + spacing / 2; z <= plat.maxZ - spacing / 2 + 0.01; z += spacing) {
-          if (!this.validatePoint(phys, x, plat.y, z)) continue;
-          this.addNode(x, plat.y, z, false);
+      // Narrow authored platforms (especially 0.62-unit stair treads) used to
+      // produce zero candidates because the generic spacing exceeded both
+      // dimensions. Always publish at least the platform centre on each axis.
+      for (const x of sampleAxis(plat.minX, plat.maxX, spacing)) {
+        for (const z of sampleAxis(plat.minZ, plat.maxZ, spacing)) {
+          const supportY = this.validatePoint(phys, x, plat.y, z);
+          if (supportY === null) continue;
+          this.addNode(x, supportY, z, false);
         }
       }
     }
@@ -104,8 +125,9 @@ export class NavGraph {
             }
           }
           if (underwater) continue;
-          if (!this.validatePoint(phys, x, y, z)) continue;
-          this.addNode(x, y, z, false);
+          const supportY = this.validatePoint(phys, x, y, z);
+          if (supportY === null) continue;
+          this.addNode(x, supportY, z, false);
         }
       }
     }
@@ -125,24 +147,30 @@ export class NavGraph {
     return node.id;
   }
 
-  private validatePoint(phys: PhysicsWorld, x: number, y: number, z: number): boolean {
+  private validatePoint(phys: PhysicsWorld, x: number, y: number, z: number): number | null {
     // Surface must be close to the declared platform height.
-    const hit = phys.raycast(x, y + 1.2, z, 0, -1, 0, 2.4);
-    if (!hit || Math.abs(hit.point.y - y) > 0.9) return false;
-    // Headroom: no ceiling within capsule height above the surface.
-    const up = phys.raycast(x, hit.point.y + 0.3, z, 0, 1, 0, HEADROOM);
-    if (up) return false;
-    return true;
+    const hit = phys.raycast(x, y + 1.2, z, 0, -1, 0, 2.4, GROUPS.rayWorldOnly);
+    if (!hit || Math.abs(hit.point.y - y) > 0.9) return null;
+    const supportY = hit.point.y;
+    // Store the measured physical support and validate the complete standing
+    // volume. This one query covers headroom as well as wall edges, doorway
+    // jambs, stair sides and low overhangs; a separate fixed-length headroom
+    // ray rejected valid stacked stairs after the capsule scale was corrected.
+    if (!phys.isCharacterPositionClear(x, supportY + CAPSULE_CENTER_OFFSET, z)) return null;
+    return supportY;
   }
 
   private connectNeighbors(): void {
-    const near = this.cellSize * 2;
+    // Jump links can span farther than one spatial-hash cell. Searching only
+    // adjacent cells silently omitted valid neighbours that straddled two
+    // cell boundaries despite being within the 13-unit traversal limit.
+    const cellRadius = Math.ceil(13 / this.cellSize);
     for (const node of this.nodes) {
       const cx = Math.floor(node.x / this.cellSize);
       const cz = Math.floor(node.z / this.cellSize);
       const candidates: number[] = [];
-      for (let ix = cx - 1; ix <= cx + 1; ix++) {
-        for (let iz = cz - 1; iz <= cz + 1; iz++) {
+      for (let ix = cx - cellRadius; ix <= cx + cellRadius; ix++) {
+        for (let iz = cz - cellRadius; iz <= cz + cellRadius; iz++) {
           const arr = this.grid.get(this.key(ix, iz));
           if (arr) candidates.push(...arr);
         }
@@ -156,32 +184,54 @@ export class NavGraph {
         const distH = Math.hypot(dx, dz);
 
         if (node.water !== other.water) {
-          // Shore transitions: allow modest height difference.
-          if (distH <= 9 && Math.abs(dy) <= 2.2) {
-            this.link(node, other, 'walk', distH * 1.6);
+          // Water nodes store the swimming body centre while dry nodes store
+          // feet/support Y. Prove the interpolated full-capsule corridor in
+          // that mixed coordinate space before exposing a shore transition.
+          if (distH <= 9 && Math.abs(dy) <= 2.2 && this.shorePathClear(node, other)) {
+            const water = node.water ? node : other;
+            const dry = node.water ? other : node;
+            this.linkDirected(water, dry, 'shore', distH * 1.6);
+            this.linkDirected(dry, water, 'walk', distH * 1.6);
           }
           continue;
         }
         if (node.water && other.water) {
-          if (distH <= 12) this.link(node, other, 'swim', distH * 1.5);
+          if (distH <= 12 && this.swimPathClear(node, other)) {
+            this.link(node, other, 'swim', distH * 1.5);
+          }
           continue;
         }
 
         if (Math.abs(dy) <= 1.1) {
           if (distH <= 9 && this.walkClear(node, other)) {
             this.link(node, other, 'walk', distH);
-          } else if (distH > 9 && distH <= 13 && dy >= -0.4 && this.losAtHeight(node, other, 1.3)) {
-            // wide gap jump link
+          } else if (distH > 9 && distH <= 13
+            && this.hasSupportGap(node, other)
+            && this.jumpPathClear(node, other)
+            && this.jumpPathClear(other, node)) {
+            // Only a real unsupported gap is a jump. The previous distance-
+            // only rule classified every 9–13 m diagonal on open terrain as
+            // a jump and published tens of thousands of false transitions.
             this.link(node, other, 'jump', distH * 2.2);
           }
-        } else if (dy >= 1.1 && dy <= 2.85 && distH <= 3.6) {
-          if (this.losAtHeight(node, other, 1.0)) this.link(node, other, 'mantle', distH + dy * 2.4);
-        } else if (dy <= -1.1 && dy >= -8 && distH <= 4.5) {
-          if (this.losAtHeight(node, other, 1.0)) this.link(node, other, 'drop', distH + Math.abs(dy) * 0.8);
+        } else {
+          // Node id/order is unrelated to elevation. Build traversal edges in
+          // their physical direction: lower→higher mantle, higher→lower drop.
+          // The old symmetric link made exactly half of both edge types point
+          // the wrong way and could ask bots to mantle down or drop upward.
+          const lower = dy > 0 ? node : other;
+          const higher = dy > 0 ? other : node;
+          const rise = higher.y - lower.y;
+          const cost = distH + rise * 2.4;
+          if (rise <= 2.85 && distH <= 3.6 && this.mantlePathClear(lower, higher)) {
+            this.linkDirected(lower, higher, 'mantle', cost);
+          }
+          if (rise <= 8 && distH <= 4.5 && this.dropPathClear(higher, lower)) {
+            this.linkDirected(higher, lower, 'drop', distH + rise * 0.8);
+          }
         }
       }
     }
-    void near;
   }
 
   private link(a: NavNode, b: NavNode, type: NavEdgeType, cost: number): void {
@@ -189,23 +239,199 @@ export class NavGraph {
     b.edges.push({ to: a.id, cost, type });
   }
 
-  private walkClear(a: NavNode, b: NavNode): boolean {
-    // Ground continuity at midpoint + chest-height line of sight.
-    const mx = (a.x + b.x) / 2;
-    const mz = (a.z + b.z) / 2;
-    const my = (a.y + b.y) / 2;
-    const down = this.rayDownCache(mx, my + 1.2, mz);
-    if (down === null || Math.abs(down - my) > 1.15) return false;
-    return this.losAtHeight(a, b, 1.25);
+  private linkDirected(from: NavNode, to: NavNode, type: NavEdgeType, cost: number): void {
+    from.edges.push({ to: to.id, cost, type });
   }
 
-  private losAtHeight(a: NavNode, b: NavNode, h: number): boolean {
-    const ax = a.x, ay = a.y + h, az = a.z;
-    const bx = b.x, by = b.y + h, bz = b.z;
+  private bodyCenter(node: NavNode): { x: number; y: number; z: number } {
+    return {
+      x: node.x,
+      // Water nodes retain the authored surface layer for graph height/cost,
+      // but the runtime swimmer must sit below it far enough for the torso
+      // probe to remain inside water on the following movement tick.
+      y: node.water ? node.y - MOVE.swimSurfaceCenterDepth : node.y + CAPSULE_CENTER_OFFSET,
+      z: node.z,
+    };
+  }
+
+  /** Sample a complete capsule densely enough that a thin side obstacle cannot hide between poses. */
+  private poseSegmentClear(
+    from: { x: number; y: number; z: number },
+    to: { x: number; y: number; z: number },
+    spacing = MOVE.capsuleRadius * 0.6,
+  ): boolean {
+    const distance = Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
+    const samples = Math.max(1, Math.ceil(distance / spacing));
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
+      if (!this.physRef!.isCharacterPositionClear(
+        from.x + (to.x - from.x) * t,
+        from.y + (to.y - from.y) * t,
+        from.z + (to.z - from.z) * t,
+      )) return false;
+    }
+    return true;
+  }
+
+  private swimPathClear(a: NavNode, b: NavNode): boolean {
+    return this.physRef!.isCharacterSweepClear(this.bodyCenter(a), this.bodyCenter(b));
+  }
+
+  private shorePathClear(a: NavNode, b: NavNode): boolean {
+    const water = a.water ? this.bodyCenter(a) : this.bodyCenter(b);
+    const dry = a.water ? this.bodyCenter(b) : this.bodyCenter(a);
+    if (this.physRef!.isCharacterSweepClear(water, dry)) return true;
+    // A bank or low quay is traversed like the movement system's swim mantle:
+    // rise in open water, then cross at standing height. A direct diagonal
+    // capsule line incorrectly cuts through the solid bank and disconnects
+    // otherwise valid exits.
+    const raised = { x: water.x, y: dry.y, z: water.z };
+    return this.physRef!.isCharacterSweepClear(water, raised)
+      && this.physRef!.isCharacterSweepClear(raised, dry);
+  }
+
+  private mantlePathClear(lower: NavNode, higher: NavNode): boolean {
+    const from = this.bodyCenter(lower);
+    const target = this.bodyCenter(higher);
+    const raised = { x: from.x, y: target.y, z: from.z };
+    return this.physRef!.isCharacterSweepClear(from, raised)
+      && this.physRef!.isCharacterSweepClear(raised, target);
+  }
+
+  private dropPathClear(higher: NavNode, lower: NavNode): boolean {
+    const from = this.bodyCenter(higher);
+    const target = this.bodyCenter(lower);
+    const aboveTarget = { x: target.x, y: from.y, z: target.z };
+    return this.poseSegmentClear(from, aboveTarget)
+      && this.poseSegmentClear(aboveTarget, target);
+  }
+
+  private hasSupportGap(a: NavNode, b: NavNode): boolean {
+    const samples = Math.max(3, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 2.5));
+    let previousSupport = a.y;
+    for (let i = 1; i < samples; i++) {
+      const t = i / samples;
+      const expectedY = a.y + (b.y - a.y) * t;
+      const supportY = this.rayDownCache(
+        a.x + (b.x - a.x) * t,
+        expectedY + 1.2,
+        a.z + (b.z - a.z) * t,
+      );
+      if (supportY === null || Math.abs(supportY - expectedY) > 1.15) return true;
+      if (Math.abs(supportY - previousSupport) > MOVE.stepHeight + 0.08) return true;
+      previousSupport = supportY;
+    }
+    return Math.abs(b.y - previousSupport) > MOVE.stepHeight + 0.08;
+  }
+
+  private jumpPathClear(a: NavNode, b: NavNode): boolean {
+    const from = this.bodyCenter(a);
+    const to = this.bodyCenter(b);
+    const distH = Math.hypot(to.x - from.x, to.z - from.z);
+    const samples = Math.max(8, Math.ceil(distH / (MOVE.capsuleRadius * 0.6)));
+    const apex = Math.min(2.1, 1.45 + distH * 0.04);
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
+      const y = from.y + (to.y - from.y) * t + 4 * apex * t * (1 - t);
+      if (!this.physRef!.isCharacterPositionClear(
+        from.x + (to.x - from.x) * t,
+        y,
+        from.z + (to.z - from.z) * t,
+      )) return false;
+    }
+    return true;
+  }
+
+  private walkClear(a: NavNode, b: NavNode): boolean {
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const distH = Math.hypot(dx, dz);
+    if (distH < 1e-4) return true;
+
+    // Follow the actual support surface instead of sweeping a capsule through
+    // the floor tangent. Sampling at less than the capsule diameter catches
+    // doorway jambs, wall corners and thin dividers that a centre ray misses,
+    // while measuring Y at every sample lets ordinary stairs and terrain
+    // slopes retain their KCC-supported walk links.
+    // Continuous rails below cover wall volume between samples, so the more
+    // expensive full-shape/support probes only need to stay within one capsule
+    // diameter. This keeps production map construction near its previous load
+    // budget while still detecting unsupported spans and isolated low props.
+    const samples = Math.max(2, Math.ceil(distH / (MOVE.capsuleRadius * 2)));
+    let previousSupport = a.y;
+    for (let i = 1; i < samples; i++) {
+      const t = i / samples;
+      const x = a.x + dx * t;
+      const z = a.z + dz * t;
+      const expectedY = a.y + (b.y - a.y) * t;
+      const supportY = this.rayDownCache(x, expectedY + 1.2, z);
+      if (supportY === null || Math.abs(supportY - expectedY) > 1.15) return false;
+      if (Math.abs(supportY - previousSupport) > MOVE.stepHeight + 0.08) return false;
+      let poseSupport = supportY;
+      if (!this.physRef!.isCharacterPositionClear(x, poseSupport + CAPSULE_CENTER_OFFSET, z)) {
+        // Immediately before a legal riser, the downward ray still sees the
+        // lower floor while the capsule nose already overlaps the step. Test
+        // the same pose after the KCC's bounded autostep lift; a full-height
+        // wall remains blocked, while a real tread becomes tangent/clear.
+        const steppedSupport = Math.min(
+          Math.max(a.y, b.y),
+          supportY + MOVE.stepHeight + 0.08,
+        );
+        if (steppedSupport <= supportY + 1e-4
+          || !this.physRef!.isCharacterPositionClear(
+            x,
+            steppedSupport + CAPSULE_CENTER_OFFSET,
+            z,
+          )) return false;
+        poseSupport = steppedSupport;
+      }
+      previousSupport = poseSupport;
+    }
+    if (Math.abs(b.y - previousSupport) > MOVE.stepHeight + 0.08) return false;
+
+    // The sampled volumes prove each pose, while these continuous offset rays
+    // close the small longitudinal gaps between samples. Rays begin above the
+    // maximum autostep height, so a valid curb or stair riser is not mistaken
+    // for a wall. The upper rail protects capsule headroom under overhangs.
+    const invLen = 1 / distH;
+    const sideX = -dz * invLen;
+    const sideZ = dx * invLen;
+    const clearance = MOVE.capsuleRadius + 0.025;
+    const rails = [
+      { lateral: 0, height: MOVE.stepHeight + 0.08 },
+      { lateral: 0, height: 1.82 },
+      { lateral: -clearance, height: 1.28 },
+      { lateral: -clearance * 0.5, height: 1.28 },
+      { lateral: 0, height: 1.28 },
+      { lateral: clearance * 0.5, height: 1.28 },
+      { lateral: clearance, height: 1.28 },
+    ];
+    for (const rail of rails) {
+      if (!this.losAtOffsetHeight(a, b, rail.height, sideX * rail.lateral, sideZ * rail.lateral)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private losAtOffsetHeight(
+    a: NavNode,
+    b: NavNode,
+    h: number,
+    offsetX: number,
+    offsetZ: number,
+  ): boolean {
+    const ax = a.x + offsetX, ay = a.y + h, az = a.z + offsetZ;
+    const bx = b.x + offsetX, by = b.y + h, bz = b.z + offsetZ;
     const dx = bx - ax, dy = by - ay, dz = bz - az;
     const len = Math.hypot(dx, dy, dz);
     if (len < 1e-4) return true;
-    const hit = this.physRef!.raycast(ax, ay, az, dx / len, dy / len, dz / len, len - 0.1);
+    const hit = this.physRef!.raycast(
+      ax, ay, az,
+      dx / len, dy / len, dz / len,
+      Math.max(0, len - 0.1),
+      GROUPS.rayWorldOnly,
+    );
     return hit === null;
   }
 
@@ -275,6 +501,10 @@ export class NavGraph {
           if (!arr) continue;
           for (const id of arr) {
             const nd = this.nodes[id]!;
+            // pruneIslands preserves ids for stable edge references but
+            // deliberately severs smaller components. Never route an actor
+            // back onto one of those orphaned floors/roofs.
+            if (nd.edges.length === 0) continue;
             const dy = Math.abs(nd.y - y);
             if (dy > 6) continue;
             const score = Math.hypot(nd.x - x, nd.z - z) + dy * 2.5;
@@ -302,6 +532,7 @@ export class NavGraph {
         if (!arr) continue;
         for (const id of arr) {
           const nd = this.nodes[id]!;
+          if (nd.edges.length === 0) continue;
           if (refY !== undefined && Math.abs(nd.y - refY) > maxYDiff) continue;
           if (Math.hypot(nd.x - x, nd.z - z) <= radius) out.push(nd);
         }

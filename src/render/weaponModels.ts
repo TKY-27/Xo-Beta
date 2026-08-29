@@ -23,6 +23,9 @@ export interface WeaponModel {
 
 const ALL_RARITIES = RARITIES;
 
+/** Keep floor pickups near their authored one-metre weapon length. */
+export const WORLD_LOOT_WEAPON_SCALE = 1.25;
+
 /** Lightweight instance clone: shares geometries + materials with the archetype. */
 function cloneWeaponModel(tmpl: WeaponModel): WeaponModel {
   const group = tmpl.group.clone(true);
@@ -247,7 +250,7 @@ export class WeaponModelFactory {
   /** World-loot presentation scale of a weapon. */
   buildWorldScale(weaponId: WeaponId, rarity: Rarity): WeaponModel | null {
     const m = this.build(weaponId, rarity);
-    if (m) m.group.scale.multiplyScalar(2.1);
+    if (m) m.group.scale.multiplyScalar(WORLD_LOOT_WEAPON_SCALE);
     return m;
   }
 

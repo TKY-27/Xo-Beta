@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import * as THREE from 'three';
 import { clampHdriPeaks, PRELOAD_HDRIS } from '../../src/assets/assets';
 import { applySharedTextureReplacements, extractGeometries } from '../../src/render/props';
+import { WORLD_LOOT_WEAPON_SCALE } from '../../src/render/weaponModels';
+import { lootRenderY } from '../../src/render/worldView';
 
 describe('HDRI peak clamping', () => {
   it('preserves half-float encoding while clamping RGB peaks', () => {
@@ -28,6 +30,12 @@ describe('HDRI peak clamping', () => {
   it('only preloads HDRIs that are present in the production asset tree', () => {
     for (const name of PRELOAD_HDRIS) {
       expect(existsSync(join(process.cwd(), 'public/assets/sky', name)), name).toBe(true);
+    }
+  });
+
+  it('ships a reviewed menu hero for every production map', () => {
+    for (const map of ['neocity', 'oldfront', 'eden', 'ashara']) {
+      expect(existsSync(join(process.cwd(), 'public/assets/maps', `${map}.jpg`)), map).toBe(true);
     }
   });
 });
@@ -66,5 +74,37 @@ describe('GLTF prop normalization', () => {
     });
     expect(bounds[0]!.min.y).toBeCloseTo(0, 8);
     expect(bounds[1]!.min.y - bounds[0]!.min.y).toBeCloseTo(3, 8);
+  });
+
+  it('tightens organic cutout edges without changing masked bark', () => {
+    const root = new THREE.Group();
+    const leafMap = new THREE.Texture();
+    leafMap.name = 'Leaves_NormalTree_C';
+    const leafMaterial = new THREE.MeshStandardMaterial({ map: leafMap, alphaTest: 0.2 });
+    leafMaterial.name = 'Leaves_NormalTree';
+    const barkMap = new THREE.Texture();
+    barkMap.name = 'Bark_NormalTree';
+    const barkMaterial = new THREE.MeshStandardMaterial({ map: barkMap, alphaTest: 0.2 });
+    barkMaterial.name = 'Bark_NormalTree';
+    root.add(
+      new THREE.Mesh(new THREE.PlaneGeometry(1, 1), leafMaterial),
+      new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), barkMaterial),
+    );
+
+    const extracted = extractGeometries(root);
+    expect(extracted.materials).toHaveLength(2);
+    expect((extracted.materials[0] as THREE.Material & { alphaTest: number }).alphaTest).toBe(0.42);
+    expect((extracted.materials[1] as THREE.Material & { alphaTest: number }).alphaTest).toBe(0.2);
+    extracted.geoms.forEach((geo) => geo.dispose());
+    extracted.materials.forEach((material) => material?.dispose());
+  });
+});
+
+describe('floor-loot presentation', () => {
+  it('keeps weapon models near authored scale and seats settled items on support', () => {
+    expect(WORLD_LOOT_WEAPON_SCALE).toBeLessThanOrEqual(1.3);
+    expect(WORLD_LOOT_WEAPON_SCALE).toBeGreaterThanOrEqual(1);
+    expect(lootRenderY(0.35, 'weapon')).toBeCloseTo(0.05, 8);
+    expect(lootRenderY(0.35, 'consumable')).toBeCloseTo(0.18, 8);
   });
 });

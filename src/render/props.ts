@@ -6,7 +6,7 @@
  */
 
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries, toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { loadGltf } from '../assets/assets';
 
 export interface InstancedProp {
@@ -56,46 +56,12 @@ export class PropLibrary {
           this.variants.set(key, v);
         }),
       );
-    const densifyCanopy = (v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }) => {
-      const geoms: THREE.BufferGeometry[] = [];
-      const materials: (THREE.Material | null)[] = [];
-      // Canopy copies are part of the authored map presentation. A runtime
-      // random source made the same map differ between loads and invalidated
-      // screenshots/replay comparisons, so derive all transforms from the
-      // source geometry index instead.
-      const rnd = seededRandom(v.geoms.length * 0x45d9f3b);
-      for (let i = 0; i < v.geoms.length; i++) {
-        const srcGeo = v.geoms[i];
-        const srcMat = v.materials[i];
-        if (!srcGeo || !srcMat) continue;
-        geoms.push(srcGeo);
-        materials.push(srcMat);
-        const std = srcMat as THREE.MeshStandardMaterial;
-        if (!std.map || !/leaf/i.test(std.map.name ?? '')) continue;
-        for (let k = 0; k < 3; k++) {
-          const g = srcGeo.clone();
-          const m4 = new THREE.Matrix4();
-          const q = new THREE.Quaternion().setFromEuler(
-            new THREE.Euler((rnd() - 0.5) * 0.9, (rnd() - 0.5) * 1.6, (rnd() - 0.5) * 0.9),
-          );
-          const sc = 0.5 + rnd() * 0.5;
-          m4.compose(
-            new THREE.Vector3((rnd() - 0.5) * 4.4, (rnd() - 0.5) * 1.6, (rnd() - 0.5) * 4.4),
-            q,
-            new THREE.Vector3(sc, sc, sc),
-          );
-          g.applyMatrix4(m4);
-          geoms.push(g);
-          materials.push(srcMat);
-        }
-      }
-      v.geoms = geoms;
-      v.materials = materials;
-      return v;
-    };
     for (const n of ['CommonTree_1', 'CommonTree_2', 'CommonTree_3', 'CommonTree_4', 'CommonTree_5']) {
       jobs.push(loadGltf(`nature/${n}.gltf`).then((a) => {
-        this.variants.set(`tree/${n}`, densifyCanopy(reviveCutoutFoliage(neutralizeGreenBark(neutralizeRedBlossoms(extractGeometries(a.scene))))));
+        // Keep the authored canopy intact. Duplicating the complete leaf mesh
+        // three times produced detached, intersecting canopy shells and 4x
+        // masked overdraw, visible as large black cards in OLD FRONT.
+        this.variants.set(`tree/${n}`, reviveCutoutFoliage(neutralizeGreenBark(neutralizeRedBlossoms(extractGeometries(a.scene)))));
       }));
     }
     for (const n of ['Pine_1', 'Pine_2', 'Pine_3', 'Pine_4']) {
@@ -133,13 +99,16 @@ export class PropLibrary {
       this.variants.set('flower/group', muteFlowers(extractGeometries(a.scene)));
     }));
     jobs.push(loadGltf('nature/Rock_Medium_1.gltf').then((a) => {
-      const v = extractGeometries(a.scene);
-      tintMaterials(v, 0.45, 0.44, 0.42);
+      const v = softenRockNormals(extractGeometries(a.scene));
+      // Preserve the 2K rock atlas' midtones. The former 0.45 multiplier
+      // crushed the shaded face to near-black before biome retoning could
+      // recover it, especially under OLD FRONT's overcast sky.
+      tintMaterials(v, 0.7, 0.68, 0.65);
       this.variants.set('rock/medium1', v);
     }));
     jobs.push(loadGltf('nature/Rock_Medium_2.gltf').then((a) => {
-      const v = extractGeometries(a.scene);
-      tintMaterials(v, 0.45, 0.44, 0.42);
+      const v = softenRockNormals(extractGeometries(a.scene));
+      tintMaterials(v, 0.7, 0.68, 0.65);
       this.variants.set('rock/medium2', v);
     }));
 
@@ -219,6 +188,42 @@ export class PropLibrary {
     this.variants.clear();
     this.templates.clear();
   }
+}
+
+/**
+ * The source boulders ship with a hard normal per low-poly face. Preserve
+ * genuine silhouette breaks while blending broad adjacent planes, letting the
+ * atlas/bump response describe stone instead of a uniformly faceted toy.
+ */
+function softenRockNormals(v: { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] }): { geoms: THREE.BufferGeometry[]; materials: (THREE.Material | null)[] } {
+  v.geoms = v.geoms.map((geometry) => {
+    const position = geometry.getAttribute('position');
+    // Add centimetre-scale deterministic breakup along a radial direction.
+    // Duplicate face vertices receive the same offset because it depends only
+    // on position, so the pass cannot tear seams in the imported mesh.
+    for (let i = 0; i < position.count; i++) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const z = position.getZ(i);
+      const rx = x;
+      const ry = y - 0.78;
+      const rz = z;
+      const invRadius = 1 / Math.max(0.001, Math.hypot(rx, ry, rz));
+      const breakup = Math.sin(x * 4.37 + y * 3.13 + z * 5.61) * 0.034
+        + Math.sin(x * 9.17 - y * 6.03 + z * 7.43) * 0.014;
+      position.setXYZ(
+        i,
+        x + rx * invRadius * breakup,
+        y + ry * invRadius * breakup,
+        z + rz * invRadius * breakup,
+      );
+    }
+    position.needsUpdate = true;
+    const softened = toCreasedNormals(geometry, Math.PI * 0.38);
+    geometry.dispose();
+    return softened;
+  });
+  return v;
 }
 
 /**
@@ -356,20 +361,20 @@ function reviveCutoutFoliage(v: { geoms: THREE.BufferGeometry[]; materials: (THR
     }
     ctx.globalCompositeOperation = 'source-over';
 
-    // Restore the original alpha mask, EXCEPT bled holes keep a small
-    // residual alpha: canvas storage is premultiplied, so alpha=0 would
-    // erase the bled RGB (the texture would upload black holes again and
-    // the mip chain would collapse to near-black). 36/255 ≈ 0.14 stays
-    // below the 0.2 alphaTest — silhouette at mip 0 is unchanged — while
-    // preserving foliage color for mip filtering.
+    // Restore the exact source alpha mask while retaining the bled RGB in a
+    // DataTexture. CanvasTexture premultiplies fully transparent pixels back
+    // to black; the former residual-alpha workaround then crossed alphaTest
+    // in lower mips and rendered a grey/black halo around whole canopies.
     const bled = ctx.getImageData(0, 0, w, h);
     const bd = bled.data;
+    const pixels = new Uint8Array(bd.length);
+    pixels.set(bd);
     for (let i = 3; i < d.length; i += 4) {
-      bd[i] = d[i]! < 128 ? 36 : d[i]!;
+      pixels[i] = d[i]!;
     }
-    ctx.putImageData(bled, 0, 0);
 
-    const tex = new THREE.CanvasTexture(canvas);
+    const tex = new THREE.DataTexture(pixels, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+    tex.name = source.name;
     tex.flipY = source.flipY;
     tex.colorSpace = source.colorSpace;
     tex.wrapS = source.wrapS;
@@ -378,6 +383,7 @@ function reviveCutoutFoliage(v: { geoms: THREE.BufferGeometry[]; materials: (THR
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
     tex.generateMipmaps = true;
+    tex.needsUpdate = true;
     replacements.set(source, tex);
   }
   applySharedTextureReplacements(v.materials, replacements);
@@ -588,10 +594,18 @@ export function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGe
     // shaded pixel than the full PBR stack — foliage dominates the fragment
     // load on forest maps (measured on the reference GPU).
     if (mat instanceof THREE.MeshStandardMaterial && mat.alphaTest > 0) {
+      const materialIdentity = `${mat.name ?? ''}|${mat.map?.name ?? ''}`;
+      const organicCutout = !/bark/i.test(materialIdentity);
       const lambert = new THREE.MeshLambertMaterial({
-        map: mat.map, color: mat.color.clone(), alphaTest: mat.alphaTest,
+        map: mat.map,
+        color: mat.color.clone(),
+        // The kit's 0.2 cutoff exposes too much filtered transparent border
+        // around leaves/flowers at distance. Bark is also tagged MASK despite
+        // using an opaque atlas, so preserve its authored value.
+        alphaTest: organicCutout ? Math.max(0.42, mat.alphaTest) : mat.alphaTest,
         side: mat.side, fog: true,
       });
+      lambert.name = mat.name;
       mat.dispose();
       mat = lambert;
     }
@@ -613,15 +627,6 @@ export function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGe
     }
   }
   return { geoms, materials };
-}
-
-function seededRandom(seed: number): () => number {
-  let state = (seed >>> 0) || 0x6d2b79f5;
-  return () => {
-    state = Math.imul(state ^ (state >>> 15), state | 1);
-    state ^= state + Math.imul(state ^ (state >>> 7), state | 61);
-    return ((state ^ (state >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 /**
