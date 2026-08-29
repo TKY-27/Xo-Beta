@@ -1143,7 +1143,12 @@ export class MovementSystem {
     const speed = a.peakFallSpeed;
     let dmg = 0;
     if (speed > MOVE.fallDamageMinSpeed) {
-      const t = Math.min(1, (speed - MOVE.fallDamageMinSpeed) / (MOVE.fallDamageMaxSpeed - MOVE.fallDamageMinSpeed));
+      // With constant gravity, fall height is proportional to v². Interpolate
+      // kinetic energy rather than raw impact speed so equal added heights
+      // produce equal added damage and ordinary falls stay less punitive.
+      const minSquared = MOVE.fallDamageMinSpeed ** 2;
+      const maxSquared = MOVE.fallDamageMaxSpeed ** 2;
+      const t = Math.min(1, (speed ** 2 - minSquared) / (maxSquared - minSquared));
       dmg = Math.round(t * MOVE.fallDamageMax);
     }
     if (dmg > 0) {

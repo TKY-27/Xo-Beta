@@ -286,7 +286,7 @@ export const MOVE = {
 
   fallDamageMinSpeed: 15,
   fallDamageMaxSpeed: 34,
-  fallDamageMax: 100,
+  fallDamageMax: 80,
 
   swimSurfaceSpeed: 5.2,
   swimDiveSpeed: 4.6,

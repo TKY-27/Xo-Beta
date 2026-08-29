@@ -36,10 +36,11 @@ function movementFor(
   phys: PhysicsWorld,
   onSplash: (actor: Actor, heavy: boolean) => void = () => undefined,
   onJump: (actor: Actor, kind: string) => void = () => undefined,
+  onLand: (actor: Actor, impactSpeed: number, fallDamage: number) => void = () => undefined,
 ): MovementSystem {
   return new MovementSystem(phys, {
     onFootstep: () => undefined,
-    onLand: () => undefined,
+    onLand,
     onJump,
     onSlide: () => undefined,
     onWallrunStart: () => undefined,
@@ -51,6 +52,38 @@ function movementFor(
     onSplash,
   });
 }
+
+describe('fall damage', () => {
+  it('scales with inferred fall height and is lighter than the former damage curve', () => {
+    const phys = new PhysicsWorld();
+    const damageAt = (speed: number, id: number): number => {
+      const body = new CharBody(phys, id, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+      const actor = new Actor(`Fall damage ${id}`, true, body, 0xffffff);
+      let damage = 0;
+      const movement = movementFor(
+        phys,
+        () => undefined,
+        () => undefined,
+        (_landed, _impactSpeed, fallDamage) => { damage = fallDamage; },
+      );
+      actor.peakFallSpeed = speed;
+      movement.notifyGrounded(actor);
+      body.dispose();
+      return damage;
+    };
+
+    expect(MOVE.fallDamageMax).toBe(80);
+    expect(damageAt(MOVE.fallDamageMinSpeed, 9100)).toBe(0);
+    const minSquared = MOVE.fallDamageMinSpeed ** 2;
+    const rangeSquared = MOVE.fallDamageMaxSpeed ** 2 - minSquared;
+    for (const [index, heightFraction] of [0.25, 0.5, 0.75].entries()) {
+      const speed = Math.sqrt(minSquared + rangeSquared * heightFraction);
+      expect(damageAt(speed, 9101 + index)).toBe(Math.round(MOVE.fallDamageMax * heightFraction));
+    }
+    expect(damageAt(MOVE.fallDamageMaxSpeed, 9104)).toBe(80);
+    phys.dispose();
+  });
+});
 
 describe('rendered terrain and physics ground alignment', () => {
   it('resolves a ray-selected wall-edge landing to a clear point on the same floor', () => {
