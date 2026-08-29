@@ -102,6 +102,7 @@ export class Actor {
   wallNormalX = 0;
   wallNormalZ = 0;
   mantleTimer = 0;
+  mantleCooldown = 0;
   mantleFrom = { x: 0, y: 0, z: 0 };
   mantleTo = { x: 0, y: 0, z: 0 };
   grappleActive = false;

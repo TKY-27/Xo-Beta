@@ -32,11 +32,16 @@ function occupiedAt(def: ReturnType<typeof loadMap>['def'], x: number, z: number
   return def.vehicles.some((v) => Math.hypot(v.x - x, v.z - z) < 8);
 }
 
-function movementFor(phys: PhysicsWorld, onSplash: (actor: Actor, heavy: boolean) => void = () => undefined): MovementSystem {
+function movementFor(
+  phys: PhysicsWorld,
+  onSplash: (actor: Actor, heavy: boolean) => void = () => undefined,
+  onJump: (actor: Actor, kind: string) => void = () => undefined,
+  onLand: (actor: Actor, impactSpeed: number, fallDamage: number) => void = () => undefined,
+): MovementSystem {
   return new MovementSystem(phys, {
     onFootstep: () => undefined,
-    onLand: () => undefined,
-    onJump: () => undefined,
+    onLand,
+    onJump,
     onSlide: () => undefined,
     onWallrunStart: () => undefined,
     onMantle: () => undefined,
@@ -47,6 +52,38 @@ function movementFor(phys: PhysicsWorld, onSplash: (actor: Actor, heavy: boolean
     onSplash,
   });
 }
+
+describe('fall damage', () => {
+  it('scales with inferred fall height and is lighter than the former damage curve', () => {
+    const phys = new PhysicsWorld();
+    const damageAt = (speed: number, id: number): number => {
+      const body = new CharBody(phys, id, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+      const actor = new Actor(`Fall damage ${id}`, true, body, 0xffffff);
+      let damage = 0;
+      const movement = movementFor(
+        phys,
+        () => undefined,
+        () => undefined,
+        (_landed, _impactSpeed, fallDamage) => { damage = fallDamage; },
+      );
+      actor.peakFallSpeed = speed;
+      movement.notifyGrounded(actor);
+      body.dispose();
+      return damage;
+    };
+
+    expect(MOVE.fallDamageMax).toBe(80);
+    expect(damageAt(MOVE.fallDamageMinSpeed, 9100)).toBe(0);
+    const minSquared = MOVE.fallDamageMinSpeed ** 2;
+    const rangeSquared = MOVE.fallDamageMaxSpeed ** 2 - minSquared;
+    for (const [index, heightFraction] of [0.25, 0.5, 0.75].entries()) {
+      const speed = Math.sqrt(minSquared + rangeSquared * heightFraction);
+      expect(damageAt(speed, 9101 + index)).toBe(Math.round(MOVE.fallDamageMax * heightFraction));
+    }
+    expect(damageAt(MOVE.fallDamageMaxSpeed, 9104)).toBe(80);
+    phys.dispose();
+  });
+});
 
 describe('rendered terrain and physics ground alignment', () => {
   it('resolves a ray-selected wall-edge landing to a clear point on the same floor', () => {
@@ -156,6 +193,374 @@ describe('rendered terrain and physics ground alignment', () => {
       body.dispose();
       phys.dispose();
     }
+  });
+
+  it('does not grant a second ordinary jump or emit a double-jump event while airborne', () => {
+    const phys = new PhysicsWorld();
+    const body = new CharBody(phys, 997, 0, CAPSULE_CENTER_OFFSET + 3, 0);
+    const actor = new Actor('Single jump regression', true, body, 0xffffff);
+    const jumpKinds: string[] = [];
+    const movement = movementFor(phys, undefined, (_jumpingActor, kind) => jumpKinds.push(kind));
+    actor.state = 'air';
+    actor.jumpsUsed = 1;
+    body.velocity.y = -1;
+
+    const command = emptyCommand();
+    command.jumpPressed = true;
+    movement.update(actor, command, 1 / 60);
+
+    expect(body.velocity.y).toBeLessThanOrEqual(-1);
+    expect(actor.jumpsUsed).toBe(1);
+    expect(jumpKinds).not.toContain('double');
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('never starts a mantle from forward input alone', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 998, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Forward-only mantle regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    const command = emptyCommand();
+    command.moveZ = 1;
+    movement.update(actor, command, 1 / 60);
+
+    expect(actor.state).not.toBe('mantle');
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('refuses a jump-forward mantle onto a 0.35 metre window ledge', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -0.75, 2, 0.9, 0.175, 0, 'metal');
+    phys.flush();
+    const body = new CharBody(phys, 999, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Thin ledge mantle regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    const command = emptyCommand();
+    command.moveZ = 1;
+    command.jumpPressed = true;
+    movement.update(actor, command, 1 / 60);
+
+    expect(actor.state).not.toBe('mantle');
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('refuses a mantle when the centre has support but the capsule sides do not', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 0.15, 0.9, 0.45, 0, 'metal');
+    phys.flush();
+    const body = new CharBody(phys, 1008, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Mantle side support regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    const command = emptyCommand();
+    command.moveZ = 1;
+    command.jumpPressed = true;
+    movement.update(actor, command, 1 / 60);
+
+    expect(actor.state).not.toBe('mantle');
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('leaves step-height obstacles to autostep instead of treating them as mantles', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, MOVE.stepHeight / 2, -1, 2, MOVE.stepHeight / 2, 0.45, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1009, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Mantle step-height regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    const command = emptyCommand();
+    command.moveZ = 1;
+    command.jumpPressed = true;
+    movement.update(actor, command, 1 / 60);
+
+    expect(actor.state).not.toBe('mantle');
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('does not climb continuously when jump is spammed into one wall for five seconds', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -10, 100, 0.25, 100, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
+    phys.addStaticBox(0, 5, -2.25, 2, 5, 0.25, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1000, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Mantle spam regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    let maxHeight = body.position.y;
+
+    for (let frame = 0; frame < 300; frame++) {
+      const command = emptyCommand();
+      command.moveZ = 1;
+      command.jumpPressed = frame % 6 === 0;
+      movement.update(actor, command, 1 / 60);
+      phys.fixedStep(1 / 60);
+      maxHeight = Math.max(maxHeight, body.position.y);
+    }
+
+    expect(maxHeight).toBeLessThan(6);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('blocks a second mantle until recovery expires', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -2, 5, 0.25, 5, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
+    phys.addStaticBox(0, 2.7, -2, 2, 0.9, 0.45, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1001, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Mantle recovery regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    const first = emptyCommand();
+    first.moveZ = 1;
+    first.jumpPressed = true;
+    movement.update(actor, first, 1 / 60);
+    phys.fixedStep(1 / 60);
+    expect(actor.state).toBe('mantle');
+    for (let frame = 0; frame < 40 && actor.state === 'mantle'; frame++) {
+      const command = emptyCommand();
+      command.moveZ = 1;
+      movement.update(actor, command, 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    expect(actor.state).toBe('ground');
+
+    const second = emptyCommand();
+    second.moveZ = 1;
+    second.jumpPressed = true;
+    movement.update(actor, second, 1 / 60);
+
+    expect(actor.mantleCooldown).toBeGreaterThan(0);
+    expect(actor.state).not.toBe('mantle');
+    for (let frame = 0; frame < 120 && (!body.grounded || actor.mantleCooldown > 0); frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    expect(actor.mantleCooldown).toBe(0);
+    expect(body.grounded).toBe(true);
+    body.teleport(0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    body.velocity.x = 0;
+    body.velocity.y = 0;
+    body.velocity.z = 0;
+    actor.state = 'air';
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    const recovered = emptyCommand();
+    recovered.moveZ = 1;
+    recovered.jumpPressed = true;
+    movement.update(actor, recovered, 1 / 60);
+    expect(actor.state).toBe('mantle');
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('does not restore the ordinary jump after mantle completion', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, -1, 4, 0.25, 4, 0, 'stone');
+    phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1002, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Mantle jump reset regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    for (let frame = 0; frame < 12; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+    actor.jumpsUsed = 1;
+    const start = emptyCommand();
+    start.moveZ = 1;
+    start.jumpPressed = true;
+    movement.update(actor, start, 1 / 60);
+    phys.fixedStep(1 / 60);
+    expect(actor.state).toBe('mantle');
+    for (let frame = 0; frame < 40 && actor.state === 'mantle'; frame++) {
+      movement.update(actor, emptyCommand(), 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    expect(actor.state).toBe('ground');
+    expect(actor.jumpsUsed).toBe(1);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('discards a blocked diagonal dash component instead of releasing it away from the wall', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.addStaticBox(0, 5, 0, 0.25, 5, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1003, -0.72, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Dash wall release regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+
+    const dash = emptyCommand();
+    dash.moveZ = 1;
+    dash.yaw = -Math.PI / 4;
+    dash.dashPressed = true;
+    let sawWallContact = false;
+    for (let frame = 0; frame < 3; frame++) {
+      movement.update(actor, dash, 1 / 60);
+      phys.fixedStep(1 / 60);
+      sawWallContact ||= body.slidAlongWall;
+      dash.dashPressed = false;
+    }
+    expect(sawWallContact).toBe(true);
+    expect(body.velocity.x).toBeLessThan(0.1);
+
+    const away = emptyCommand();
+    away.moveZ = 1;
+    away.yaw = Math.PI / 2;
+    movement.update(actor, away, 1 / 60);
+    expect(body.velocity.x).toBeLessThanOrEqual(0.5);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('discards blocked slide velocity while retaining authored slide speed', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.addStaticBox(0, 5, 0, 0.25, 5, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1004, -0.72, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Slide wall regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+    actor.state = 'slide';
+    actor.slideDirX = Math.SQRT1_2;
+    actor.slideDirZ = -Math.SQRT1_2;
+    body.velocity.x = 10;
+    body.velocity.z = -10;
+    const command = emptyCommand();
+    command.crouchHeld = true;
+    for (let frame = 0; frame < 3; frame++) {
+      movement.update(actor, command, 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    expect(body.slidAlongWall).toBe(true);
+    expect(body.velocity.x).toBeLessThan(0.1);
+    expect(Math.hypot(body.velocity.x, body.velocity.z)).toBeLessThanOrEqual(
+      MOVE.softSpeedCap + MOVE.slideBoostAdd + 0.01,
+    );
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('keeps wall sprint and jump spam bounded for ten seconds', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.addStaticBox(0, 5, 0, 0.25, 5, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1005, -0.72, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Wall jump spam speed regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+    let maxSpeed = 0;
+    for (let frame = 0; frame < 600; frame++) {
+      const command = emptyCommand();
+      command.moveZ = 1;
+      command.yaw = -Math.PI / 2;
+      command.sprint = true;
+      command.jumpPressed = frame % 12 === 0;
+      movement.update(actor, command, 1 / 60);
+      phys.fixedStep(1 / 60);
+      maxSpeed = Math.max(maxSpeed, Math.hypot(body.velocity.x, body.velocity.z));
+    }
+
+    expect(maxSpeed).toBeLessThanOrEqual(MOVE.softSpeedCap + 0.01);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('removes outward and excess velocity after a map-boundary clamp', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 10, 0.25, 10, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1006, 0.99, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Boundary speed cap regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    movement.bounds = { half: 1 };
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+    body.velocity.z = 100;
+    const command = emptyCommand();
+    command.moveZ = 1;
+    command.yaw = -Math.PI / 2;
+    command.sprint = true;
+    command.jumpPressed = true;
+    movement.update(actor, command, 1 / 60);
+
+    expect(body.velocity.x).toBeLessThanOrEqual(0);
+    expect(Math.hypot(body.velocity.x, body.velocity.z)).toBeLessThanOrEqual(MOVE.softSpeedCap + 0.01);
+    let maxBoundarySpeed = 0;
+    for (let frame = 0; frame < 600; frame++) {
+      command.jumpPressed = frame % 12 === 0;
+      movement.update(actor, command, 1 / 60);
+      phys.fixedStep(1 / 60);
+      maxBoundarySpeed = Math.max(maxBoundarySpeed, Math.hypot(body.velocity.x, body.velocity.z));
+    }
+    expect(maxBoundarySpeed).toBeLessThanOrEqual(MOVE.dashSpeed + 0.01);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('preserves the authored dash speed in open space', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 1007, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Open dash speed regression', true, body, 0xffffff);
+    const movement = movementFor(phys);
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+    const beforeZ = body.position.z;
+    const command = emptyCommand();
+    command.moveZ = 1;
+    command.dashPressed = true;
+    movement.update(actor, command, 1 / 60);
+
+    expect(Math.hypot(body.velocity.x, body.velocity.z)).toBeCloseTo(MOVE.dashSpeed, 5);
+    expect((beforeZ - body.position.z) * 60).toBeGreaterThan(MOVE.dashSpeed - 0.1);
+    body.dispose();
+    phys.dispose();
   });
 
   it('keeps the queued Rapier translation synchronized when flight hits map bounds', () => {
@@ -345,9 +750,11 @@ describe('rendered terrain and physics ground alignment', () => {
     const command = emptyCommand();
     command.moveZ = 1;
     command.yaw = 0;
+    command.jumpPressed = true;
     movement.update(actor, command, 1 / 60);
     phys.fixedStep(1 / 60);
     expect(actor.state).toBe('mantle');
+    command.jumpPressed = false;
 
     for (let frame = 0; frame < 32; frame++) {
       movement.update(actor, command, 1 / 60);
@@ -420,6 +827,7 @@ describe('rendered terrain and physics ground alignment', () => {
     const command = emptyCommand();
     command.moveZ = 1;
     command.yaw = 0;
+    command.jumpPressed = true;
     movement.update(actor, command, 1 / 60);
     phys.fixedStep(1 / 60);
     expect(actor.state).not.toBe('mantle');
@@ -445,6 +853,7 @@ describe('rendered terrain and physics ground alignment', () => {
     actor.jumpsUsed = 1;
     const command = emptyCommand();
     command.moveZ = 1;
+    command.jumpPressed = true;
     movement.update(actor, command, 1 / 60);
     phys.fixedStep(1 / 60);
     expect(actor.state).toBe('mantle');
