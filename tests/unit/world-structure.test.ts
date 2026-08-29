@@ -20,6 +20,7 @@ import {
   VEHICLE_ASSET_BOUNDS,
   vehicleColliderBox,
   vehicleRenderSpec,
+  type GeoSpec,
 } from '../../src/world/types';
 
 describe('world-space structure contracts', () => {
@@ -444,6 +445,76 @@ describe('world-space structure contracts', () => {
     ));
     expect(rainGardens).toHaveLength(4);
     expect(guideLights.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('grounds every Neo City neon pylon from its sign face to the street', async () => {
+    const { buildNeoCity } = await import('../../src/world/maps/neocity');
+    const def = buildNeoCity();
+    const locations = [[108, 96], [126, 150], [152, 118]] as const;
+
+    for (const [x, z] of locations) {
+      const face = def.geo.find((geo) => (
+        geo.kind === 'box'
+        && geo.noCollide
+        && Math.abs(geo.x - (x + 0.42)) < 0.05
+        && Math.abs(geo.z - z) < 0.05
+        && geo.sy > 2
+        && geo.sz > 5
+      ));
+      expect(face, `missing pylon face at ${x},${z}`).toBeDefined();
+      if (!face || face.kind !== 'box') continue;
+
+      const groundedPosts = def.geo.filter((geo) => (
+        (geo.kind === 'box' || geo.kind === 'cyl')
+        && geo.mat === 'metalDark'
+        && Math.abs(geo.x - x) < 0.8
+        && Math.abs(geo.z - z) < 3
+        && (geo.y - (geo.kind === 'box' ? geo.sy : geo.h) / 2) <= 0.2
+        && (geo.y + (geo.kind === 'box' ? geo.sy : geo.h) / 2) >= face.y - face.sy / 2
+      ));
+      expect(groundedPosts, `floating pylon at ${x},${z}`).toHaveLength(2);
+      expect(groundedPosts.every((post) => post.noCollide), `pylon blocks play at ${x},${z}`).toBe(true);
+
+      const light = def.lights.find((candidate) => (
+        Math.abs(candidate.x - face.x) < 0.25
+        && Math.abs(candidate.y - face.y) < 0.25
+        && Math.abs(candidate.z - face.z) < 0.25
+      ));
+      expect(light, `misaligned pylon light at ${x},${z}`).toBeDefined();
+    }
+  });
+
+  it('hosts every Neo City emissive plate on a building or grounded support', async () => {
+    const { buildNeoCity } = await import('../../src/world/maps/neocity');
+    const def = buildNeoCity();
+    const emissiveMats = new Set([
+      'neonCyan', 'neonMagenta', 'neonOrange', 'neonGreen', 'neonBlue',
+      'signDimCyan', 'signDimMagenta', 'signDimOrange',
+    ]);
+    const buildingMats = new Set(['facadeA', 'facadeB', 'facadeC', 'concrete', 'concreteDark', 'metalExterior']);
+    const bounds = (geo: GeoSpec) => {
+      if (geo.kind === 'box') return { x: geo.sx / 2, y: geo.sy / 2, z: geo.sz / 2 };
+      if (geo.kind === 'cyl') return { x: geo.r, y: geo.h / 2, z: geo.r };
+      return { x: geo.r, y: geo.r, z: geo.r };
+    };
+    const touches = (a: GeoSpec, support: GeoSpec) => {
+      const aa = bounds(a);
+      const bb = bounds(support);
+      const epsilon = 0.18;
+      return Math.abs(a.x - support.x) <= aa.x + bb.x + epsilon
+        && Math.abs(a.y - support.y) <= aa.y + bb.y + epsilon
+        && Math.abs(a.z - support.z) <= aa.z + bb.z + epsilon;
+    };
+
+    const plates = def.geo.filter((geo) => geo.kind === 'box' && geo.noCollide && emissiveMats.has(geo.mat));
+    const floating = plates.filter((plate) => !def.geo.some((support) => {
+      if (support === plate || !touches(plate, support)) return false;
+      const halfHeight = bounds(support).y;
+      const reachesGround = support.y - halfHeight <= 0.2;
+      return reachesGround || buildingMats.has(support.mat);
+    }));
+
+    expect(floating, JSON.stringify(floating, null, 2)).toEqual([]);
   });
 
   it('articulates the Old Front bridge with four relieving arch rings', async () => {

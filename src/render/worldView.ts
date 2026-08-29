@@ -518,7 +518,12 @@ export class WorldView {
   // -------------------------------------------------------------------------
 
   private buildStatic(def: MapDef): void {
-    const byKind = new Map<string, Map<MatKey, THREE.Matrix4[]>>();
+    const batches = new Map<string, {
+      kind: string;
+      mat: MatKey;
+      castShadow: boolean;
+      matrices: THREE.Matrix4[];
+    }>();
     const desertDaylightMat: Partial<Record<MatKey, MatKey>> = {
       concreteDark: 'concrete',
       metalDark: 'metal',
@@ -537,10 +542,12 @@ export class WorldView {
       else scale = new THREE.Vector3(g.r, g.r, g.r);
       const key = g.kind;
       const renderMat = def.id === 'ashara' ? desertDaylightMat[g.mat] ?? g.mat : g.mat;
-      if (!byKind.has(key)) byKind.set(key, new Map());
-      const byMat = byKind.get(key)!;
-      if (!byMat.has(renderMat)) byMat.set(renderMat, []);
-      byMat.get(renderMat)!.push(new THREE.Matrix4().compose(new THREE.Vector3(g.x, g.y, g.z), q, scale));
+      const castShadow = g.kind !== 'box' || g.castShadow !== false;
+      const batchKey = `${key}:${renderMat}:${castShadow ? 'shadow' : 'unshadowed'}`;
+      if (!batches.has(batchKey)) batches.set(batchKey, { kind: key, mat: renderMat, castShadow, matrices: [] });
+      batches.get(batchKey)!.matrices.push(
+        new THREE.Matrix4().compose(new THREE.Vector3(g.x, g.y, g.z), q, scale),
+      );
     }
 
     const geos: Record<string, THREE.BufferGeometry> = {
@@ -554,17 +561,15 @@ export class WorldView {
     // instanced draw instead of allocating a mesh per bale.
     const hayBox = new RoundedBoxGeometry(1, 1, 1, 3, 0.12);
 
-    for (const [kind, byMat] of byKind) {
-      for (const [mat, matrices] of byMat) {
-        const geometry = kind === 'box' && mat === 'hay' ? hayBox : geos[kind]!;
-        const inst = new THREE.InstancedMesh(geometry, this.mats.get(mat), matrices.length);
-        matrices.forEach((m, i) => inst.setMatrixAt(i, m));
-        inst.instanceMatrix.needsUpdate = true;
-        inst.frustumCulled = false;
-        inst.castShadow = true;
-        inst.receiveShadow = true;
-        this.group.add(inst);
-      }
+    for (const { kind, mat, castShadow, matrices } of batches.values()) {
+      const geometry = kind === 'box' && mat === 'hay' ? hayBox : geos[kind]!;
+      const inst = new THREE.InstancedMesh(geometry, this.mats.get(mat), matrices.length);
+      matrices.forEach((m, i) => inst.setMatrixAt(i, m));
+      inst.instanceMatrix.needsUpdate = true;
+      inst.frustumCulled = false;
+      inst.castShadow = castShadow;
+      inst.receiveShadow = true;
+      this.group.add(inst);
     }
   }
 
