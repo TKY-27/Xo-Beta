@@ -433,6 +433,7 @@ export class WorldBuilder {
     opts?: {
       noCollide?: boolean;
       noRender?: boolean;
+      castShadow?: boolean;
       hint?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage';
       floor?: boolean;
       terrain?: boolean;
@@ -448,6 +449,7 @@ export class WorldBuilder {
       roll: opts?.roll,
       noCollide: opts?.noCollide,
       noRender: opts?.noRender,
+      castShadow: opts?.castShadow,
       terrain: opts?.terrain,
       preserveInTerrainCutout: opts?.preserveInTerrainCutout,
       materialHint: opts?.hint,

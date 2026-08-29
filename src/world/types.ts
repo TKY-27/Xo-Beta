@@ -28,6 +28,8 @@ export interface GeoBox {
   noCollide?: boolean;
   /** Collider/placement proxy that is intentionally hidden from rendering. */
   noRender?: boolean;
+  /** Skip the static shadow pass for presentation-only detail. */
+  castShadow?: boolean;
   /** Authored bridge/stair geometry that intentionally occupies a terrain opening. */
   preserveInTerrainCutout?: boolean;
   /** Finished flat world skin; QA terrain queries ignore ordinary floors/roofs. */
