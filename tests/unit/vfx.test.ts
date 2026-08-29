@@ -52,4 +52,23 @@ describe('VFX pool stability', () => {
     expect(inner.shockwaves).toHaveLength(8);
     expect(new Set(inner.shockwaves.map((wave) => wave.mesh)).size).toBe(inner.shockwaves.length);
   });
+
+  it('keeps normal and additive shockwaves in fixed material pools', () => {
+    const vfx = new VfxSystem();
+    const inner = vfx as unknown as VfxInternals;
+    for (let i = 0; i < 12; i++) inner.spawnShockwave(i, 0, 0, 1, 0xffffff, false);
+    for (let i = 0; i < 12; i++) inner.spawnShockwave(i, 0, 0, 1, 0x6fd4ff, true);
+    expect(inner.shockwaves).toHaveLength(16);
+    const blending = inner.shockwaves.map((wave) => (wave.mesh.material as THREE.MeshBasicMaterial).blending);
+    expect(blending.filter((value) => value === THREE.NormalBlending)).toHaveLength(8);
+    expect(blending.filter((value) => value === THREE.AdditiveBlending)).toHaveLength(8);
+  });
+
+  it('limits dynamic muzzle lights while preserving the full sprite pool', () => {
+    const vfx = new VfxSystem();
+    const lights = vfx.group.children.filter((child) => (child as THREE.PointLight).isPointLight);
+    const sprites = vfx.group.children.filter((child) => (child as THREE.Sprite).isSprite);
+    expect(lights).toHaveLength(6);
+    expect(sprites).toHaveLength(24);
+  });
 });

@@ -38,6 +38,8 @@ export interface CharacterRig {
   attachWeapon?(model: THREE.Object3D | null): void;
   /** Resolve the attached weapon's authored muzzle in world space. */
   muzzleWorld?(position: THREE.Vector3, direction: THREE.Vector3): boolean;
+  /** Bind the death clip during loading without advancing or displaying it. */
+  prewarmDeath?(): void;
   dispose(): void;
 }
 
@@ -388,6 +390,15 @@ export class CharacterFactory {
       accentMats: accents,
       baseMats: baseMats,
       dissolving: 0,
+      prewarmDeath() {
+        const death = actions['death'];
+        if (!death) return;
+        death.reset();
+        death.setEffectiveWeight(0);
+        death.play();
+        mixer.update(0);
+        death.stop();
+      },
       update(a: Actor, t: number, dt: number) {
         // Face aim heading. GLB base characters are authored facing +Z;
         // sim yaw 0 faces -Z, hence the PI offset.
@@ -609,7 +620,10 @@ export function updateEliminationFx(rig: CharacterRig, dt: number): void {
     rig.group.rotation.y += dt * 1.1 * k;
     rig.group.scale.setScalar(Math.max(0.001, 1 - k));
     for (const m of [...rig.accentMats, ...rig.baseMats]) {
-      m.transparent = true;
+      if (!m.transparent) {
+        m.transparent = true;
+        m.needsUpdate = true;
+      }
       m.opacity = 1 - k;
       m.emissiveIntensity *= 1 - dt * 0.8;
     }
