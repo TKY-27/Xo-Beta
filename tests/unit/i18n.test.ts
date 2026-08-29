@@ -5,6 +5,7 @@ import { isTextKey, localizePoiName } from '../../src/core/i18n';
 import { buildEdenFacility } from '../../src/world/maps/eden';
 import { buildNeoCity } from '../../src/world/maps/neocity';
 import { buildOldFront } from '../../src/world/maps/oldfront';
+import { buildAsharaReach } from '../../src/world/maps/desert';
 
 describe('localization contract', () => {
   it('defines every declarative data-i18n key used by the shipped HTML', () => {
@@ -23,8 +24,8 @@ describe('localization contract', () => {
     expect(html).toContain('class="scope-mil mil-h"');
   });
 
-  it('localizes every authored POI on all three maps', () => {
-    const maps = [buildNeoCity(), buildOldFront(), buildEdenFacility()];
+  it('localizes every authored POI on all four maps', () => {
+    const maps = [buildNeoCity(), buildOldFront(), buildEdenFacility(), buildAsharaReach()];
     for (const map of maps) {
       for (const poi of map.pois) {
         expect(localizePoiName(poi.name, 'en')).toBe(poi.name);

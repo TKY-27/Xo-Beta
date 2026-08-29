@@ -14,9 +14,10 @@ import { getSettings } from '../../src/core/settings';
 import { Actor } from '../../src/sim/actor';
 import { CombatSystem } from '../../src/sim/combat';
 import { emptyCommand } from '../../src/sim/input';
-import { groundSurfaceForActor } from '../../src/sim/match';
+import { groundSurfaceForActor, waterVolumeContains } from '../../src/sim/match';
 import { MovementSystem, type MovementEvents } from '../../src/sim/movement';
 import { buildColliders, WorldBuilder } from '../../src/world/builder';
+import { vehicleColliderBox } from '../../src/world/types';
 
 beforeAll(async () => {
   await initPhysics();
@@ -49,6 +50,14 @@ function actorAtFeet(name: string, x: number, feetY: number, z: number): Actor {
 }
 
 describe('authoritative character-space coordinates', () => {
+  it('keeps the Rapier standing capsule at human scale', () => {
+    const totalHeight = MOVE.capsuleHalfHeight * 2 + MOVE.capsuleRadius * 2;
+    expect(totalHeight).toBeCloseTo(1.99, 6);
+    expect(MOVE.eyeHeight).toBeCloseTo(1.72, 6);
+    expect(MOVE.eyeHeight).toBeLessThan(1.86);
+    expect(MOVE.eyeHeight).toBeLessThan(totalHeight - 0.1);
+  });
+
   it('derives standing and crouched eyes from the physical soles', () => {
     const actor = actorAtFeet('EYE', 0, 7.25, 0);
     expect(feetYFromBodyCenter(actor.body.position.y)).toBeCloseTo(7.25, 8);
@@ -95,6 +104,25 @@ describe('authoritative character-space coordinates', () => {
     rig.update(actor, 1, phys);
     expect(rig.camera.position.z).toBeGreaterThan(0.75);
     expect(rig.camera.position.z).toBeLessThan(3);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('never forces a short TPS boom through a wall close to the actor', () => {
+    const phys = new PhysicsWorld();
+    const body = new CharBody(phys, 2, 0, CAPSULE_CENTER_OFFSET, 0);
+    const actor = new Actor('TPS_NEAR_WALL', true, body, 0x5fd0ff);
+    // Near face at z=0.55: clear of the 0.42 m actor capsule, but closer than
+    // the old hard-coded 0.75 m camera minimum.
+    phys.addStaticBox(0, 2, 0.65, 4, 2, 0.1, 0, 'stone');
+    phys.flush();
+
+    const rig = new CameraRig(16 / 9);
+    rig.mode = 'tps';
+    rig.update(actor, 1, phys);
+    expect(rig.camera.position.z).toBeGreaterThan(0.08);
+    expect(rig.camera.position.z).toBeLessThan(0.35);
+
     body.dispose();
     phys.dispose();
   });
@@ -201,7 +229,10 @@ describe('authoritative character-space coordinates', () => {
 
     // Vehicles use the same arbitrary yaw as their render group instead of
     // snapping the collider to one of four axis-aligned footprints.
-    expect(phys.surfaceAt(21.2, 1.2, 4, 4)).toBeCloseTo(1.65, 5);
+    expect(phys.surfaceAt(21.2, 1.2, 4, 4)).toBeCloseTo(
+      vehicleColliderBox('sedan', 20, 0).h,
+      5,
+    );
     expect(phys.surfaceAt(21.2, -1.2, 4, 4)).toBeNull();
   });
 
@@ -218,6 +249,15 @@ describe('authoritative character-space coordinates', () => {
     expect(actor.inWater).toBe(true);
     expect(actor.state).toBe('swim');
     body.dispose();
+  });
+
+  it('treats authored water as a finite volume instead of extending below its bed', () => {
+    const water = { minX: -4, maxX: 4, minZ: -3, maxZ: 3, surfaceY: 2, depth: 0.5 };
+    expect(waterVolumeContains(water, 0, 1.5, 0)).toBe(true);
+    expect(waterVolumeContains(water, 0, 1.49, 0)).toBe(false);
+    expect(waterVolumeContains(water, 0, 2.2, 0)).toBe(true);
+    expect(waterVolumeContains(water, 0, 2.21, 0)).toBe(false);
+    expect(waterVolumeContains(water, 4.01, 1.8, 0)).toBe(false);
   });
 });
 

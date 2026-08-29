@@ -9,7 +9,7 @@ import { loadMap } from '../../src/world';
 import { RAPIER_READY } from '../../src/world/rapierReady';
 import { MELEE } from '../../src/core/balance';
 
-async function makeMatch(mapId: 'neocity' | 'oldfront' | 'eden', seed: number): Promise<Match> {
+async function makeMatch(mapId: 'neocity' | 'oldfront' | 'eden' | 'ashara', seed: number): Promise<Match> {
   const loaded = await loadMap(mapId);
   return new Match({ mapDef: loaded.def, seed, difficulty: 'normal', withPlayer: true });
 }

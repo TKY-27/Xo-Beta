@@ -1,20 +1,27 @@
 /**
  * Perf profile: boots each map at 1600x900 ultra, samples rAF deltas for
- * 4s after a 2s warmup, reports avg/1%-low FPS + scene stats.
+ * one chronological 4s warm-up + 6s steady interval, then reports temporal
+ * frame metrics and scene stats for each production map.
  * Run: npx tsx tests/browser/qa-perf.ts
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
+import { summarizeFrameProfile } from './frame-metrics';
 
-const MAPS = ['neocity', 'oldfront', 'eden'] as const;
+const MAPS = ['neocity', 'oldfront', 'eden', 'ashara'] as const;
 
 async function main(): Promise<void> {
   const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
   await server.listen();
-  const browser = await chromium.launch({ args: ['--use-angle=metal', '--enable-gpu'] });
+  const headless = process.env.HEADLESS === '1';
+  if (headless) console.warn('HEADLESS=1 is diagnostic only; it is not release QA evidence.');
+  const browser = await chromium.launch({ channel: 'chrome', headless });
   const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message.slice(0, 160)));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text().slice(0, 160));
+  });
   await page.addInitScript(() => {
     localStorage.setItem('xo-beta-settings-v1', JSON.stringify({
       quality: 'ultra', shadows: true, shadowQuality: 'high',
@@ -35,47 +42,52 @@ async function main(): Promise<void> {
 
     const evalSoft = async <T>(expr: string, ms = 5000): Promise<T | null> =>
       Promise.race([page.evaluate(expr) as Promise<T>, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
+    let live = false;
     for (let i = 0; i < 120; i++) {
       const ph = await evalSoft<string>('window.__xoState ? window.__xoState.phase : "?"');
-      if (ph === 'live') break;
+      if (ph === 'live') { live = true; break; }
       await page.keyboard.press('Space');
       await page.waitForTimeout(600);
     }
+    if (!live) throw new Error(`${map}: perf capture never reached live phase`);
+    let grounded = false;
     for (let i = 0; i < 60; i++) {
       const pl = await evalSoft<string>('window.__xoState ? JSON.stringify(window.__xoState.player) : "none"', 2500);
-      if (pl && pl.includes('"grounded":true')) break;
+      if (pl && pl.includes('"grounded":true')) { grounded = true; break; }
       await page.waitForTimeout(400);
     }
-    await page.waitForTimeout(2000); // warmup (shader compile, streaming)
-
-    const stats = await page.evaluate(`(async () => {
+    if (!grounded) throw new Error(`${map}: perf capture never reached grounded state`);
+    const raw = await page.evaluate(`(async () => {
       const samples = [];
       const t0 = performance.now();
       await new Promise((res) => {
         const tick = () => {
           samples.push(performance.now());
-          if (samples.length >= 240 || performance.now() - t0 > 6000) res(null);
+          if (performance.now() - t0 > 10250) res(null);
           else requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);
       });
       const deltas = [];
       for (let i = 1; i < samples.length; i++) deltas.push(samples[i] - samples[i - 1]);
-      deltas.sort((a, b) => a - b);
-      const avg = deltas.reduce((a, b) => a + b, 0) / deltas.length;
-      const p1 = deltas[Math.floor(deltas.length * 0.01)] ?? deltas[0];
-      const p99 = deltas[Math.floor(deltas.length * 0.99)] ?? deltas[deltas.length - 1];
       const st = window.__xoState ? window.__xoState.sceneInfo : {};
-      return {
-        frames: deltas.length,
-        avgFps: Math.round(1000 / avg),
-        lowFps: Math.round(1000 / p99),
-        highFps: Math.round(1000 / p1),
+      return { deltas, scene: {
         triangles: st.triangles, drawCalls: st.drawCalls,
         lights: st.lights ? st.lights.length : 0,
-      };
+      } };
     })()`);
-    console.log(map, JSON.stringify(stats));
+    const stats = raw as { deltas: number[]; scene: Record<string, number> };
+    const profile = summarizeFrameProfile(stats.deltas, 4000, 6000);
+    const numeric = [...Object.values(profile.warmup), ...Object.values(profile.steady)];
+    if (profile.warmup.n < 30 || profile.steady.n < 60 || numeric.some((value) => !Number.isFinite(value))) {
+      throw new Error(`${map}: invalid frame profile ${JSON.stringify(profile)}`);
+    }
+    if (errors.length > 0) throw new Error(`${map}: browser errors: ${errors.join(' | ')}`);
+    console.log(map, JSON.stringify({
+      mode: headless ? 'headless-diagnostic' : 'headed-chrome',
+      ...profile,
+      scene: stats.scene,
+    }));
   }
   console.log('errors:', errors.length, errors.slice(0, 3));
   await browser.close();

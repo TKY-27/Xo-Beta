@@ -4,7 +4,7 @@
  * treatment with underground level, cliffs, greenhouses, docks.
  */
 
-import { WorldBuilder } from '../builder';
+import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef } from '../types';
 import { Rng } from '../../core/rng';
 import { addBuilding, scatterRocks, scatterTrees, structureBaseY } from './common';
@@ -89,8 +89,6 @@ export function buildEdenFacility(): MapDef {
   // ------------------------------------------------------------------
   b.poi('Water Treatment', -170, -120, 45);
   treatmentPlant(b, -170, -120);
-  b.chest(-162, terrainH(-162, -112) + 0.3, -112, 'elite');
-  b.chest(-176, terrainH(-170, -120) - 5, -124, 'vault');
 
   // ------------------------------------------------------------------
   // POI: LAKESIDE DOCK (east shore)
@@ -175,23 +173,23 @@ export function buildEdenFacility(): MapDef {
       preset: 'day',
       hdri: 'qwantani_puresky_2k.hdr',
       fogColor: 0xa9c2d4,
-      fogDensity: 0.0016,
+      fogDensity: 0.0013,
       sunDirection: [0.45, -0.8, 0.35],
       sunColor: 0xfff2dd,
-      sunIntensity: 2.9,
+      sunIntensity: 2.25,
       ambientColor: 0xb6ccd8,
-      ambientIntensity: 0.55,
+      ambientIntensity: 0.46,
       hemisphereSky: 0xa8d4f0,
       hemisphereGround: 0x55663f,
-      hemisphereIntensity: 1.55,
-      exposure: 1.12,
-      envIntensity: 1.15,
+      hemisphereIntensity: 1.2,
+      exposure: 0.98,
+      envIntensity: 0.9,
       backgroundBlurriness: 0.045,
-      backgroundIntensity: 0.62,
+      backgroundIntensity: 0.52,
       grade: {
         vignette: 0.28,
-        saturation: 1.08,
-        contrast: 1.03,
+        saturation: 0.96,
+        contrast: 1.02,
         lift: [0.004, 0.004, 0.002],
       },
     },
@@ -273,7 +271,7 @@ function buildHeightfield(b: WorldBuilder): void {
       heights[r * n + c] = terrainH(x, z);
     }
   }
-  (b.def as MapDef & { heightfield?: unknown }).heightfield = { n, heights };
+  b.def.heightfield = { n, heights };
 }
 
 // ---------------------------------------------------------------------------
@@ -284,8 +282,71 @@ function labMain(b: WorldBuilder, cx: number, cz: number): void {
   const gy = structureBaseY(terrainH, cx, cz, 34, 24);
   addBuilding(b, {
     x: cx, z: cz, baseY: gy, w: 34, d: 24, floors: 2, floorHeight: 4.2, wallMat: 'facadeA', trimMat: 'metal',
+    floorMat: 'facilityFloor',
     doors: [[0, 10, 2.8], [0, 24, 2.8], [2, 17, 2.8], [1, 9, 2.8]], roofAccess: true,
   });
+  // addBuilding's deep metal foundation remains the exterior plinth. Give the
+  // occupied ground floor its own inset physical surface so the interior does
+  // not inherit a metallic foundation top and its implausible reflection.
+  b.slab(cx, gy + 0.1, cz, 33.2, 23.2, 0.04, 'facilityFloor');
+  // Interior architectural services: the previous lab was an unlit empty box
+  // with no visible reason for its scale. Ceiling luminaires, perimeter cable
+  // trays, vertical utility risers and two real work benches establish a
+  // maintained research space while preserving the door/stair circulation.
+  for (let floor = 0; floor < 2; floor++) {
+    const levelY = gy + floor * 4.2;
+    for (const z of [cz - 6.5, cz, cz + 6.5]) {
+      b.box(cx, levelY + 3.82, z, 7.2, 0.08, 0.22, 'signDimCyan', 0, { noCollide: true });
+      b.light(cx, levelY + 3.55, z, 0xcfe8ff, 0.82, 10.5);
+    }
+    for (const wallZ of [cz - 11.65, cz + 11.65]) {
+      b.box(cx, levelY + 2.72, wallZ, 27, 0.16, 0.18, 'metalDark', 0, { noCollide: true });
+      b.box(cx, levelY + 0.18, wallZ, 32.2, 0.22, 0.16, 'metalDark', 0, { noCollide: true });
+    }
+    for (const x of [cx - 15.65, cx + 15.65]) {
+      b.cyl(x, levelY + 1.45, cz - 8.8, 0.13, 2.9, 'metal', { segments: 10, noCollide: true });
+      b.cyl(x, levelY + 1.45, cz + 8.8, 0.13, 2.9, 'metal', { segments: 10, noCollide: true });
+    }
+  }
+  for (const benchX of [cx - 7, cx + 7]) {
+    b.box(benchX, gy + 0.86, cz, 5.2, 0.16, 1.35, 'metal');
+    for (const dx of [-2.25, 2.25]) {
+      for (const dz of [-0.48, 0.48]) {
+        b.box(benchX + dx, gy + 0.43, cz + dz, 0.18, 0.86, 0.18, 'metalDark');
+      }
+    }
+    // Drawers, instrument screens and sample canisters turn each bare table
+    // into a working laboratory station. They sit inside the physical bench
+    // footprint and remain presentation-only, so the accepted circulation
+    // lane and capsule clearance are unchanged.
+    b.box(benchX, gy + 0.45, cz, 4.35, 0.62, 1.02, 'metalDark', 0, { noCollide: true });
+    for (const monitorX of [benchX - 1.25, benchX + 1.25]) {
+      b.box(monitorX, gy + 1.18, cz + 0.2, 0.12, 0.55, 0.12, 'metalDark', 0, { noCollide: true });
+      b.box(monitorX, gy + 1.55, cz + 0.24, 1.22, 0.72, 0.1, 'metalDark', 0, { noCollide: true });
+      b.box(monitorX, gy + 1.55, cz + 0.175, 0.98, 0.5, 0.035, 'signDimCyan', 0, { noCollide: true });
+    }
+    for (const sampleX of [benchX - 0.4, benchX, benchX + 0.4]) {
+      b.cyl(sampleX, gy + 1.16, cz - 0.34, 0.09, 0.44, 'glass', { segments: 10, noCollide: true });
+    }
+  }
+  // Four wall-side equipment cabinets provide scale and service logic while
+  // leaving every doorway, stair and central route unobstructed.
+  for (const wallX of [cx - 14.7, cx + 14.7]) {
+    for (const cabinetZ of [cz - 6.5, cz + 6.5]) {
+      b.box(wallX, gy + 1.05, cabinetZ, 1.25, 2.1, 2.4, 'metalDark', 0, { noCollide: true });
+      b.box(wallX + (wallX < cx ? 0.64 : -0.64), gy + 1.42, cabinetZ, 0.035, 0.5, 0.9, 'signDimCyan', 0, {
+        noCollide: true,
+      });
+    }
+  }
+  // Thin floor-zone markings define the central circulation lane and make the
+  // room's scale readable from eye height without adding collision or glow.
+  for (const x of [cx - 3.1, cx + 3.1]) {
+    b.box(x, gy + 0.135, cz, 0.1, 0.015, 18, 'paint', 0, { noCollide: true });
+  }
+  for (const z of [cz - 5.5, cz + 5.5]) {
+    b.box(cx, gy + 0.135, z, 6.3, 0.015, 0.1, 'paint', 0, { noCollide: true });
+  }
   // Rooftop units
   b.box(cx + 8, gy + 9.4, cz - 4, 4, 1.6, 3, 'metalDark');
   b.loot(cx - 8, gy + 0.4, cz + 4);
@@ -298,6 +359,24 @@ function labWing(b: WorldBuilder, cx: number, cz: number, doorSide: 0 | 1 | 2 | 
     x: cx, z: cz, baseY: gy, w: 20, d: 15, floors: 2, floorHeight: 4, wallMat: 'facadeC', trimMat: 'metalDark',
     doors: [[doorSide, 8, 2.4]],
   });
+  // Deterministic exterior plant on the courtyard-facing elevation ties the
+  // building to the apron drain below. The shallow cabinet, louvres, header
+  // and downpipes add operational scale without narrowing circulation or
+  // changing the proven building collider.
+  const serviceZ = cz + 7.64;
+  b.box(cx + 5.7, gy + 1.42, serviceZ, 2.25, 1.9, 0.14, 'metalDark', 0, { noCollide: true });
+  for (const yOffset of [-0.58, -0.28, 0.02, 0.32, 0.62]) {
+    b.box(cx + 5.7, gy + 1.42 + yOffset, serviceZ + 0.085, 1.78, 0.09, 0.06, 'metal', 0, {
+      noCollide: true,
+    });
+  }
+  b.box(cx, gy + 3.15, serviceZ + 0.03, 15.2, 0.16, 0.16, 'rust', 0, { noCollide: true });
+  for (const pipeX of [cx - 6.2, cx + 3.6]) {
+    b.cyl(pipeX, gy + 1.62, serviceZ + 0.04, 0.1, 3.2, 'metalDark', {
+      segments: 8,
+      noCollide: true,
+    });
+  }
   b.loot(cx + 3, gy + 0.4, cz + 2);
 }
 
@@ -313,6 +392,7 @@ function atriumLink(b: WorldBuilder, cx: number, cz: number): void {
     const z = cz - 13 + i * (26 / 6);
     b.box(cx - 4.7, gy + 2.4, z, 0.5, 4.8, 0.5, 'metalDark');
     b.box(cx + 4.7, gy + 2.4, z, 0.5, 4.8, 0.5, 'metalDark');
+    b.box(cx, gy + 4.35, z, 9.4, 0.18, 0.24, 'metalDark', 0, { noCollide: true });
   }
   b.slab(cx, gy + 4.8, cz, 10.6, 26.6, 0.4, 'metalDark');
   // Perimeter beam under the slab edge — keeps the roof visually connected to
@@ -326,8 +406,20 @@ function atriumLink(b: WorldBuilder, cx: number, cz: number): void {
   b.box(cx, gy + 5.1, cz + 13.3, 11, 0.42, 0.55, 'metalDark');
   b.box(cx - 5.3, gy + 5.1, cz, 0.55, 0.42, 26.6, 'metalDark');
   b.box(cx + 5.3, gy + 5.1, cz, 0.55, 0.42, 26.6, 'metalDark');
+  // The glazed link is a working circulation spine, not an empty dark tube.
+  // Recessed luminaires, a restrained floor guide and low service trunking
+  // repeat the facility language used inside the main laboratory.
+  for (const z of [cz - 10.5, cz - 6.3, cz - 2.1, cz + 2.1, cz + 6.3, cz + 10.5]) {
+    b.box(cx, gy + 4.28, z, 2.8, 0.08, 0.28, 'signDimCyan', 0, { noCollide: true });
+    b.light(cx, gy + 4.02, z, 0xcfe8ff, 0.62, 7.5);
+  }
+  for (const lineZ of [cz - 10.5, cz - 7.5, cz - 4.5, cz - 1.5, cz + 1.5, cz + 4.5, cz + 7.5, cz + 10.5]) {
+    b.box(cx, gy + 0.42, lineZ, 0.12, 0.018, 1.45, 'paint', 0, { noCollide: true });
+  }
+  for (const side of [-1, 1]) {
+    b.box(cx + side * 4.45, gy + 0.82, cz, 0.2, 0.28, 24.8, 'metalDark', 0, { noCollide: true });
+  }
   b.platform(cx - 5, cx + 5, cz - 13, cz + 13, gy + 0.4);
-  b.light(cx, gy + 4, cz, 0xcfe8ff, 1.4, 20);
 }
 
 function helipad(b: WorldBuilder, cx: number, cz: number): void {
@@ -344,6 +436,19 @@ function dormitory(b: WorldBuilder, cx: number, cz: number): void {
     x: cx, z: cz, baseY: gy, w: 22, d: 14, floors: 2, floorHeight: 3.6, wallMat: 'plaster', trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[0, 8, 2.2], [2, 8, 2.2]],
   });
+  // The generic building keeps ground-floor side walls solid. On these long
+  // dormitory elevations that produced a scale-less white slab at spawn
+  // distance, so add shallow framed panes and a continuous rain plinth. They
+  // are presentation-only and do not alter the proven capsule clearance.
+  for (const side of [-1, 1]) {
+    const x = cx + side * 11.22;
+    for (const oz of [-4.2, 0, 4.2]) {
+      b.box(x, gy + 1.9, cz + oz, 0.07, 1.55, 1.85, 'glass', 0, { noCollide: true });
+      b.box(x + side * 0.035, gy + 1.9, cz + oz, 0.09, 1.9, 0.12, 'metalDark', 0, { noCollide: true });
+      b.box(x + side * 0.035, gy + 1.9, cz + oz, 0.09, 0.12, 2.1, 'metalDark', 0, { noCollide: true });
+    }
+    b.box(x + side * 0.025, gy + 0.42, cz, 0.1, 0.62, 14.1, 'woodDark', 0, { noCollide: true });
+  }
   b.loot(cx - 4, gy + 0.4, cz + 2);
 }
 
@@ -352,6 +457,30 @@ function serviceHouse(b: WorldBuilder, cx: number, cz: number): void {
   addBuilding(b, {
     x: cx, z: cz, baseY: gy, w: 10, d: 9, floors: 1, wallMat: 'woodDark', doors: [[0, 4, 1.8]],
     interiorDividers: false, windows: false,
+  });
+  // Make the utility use legible from every courtyard approach. The old
+  // windowless shell was an unarticulated brown cube: louver banks, a real
+  // supported entrance canopy, roof exhaust and a downpipe give it scale and
+  // explain why the service building is closed while keeping routes clear.
+  for (const side of [-1, 1]) {
+    const x = cx + side * 5.23;
+    b.box(x, gy + 1.85, cz, 0.08, 1.5, 2.8, 'metalDark', 0, { noCollide: true });
+    for (const yOffset of [-0.45, -0.15, 0.15, 0.45]) {
+      b.box(x + side * 0.055, gy + 1.85 + yOffset, cz, 0.08, 0.1, 2.25, 'metal', 0, {
+        noCollide: true,
+      });
+    }
+  }
+  b.box(cx, gy + 2.62, cz + 5.05, 3.4, 0.18, 1.7, 'metalDark');
+  for (const postX of [cx - 1.45, cx + 1.45]) {
+    b.box(postX, gy + 1.28, cz + 5.55, 0.16, 2.55, 0.16, 'metalDark');
+  }
+  b.cyl(cx + 2.7, gy + 4.65, cz - 1.8, 0.42, 1.7, 'metalDark', {
+    segments: 12,
+    noCollide: true,
+  });
+  b.box(cx - 4.7, gy + 1.75, cz - 4.62, 0.16, 3.5, 0.16, 'metalDark', 0, {
+    noCollide: true,
   });
   b.loot(cx + 1, gy + 0.4, cz + 1);
 }
@@ -377,20 +506,62 @@ function treatmentPlant(b: WorldBuilder, cx: number, cz: number): void {
   // Clarifier tanks outside
   b.cyl(cx + 18, gy + 2.5, cz + 8, 5, 5, 'concrete');
   b.cyl(cx + 18, gy + 2.5, cz - 6, 5, 5, 'rust');
-  // Underground pump room via stairs shaft
-  b.stairs(cx - 8, gy, cz + 6, 2, 9, -5 / 9, 0.62, 2.2, 'concreteDark');
+  // Open retaining-wall ramp into the underground room from the west. The
+  // old flight sat under an unbroken heightfield and the building foundation.
+  const entryX = cx - 24.7;
+  const entryZ = cz - 4;
+  const pumpCutout = {
+    minX: entryX,
+    maxX: cx - 8.5,
+    minZ: cz - 9,
+    maxZ: cz + 1,
+    surfaceY: gy,
+  };
+  b.terrainCutout(pumpCutout);
+  // Start at the actual coarse-mesh hole edge and keep the lower tread west
+  // of the building foundation. Otherwise descending worked, but an actor
+  // climbing out raised its capsule into the foundation before clearing the
+  // west edge.
   const py = gy - 5;
+  // The cut heightfield follows its coarse grid at the boundary. Bridge that
+  // small edge explicitly, then descend from the real approach surface to the
+  // pump-room floor with every riser inside the KCC snap distance.
+  const entrySurfaceY = terrainH(entryX - 2, entryZ);
+  b.box(entryX - 1.3, entrySurfaceY - 0.15, entryZ, 3, 0.3, 3.2, 'concreteDark', 0, {
+    floor: true,
+    preserveInTerrainCutout: true,
+  });
+  // Use the safe 0.34 m maximum here rather than over-sampling the flight:
+  // the actor must be below the building foundation before its capsule
+  // reaches the west edge. A shallower, longer flight collides with that
+  // overhead foundation even though every individual tread is walkable.
+  const stairSteps = Math.ceil(Math.abs(entrySurfaceY - py) / 0.34);
+  const stair = b.stairs(
+    entryX, entrySurfaceY, entryZ, 1, stairSteps,
+    (py - entrySurfaceY) / stairSteps,
+    0.78, 2.6, 'concreteDark',
+  );
+  const retainingLength = stair.run + 1.4;
+  const retainingX = entryX + stair.run / 2;
+  b.box(retainingX, (entrySurfaceY + py) / 2, entryZ - 1.7, retainingLength, entrySurfaceY - py, 0.3, 'concreteDark');
+  b.box(retainingX, (entrySurfaceY + py) / 2, entryZ + 1.7, retainingLength, entrySurfaceY - py, 0.3, 'concreteDark');
+  b.slab(cx - 12.5, py, entryZ, 7, 3.2, 0.35, 'concreteDark');
   b.slab(cx, py, cz - 6, 20, 14, 0.5, 'concreteDark');
   b.slab(cx, py + 4.2, cz - 6, 20, 14, 0.5, 'concreteDark');
   b.wallWithGaps(cx - 10, cz - 13, 20, 4.2, 0.5, 'x', 'concrete', [], 0, py);
   b.wallWithGaps(cx - 10, cz + 1, 20, 4.2, 0.5, 'x', 'concrete', [[8, 2.4]], 0, py);
-  b.wallWithGaps(cx - 10, cz - 13, 14, 4.2, 0.5, 'z', 'concrete', [], 0, py);
+  b.wallWithGaps(cx - 10, cz - 13, 14, 4.2, 0.5, 'z', 'concrete', [[7.7, 2.6]], 0, py);
   b.wallWithGaps(cx + 10, cz - 13, 14, 4.2, 0.5, 'z', 'concrete', [], 0, py);
   for (let i = 0; i < 3; i++) {
     b.cyl(cx - 6 + i * 6, py + 1.4, cz - 9, 1.4, 2.8, 'metalDark');
   }
   b.light(cx, py + 3.4, cz - 6, 0x9fe8ff, 1.6, 22);
   b.loot(cx + 4, py + 0.4, cz - 4);
+  // Author against the structure's measured floors. The former map-level
+  // guesses used terrainH and sat one chest in the north wall and the other
+  // below the pump floor, so finish-time placement validation removed both.
+  b.chest(cx + 5, gy + 0.3, cz + 4, 'elite');
+  b.chest(cx + 5, py + 0.3, cz - 4, 'vault');
 }
 
 function dock(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
@@ -439,6 +610,48 @@ function boathouse(b: WorldBuilder, cx: number, cz: number): void {
     x: cx, z: cz, baseY: gy, w: 12, d: 14, floors: 1, floorHeight: 5, wallMat: 'woodDark', trimMat: 'wood',
     doors: [[1, 5, 2.6]], interiorDividers: false, windows: false,
   });
+  // Break up the plain lake-facing box with a continuous eave, framed
+  // clerestory panes and grounded corner trim. All additions are shallow
+  // presentation pieces; the existing wall/door collider remains canonical.
+  const eaveY = gy + 4.82;
+  b.box(cx, eaveY, cz - 7.24, 12.7, 0.28, 0.3, 'metalExterior', 0, { noCollide: true });
+  b.box(cx, eaveY, cz + 7.24, 12.7, 0.28, 0.3, 'metalExterior', 0, { noCollide: true });
+  b.box(cx - 6.24, eaveY, cz, 0.3, 0.28, 14.2, 'metalExterior', 0, { noCollide: true });
+  b.box(cx + 6.24, eaveY, cz, 0.3, 0.28, 14.2, 'metalExterior', 0, { noCollide: true });
+  for (const paneX of [cx - 3.5, cx, cx + 3.5]) {
+    b.box(paneX, gy + 3.35, cz - 7.23, 2.45, 1.12, 0.06, 'windowCool', 0, { noCollide: true });
+    b.box(paneX, gy + 3.35, cz - 7.28, 0.1, 1.3, 0.08, 'metalExterior', 0, { noCollide: true });
+    for (const side of [-1, 1]) {
+      b.box(paneX + side * 1.28, gy + 3.35, cz - 7.3, 0.1, 1.34, 0.1,
+        'metalExterior', 0, { noCollide: true });
+      b.box(paneX, gy + 3.35 + side * 0.62, cz - 7.3, 2.66, 0.1, 0.1,
+        'metalExterior', 0, { noCollide: true });
+    }
+  }
+  // Fine battens stop the broad timber panel from reading as one stretched
+  // texture, while a real gutter/downpipe gives the lakeside wall a plausible
+  // weathering and drainage path.
+  for (const battenX of [cx - 5.1, cx - 1.75, cx + 1.75, cx + 5.1]) {
+    b.box(battenX, gy + 2.12, cz - 7.29, 0.055, 3.72, 0.07, 'wood', 0, { noCollide: true });
+  }
+  b.box(cx, gy + 4.58, cz - 7.38, 11.55, 0.12, 0.16, 'metalDark', 0, { noCollide: true });
+  b.cyl(cx + 5.45, gy + 2.3, cz - 7.42, 0.07, 4.55, 'metalDark', { segments: 10, noCollide: true });
+  b.box(cx + 5.45, gy + 0.16, cz - 7.08, 0.14, 0.14, 0.72, 'metalDark', 0, { noCollide: true });
+  for (const side of [-1, 1]) {
+    b.box(cx + side * 5.72, gy + 2.45, cz - 7.3, 0.24, 4.75, 0.24, 'wood', 0, { noCollide: true });
+  }
+  b.light(cx, gy + 4.1, cz - 7.6, 0x9fdfff, 0.72, 12);
+  // The east-wall door previously read as an unexplained grey cutout from
+  // the shore approach. A shallow, supported hood marks the service entry
+  // without changing the canonical doorway clearance.
+  const serviceDoorZ = cz - 0.7;
+  b.box(cx + 6.62, gy + 3.06, serviceDoorZ, 1.28, 0.16, 3.3, 'metalExterior', 0, { noCollide: true });
+  for (const side of [-1, 1]) {
+    b.box(cx + 6.28, gy + 2.57, serviceDoorZ + side * 1.36, 0.12, 0.98, 0.12,
+      'metalDark', 0, { noCollide: true });
+  }
+  b.box(cx + 6.7, gy + 2.88, serviceDoorZ, 0.08, 0.12, 1.25, 'windowCool', 0, { noCollide: true });
+  b.light(cx + 6.9, gy + 2.8, serviceDoorZ, 0x9fdfff, 0.58, 9);
   b.loot(cx - 2, gy + 0.4, cz + 2);
 }
 
@@ -542,15 +755,15 @@ function ford(b: WorldBuilder, cx: number, cz: number): void {
 }
 
 function meadowCamp(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
-  const gy = terrainH(cx, cz);
   for (let i = 0; i < 3; i++) {
     const tx = cx + rng.range(-8, 8);
     const tz = cz + rng.range(-8, 8);
-    b.box(tx, gy + 0.9, tz, 2.6, 1.8, 2.6, 'plasterOld', rng.angle());
-    b.platform(tx - 1.3, tx + 1.3, tz - 1.3, tz + 1.3, gy + 1.8);
+    const tentY = terrainH(tx, tz);
+    b.box(tx, tentY + 0.9, tz, 2.6, 1.8, 2.6, 'plasterOld', rng.angle());
+    b.platform(tx - 1.3, tx + 1.3, tz - 1.3, tz + 1.3, tentY + 1.8);
   }
   b.chest(cx + 10, terrainH(cx + 10, cz - 10) + 0.3, cz - 10, 'standard');
-  b.loot(cx - 4, gy + 0.4, cz + 5);
+  b.loot(cx - 4, terrainH(cx - 4, cz + 5) + 0.4, cz + 5);
 }
 
 function pumpHouse(b: WorldBuilder, cx: number, cz: number): void {
@@ -565,10 +778,67 @@ function pumpHouse(b: WorldBuilder, cx: number, cz: number): void {
 
 function watchRock(b: WorldBuilder, cx: number, cz: number): void {
   const gy = terrainH(cx, cz);
-  b.rock(cx, cz, gy, 4.2);
-  b.stairs(cx + 4.5, gy, cz, 3, 5, 0.6, 0.7, 2.2, 'rock');
-  b.platform(cx - 2.5, cx + 2.5, cz - 2.5, cz + 2.5, gy + 3.2);
-  b.chest(cx, gy + 3.5, cz, 'elite');
+  // The former 4.2x boulder enclosed the nominal lookout floor inside a
+  // 10 m-tall collider, while b.platform registered navigation without any
+  // physical/rendered deck. Build a supported, human-scale rock lookout.
+  b.rock(cx, cz, gy, 1);
+  const deckY = gy + 2.45;
+  b.slab(cx, deckY, cz, 5, 5, 0.35, 'rock');
+
+  const deckEastEdge = cx + 2.5;
+  let stairPlan = planStairs(8, 0.3, 0.7, 2.2);
+  let stairStartX = deckEastEdge + stairPlan.run;
+  let stairStartY = terrainH(stairStartX, cz);
+  for (let pass = 0; pass < 3; pass++) {
+    const rise = deckY - stairStartY;
+    const steps = Math.max(1, Math.ceil(rise / 0.34));
+    stairPlan = planStairs(steps, rise / steps, 0.7, 2.2);
+    stairStartX = deckEastEdge + stairPlan.run;
+    stairStartY = terrainH(stairStartX, cz);
+  }
+  const finalRise = deckY - stairStartY;
+  b.stairs(
+    stairStartX, stairStartY, cz, 3,
+    stairPlan.steps, finalRise / stairPlan.steps, stairPlan.stepD, stairPlan.width,
+    'rock',
+  );
+  // The lookout stair is fully exposed on both sides. A continuous rock
+  // soffit is supplied by WorldBuilder; slim weathered rails and repeated
+  // posts make the edge/load path readable without narrowing the collider.
+  const slope = Math.atan2(finalRise, stairPlan.run);
+  const slopeLength = Math.hypot(stairPlan.run, finalRise);
+  const railCentreX = stairStartX - stairPlan.run / 2;
+  for (const side of [-1, 1]) {
+    const railZ = cz + side * (stairPlan.width / 2 + 0.04);
+    for (const height of [0.5, 0.9]) {
+      b.box(
+        railCentreX,
+        stairStartY + finalRise / 2 + height,
+        railZ,
+        0.1,
+        0.1,
+        slopeLength,
+        'metalDark',
+        -Math.PI / 2,
+        { noCollide: true, pitch: -slope },
+      );
+    }
+    for (let post = 0; post <= 5; post++) {
+      const t = post / 5;
+      b.box(
+        stairStartX - stairPlan.run * t,
+        stairStartY + finalRise * t + 0.45,
+        railZ,
+        0.1,
+        0.9,
+        0.1,
+        'metalDark',
+        0,
+        { noCollide: true },
+      );
+    }
+  }
+  b.chest(cx, deckY + 0.3, cz, 'elite');
 }
 
 // ---------------------------------------------------------------------------
@@ -576,26 +846,20 @@ function watchRock(b: WorldBuilder, cx: number, cz: number): void {
 // ---------------------------------------------------------------------------
 
 function decorateEden(b: WorldBuilder, rng: Rng): void {
-  // Concrete service paths linking facility POIs (overlapping, partially
-  // sunk segments so the path reads continuous rather than floating tiles)
+  // Continuous terrain-following service paths replace overlapping square
+  // tiles. A broad dirt shoulder seats the narrower concrete ribbon in grass.
   const path = (x1: number, z1: number, x2: number, z2: number) => {
     const len = Math.hypot(x2 - x1, z2 - z1);
     const steps = Math.max(2, Math.round(len / 4.5));
+    const centre: Array<{ x: number; z: number; width: number }> = [];
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
       const px = x1 + (x2 - x1) * t + Math.sin(t * 8.3) * 2.6;
       const pz = z1 + (z2 - z1) * t + Math.cos(t * 6.7) * 2.4;
-      // Width jitter + gravel shoulders break the poured-stamp look.
-      const w = rng.range(4.6, 6.4);
-      b.box(px, terrainH(px, pz) + 0.04 - 0.21, pz, w, 0.5, w * rng.range(1.02, 1.18), 'concreteDark', rng.range(-0.12, 0.12), { noCollide: true });
-      if (i % 3 === 1) {
-        const sw = w * rng.range(1.4, 1.7);
-        b.box(
-          px + rng.range(-1.4, 1.4), terrainH(px, pz) - 0.14, pz + rng.range(-1.4, 1.4),
-          sw, 0.38, sw * rng.range(0.9, 1.15), 'dirt', rng.range(-0.35, 0.35), { noCollide: true },
-        );
-      }
+      centre.push({ x: px, z: pz, width: rng.range(4.6, 6.4) });
     }
+    b.surfacePath(centre.map((point) => ({ ...point, width: point.width * 1.38 })), 'dirt', 0.025);
+    b.surfacePath(centre, 'concrete', 0.045);
   };
   path(-95, -30, -55, 12);      // lab main → east wing
   path(-95, -30, -110, 100);    // complex → dormitories
@@ -604,6 +868,48 @@ function decorateEden(b: WorldBuilder, rng: Rng): void {
   path(-95, -30, -170, -120);   // complex → water treatment
   path(-60, -55, 10, -195);     // helipad → overlook
   path(60, 175, 160, 150);      // cabin → ford
+
+  // The south apron of the research complex used to be an uninterrupted
+  // grass sheet between two large laboratory wings. A terrain-following
+  // grated drain now carries storm water across the low side of the site,
+  // with regular access covers that make the route read as maintained civil
+  // infrastructure rather than a decorative stripe.
+  const facilityDrain: Array<{ x: number; z: number; width: number }> = [];
+  for (let x = -146; x <= -42; x += 8) {
+    facilityDrain.push({ x, z: 26.5 + Math.sin((x + 146) * 0.075) * 0.65, width: 1.65 });
+  }
+  b.surfacePath(facilityDrain, 'dirt', 0.018);
+  b.surfacePath(facilityDrain.map((point) => ({ ...point, width: 0.34 })), 'metalDark', 0.052);
+  for (const x of [-142, -117, -92, -67, -46]) {
+    const z = 26.5 + Math.sin((x + 146) * 0.075) * 0.65;
+    b.box(x, terrainH(x, z) + 0.085, z, 1.45, 0.1, 0.78, 'metalDark', 0, { noCollide: true });
+    b.box(x, terrainH(x, z) + 0.141, z, 1.02, 0.018, 0.44, 'paint', 0, { noCollide: true });
+  }
+
+  // A narrow maintenance spine joins the two wing service systems to the
+  // apron drain. Its irregular edge, inspection cabinets and marker lamps
+  // replace the scale-less lawn while leaving the central combat route open.
+  const serviceSpine: Array<{ x: number; z: number; width: number }> = [];
+  for (let x = -136; x <= -48; x += 8) {
+    serviceSpine.push({ x, z: 18 + Math.sin((x + 136) * 0.11) * 0.45, width: 1.9 });
+  }
+  b.surfacePath(serviceSpine.map((point) => ({ ...point, width: 2.85 })), 'dirt', 0.022);
+  b.surfacePath(serviceSpine, 'concreteDark', 0.047);
+  b.surfacePath(serviceSpine.map((point) => ({ ...point, width: 0.18 })), 'metalDark', 0.071);
+  for (const point of serviceSpine) {
+    const y = terrainH(point.x, point.z);
+    b.box(point.x, y + 0.083, point.z, 0.055, 0.018, 1.45, 'metalDark', 0, { noCollide: true });
+  }
+  for (const x of [-130, -112, -94, -76, -58]) {
+    const z = 19.8 + Math.sin((x + 136) * 0.11) * 0.45;
+    const y = terrainH(x, z);
+    b.box(x, y + 0.58, z, 1.6, 1.16, 0.78, 'metalDark', 0, { noCollide: true });
+    for (const louverY of [0.33, 0.58, 0.83]) {
+      b.box(x, y + louverY, z - 0.405, 1.15, 0.07, 0.04, 'metal', 0, { noCollide: true });
+    }
+    b.cyl(x + 1.2, y + 0.72, z, 0.08, 1.44, 'rust', { segments: 8, noCollide: true });
+    b.box(x + 1.2, y + 1.47, z, 0.22, 0.08, 0.22, 'signDimCyan', 0, { noCollide: true });
+  }
 
   // Rooftop solar arrays + conduit runs on facility roofs
   for (const g of [...b.def.geo]) {
@@ -629,13 +935,31 @@ function decorateEden(b: WorldBuilder, rng: Rng): void {
     }
   }
 
-  // Greenhouse interior growth: fern/flower beds handled by scatter; add vine posts
+  // Greenhouse interior growth: fern/flower beds are handled by scatter. Use
+  // supported trellises here; the old rock sphere on a single thin post read
+  // as a floating boulder rather than cultivated vegetation.
   for (let i = 0; i < 10; i++) {
     const gx = rng.range(-8, 34);
     const gz = rng.range(18, 44);
     const gy = terrainH(gx, gz);
-    b.cyl(gx, gy + 1.1, gz, 0.06, 2.2, 'metalDark');
-    b.sphere(gx, gy + 2.25, gz, rng.range(0.35, 0.6), 'rock', { noCollide: true });
+    const trellisW = rng.range(0.9, 1.25);
+    for (const side of [-1, 1]) {
+      b.cyl(gx + side * trellisW / 2, gy + 1.05, gz, 0.045, 2.1, 'metalDark');
+    }
+    b.box(gx, gy + 2.08, gz, trellisW + 0.14, 0.07, 0.07, 'metalDark', 0, { noCollide: true });
+    for (const side of [-0.3, 0, 0.3]) {
+      b.box(
+        gx + side * trellisW,
+        gy + rng.range(0.72, 1.42),
+        gz,
+        rng.range(0.16, 0.25),
+        rng.range(0.7, 1.25),
+        0.09,
+        'grass',
+        0,
+        { noCollide: true },
+      );
+    }
   }
 
   // Dock gear: mooring posts, fish crates, lanterns

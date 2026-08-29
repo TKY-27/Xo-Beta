@@ -4,7 +4,7 @@
  */
 
 import { planStairs, WorldBuilder } from '../builder';
-import type { MatKey } from '../types';
+import { ROCK_COLLIDER_RADIUS, type MatKey, type TerrainCutout } from '../types';
 import { Rng } from '../../core/rng';
 
 export interface BuildingOpts {
@@ -78,7 +78,76 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   const interiorStair = planStairs(requestedStairSteps, fh / requestedStairSteps, 0.62, 1.7);
   const hasInteriorStair = floors > 1 && interiorStair.run < o.d - 2;
   const stairX = x - hw + 1.4;
-  const stairZ = z - hd + 0.8;
+  // Leave a real standing-capsule landing behind the first tread. At 0.8 m
+  // from the back wall, the stair builder's 0.55 m lower anchor sat only
+  // 0.25 m from the wall centre and was necessarily embedded for a 0.42 m
+  // radius actor. The disconnected flight was previously masked by false
+  // long-distance jump edges across the room.
+  const stairZ = z - hd + 1.55;
+  const gapsOverlap = ([aStart, aWidth]: [number, number], [bStart, bWidth]: [number, number]): boolean =>
+    aStart < bStart + bWidth && bStart < aStart + aWidth;
+  const windowsWithoutDoorOverlap = (
+    windows: Array<[number, number]>,
+    doors: Array<[number, number]>,
+  ): Array<[number, number]> => windows.filter((window) =>
+    !doors.some((door) => gapsOverlap(window, door)));
+  const navDoorway = (doorX: number, doorZ: number, tx: number, tz: number, y: number) => {
+    const half = 0.05;
+    for (const side of [-0.75, 0, 0.75]) {
+      // Sample across the opening, not through the wall normal. The previous
+      // anchors all shared one lateral coordinate, so path selection could
+      // aim bots at a jamb even though the doorway centre itself was clear.
+      const px = doorX + tx * side;
+      const pz = doorZ + tz * side;
+      b.platform(px - half, px + half, pz - half, pz + half, y);
+    }
+  };
+  const addGroundFacadeWindow = (
+    side: 1 | 2 | 3,
+    offset: number,
+    width: number,
+    y0: number,
+    sillH: number,
+  ) => {
+    const paneH = 1.42;
+    const paneY = y0 + sillH + paneH / 2;
+    const surfaceOffset = t / 2 + 0.025;
+    if (side === 2) {
+      const paneX = x - hw + offset + width / 2;
+      const paneZ = z - hd - surfaceOffset;
+      b.box(paneX, paneY, paneZ, width, paneH, 0.045, 'windowCool', 0, { noCollide: true });
+      b.box(paneX, paneY, paneZ - 0.026, 0.075, paneH + 0.08, 0.055, trim, 0, { noCollide: true });
+      b.box(paneX, paneY, paneZ - 0.026, width + 0.08, 0.075, 0.055, trim, 0, { noCollide: true });
+    } else {
+      const paneX = x + (side === 1 ? hw + surfaceOffset : -hw - surfaceOffset);
+      const paneZ = z - hd + offset + width / 2;
+      b.box(paneX, paneY, paneZ, 0.045, paneH, width, 'windowCool', 0, { noCollide: true });
+      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, paneH + 0.08, 0.075, trim, 0, { noCollide: true });
+      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, 0.075, width + 0.08, trim, 0, { noCollide: true });
+    }
+  };
+  const addUpperWindowGlass = (
+    side: 0 | 1 | 2 | 3,
+    offset: number,
+    width: number,
+    y0: number,
+    sillH: number,
+  ) => {
+    const paneH = Math.max(0.8, fh - sillH - 0.5);
+    const paneY = y0 + sillH + paneH / 2;
+    const inset = t / 2 + 0.045;
+    if (side === 0 || side === 2) {
+      const paneX = x - hw + offset + width / 2;
+      const paneZ = z + (side === 0 ? hd - inset : -hd + inset);
+      b.box(paneX, paneY, paneZ, width - 0.08, paneH, 0.035, 'glass', 0, { noCollide: true });
+      b.box(paneX, paneY, paneZ + (side === 0 ? 0.022 : -0.022), 0.055, paneH, 0.045, trim, 0, { noCollide: true });
+    } else {
+      const paneX = x + (side === 1 ? hw - inset : -hw + inset);
+      const paneZ = z - hd + offset + width / 2;
+      b.box(paneX, paneY, paneZ, 0.035, paneH, width - 0.08, 'glass', 0, { noCollide: true });
+      b.box(paneX + (side === 1 ? 0.022 : -0.022), paneY, paneZ, 0.045, paneH, 0.055, trim, 0, { noCollide: true });
+    }
+  };
 
   // Foundation slab — extends deep below grade so buildings on sloping
   // terrain (eden/oldfront heightfields) never show a floating downhill edge;
@@ -90,15 +159,22 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
 
     // Floor slab (skip ground — foundation serves)
     if (f > 0) {
+      const stairHole = {
+        minX: stairX - interiorStair.width / 2 - 0.28,
+        maxX: stairX + interiorStair.width / 2 + 0.28,
+        minZ: stairZ - 0.18,
+        maxZ: stairZ + interiorStair.run + 0.35,
+      };
       if (hasInteriorStair) {
-        slabWithHole(b, x, y0 + 0.18, z, o.w, o.d, 0.35, floorMat, {
-          minX: stairX - interiorStair.width / 2 - 0.28,
-          maxX: stairX + interiorStair.width / 2 + 0.28,
-          minZ: stairZ - 0.18,
-          maxZ: stairZ + interiorStair.run + 0.35,
+        slabWithHole(b, x, y0 + 0.18, z, o.w, o.d, 0.35, floorMat, stairHole);
+        slabWithHole(b, x, y0 - 0.18, z, o.w - 0.5, o.d - 0.5, 0.04, 'interiorCeiling', stairHole, {
+          noCollide: true,
         });
       } else {
         b.slab(x, y0 + 0.18, z, o.w, o.d, 0.35, floorMat);
+        b.box(x, y0 - 0.2, z, o.w - 0.5, 0.04, o.d - 0.5, 'interiorCeiling', 0, {
+          noCollide: true,
+        });
       }
     }
 
@@ -127,7 +203,6 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       [o.w * 0.28 - 0.75, 1.5],
       [o.w * 0.72 - 0.75, 1.5],
     ];
-
     if (f === 0) {
       // Ground-floor glazing must be a real opening. Previously the opaque
       // front wall and glass pane occupied the same depth, causing
@@ -135,16 +210,61 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       // then place glass just inside the opening below.
       b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat,
         o.windows === false ? frontDoors : [...frontDoors, ...groundWindowGapsFront],
-        o.windows === false ? 0 : sillH, y0);
+        o.windows === false ? 0 : sillH, y0,
+        o.windows === false ? undefined : windowsWithoutDoorOverlap(groundWindowGapsFront, frontDoors));
       b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat, backDoors, 0, y0);
       b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat, rightDoors, 0, y0);
       b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat, leftDoors, 0, y0);
+      if (o.windows !== false) {
+        // Ground-floor side and rear walls remain structurally solid to avoid
+        // changing indoor collision/nav, but receive shallow, non-colliding
+        // glazing and mullions. This removes the repeated blank-box facade
+        // without implying a new traversable opening.
+        for (const [offset, width] of windowsWithoutDoorOverlap(groundWindowGapsFront, backDoors)) {
+          addGroundFacadeWindow(2, offset, width, y0, sillH);
+        }
+        const sideWindows: Array<[number, number]> = [
+          [o.d * 0.28 - 0.75, 1.5],
+          [o.d * 0.72 - 0.75, 1.5],
+        ];
+        for (const [offset, width] of windowsWithoutDoorOverlap(sideWindows, rightDoors)) {
+          addGroundFacadeWindow(1, offset, width, y0, sillH);
+        }
+        for (const [offset, width] of windowsWithoutDoorOverlap(sideWindows, leftDoors)) {
+          addGroundFacadeWindow(3, offset, width, y0, sillH);
+        }
+      }
+      const floorY = y0 + 0.08;
+      for (const [side, offset, width] of o.doors ?? []) {
+        if (side === 0) navDoorway(x - hw + offset + width / 2, z + hd, 1, 0, floorY);
+        else if (side === 2) navDoorway(x - hw + offset + width / 2, z - hd, 1, 0, floorY);
+        else if (side === 1) navDoorway(x + hw, z - hd + offset + width / 2, 0, 1, floorY);
+        else navDoorway(x - hw, z - hd + offset + width / 2, 0, 1, floorY);
+      }
     } else {
       // Upper floors: windows (sill gaps) all around
-      b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat, [...frontDoors, ...windowGapsFront], sillH, y0);
-      b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat, [...backDoors, ...windowGapsBack], sillH, y0);
-      b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat, [...rightDoors, ...windowGapsRight], sillH, y0);
-      b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat, [...leftDoors, ...windowGapsLeft], sillH, y0);
+      b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat,
+        windowGapsFront, sillH, y0, windowGapsFront);
+      b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat,
+        windowGapsBack, sillH, y0, windowGapsBack);
+      b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat,
+        windowGapsRight, sillH, y0, windowGapsRight);
+      b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat,
+        windowGapsLeft, sillH, y0, windowGapsLeft);
+      if (o.windows !== false) {
+        for (const [offset, width] of windowGapsFront) {
+          addUpperWindowGlass(0, offset, width, y0, sillH);
+        }
+        for (const [offset, width] of windowGapsBack) {
+          addUpperWindowGlass(2, offset, width, y0, sillH);
+        }
+        for (const [offset, width] of windowGapsRight) {
+          addUpperWindowGlass(1, offset, width, y0, sillH);
+        }
+        for (const [offset, width] of windowGapsLeft) {
+          addUpperWindowGlass(3, offset, width, y0, sillH);
+        }
+      }
     }
 
     // Interior divider with doorway (alternating orientation per floor)
@@ -153,8 +273,22 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       const gapStart = o.d * 0.42;
       if (f % 2 === 0) {
         b.wallWithGaps(x - hw + divOffset, z - hd + t, o.d - t * 2, fh, 0.3, 'z', trim, [[gapStart, 1.6]], 0, y0);
+        navDoorway(
+          x - hw + divOffset,
+          z - hd + t + gapStart + 0.8,
+          1,
+          0,
+          y0 + (f > 0 ? 0.18 : 0.08),
+        );
       } else {
         b.wallWithGaps(x - hw + t, z - hd + divOffset, o.w - t * 2, fh, 0.3, 'x', trim, [[gapStart, 1.6]], 0, y0);
+        navDoorway(
+          x - hw + t + gapStart + 0.8,
+          z - hd + divOffset,
+          0,
+          1,
+          y0 + (f > 0 ? 0.18 : 0.08),
+        );
       }
     }
 
@@ -168,6 +302,26 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   // Roof
   const roofY = baseY + floors * fh + 0.2;
   b.slab(x, roofY, z, o.w + 0.5, o.d + 0.5, 0.35, roofMat);
+  // The exterior roof material used to remain visible on its underside,
+  // giving occupied rooms a black repeated tile/grid instead of an interior
+  // ceiling. Keep the physical roof untouched and add an inset finish with
+  // shallow non-colliding beams for indoor scale and material separation.
+  // roofY is the slab's top surface (WorldBuilder.slab), not its centre.
+  // Place the finish below the 0.35 m roof volume with a small separation;
+  // the previous centre-style offset embedded both finish and beams inside
+  // the roof and left the exterior roof texture visible from the room.
+  const ceilingY = roofY - 0.38;
+  b.box(x, ceilingY, z, Math.max(1, o.w - 0.5), 0.04, Math.max(1, o.d - 0.5), 'interiorCeiling', 0, {
+    noCollide: true,
+  });
+  if (o.w >= 8 && o.d >= 8) {
+    const beamY = roofY - 0.47;
+    const beamCount = Math.max(2, Math.min(5, Math.round(o.d / 3.8)));
+    for (let i = 1; i <= beamCount; i++) {
+      const bz = z - hd + (o.d * i) / (beamCount + 1);
+      b.box(x, beamY, bz, o.w - 0.65, 0.12, 0.14, trim, 0, { noCollide: true });
+    }
+  }
   if (o.parapet !== false) {
     const ph = 0.8;
     b.box(x, roofY + ph / 2, z + hd + 0.25, o.w + 0.5, ph, 0.25, trim);
@@ -182,25 +336,140 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
 
   // Exterior access staircase to the roof (along the left wall)
   if (o.roofAccess) {
+    // structureBaseY levels the building to its highest footprint sample;
+    // exterior stair posts can stand on the downhill side. Give every visible
+    // support a common embedded footing instead of stopping at that level pad.
+    const fireEscapeFoundationDepth = 1.6;
+    const fireEscapeFoundationY = baseY - fireEscapeFoundationDepth;
     const ph = o.parapet === false ? 0 : 0.8;
     const totalRise = roofY - baseY;
     const steps = Math.ceil(totalRise / 0.52);
     const stepH = totalRise / steps;
     const stair = planStairs(steps, stepH, 0.64, 1.9);
-    const runLen = stair.run;
-    if (runLen < o.d + 30) {
-      // straight run alongside left wall, front -> back
-      const zStart = z + hd - 0.5;
-      b.stairs(x - hw - 1.35, baseY, zStart, 2,
-        stair.steps, stair.stepH, stair.stepD, stair.width, 'metalDark');
-      // landing bridging the parapet gap where the stair meets the roof
-      const zLand = zStart - runLen;
-      b.slab(x - hw - 0.6, roofY + 0.05, zLand, 2.4, 2.4, 0.25, 'metalDark');
-      // cut the left parapet around the landing (or leave open edge)
-      if (ph > 0) {
-        b.wallWithGaps(x - hw - 0.25, z - hd - 0.25, o.d + 0.5, ph, 0.25, 'z', trim,
-          [[Math.max(0, zLand - 1.4 - (z - hd - 0.25)), 2.8]], 0, roofY);
+    // Fit every flight between the building's front/back edges. Tall or
+    // shallow buildings use switchbacks instead of letting a single run end
+    // in empty space far beyond the roof.
+    const frontZ = z + hd - 1.8;
+    const usableRun = Math.max(3.2, o.d - 3.6);
+    const maxStepsPerFlight = Math.max(3, Math.floor(usableRun / stair.stepD));
+    const flightCount = Math.ceil(stair.steps / maxStepsPerFlight);
+    const innerStairX = x - hw - stair.width / 2 - 0.35;
+    const outerStairX = innerStairX - stair.width - 0.55;
+    const landingCenterX = (innerStairX + outerStairX) / 2;
+    const landingWidth = innerStairX - outerStairX + stair.width + 0.4;
+    // A real bottom landing gives the stair sampler a capsule-clear node that
+    // connects to the surrounding ground grid instead of an isolated point
+    // trapped between the first riser and the fire-escape posts.
+    b.slab(outerStairX, baseY + 0.04, frontZ + 1, stair.width + 0.5, 2, 0.2, 'metalExterior');
+    let remainingSteps = stair.steps;
+    let currentY = baseY;
+    let currentZ = frontZ;
+    let topStairX = outerStairX;
+    for (let flight = 0; flight < flightCount; flight++) {
+      const flightsLeft = flightCount - flight;
+      const flightSteps = Math.ceil(remainingSteps / flightsLeft);
+      const dir = flight % 2 === 0 ? 2 : 0;
+      const flightX = flight % 2 === 0 ? outerStairX : innerStairX;
+      topStairX = flightX;
+      const flightPlan = b.stairs(
+        flightX,
+        currentY,
+        currentZ,
+        dir,
+        flightSteps,
+        stair.stepH,
+        stair.stepD,
+        stair.width,
+        'metalExterior',
+      );
+      const railSide = flight % 2 === 0 ? -1 : 1;
+      const railX = flightX + railSide * (stair.width / 2 + 0.055);
+      const travelSign = dir === 0 ? 1 : -1;
+      const railPostSteps = new Set<number>();
+      for (let step = 0; step <= flightSteps; step += 3) railPostSteps.add(step);
+      railPostSteps.add(flightSteps);
+      for (const step of [...railPostSteps].sort((a, b2) => a - b2)) {
+        const railZ = currentZ + travelSign * step * stair.stepD;
+        const railY = currentY + step * stair.stepH + 0.58;
+        b.box(railX, railY, railZ, 0.085, 1.05, 0.085, 'metalExterior', 0, { noCollide: true });
       }
+      // One true sloped handrail joins the posts. Horizontal per-step bars
+      // read as detached floating strips at close range.
+      const railRise = flightSteps * stair.stepH;
+      const railRun = flightSteps * stair.stepD;
+      b.box(
+        railX,
+        currentY + railRise / 2 + 1.1,
+        currentZ + travelSign * railRun / 2,
+        0.09,
+        0.09,
+        Math.hypot(railRun, railRise) + 0.08,
+        'metalExterior',
+        0,
+        {
+          noCollide: true,
+          pitch: -travelSign * Math.atan2(railRise, railRun),
+        },
+      );
+      currentZ += (dir === 0 ? 1 : -1) * flightPlan.run;
+      currentY += flightPlan.totalRise;
+      remainingSteps -= flightSteps;
+      if (flight < flightCount - 1) {
+        b.slab(landingCenterX, currentY + 0.05, currentZ, landingWidth, 2.4, 0.25, 'metalExterior');
+        const nextTravelSign = (flight + 1) % 2 === 0 ? -1 : 1;
+        // The switchback opens toward the next flight. Guard the opposite
+        // landing edge so the rail alternates with the stair direction.
+        const guardedZ = currentZ - nextTravelSign * 1.16;
+        b.box(landingCenterX, currentY + 1.05, guardedZ, landingWidth, 0.09, 0.09, 'metalExterior', 0, { noCollide: true });
+        for (const landingX of [landingCenterX - landingWidth / 2 + 0.08, landingCenterX + landingWidth / 2 - 0.08]) {
+          b.box(landingX, currentY + 0.55, guardedZ, 0.085, 1.05, 0.085, 'metalExterior', 0, { noCollide: true });
+        }
+        const supportHeight = currentY - fireEscapeFoundationY;
+        if (supportHeight > 0.4) {
+          b.box(outerStairX, fireEscapeFoundationY + supportHeight / 2, currentZ, 0.14, supportHeight, 0.14, 'metalExterior', 0, { noCollide: true });
+        }
+      }
+    }
+    const zLand = currentZ;
+    // Top landing bridges the wall gap and physically overlaps the roof edge.
+    const roofLandingInnerEdge = x - hw + 0.25;
+    const roofLandingOuterEdge = topStairX - stair.width / 2 - 0.2;
+    b.slab(
+      (roofLandingInnerEdge + roofLandingOuterEdge) / 2,
+      roofY + 0.05,
+      zLand,
+      roofLandingInnerEdge - roofLandingOuterEdge,
+      2.6,
+      0.25,
+      'metalExterior',
+    );
+    // Guard and support the exposed outer edge of the roof bridge. These are
+    // visual-only so the authored traversal width remains unchanged.
+    b.box(roofLandingOuterEdge, roofY + 1.05, zLand, 0.09, 0.09, 2.6, 'metalExterior', 0, { noCollide: true });
+    for (const postZ of [zLand - 1.1, zLand + 1.1]) {
+      b.box(roofLandingOuterEdge, roofY + 0.55, postZ, 0.085, 1.05, 0.085, 'metalExterior', 0, { noCollide: true });
+    }
+    const topSupportHeight = roofY - fireEscapeFoundationY;
+    b.box(
+      roofLandingOuterEdge,
+      fireEscapeFoundationY + topSupportHeight / 2,
+      zLand,
+      0.14,
+      topSupportHeight,
+      0.14,
+      'metalExterior',
+      0,
+      { noCollide: true },
+    );
+    if (ph > 0) {
+      b.wallWithGaps(x - hw - 0.25, z - hd - 0.25, o.d + 0.5, ph, 0.25, 'z', trim,
+        [[Math.max(0, zLand - 1.5 - (z - hd - 0.25)), 3]], 0, roofY);
+    }
+    // Exterior fire-escape posts make every landing visibly supported.
+    const postHeight = totalRise + fireEscapeFoundationDepth;
+    for (const postZ of [frontZ, z - hd + 1.8]) {
+      b.box(outerStairX - stair.width / 2, fireEscapeFoundationY + postHeight / 2, postZ, 0.18, postHeight, 0.18, 'metalExterior');
+      b.box(innerStairX + stair.width / 2, fireEscapeFoundationY + postHeight / 2, postZ, 0.18, postHeight, 0.18, 'metalExterior');
     }
   }
 
@@ -213,7 +482,12 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   // Windows glass on ground floor front
   if (o.windows !== false) {
     const gy = baseY + 1.1 + (fh - 1.1) / 2;
+    const frontDoors = (o.doors ?? [])
+      .filter((door) => door[0] === 0)
+      .map((door) => [door[1], door[2]] as [number, number]);
     for (let i = 0; i < 2; i++) {
+      const windowGap: [number, number] = [o.w * (0.28 + i * 0.44) - 0.75, 1.5];
+      if (frontDoors.some((door) => gapsOverlap(windowGap, door))) continue;
       const wx = x - hw + o.w * (0.28 + i * 0.44);
       b.glassPane(wx, gy, z + hd - t / 2 - 0.08, 1.5, fh - 1.6, 'x');
     }
@@ -227,7 +501,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   }
 }
 
-function slabWithHole(
+export function slabWithHole(
   b: WorldBuilder,
   x: number,
   yTop: number,
@@ -237,6 +511,7 @@ function slabWithHole(
   thickness: number,
   mat: MatKey,
   hole: { minX: number; maxX: number; minZ: number; maxZ: number },
+  opts?: { noCollide?: boolean },
 ): void {
   const minX = x - width / 2;
   const maxX = x + width / 2;
@@ -248,7 +523,21 @@ function slabWithHole(
   const hz1 = Math.max(hz0, Math.min(maxZ, hole.maxZ));
   const add = (x0: number, x1: number, z0: number, z1: number) => {
     if (x1 - x0 < 0.05 || z1 - z0 < 0.05) return;
-    b.slab((x0 + x1) / 2, yTop, (z0 + z1) / 2, x1 - x0, z1 - z0, thickness, mat);
+    if (opts?.noCollide) {
+      b.box(
+        (x0 + x1) / 2,
+        yTop - thickness / 2,
+        (z0 + z1) / 2,
+        x1 - x0,
+        thickness,
+        z1 - z0,
+        mat,
+        0,
+        { noCollide: true },
+      );
+    } else {
+      b.slab((x0 + x1) / 2, yTop, (z0 + z1) / 2, x1 - x0, z1 - z0, thickness, mat);
+    }
   };
   add(minX, hx0, minZ, maxZ);
   add(hx1, maxX, minZ, maxZ);
@@ -261,8 +550,39 @@ function hashOf(x: number, z: number): number {
 }
 
 /** Flat ground plane with walkable platform registration. */
-export function addGround(b: WorldBuilder, size: number, mat: MatKey, y = 0, registerPlatform = true): void {
-  b.box(0, y - 1, 0, size + 200, 2, size + 200, mat, 0, { floor: registerPlatform });
+export function addGround(
+  b: WorldBuilder,
+  size: number,
+  mat: MatKey,
+  y = 0,
+  registerPlatform = true,
+  cutouts: TerrainCutout[] = [],
+): void {
+  if (cutouts.length === 0) {
+    b.box(0, y - 1, 0, size + 200, 2, size + 200, mat, 0, { terrain: true });
+    if (registerPlatform) b.platform(-size / 2, size / 2, -size / 2, size / 2, y);
+    return;
+  }
+  for (const cutout of cutouts) b.terrainCutout(cutout);
+  const half = (size + 200) / 2;
+  const uniqueSorted = (values: number[]) => [...new Set(values)]
+    .filter((value) => value >= -half && value <= half)
+    .sort((a, b) => a - b);
+  const xs = uniqueSorted([-half, ...cutouts.flatMap((hole) => [hole.minX, hole.maxX]), half]);
+  const zs = uniqueSorted([-half, ...cutouts.flatMap((hole) => [hole.minZ, hole.maxZ]), half]);
+  for (let xi = 0; xi < xs.length - 1; xi++) {
+    for (let zi = 0; zi < zs.length - 1; zi++) {
+      const minX = xs[xi]!;
+      const maxX = xs[xi + 1]!;
+      const minZ = zs[zi]!;
+      const maxZ = zs[zi + 1]!;
+      const cx = (minX + maxX) / 2;
+      const cz = (minZ + maxZ) / 2;
+      if (cutouts.some((hole) => cx >= hole.minX && cx <= hole.maxX && cz >= hole.minZ && cz <= hole.maxZ)) continue;
+      b.box(cx, y - 1, cz, maxX - minX, 2, maxZ - minZ, mat, 0, { terrain: true });
+    }
+  }
+  if (registerPlatform) b.platform(-size / 2, size / 2, -size / 2, size / 2, y);
 }
 
 /** Scatter trees avoiding building rectangles (simple min-distance check). */
@@ -292,11 +612,17 @@ export function scatterRocks(
 ): void {
   let placed = 0;
   let attempts = 0;
-  while (placed < count && attempts++ < count * 10) {
+  while (placed < count && attempts++ < count * 20) {
     const x = rng.range(area.minX, area.maxX);
     const z = rng.range(area.minZ, area.maxZ);
-    if (avoid.some((a) => Math.hypot(a.x - x, a.z - z) < a.r)) continue;
-    b.rock(x, z, heightAt ? heightAt(x, z) : 0, rng.range(0.6, 2.4));
+    const scale = rng.range(0.6, 2.4);
+    const radius = ROCK_COLLIDER_RADIUS * scale;
+    if (avoid.some((a) => Math.hypot(a.x - x, a.z - z) < a.r + radius)) continue;
+    if (b.def.rocks.some((rock) => (
+      Math.hypot(rock.x - x, rock.z - z)
+        < (ROCK_COLLIDER_RADIUS * rock.scale + radius) * 0.82
+    ))) continue;
+    b.rock(x, z, heightAt ? heightAt(x, z) : 0, scale);
     placed++;
   }
 }

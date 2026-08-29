@@ -74,6 +74,8 @@ export interface ActorHitMeta {
 export interface WorldHitMeta {
   kind: 'world';
   material?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'water' | 'foliage';
+  /** True only for the finished terrain surface, never for roofs/floors. */
+  terrain?: boolean;
 }
 export interface DestructibleHitMeta {
   kind: 'destructible';
@@ -81,6 +83,15 @@ export interface DestructibleHitMeta {
   material: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'water' | 'foliage';
 }
 export type ColliderMeta = ActorHitMeta | WorldHitMeta | DestructibleHitMeta;
+
+export interface CharacterPenetration {
+  collider: RAPIER.Collider;
+  meta: WorldHitMeta | DestructibleHitMeta;
+  /** Positive overlap depth in world units. */
+  depth: number;
+  /** World-space normal pointing out of the character capsule. */
+  normal: { x: number; y: number; z: number };
+}
 
 let rapierReady: Promise<void> | null = null;
 
@@ -94,6 +105,8 @@ export async function initPhysics(): Promise<void> {
 export class PhysicsWorld {
   readonly world: RAPIER.World;
   private meta = new WeakMap<RAPIER.Collider, ColliderMeta>();
+  private readonly characterShape = new RAPIER.Capsule(MOVE.capsuleHalfHeight, MOVE.capsuleRadius);
+  private readonly identityRotation = { x: 0, y: 0, z: 0, w: 1 } as const;
   private disposed = false;
 
   constructor(gravityY = -MOVE.gravity) {
@@ -129,6 +142,7 @@ export class PhysicsWorld {
     hx: number, hy: number, hz: number,
     yaw = 0,
     material: WorldHitMeta['material'] = 'stone',
+    terrain = false,
   ): RAPIER.Collider {
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.fixed().setTranslation(cx, cy, cz).setRotation(quatFromYaw(yaw)),
@@ -138,6 +152,40 @@ export class PhysicsWorld {
       .setRestitution(0)
       .setCollisionGroups(GROUPS.worldStatic);
     const collider = this.world.createCollider(desc, body);
+    this.setMeta(collider, { kind: 'world', material, terrain });
+    return collider;
+  }
+
+  addStaticCylinder(
+    cx: number, cy: number, cz: number,
+    halfHeight: number, radius: number,
+    material: WorldHitMeta['material'] = 'stone',
+  ): RAPIER.Collider {
+    const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(cx, cy, cz));
+    const collider = this.world.createCollider(
+      RAPIER.ColliderDesc.cylinder(halfHeight, radius)
+        .setFriction(1.0)
+        .setRestitution(0)
+        .setCollisionGroups(GROUPS.worldStatic),
+      body,
+    );
+    this.setMeta(collider, { kind: 'world', material });
+    return collider;
+  }
+
+  addStaticSphere(
+    cx: number, cy: number, cz: number,
+    radius: number,
+    material: WorldHitMeta['material'] = 'stone',
+  ): RAPIER.Collider {
+    const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(cx, cy, cz));
+    const collider = this.world.createCollider(
+      RAPIER.ColliderDesc.ball(radius)
+        .setFriction(1.0)
+        .setRestitution(0)
+        .setCollisionGroups(GROUPS.worldStatic),
+      body,
+    );
     this.setMeta(collider, { kind: 'world', material });
     return collider;
   }
@@ -194,7 +242,26 @@ export class PhysicsWorld {
       .setFriction(1.0)
       .setCollisionGroups(GROUPS.worldStatic);
     const collider = this.world.createCollider(desc, body);
-    this.setMeta(collider, { kind: 'world', material });
+    this.setMeta(collider, { kind: 'world', material, terrain: true });
+  }
+
+  /** Add static authored terrain triangles when a heightfield needs openings. */
+  addStaticTrimesh(
+    vertices: Float32Array,
+    indices: Uint32Array,
+    material: WorldHitMeta['material'] = 'dirt',
+    terrain = false,
+  ): RAPIER.Collider {
+    const body = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    const collider = this.world.createCollider(
+      RAPIER.ColliderDesc.trimesh(vertices, indices)
+        .setFriction(1.0)
+        .setRestitution(0)
+        .setCollisionGroups(GROUPS.worldStatic),
+      body,
+    );
+    this.setMeta(collider, { kind: 'world', material, terrain });
+    return collider;
   }
 
   // -------------------------------------------------------------------------
@@ -265,6 +332,184 @@ export class PhysicsWorld {
   surfaceAt(x: number, z: number, fromY: number, maxDrop = 300): number | null {
     const hit = this.raycast(x, fromY, z, 0, -1, 0, maxDrop, GROUPS.rayWorldOnly);
     return hit ? hit.point.y : null;
+  }
+
+  /**
+   * Finished terrain height without confusing a roof, bridge or interior floor
+   * for the world skin. QA uses this to detect a capsule below a one-sided
+   * heightfield even when ordinary overlap and support queries appear clear.
+   */
+  terrainSurfaceAt(x: number, z: number, fromY = 400, maxDrop = 500): number | null {
+    const ray = new RAPIER.Ray({ x, y: fromY, z }, { x: 0, y: -1, z: 0 });
+    const hit = this.world.castRayAndGetNormal(
+      ray,
+      maxDrop,
+      true,
+      undefined,
+      GROUPS.rayWorldOnly,
+      undefined,
+      undefined,
+      (collider) => {
+        const meta = this.metaOf(collider);
+        return meta?.kind === 'world' && meta.terrain === true;
+      },
+    );
+    return hit ? fromY - hit.timeOfImpact : null;
+  }
+
+  /**
+   * Measure material overlap between a standing actor capsule and world solids.
+   *
+   * Point rays cannot prove that a character fits beside a wall, in a doorway,
+   * or under an overhang. This volume query is the authoritative placement and
+   * regression invariant for spawns, navigation nodes and traversal targets.
+   */
+  characterPenetrationsAt(
+    x: number,
+    bodyCenterY: number,
+    z: number,
+    excludeBody?: RAPIER.RigidBody,
+    tolerance = 0.005,
+  ): CharacterPenetration[] {
+    const position = { x, y: bodyCenterY, z };
+    const penetrations: CharacterPenetration[] = [];
+    this.world.intersectionsWithShape(
+      position,
+      this.identityRotation,
+      this.characterShape,
+      (collider) => {
+        const meta = this.metaOf(collider);
+        if (!meta || (meta.kind !== 'world' && meta.kind !== 'destructible')) return true;
+        const contact = this.characterShape.contactShape(
+          position,
+          this.identityRotation,
+          collider.shape,
+          collider.translation(),
+          collider.rotation(),
+          0,
+        );
+        if (contact && contact.distance < -tolerance) {
+          penetrations.push({
+            collider,
+            meta,
+            depth: -contact.distance,
+            normal: {
+              x: contact.normal1.x,
+              y: contact.normal1.y,
+              z: contact.normal1.z,
+            },
+          });
+        }
+        return true;
+      },
+      undefined,
+      GROUPS.actor,
+      undefined,
+      excludeBody,
+    );
+    return penetrations;
+  }
+
+  isCharacterPositionClear(
+    x: number,
+    bodyCenterY: number,
+    z: number,
+    excludeBody?: RAPIER.RigidBody,
+    tolerance = 0.005,
+  ): boolean {
+    return this.characterPenetrationsAt(x, bodyCenterY, z, excludeBody, tolerance).length === 0;
+  }
+
+  /**
+   * Test the complete standing capsule along a straight world-space segment.
+   * Used for authored navigation links and forced traversal paths where a
+   * centre ray can miss doorway jambs, wall corners and low overhangs.
+   */
+  isCharacterSweepClear(
+    from: { x: number; y: number; z: number },
+    to: { x: number; y: number; z: number },
+    excludeBody?: RAPIER.RigidBody,
+    targetDistance = 0.005,
+  ): boolean {
+    if (!this.isCharacterPositionClear(from.x, from.y, from.z, excludeBody, targetDistance) ||
+        !this.isCharacterPositionClear(to.x, to.y, to.z, excludeBody, targetDistance)) {
+      return false;
+    }
+    const velocity = {
+      x: to.x - from.x,
+      y: to.y - from.y,
+      z: to.z - from.z,
+    };
+    if (Math.hypot(velocity.x, velocity.y, velocity.z) < 1e-6) return true;
+    const hit = this.world.castShape(
+      from,
+      this.identityRotation,
+      velocity,
+      this.characterShape,
+      targetDistance,
+      1,
+      true,
+      undefined,
+      GROUPS.actor,
+      undefined,
+      excludeBody,
+      (collider) => {
+        const meta = this.metaOf(collider);
+        return meta?.kind === 'world' || meta?.kind === 'destructible';
+      },
+    );
+    return hit === null;
+  }
+
+  /**
+   * Resolve a standing placement on the requested floor layer without ever
+   * forcing the actor into a wall edge or prop. Nearby candidates may follow
+   * modest terrain slope, but cannot jump to an unrelated roof or floor.
+   */
+  findClearStandingPlacement(
+    x: number,
+    supportY: number,
+    z: number,
+    excludeBody?: RAPIER.RigidBody,
+    maxRadius = 2.2,
+  ): { x: number; y: number; z: number } | null {
+    const radii = [0, 0.55, 1.1, 1.65, maxRadius];
+    for (const radius of radii) {
+      const samples = radius === 0 ? 1 : 12;
+      for (let i = 0; i < samples; i++) {
+        const angle = (i / samples) * Math.PI * 2;
+        const px = x + Math.cos(angle) * radius;
+        const pz = z + Math.sin(angle) * radius;
+        // Never trust a caller-provided support height without proving that a
+        // world surface exists on that layer. Heightfields are one-sided, so
+        // an unchecked support below terrain can appear volume-clear and put
+        // a teleported actor underneath the entire map.
+        const measured = this.surfaceAt(px, pz, supportY + 1.25, 2.5);
+        if (measured === null || Math.abs(measured - supportY) > 0.8) continue;
+        const py = measured + CAPSULE_CENTER_OFFSET + 0.05;
+        if (this.isCharacterPositionClear(px, py, pz, excludeBody)) return { x: px, y: py, z: pz };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Prove a swimming pose whose capsule centre sits at the authored water
+   * surface. Heightfields are one-sided, so an overlap query alone can accept
+   * a capsule hidden immediately below dry terrain; check the finished terrain
+   * surface against the capsule bottom as a separate invariant.
+   */
+  findClearSwimmingPlacement(
+    x: number,
+    waterSurfaceY: number,
+    z: number,
+    excludeBody?: RAPIER.RigidBody,
+  ): { x: number; y: number; z: number } | null {
+    const bodyCenterY = waterSurfaceY - MOVE.swimSurfaceCenterDepth;
+    if (!this.isCharacterPositionClear(x, bodyCenterY, z, excludeBody)) return null;
+    const terrainY = this.terrainSurfaceAt(x, z, waterSurfaceY + 20, 40);
+    if (terrainY !== null && terrainY > bodyCenterY - CAPSULE_CENTER_OFFSET + 0.05) return null;
+    return { x, y: bodyCenterY, z };
   }
 
   // -------------------------------------------------------------------------
@@ -385,6 +630,10 @@ export class CharBody {
     this.position.z = z;
     this.body.setNextKinematicTranslation(this.position);
     this.body.setTranslation(this.position, true);
+    this.grounded = false;
+    this.groundNormalY = 1;
+    this.hitCeiling = false;
+    this.slidAlongWall = false;
   }
 
   dispose(): void {
