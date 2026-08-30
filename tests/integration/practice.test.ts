@@ -6,6 +6,7 @@ import { loadMap } from '../../src/world';
 import { RAPIER_READY } from '../../src/world/rapierReady';
 import { CAPSULE_CENTER_OFFSET } from '../../src/sim/movement';
 import { HEAL_ITEMS } from '../../src/core/balance';
+import { buildSoloRoster } from '../../src/sim/roster';
 
 beforeAll(async () => {
   await RAPIER_READY();
@@ -17,7 +18,8 @@ function makePractice(seed: number): Match {
     mapDef: loaded.def,
     seed,
     difficulty: 'normal',
-    withPlayer: true,
+    mode: 'solo',
+    roster: buildSoloRoster(seed, { practice: true }),
     practice: true,
   });
 }
@@ -62,7 +64,7 @@ class FireOnceController implements ActorController {
 describe('practice starts', () => {
   it('routes deterministic QA elimination through placement, loot and alive-count processing', () => {
     const match = makePractice(94991);
-    const player = match.player!;
+    const player = match.localActor!;
     player.inv.add({ kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: 3 }, 0);
     expect(match.eliminateActor(player)).toBe(true);
     expect(match.eliminateActor(player)).toBe(false);
@@ -77,7 +79,7 @@ describe('practice starts', () => {
 
   it('uses a selected heal stack from a left-click edge and HEAL_ITEMS timing/amount', () => {
     const match = makePractice(95001);
-    const player = match.player!;
+    const player = match.localActor!;
     const controller = new FireOnceController();
     player.shield = 50;
     player.inv.add({ kind: 'heal', itemId: 'shieldpot', count: 1 });
@@ -103,9 +105,9 @@ describe('practice starts', () => {
     const start = first.practiceStart!;
 
     expect(repeat.practiceStart).toEqual(start);
-    expect(first.player?.body.position.x).toBeCloseTo(start.x);
-    expect(first.player?.body.position.y).toBeCloseTo(start.y);
-    expect(first.player?.body.position.z).toBeCloseTo(start.z);
+    expect(first.localActor?.body.position.x).toBeCloseTo(start.x);
+    expect(first.localActor?.body.position.y).toBeCloseTo(start.y);
+    expect(first.localActor?.body.position.z).toBeCloseTo(start.z);
 
     const node = first.nav.nodes.find((candidate) => (
       Math.abs(candidate.x - start.x) < 0.01
@@ -126,7 +128,7 @@ describe('practice starts', () => {
     const heights: number[] = [];
     for (const sprint of [false, true]) {
       const match = makePractice(sprint ? 92002 : 92001);
-      const player = match.player!;
+      const player = match.localActor!;
       const controller = new JumpController();
       controller.sprint = sprint;
       match.controllers.set(player.id, controller);
@@ -161,7 +163,7 @@ describe('practice starts', () => {
 
   it('stands after crouch is released in open terrain', () => {
     const match = makePractice(94001);
-    const player = match.player!;
+    const player = match.localActor!;
     const controller = new CrouchController();
     match.controllers.set(player.id, controller);
 

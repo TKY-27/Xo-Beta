@@ -11,7 +11,7 @@ function actorWithPistol(ammoInMag: number): Actor {
     velocity: { x: 0, y: 0, z: 0 },
     grounded: true,
   } as never;
-  const actor = new Actor('TEST', true, body, 0xffffff);
+  const actor = new Actor('TEST', body, 0xffffff);
   actor.inv.add({ kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag });
   actor.inv.select(0);
   return actor;

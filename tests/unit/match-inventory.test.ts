@@ -4,6 +4,7 @@ import { loadMap } from '../../src/world';
 import { Match } from '../../src/sim/match';
 import { WEAPONS } from '../../src/core/balance';
 import { feetYFromBodyCenter } from '../../src/physics/physics';
+import { buildSoloRoster } from '../../src/sim/roster';
 
 beforeAll(async () => {
   await RAPIER_READY();
@@ -15,7 +16,8 @@ async function makePractice(mapId: 'neocity' | 'oldfront' | 'eden' | 'ashara' = 
     mapDef: loaded.def,
     seed: 120034,
     difficulty: 'normal',
-    withPlayer: true,
+    mode: 'solo',
+    roster: buildSoloRoster(120034, { practice: true }),
     practice: true,
   });
 }
@@ -23,7 +25,7 @@ async function makePractice(mapId: 'neocity' | 'oldfront' | 'eden' | 'ashara' = 
 describe('player inventory UI simulation API', () => {
   it('selects and reorders slots while cancelling only the moved weapon reload', async () => {
     const match = await makePractice();
-    const player = match.player!;
+    const player = match.localActor!;
     const ar = { kind: 'weapon' as const, weaponId: 'ar' as const, rarity: 'common' as const, ammoInMag: 5 };
     const heal = { kind: 'heal' as const, itemId: 'shieldpot' as const, count: 1 };
     player.inv.add(ar, 0);
@@ -62,7 +64,7 @@ describe('player inventory UI simulation API', () => {
 
   it('drops selected weapons and non-weapon healing stacks through one API', async () => {
     const match = await makePractice();
-    const player = match.player!;
+    const player = match.localActor!;
     const weapon = { kind: 'weapon' as const, weaponId: 'pistol' as const, rarity: 'rare' as const, ammoInMag: WEAPONS.pistol.magSize };
     const heal = { kind: 'heal' as const, itemId: 'medkit' as const, count: 1 };
     player.inv.add(weapon, 0);
@@ -84,7 +86,7 @@ describe('player inventory UI simulation API', () => {
 
   it('does not let a full bot inventory swap one heal stack for another every tick', async () => {
     const match = await makePractice();
-    const actor = match.player!;
+    const actor = match.localActor!;
     for (let slot = 0; slot < 5; slot++) {
       actor.inv.add({
         kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: WEAPONS.pistol.magSize,
@@ -106,7 +108,7 @@ describe('player inventory UI simulation API', () => {
 
   it('chooses the nearest floor item from feet with deterministic id tie-breaks', async () => {
     const match = await makePractice();
-    const player = match.player!;
+    const player = match.localActor!;
     const p = player.body.position;
     const feetY = feetYFromBodyCenter(p.y);
     const first = match.loot.spawnWeapon(p.x + 1.1, feetY, p.z, {
@@ -124,7 +126,7 @@ describe('player inventory UI simulation API', () => {
 
   it('uses the same floor-aware chest resolver for prompts and interaction', async () => {
     const match = await makePractice();
-    const player = match.player!;
+    const player = match.localActor!;
     const p = player.body.position;
     const feetY = feetYFromBodyCenter(p.y);
     match.chests.splice(0, match.chests.length,
@@ -141,7 +143,7 @@ describe('player inventory UI simulation API', () => {
 
   it('blocks chest prompts, chest opening and floor-item pickup through solid walls', async () => {
     const match = await makePractice();
-    const player = match.player!;
+    const player = match.localActor!;
     const p = player.body.position;
     const feetY = feetYFromBodyCenter(p.y);
     const clearDirection = [
@@ -189,7 +191,7 @@ describe('player inventory UI simulation API', () => {
 
   it('does not let a visible chest block its own interaction ray', async () => {
     const match = await makePractice('oldfront');
-    const player = match.player!;
+    const player = match.localActor!;
     const chest = match.chests.find((candidate) =>
       Math.abs(candidate.x + 220) < 0.01 && Math.abs(candidate.z + 30) < 0.01);
     expect(chest).toBeDefined();

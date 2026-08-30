@@ -9,7 +9,6 @@ import { Actor } from '../../src/sim/actor';
 function makeActor(name: string): Actor {
   const actor = Object.create(Actor.prototype) as Actor;
   (actor as { name: string }).name = name;
-  (actor as { isPlayer: boolean }).isPlayer = false;
   actor.personality = null;
   actor.health = 100;
   actor.shield = 100;

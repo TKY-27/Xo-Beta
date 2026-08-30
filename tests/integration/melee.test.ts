@@ -8,10 +8,11 @@ import { Match } from '../../src/sim/match';
 import { loadMap } from '../../src/world';
 import { RAPIER_READY } from '../../src/world/rapierReady';
 import { MELEE } from '../../src/core/balance';
+import { buildSoloRoster } from '../../src/sim/roster';
 
 async function makeMatch(mapId: 'neocity' | 'oldfront' | 'eden' | 'ashara', seed: number): Promise<Match> {
   const loaded = await loadMap(mapId);
-  return new Match({ mapDef: loaded.def, seed, difficulty: 'normal', withPlayer: true });
+  return new Match({ mapDef: loaded.def, seed, difficulty: 'normal', mode: 'solo', roster: buildSoloRoster(seed) });
 }
 
 beforeAll(async () => {

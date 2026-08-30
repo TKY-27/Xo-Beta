@@ -205,6 +205,7 @@ const en = {
 
   // Results
   'results.victory': 'VICTORY',
+  'results.teamName': 'TEAM {n}',
   'results.subtitle.win': '{name} stands victorious',
   'results.subtitle.lose': '{name} wins the match',
   'stats.placement': 'PLACEMENT',
@@ -438,6 +439,7 @@ const ja: Dict = {
   'tac.markerPlaced': 'マーカー設置',
 
   'results.victory': '勝利',
+  'results.teamName': 'チーム{n}',
   'results.subtitle.win': '{name}が勝利した',
   'results.subtitle.lose': '{name}がこのマッチを制した',
   'stats.placement': '順位',

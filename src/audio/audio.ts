@@ -913,7 +913,7 @@ const cameraCenter = { x: 0, z: 0 };
 /** Wire all match events to audio. */
 export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<MatchEventsMap>): () => void {
   const offs: Array<() => void> = [];
-  const localActor = createLocalActorIdentity(match.player?.id);
+  const localActor = createLocalActorIdentity(match.localActorId);
   const on = <K extends keyof MatchEventsMap>(k: K, fn: (p: MatchEventsMap[K]) => void) => offs.push(bus.on(k, fn));
 
   on('shotFired', (e) => audio.gunshot(e.weaponId, e.x, e.y, e.z, e.dry, isLocalActor(e.actorId, localActor)));
@@ -943,8 +943,12 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
   on('itemPickedUp', (e) => {
     if (isLocalActor(e.actorId, localActor)) audio.pickupUi(e.rare ?? false);
   });
-  on('healDone', () => audio.healComplete());
-  on('reloadStarted', (e) => audio.reloadClick(e.empty));
+  on('healDone', (e) => {
+    if (isLocalActor(e.actorId, localActor)) audio.healComplete();
+  });
+  on('reloadStarted', (e) => {
+    if (isLocalActor(e.actorId, localActor)) audio.reloadClick(e.empty);
+  });
   on('actorHit', (e) => {
     if (e.shieldDamage > 0) {
       const v = match.actors.find((a) => a.id === e.targetId);
@@ -955,7 +959,9 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
     const v = match.actors.find((a) => a.id === e.actorId);
     if (v) audio.shieldBreakFx(v.body.position.x, v.body.position.y, v.body.position.z);
   });
-  on('headshotFeedback', () => audio.headshotTick());
+  on('headshotFeedback', (e) => {
+    if (isLocalActor(e.attackerId, localActor)) audio.headshotTick();
+  });
   on('eliminated', (e) => {
     const v = match.actors.find((a) => a.id === e.victimId);
     if (v) audio.eliminationFx(v.body.position.x, v.body.position.y, v.body.position.z);
@@ -971,5 +977,5 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
 
 interface MatchLike {
   actors: Array<{ id: number; body: { position: { x: number; y: number; z: number } } }>;
-  player?: { id: number } | null;
+  localActorId: number | null;
 }

@@ -13,6 +13,7 @@ import { RAPIER_READY } from '../../src/world/rapierReady';
 import { Match } from '../../src/sim/match';
 import { MOVE } from '../../src/core/balance';
 import { emptyCommand } from '../../src/sim/input';
+import { buildSoloRoster } from '../../src/sim/roster';
 
 beforeAll(async () => {
   await RAPIER_READY();
@@ -68,10 +69,11 @@ describe('character capsule penetration invariants', () => {
           mapDef: loaded.def,
           seed,
           difficulty: 'normal',
-          withPlayer: true,
+          mode: 'solo',
+          roster: buildSoloRoster(seed, { practice: true }),
           practice: true,
         });
-        const player = match.player!;
+        const player = match.localActor!;
         const position = player.body.position;
         expect(match.phys.characterPenetrationsAt(
           position.x,
@@ -102,10 +104,11 @@ describe('character capsule penetration invariants', () => {
         mapDef: loaded.def,
         seed: 901244,
         difficulty: 'normal',
-        withPlayer: true,
+        mode: 'solo',
+        roster: buildSoloRoster(901244, { practice: true }),
         practice: true,
       });
-      const body = match.player!.body;
+      const body = match.localActor!.body;
       const inaccessible = match.chests.filter((chest) => {
         for (const radius of [3, 2.5, 2, 1.5]) {
           for (let i = 0; i < 16; i++) {
@@ -233,10 +236,11 @@ describe('character capsule penetration invariants', () => {
       mapDef: loadMap('eden').def,
       seed: 904243,
       difficulty: 'normal',
-      withPlayer: true,
+      mode: 'solo',
+      roster: buildSoloRoster(904243, { practice: true }),
       practice: true,
     });
-    const player = match.player!;
+    const player = match.localActor!;
     const candidates = match.nav.nodes.flatMap((source) => {
       if (!source.water) return [];
       return source.edges

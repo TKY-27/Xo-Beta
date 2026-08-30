@@ -58,7 +58,7 @@ describe('fall damage', () => {
     const phys = new PhysicsWorld();
     const damageAt = (speed: number, id: number): number => {
       const body = new CharBody(phys, id, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-      const actor = new Actor(`Fall damage ${id}`, true, body, 0xffffff);
+      const actor = new Actor(`Fall damage ${id}`, body, 0xffffff);
       let damage = 0;
       const movement = movementFor(
         phys,
@@ -181,7 +181,7 @@ describe('rendered terrain and physics ground alignment', () => {
       phys.addStaticBox(0, -1, 0, 350, 1, 350, 0, 'stone');
       phys.flush();
       const body = new CharBody(phys, 80, x, CAPSULE_CENTER_OFFSET + 0.05, z);
-      const actor = new Actor('IDLE SUPPORT TEST', true, body, 0x5fd0ff);
+      const actor = new Actor('IDLE SUPPORT TEST', body, 0x5fd0ff);
       const movement = movementFor(phys);
       for (let frame = 0; frame < 180; frame++) {
         movement.update(actor, emptyCommand(), 1 / 60);
@@ -198,7 +198,7 @@ describe('rendered terrain and physics ground alignment', () => {
   it('does not grant a second ordinary jump or emit a double-jump event while airborne', () => {
     const phys = new PhysicsWorld();
     const body = new CharBody(phys, 997, 0, CAPSULE_CENTER_OFFSET + 3, 0);
-    const actor = new Actor('Single jump regression', true, body, 0xffffff);
+    const actor = new Actor('Single jump regression', body, 0xffffff);
     const jumpKinds: string[] = [];
     const movement = movementFor(phys, undefined, (_jumpingActor, kind) => jumpKinds.push(kind));
     actor.state = 'air';
@@ -222,7 +222,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 998, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Forward-only mantle regression', true, body, 0xffffff);
+    const actor = new Actor('Forward-only mantle regression', body, 0xffffff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -244,7 +244,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 0.9, -0.75, 2, 0.9, 0.175, 0, 'metal');
     phys.flush();
     const body = new CharBody(phys, 999, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Thin ledge mantle regression', true, body, 0xffffff);
+    const actor = new Actor('Thin ledge mantle regression', body, 0xffffff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -267,7 +267,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 0.9, -1, 0.15, 0.9, 0.45, 0, 'metal');
     phys.flush();
     const body = new CharBody(phys, 1008, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Mantle side support regression', true, body, 0xffffff);
+    const actor = new Actor('Mantle side support regression', body, 0xffffff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -289,7 +289,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, MOVE.stepHeight / 2, -1, 2, MOVE.stepHeight / 2, 0.45, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1009, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Mantle step-height regression', true, body, 0xffffff);
+    const actor = new Actor('Mantle step-height regression', body, 0xffffff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -312,7 +312,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 5, -2.25, 2, 5, 0.25, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1000, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Mantle spam regression', true, body, 0xffffff);
+    const actor = new Actor('Mantle spam regression', body, 0xffffff);
     const movement = movementFor(phys);
     let maxHeight = body.position.y;
 
@@ -337,7 +337,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 2.7, -2, 2, 0.9, 0.45, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1001, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Mantle recovery regression', true, body, 0xffffff);
+    const actor = new Actor('Mantle recovery regression', body, 0xffffff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -394,7 +394,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1002, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Mantle jump reset regression', true, body, 0xffffff);
+    const actor = new Actor('Mantle jump reset regression', body, 0xffffff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -424,7 +424,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 5, 0, 0.25, 5, 20, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1003, -0.72, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Dash wall release regression', true, body, 0xffffff);
+    const actor = new Actor('Dash wall release regression', body, 0xffffff);
     const movement = movementFor(phys);
     body.move(0, -0.1, 0);
     phys.fixedStep(1 / 60);
@@ -458,7 +458,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 5, 0, 0.25, 5, 20, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1004, -0.72, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Slide wall regression', true, body, 0xffffff);
+    const actor = new Actor('Slide wall regression', body, 0xffffff);
     const movement = movementFor(phys);
     body.move(0, -0.1, 0);
     phys.fixedStep(1 / 60);
@@ -489,7 +489,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 5, 0, 0.25, 5, 20, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1005, -0.72, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Wall jump spam speed regression', true, body, 0xffffff);
+    const actor = new Actor('Wall jump spam speed regression', body, 0xffffff);
     const movement = movementFor(phys);
     body.move(0, -0.1, 0);
     phys.fixedStep(1 / 60);
@@ -515,7 +515,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, -0.25, 0, 10, 0.25, 10, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1006, 0.99, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Boundary speed cap regression', true, body, 0xffffff);
+    const actor = new Actor('Boundary speed cap regression', body, 0xffffff);
     const movement = movementFor(phys);
     movement.bounds = { half: 1 };
     body.move(0, -0.1, 0);
@@ -547,7 +547,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 1007, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Open dash speed regression', true, body, 0xffffff);
+    const actor = new Actor('Open dash speed regression', body, 0xffffff);
     const movement = movementFor(phys);
     body.move(0, -0.1, 0);
     phys.fixedStep(1 / 60);
@@ -566,7 +566,7 @@ describe('rendered terrain and physics ground alignment', () => {
   it('keeps the queued Rapier translation synchronized when flight hits map bounds', () => {
     const phys = new PhysicsWorld();
     const body = new CharBody(phys, 991, 0, 20, 0);
-    const actor = new Actor('Boundary glide', true, body, 0xffffff);
+    const actor = new Actor('Boundary glide', body, 0xffffff);
     const movement = movementFor(phys);
     movement.bounds = { half: 1 };
     actor.state = 'glide';
@@ -585,7 +585,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 10, 0, 0.25, 10, 100, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 992, -0.72, CAPSULE_CENTER_OFFSET + 10, 40);
-    const actor = new Actor('Wall speed regression', true, body, 0xffffff);
+    const actor = new Actor('Wall speed regression', body, 0xffffff);
     const movement = movementFor(phys);
     actor.state = 'wallrun';
     actor.wallSide = 1;
@@ -622,7 +622,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 996, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('Slide state regression', true, body, 0xffffff);
+    const actor = new Actor('Slide state regression', body, 0xffffff);
     const movement = movementFor(phys);
 
     body.move(0, -0.1, 0);
@@ -658,7 +658,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 993, 0, CAPSULE_CENTER_OFFSET + 2, 0);
-    const actor = new Actor('Landing reset regression', true, body, 0xffffff);
+    const actor = new Actor('Landing reset regression', body, 0xffffff);
     const movement = movementFor(phys);
     actor.state = 'air';
     actor.jumpsUsed = MOVE.maxJumps;
@@ -685,7 +685,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 5, 0, 0.25, 5, 30, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 994, -0.72, CAPSULE_CENTER_OFFSET + 3, 8);
-    const actor = new Actor('Wall re-entry regression', true, body, 0xffffff);
+    const actor = new Actor('Wall re-entry regression', body, 0xffffff);
     const movement = movementFor(phys);
     actor.state = 'air';
     actor.wallrunLanded = true;
@@ -708,7 +708,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 3, 0, 0.25, 3, 20, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 995, -0.72, CAPSULE_CENTER_OFFSET + 1.2, 6);
-    const actor = new Actor('Wall landing regression', true, body, 0xffffff);
+    const actor = new Actor('Wall landing regression', body, 0xffffff);
     const movement = movementFor(phys);
     actor.state = 'wallrun';
     actor.wallSide = 1;
@@ -740,7 +740,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 90, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('MANTLE TEST', true, body, 0x5fd0ff);
+    const actor = new Actor('MANTLE TEST', body, 0x5fd0ff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -781,7 +781,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.fixedStep(1 / 60);
     expect(body.grounded).toBe(true);
 
-    const actor = new Actor('Ground boundary', true, body, 0xffffff);
+    const actor = new Actor('Ground boundary', body, 0xffffff);
     actor.state = 'ground';
     const movement = movementFor(phys);
     movement.bounds = { half: 1 };
@@ -817,7 +817,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0.55, 2.9, -1, 0.2, 1.1, 0.5, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 91, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('BLOCKED MANTLE TEST', true, body, 0x5fd0ff);
+    const actor = new Actor('BLOCKED MANTLE TEST', body, 0x5fd0ff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -842,7 +842,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, 0.9, -1, 2, 0.9, 0.45, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 92, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('DYNAMIC MANTLE TEST', true, body, 0x5fd0ff);
+    const actor = new Actor('DYNAMIC MANTLE TEST', body, 0x5fd0ff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -878,7 +878,7 @@ describe('rendered terrain and physics ground alignment', () => {
       phys.addStaticBox(0, -0.25, 0, 4, 0.25, 4, 0, 'stone');
       phys.flush();
       const body = new CharBody(phys, 93, 0, CAPSULE_CENTER_OFFSET + 0.05, -0.45);
-      const actor = new Actor('SWIM EXIT TEST', true, body, 0x5fd0ff);
+      const actor = new Actor('SWIM EXIT TEST', body, 0x5fd0ff);
       const movement = movementFor(phys);
       for (let frame = 0; frame < 12; frame++) {
         movement.update(actor, emptyCommand(), 1 / 60);
@@ -932,7 +932,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, -0.25, 0, 4, 0.25, 4, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 95, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
-    const actor = new Actor('SPLASH SURFACE TEST', true, body, 0x5fd0ff);
+    const actor = new Actor('SPLASH SURFACE TEST', body, 0x5fd0ff);
     let emittedSurface = -Infinity;
     const movement = movementFor(phys, (entering) => { emittedSurface = entering.waterSurfaceY; });
     movement.waterAt = () => ({ minX: -4, maxX: 4, minZ: -4, maxZ: 4, surfaceY: 2, depth: 3 });
@@ -948,7 +948,7 @@ describe('rendered terrain and physics ground alignment', () => {
     phys.addStaticBox(0, -0.25, 0, 4, 0.25, 4, 0, 'stone');
     phys.flush();
     const body = new CharBody(phys, 94, 0, CAPSULE_CENTER_OFFSET + 0.05, 0.5);
-    const actor = new Actor('PRE-TICK SWIM EXIT TEST', true, body, 0x5fd0ff);
+    const actor = new Actor('PRE-TICK SWIM EXIT TEST', body, 0x5fd0ff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -979,7 +979,7 @@ describe('rendered terrain and physics ground alignment', () => {
     buildColliders(builder.def, phys);
     phys.flush();
     const body = new CharBody(phys, 1, 0, CAPSULE_CENTER_OFFSET + 0.05, -2);
-    const actor = new Actor('STAIR TEST', true, body, 0x5fd0ff);
+    const actor = new Actor('STAIR TEST', body, 0x5fd0ff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
@@ -1016,7 +1016,7 @@ describe('rendered terrain and physics ground alignment', () => {
     buildColliders(builder.def, phys);
     phys.flush();
     const body = new CharBody(phys, 2, 0, 6 + CAPSULE_CENTER_OFFSET + 0.05, -2);
-    const actor = new Actor('STAIR DOWN TEST', true, body, 0x5fd0ff);
+    const actor = new Actor('STAIR DOWN TEST', body, 0x5fd0ff);
     const movement = movementFor(phys);
     for (let frame = 0; frame < 12; frame++) {
       movement.update(actor, emptyCommand(), 1 / 60);
