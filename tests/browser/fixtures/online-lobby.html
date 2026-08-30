@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Xo Beta online lobby test fixture</title>
+  <link rel="stylesheet" href="/src/ui/styles.css">
+</head>
+<body>
+  <main id="main-menu"><button id="open-create">Create</button><button id="open-join">Join</button></main>
+
+  <section id="create-room-menu" class="hidden">
+    <form id="create-room-form">
+      <label>Display name <input id="create-display-name" maxlength="24" required></label>
+      <div id="create-room-skin-selector"></div>
+      <p id="create-room-error"></p>
+      <button id="btn-confirm-create-room" type="submit">Create room</button>
+      <button id="btn-create-room-back" type="button">Back</button>
+    </form>
+  </section>
+
+  <section id="join-room-menu" class="hidden">
+    <form id="join-room-form">
+      <label>Invite <textarea id="join-room-invite" maxlength="256" required></textarea></label>
+      <label>Display name <input id="join-display-name" maxlength="24" required></label>
+      <div id="join-room-skin-selector"></div>
+      <p id="join-room-error"></p>
+      <button id="btn-confirm-join-room" type="submit">Join room</button>
+      <button id="btn-join-room-back" type="button">Back</button>
+    </form>
+  </section>
+
+  <section id="online-lobby-menu" class="hidden">
+    <code id="online-room-code"></code>
+    <button id="btn-copy-invite-link" type="button">Copy link</button>
+    <button id="btn-copy-room-code" type="button">Copy code</button>
+    <div id="lobby-player-slots"></div>
+    <button id="btn-lobby-ready" type="button">Ready</button>
+    <div id="lobby-skin-selector"></div>
+    <select id="lobby-arena"></select>
+    <select id="lobby-mode"></select>
+    <select id="lobby-bot-fill"></select>
+    <select id="lobby-bot-difficulty"></select>
+    <div id="lobby-team-controls"></div>
+    <strong id="lobby-roster-summary"></strong>
+    <ul id="lobby-roster-list"></ul>
+    <dl id="lobby-relay-status"></dl>
+    <dl id="lobby-direct-status"></dl>
+    <p id="lobby-status-message"></p>
+    <button id="btn-online-start" type="button">Start</button>
+    <p id="lobby-start-note"></p>
+    <button id="btn-leave-room" type="button">Leave</button>
+  </section>
+
+  <script type="module" src="/tests/browser/online-lobby-fixture.ts"></script>
+</body>
+</html>

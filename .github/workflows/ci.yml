@@ -43,6 +43,13 @@ jobs:
         run: npm run test
         timeout-minutes: 15
 
+      - name: Install browser for deterministic lobby tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Isolated-context online lobby tests
+        run: npm run test:browser:online
+        timeout-minutes: 5
+
       - name: Production build
         run: npm run build
 
