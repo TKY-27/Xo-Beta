@@ -1,6 +1,7 @@
-import { defineConfig, type Plugin } from 'vite';
-import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { defineConfig, type Plugin } from 'vite';
 
 /** Ship third-party license notices with every production build. */
 function legalNotices(): Plugin {
@@ -18,12 +19,28 @@ function legalNotices(): Plugin {
   };
 }
 
+function buildHash(): string {
+  const supplied = process.env.CF_PAGES_COMMIT_SHA ?? process.env.GITHUB_SHA;
+  if (supplied && /^[0-9a-f]{7,64}$/i.test(supplied)) return supplied.toLowerCase();
+  try {
+    return execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim().toLowerCase();
+  } catch {
+    return 'development-build';
+  }
+}
+
 export default defineConfig({
   // Cloudflare serves this project at the origin root. Absolute bundle URLs
   // keep SPA fallbacks such as /play/neocity from resolving ./assets beneath
   // the deep route and receiving HTML in place of JavaScript.
   base: '/',
   plugins: [legalNotices()],
+  define: {
+    __XO_BUILD_HASH__: JSON.stringify(buildHash()),
+  },
   build: {
     target: 'es2022',
     outDir: 'dist',
