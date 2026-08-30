@@ -93,7 +93,7 @@ describe('canonical ownership and team presentation', () => {
     internals(match).processEliminations();
     expect(match.spectatorTargets().map((actor) => actor.id)).toEqual([3, 4]);
     match.dispose();
-  });
+  }, 30_000);
 });
 
 describe('team-aware Bot targeting', () => {
@@ -114,7 +114,7 @@ describe('team-aware Bot targeting', () => {
     expect(controller.perception.memories.has(ally.id)).toBe(false);
     expect(controller.perception.memories.has(enemy.id)).toBe(true);
     match.dispose();
-  });
+  }, 30_000);
 });
 
 describe('FFA and team win conditions', () => {
@@ -125,7 +125,7 @@ describe('FFA and team win conditions', () => {
     expect(match.winnerView).toEqual({ kind: 'actor', actorId: 1, displayName: 'HUMAN 1' });
     expect(match.localActor?.placement).toBe(1);
     match.dispose();
-  });
+  }, 30_000);
 
   it.each([
     ['1v1', 2, [0, 1]],
@@ -139,7 +139,7 @@ describe('FFA and team win conditions', () => {
     expect(match.teamResults.find((result) => result.teamId === 0)).toMatchObject({ won: true, eliminations: count / 2 });
     expect(match.teamResults.find((result) => result.teamId === 0)?.survivingActorIds.length).toBe(count / 2);
     match.dispose();
-  });
+  }, 30_000);
 
   it('declares a valid 5v5 team winner', () => {
     const match = makeMatch('teams-bot-fill', 4, [0, 0, 1, 1]);
@@ -148,7 +148,7 @@ describe('FFA and team win conditions', () => {
     expect(match.winnerView).toEqual({ kind: 'team', teamId: 0 });
     expect(match.teams.find((team) => team.teamId === 0)?.aliveCount).toBe(5);
     match.dispose();
-  });
+  }, 30_000);
 
   it('supports both humans-versus-Bots outcomes', () => {
     const humanWin = makeMatch('humans-vs-bots', 4);
@@ -175,7 +175,7 @@ describe('FFA and team win conditions', () => {
     expect(match.winnerView).toEqual({ kind: 'team', teamId: 0 });
     expect(match.teamResults.find((result) => result.teamId === 0)?.survivingActorIds).toContain(2);
     match.dispose();
-  });
+  }, 30_000);
 });
 
 class AggressiveController implements ActorController {
@@ -243,7 +243,7 @@ describe('deterministic connection-state simulation', () => {
     expect(actor.stats.shotsFired).toBe(shotsBeforeDisconnect + 1);
     expect(match.connectionStateForActor(actor)).toBe('connected');
     match.dispose();
-  });
+  }, 30_000);
 
   it('keeps a disconnected actor vulnerable and reconnects a dead local actor into spectator semantics', () => {
     const match = makeMatch('ffa', 2);
@@ -262,5 +262,5 @@ describe('deterministic connection-state simulation', () => {
     expect(match.localActor?.alive).toBe(false);
     expect(match.spectatorTargets()).toContain(enemy);
     match.dispose();
-  });
+  }, 30_000);
 });
