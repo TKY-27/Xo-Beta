@@ -6,10 +6,32 @@
 import * as THREE from 'three';
 import type { Actor } from '../sim/actor';
 import { getSettings } from '../core/settings';
-import { MATCH, MOVE } from '../core/balance';
+import { MOVE } from '../core/balance';
 import { feetYFromBodyCenter } from '../physics/physics';
 
 const _tv = new THREE.Vector3();
+const _cameraOffset = new THREE.Vector3();
+const _cameraLook = new THREE.Vector3();
+const _cameraUp = new THREE.Vector3(0, 1, 0);
+const _cameraQuat = new THREE.Quaternion();
+
+export const TRANSPORT_CAMERA = Object.freeze({
+  height: 22,
+  rear: 30,
+  lateral: 5.2,
+  lookAhead: 6,
+  lookHeight: 0.5,
+});
+
+export const SPECTATOR_CAMERA = Object.freeze({
+  rear: 6.2,
+  height: 2.6,
+  lateral: 0.8,
+  torsoHeight: 1.35,
+  contractRate: 22,
+  recoverRate: 2.8,
+  hysteresis: 0.28,
+});
 
 export interface PhysicsQuery {
   cameraCast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, radius?: number): { dist: number } | null;
@@ -29,6 +51,11 @@ export class CameraRig {
   private blendFromFov = 80;
   private blendT = 1;
   private spectateInitialized = false;
+  private spectateTargetId: number | null = null;
+  private spectateYaw = 0;
+  private spectateDistance: number = SPECTATOR_CAMERA.rear;
+  private spectateObstructed = false;
+  private transportInitialized = false;
   /** True while the sniper scope is fully engaged. */
   scoped = false;
   onScopedChanged: ((scoped: boolean) => void) | null = null;
@@ -190,39 +217,76 @@ export class CameraRig {
   /** Spectator orbit around an alive target actor. */
   updateSpectate(target: Actor, dt: number, phys: PhysicsQuery): void {
     this.setScoped(false);
+    this.baseFov = getSettings().fov;
     this.camera.fov += (this.baseFov - this.camera.fov) * Math.min(1, dt * 12);
     this.camera.updateProjectionMatrix();
     const p = target.body.position;
-    const yaw = target.yaw;
-    const pitch = THREE.MathUtils.clamp(target.pitch, -1.15, 1.15);
-    const dir = new THREE.Vector3(
-      -Math.sin(yaw) * Math.cos(pitch),
-      Math.sin(pitch),
-      -Math.cos(yaw) * Math.cos(pitch),
-    );
-    const pivot = new THREE.Vector3(p.x, target.eyeY - 0.2, p.z);
-    const back = dir.clone().multiplyScalar(-1);
-    const hit = phys.cameraCast(pivot.x, pivot.y, pivot.z, back.x, back.y, back.z, 5, 0.2);
-    const dist = hit ? Math.max(this.camera.near + 0.02, hit.dist - 0.08) : 5;
-    _tv.copy(pivot).addScaledVector(back, dist);
-    if (!this.spectateInitialized) {
+    const targetChanged = this.spectateTargetId !== target.id;
+    if (targetChanged) {
+      // A new target owns a new camera trail. Never carry the previous actor's
+      // interpolated position, yaw or collision distance into this actor.
+      this.spectateTargetId = target.id;
+      this.spectateYaw = target.yaw;
+      this.spectateDistance = SPECTATOR_CAMERA.rear;
+      this.spectateObstructed = false;
+      this.spectateInitialized = false;
+    }
+
+    const speed = Math.hypot(target.body.velocity.x, target.body.velocity.z);
+    const movementYaw = speed > 0.45
+      ? Math.atan2(-target.body.velocity.x, -target.body.velocity.z)
+      : target.yaw;
+    const yawDelta = Math.atan2(Math.sin(movementYaw - this.spectateYaw), Math.cos(movementYaw - this.spectateYaw));
+    this.spectateYaw += yawDelta * (1 - Math.exp(-dt * 7));
+
+    const feetY = feetYFromBodyCenter(p.y);
+    const pivot = new THREE.Vector3(p.x, feetY + SPECTATOR_CAMERA.torsoHeight, p.z);
+    const back = new THREE.Vector3(Math.sin(this.spectateYaw), 0, Math.cos(this.spectateYaw));
+    const right = new THREE.Vector3(Math.cos(this.spectateYaw), 0, -Math.sin(this.spectateYaw));
+    _cameraOffset.copy(back).multiplyScalar(SPECTATOR_CAMERA.rear)
+      .addScaledVector(right, SPECTATOR_CAMERA.lateral)
+      .y = SPECTATOR_CAMERA.height - SPECTATOR_CAMERA.torsoHeight;
+    const boomLength = _cameraOffset.length();
+    _cameraOffset.multiplyScalar(1 / Math.max(boomLength, 1e-6));
+    const hit = phys.cameraCast(pivot.x, pivot.y, pivot.z, _cameraOffset.x, _cameraOffset.y, _cameraOffset.z, boomLength, 0.2);
+    const hitDistance = hit ? Math.max(this.camera.near + 0.02, hit.dist - 0.08) : boomLength;
+    const blocked = hit !== null && hitDistance < boomLength - SPECTATOR_CAMERA.hysteresis;
+    if (blocked) {
+      this.spectateObstructed = true;
+      this.spectateDistance += (Math.min(this.spectateDistance, hitDistance) - this.spectateDistance)
+        * (1 - Math.exp(-dt * SPECTATOR_CAMERA.contractRate));
+    } else if (this.spectateObstructed && (!hit || hitDistance >= boomLength - SPECTATOR_CAMERA.hysteresis * 0.35)) {
+      this.spectateObstructed = false;
+      this.spectateDistance += (boomLength - this.spectateDistance)
+        * (1 - Math.exp(-dt * SPECTATOR_CAMERA.recoverRate));
+    } else if (!this.spectateObstructed) {
+      this.spectateDistance = boomLength;
+    }
+    this.spectateDistance = THREE.MathUtils.clamp(this.spectateDistance, this.camera.near + 0.02, boomLength);
+    _tv.copy(pivot).addScaledVector(_cameraOffset, this.spectateDistance);
+    _cameraLook.copy(pivot);
+    _cameraQuat.setFromRotationMatrix(new THREE.Matrix4().lookAt(_tv, _cameraLook, _cameraUp));
+    if (!this.spectateInitialized || targetChanged) {
       this.camera.position.copy(_tv);
+      this.camera.quaternion.copy(_cameraQuat);
       this.spectateInitialized = true;
     } else {
       this.camera.position.lerp(_tv, 1 - Math.exp(-dt * 10));
+      this.camera.quaternion.slerp(_cameraQuat, 1 - Math.exp(-dt * 12));
     }
-    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
-    this.camera.quaternion.slerp(q, 1 - Math.exp(-dt * 12));
   }
 
   endSpectate(): void {
     this.spectateInitialized = false;
+    this.spectateTargetId = null;
+    this.spectateObstructed = false;
+    this.spectateDistance = SPECTATOR_CAMERA.rear;
   }
 
   /**
-   * Transport-phase presentation. FPS is anchored at the player's hanging
-   * slot and preserves the full free-look range. TPS remains a continuous
-   * shoulder view. Neither path quantizes yaw around the sun.
+   * Transport-phase presentation. Both view modes use one external camera
+   * above and behind the interpolated hull. Free look changes only the bounded
+   * look target; it can never move the camera into a hanging seat.
    */
   updateTransport(
     pos: { x: number; y: number; z: number },
@@ -234,43 +298,31 @@ export class CameraRig {
   ): void {
     this.resetAimState(false);
     this.baseFov = getSettings().fov;
-    const transportFov = this.mode === 'tps'
-      ? THREE.MathUtils.clamp(this.baseFov * 0.7, 52, 68)
-      : this.baseFov;
+    const transportFov = THREE.MathUtils.clamp(this.baseFov * 0.78, 55, 72);
     this.camera.fov += (transportFov - this.camera.fov) * Math.min(1, dt * 14);
     this.camera.updateProjectionMatrix();
     this.smoothEye = MOVE.eyeHeight;
     const pitch = THREE.MathUtils.clamp(playerPitch, -1.35, 1.35);
-    const seat = new THREE.Vector3(
-      pos.x + slot.x,
-      pos.y - MATCH.transportHangOffset + slot.y + 1.65,
-      pos.z + slot.z,
-    );
-    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, playerYaw, 0, 'YXZ'));
-    if (this.mode === 'fps') {
-      _tv.copy(seat);
-      this.camera.position.lerp(_tv, 1 - Math.exp(-dt * 16));
-      this.camera.quaternion.slerp(q, 1 - Math.exp(-dt * 18));
+    void slot;
+    const horizontalForward = new THREE.Vector3(-Math.sin(playerYaw), 0, -Math.cos(playerYaw));
+    const right = new THREE.Vector3(Math.cos(playerYaw), 0, -Math.sin(playerYaw));
+    const hull = new THREE.Vector3(pos.x, pos.y - 2.5, pos.z);
+    _tv.copy(hull)
+      .addScaledVector(horizontalForward, -TRANSPORT_CAMERA.rear)
+      .addScaledVector(right, getSettings().tpsCharacterSide === 'right' ? -TRANSPORT_CAMERA.lateral : TRANSPORT_CAMERA.lateral);
+    _tv.y = pos.y + TRANSPORT_CAMERA.height;
+    _cameraLook.copy(hull)
+      .addScaledVector(horizontalForward, TRANSPORT_CAMERA.lookAhead)
+      .y += TRANSPORT_CAMERA.lookHeight + THREE.MathUtils.clamp(pitch, -1.1, 1.1) * 4.5;
+    const look = new THREE.Matrix4().lookAt(_tv, _cameraLook, _cameraUp);
+    _cameraQuat.setFromRotationMatrix(look);
+    if (!this.transportInitialized) {
+      this.camera.position.copy(_tv);
+      this.camera.quaternion.copy(_cameraQuat);
+      this.transportInitialized = true;
     } else {
-      // A transport is read from above: keep a constant height and distance
-      // relative to the interpolated hull while yaw orbits continuously. Aim
-      // input moves the look target instead of bobbing the camera, so terrain
-      // stays stable and the ship remains visible during free look.
-      const horizontalForward = new THREE.Vector3(-Math.sin(playerYaw), 0, -Math.cos(playerYaw));
-      const right = new THREE.Vector3(Math.cos(playerYaw), 0, -Math.sin(playerYaw));
-      const side = getSettings().tpsCharacterSide === 'right' ? -1 : 1;
-      const hull = new THREE.Vector3(pos.x, pos.y - 2.5, pos.z);
-      _tv.copy(hull)
-        .addScaledVector(horizontalForward, -27)
-        .addScaledVector(right, side * 5.2);
-      _tv.y = pos.y + 22;
       this.camera.position.lerp(_tv, 1 - Math.exp(-dt * 16));
-      const lookTarget = hull
-        .addScaledVector(horizontalForward, 5.5)
-        .add(new THREE.Vector3(0, THREE.MathUtils.clamp(pitch, -1.1, 1.1) * 4.5, 0));
-      const look = new THREE.Matrix4().lookAt(this.camera.position, lookTarget, new THREE.Vector3(0, 1, 0));
-      const transportQ = new THREE.Quaternion().setFromRotationMatrix(look);
-      this.camera.quaternion.slerp(transportQ, 1 - Math.exp(-dt * 18));
+      this.camera.quaternion.slerp(_cameraQuat, 1 - Math.exp(-dt * 18));
     }
   }
 

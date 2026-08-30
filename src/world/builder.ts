@@ -673,6 +673,7 @@ export class WorldBuilder {
   crate(x: number, y: number, z: number, scale = 1, mat: MatKey = 'wood'): void {
     const s = 1.4 * scale;
     this.def.destructibles.push({
+      stableId: `${this.def.id}:crate:${this.def.destructibles.length.toString(36).padStart(4, '0')}`,
       hp: 30,
       type: 'crate',
       geo: { kind: 'box', x, y: y + s / 2, z, sx: s, sy: s, sz: s, yaw: 0, mat },
@@ -681,6 +682,7 @@ export class WorldBuilder {
 
   glassPane(x: number, y: number, z: number, sx: number, sy: number, axis: 'x' | 'z'): void {
     this.def.destructibles.push({
+      stableId: `${this.def.id}:glass:${this.def.destructibles.length.toString(36).padStart(4, '0')}`,
       hp: 5,
       type: 'glass',
       geo: { kind: 'box', x, y, z, sx: axis === 'x' ? sx : 0.08, sy, sz: axis === 'z' ? sx : 0.08, yaw: 0, mat: 'glass', materialHint: 'glass' },

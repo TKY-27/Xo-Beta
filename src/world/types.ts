@@ -66,6 +66,8 @@ export type GeoSpec = GeoBox | GeoCylinder | GeoSphere;
 
 /** Destructible prop instance (crates, glass, lamps...). */
 export interface DestructibleSpec {
+  /** Stable map-scoped identity shared by physics, presentation and events. */
+  stableId: string;
   geo: GeoSpec;
   hp: number;
   type: 'crate' | 'glass' | 'lamp' | 'fence' | 'furniture' | 'sign' | 'vegetation';

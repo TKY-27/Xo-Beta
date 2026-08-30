@@ -9,7 +9,7 @@ import {
   PhysicsWorld,
   type CharBody as CharBodyType,
 } from '../../src/physics/physics';
-import { CameraRig } from '../../src/render/cameraRig';
+import { CameraRig, SPECTATOR_CAMERA, TRANSPORT_CAMERA } from '../../src/render/cameraRig';
 import { getSettings } from '../../src/core/settings';
 import { Actor } from '../../src/sim/actor';
 import { CombatSystem } from '../../src/sim/combat';
@@ -37,16 +37,17 @@ const noMovementEvents: MovementEvents = {
   onSplash: () => undefined,
 };
 
-function fakeBody(x: number, y: number, z: number): CharBodyType {
+function fakeBody(x: number, y: number, z: number, actorId = 0): CharBodyType {
   return {
+    actorId,
     position: { x, y, z },
     velocity: { x: 0, y: 0, z: 0 },
     grounded: true,
   } as CharBodyType;
 }
 
-function actorAtFeet(name: string, x: number, feetY: number, z: number): Actor {
-  return new Actor(name, true, fakeBody(x, feetY + CAPSULE_CENTER_OFFSET, z), 0x5fd0ff);
+function actorAtFeet(name: string, x: number, feetY: number, z: number, actorId = 0): Actor {
+  return new Actor(name, true, fakeBody(x, feetY + CAPSULE_CENTER_OFFSET, z, actorId), 0x5fd0ff);
 }
 
 describe('authoritative character-space coordinates', () => {
@@ -85,7 +86,67 @@ describe('authoritative character-space coordinates', () => {
     expect(rig.camera.position.y).toBeCloseTo(feetY + MOVE.eyeHeight - 0.55, 6);
 
     rig.updateSpectate(actor, 1 / 60, noCollision);
-    expect(rig.camera.position.y).toBeCloseTo(actor.eyeY - 0.2, 6);
+    expect(rig.camera.position.y).toBeCloseTo(feetY + SPECTATOR_CAMERA.height, 6);
+  });
+
+  it('keeps spectator height independent of target pitch and bounds rapid yaw changes', () => {
+    const actor = actorAtFeet('SPECTATE_STABLE', 0, 3, 0, 41);
+    const rig = new CameraRig(16 / 9);
+    const noCollision = { cameraCast: () => null };
+
+    actor.pitch = 1.2;
+    rig.updateSpectate(actor, 1 / 60, noCollision);
+    const first = rig.camera.position.clone();
+    actor.pitch = -1.2;
+    rig.updateSpectate(actor, 1 / 60, noCollision);
+    expect(Math.abs(rig.camera.position.y - first.y)).toBeLessThan(0.001);
+
+    let maxRadius = 0;
+    for (let i = 0; i < 20; i++) {
+      actor.yaw = i % 2 === 0 ? Math.PI : -Math.PI;
+      rig.updateSpectate(actor, 1 / 60, noCollision);
+      expect(rig.camera.position.toArray().every(Number.isFinite)).toBe(true);
+      maxRadius = Math.max(maxRadius, Math.hypot(rig.camera.position.x, rig.camera.position.z));
+    }
+    expect(maxRadius).toBeLessThan(SPECTATOR_CAMERA.rear + 1.5);
+  });
+
+  it('resets the spectator camera immediately when the target actor changes', () => {
+    const firstActor = actorAtFeet('SPECTATE_A', 0, 0, 0, 51);
+    const secondActor = actorAtFeet('SPECTATE_B', 80, 5, -40, 52);
+    const rig = new CameraRig(16 / 9);
+    const noCollision = { cameraCast: () => null };
+
+    rig.updateSpectate(firstActor, 1, noCollision);
+    rig.updateSpectate(secondActor, 1 / 120, noCollision);
+
+    expect(rig.camera.position.distanceTo(new THREE.Vector3(secondActor.body.position.x, 5 + SPECTATOR_CAMERA.torsoHeight, secondActor.body.position.z)))
+      .toBeGreaterThan(SPECTATOR_CAMERA.rear - 0.5);
+    expect(rig.camera.position.x).toBeGreaterThan(70);
+    expect(rig.camera.position.toArray().every(Number.isFinite)).toBe(true);
+    expect(rig.camera.quaternion.toArray().every(Number.isFinite)).toBe(true);
+  });
+
+  it('contracts the spectator boom quickly and recovers it slowly after a rear obstruction clears', () => {
+    const phys = new PhysicsWorld();
+    const actor = actorAtFeet('SPECTATE_WALL', 0, 0, 0, 61);
+    const wall = phys.addStaticBox(0, 1.8, 2.5, 4, 2, 0.12, 0, 'stone');
+    phys.flush();
+    const rig = new CameraRig(16 / 9);
+
+    rig.updateSpectate(actor, 1, phys);
+    const blockedDistance = rig.camera.position.distanceTo(new THREE.Vector3(0, SPECTATOR_CAMERA.torsoHeight, 0));
+    expect(blockedDistance).toBeLessThan(SPECTATOR_CAMERA.rear);
+
+    phys.removeCollider(wall);
+    rig.updateSpectate(actor, 0.1, phys);
+    const recoveringDistance = rig.camera.position.distanceTo(new THREE.Vector3(0, SPECTATOR_CAMERA.torsoHeight, 0));
+    expect(recoveringDistance).toBeGreaterThan(blockedDistance);
+    expect(recoveringDistance).toBeLessThan(SPECTATOR_CAMERA.rear);
+    rig.updateSpectate(actor, 1, phys);
+    expect(rig.camera.position.distanceTo(new THREE.Vector3(0, SPECTATOR_CAMERA.torsoHeight, 0)))
+      .toBeGreaterThan(recoveringDistance);
+    phys.dispose();
   });
 
   it('ignores the owning actor during a TPS camera sweep and shortens only against scenery', () => {
@@ -201,6 +262,42 @@ describe('authoritative character-space coordinates', () => {
     expect(second.y).toBeCloseTo(first.y, 4);
     expect(second.distanceTo(first)).toBeGreaterThan(0.1);
     expect(second.distanceTo(first)).toBeLessThan(1);
+  });
+
+  it('uses the same external transport camera for FPS and TPS', () => {
+    const transport = { x: -18, y: 96, z: 14 };
+    const slot = { x: 4, y: -12, z: 2 };
+    const fps = new CameraRig(16 / 9);
+    const tps = new CameraRig(16 / 9);
+    tps.mode = 'tps';
+
+    fps.updateTransport(transport, slot, 0.35, -0.6, 0, 1);
+    tps.updateTransport(transport, slot, 0.35, -0.6, 0, 1);
+
+    expect(fps.camera.position.y).toBeCloseTo(transport.y + TRANSPORT_CAMERA.height, 6);
+    expect(fps.camera.position.distanceTo(new THREE.Vector3(transport.x, transport.y - 2.5, transport.z)))
+      .toBeGreaterThan(35);
+    expect(fps.camera.position.distanceTo(tps.camera.position)).toBeLessThan(1e-8);
+    expect(fps.camera.quaternion.angleTo(tps.camera.quaternion)).toBeLessThan(1e-8);
+  });
+
+  it('blends from the external transport camera into gameplay without a teleport', () => {
+    const actor = actorAtFeet('DEPLOY_BLEND', 0, 0, 0);
+    const rig = new CameraRig(16 / 9);
+    const noCollision = { cameraCast: () => null };
+    const transport = { x: 0, y: 120, z: 0 };
+    rig.updateTransport(transport, { x: 0, y: 0, z: 0 }, 0, 0, 0, 1);
+    const before = rig.camera.position.clone();
+    rig.beginGameplayBlend();
+    rig.update(actor, 0.05, noCollision);
+    const firstStep = rig.camera.position.clone();
+    rig.update(actor, 0.05, noCollision);
+    const secondStep = rig.camera.position.clone();
+
+    expect(firstStep.toArray().every(Number.isFinite)).toBe(true);
+    expect(secondStep.toArray().every(Number.isFinite)).toBe(true);
+    expect(firstStep.distanceTo(before)).toBeLessThan(before.distanceTo(actor.body.position));
+    expect(secondStep.distanceTo(firstStep)).toBeLessThan(before.distanceTo(actor.body.position));
   });
 
   it('probes the support immediately below the soles for footstep material', () => {

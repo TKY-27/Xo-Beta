@@ -91,8 +91,8 @@ export interface MatchEventsMap {
   impact: { x: number; y: number; z: number; nx: number; ny: number; nz: number; material: string };
   tracer: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; color: number };
   ricochet: { x: number; y: number; z: number };
-  glassBreak: { x: number; y: number; z: number };
-  destructibleDestroyed: { id: number; x: number; y: number; z: number };
+  glassBreak: { destructibleId: string; x: number; y: number; z: number };
+  destructibleDestroyed: { id: number; destructibleId: string; x: number; y: number; z: number };
   actorHit: { targetId: number; attackerId: number; damage: number; region: string; killed: boolean; headshot: boolean; weaponId: WeaponId | 'melee'; shieldDamage: number };
   shieldBroken: { actorId: number };
   headshotFeedback: { attackerId: number };
@@ -142,6 +142,7 @@ export interface ActorController {
 
 interface DestructibleInstance {
   id: number;
+  stableId: string;
   hp: number;
   collider: import('@dimforge/rapier3d-compat').Collider;
   geo: MapDef['destructibles'][number]['geo'];
@@ -260,7 +261,7 @@ export class Match {
         d.geo.kind === 'box'
           ? this.phys.addDestructibleBox(id, d.geo.x, d.geo.y, d.geo.z, d.geo.sx / 2, d.geo.sy / 2, d.geo.sz / 2, hint)
           : this.phys.addDestructibleBox(id, d.geo.x, d.geo.y, d.geo.z, (d.geo.r ?? 0.5) * 0.85, (('h' in d.geo ? d.geo.h : undefined) ?? 1) / 2, (d.geo.r ?? 0.5) * 0.85, hint);
-      drefs.push({ id, hp: d.hp, collider, geo: d.geo, type: d.type, alive: true });
+      drefs.push({ id, stableId: d.stableId, hp: d.hp, collider, geo: d.geo, type: d.type, alive: true });
     }
     this.combat.registerDestructibles(drefs as never);
     this.phys.flush();
@@ -496,9 +497,9 @@ export class Match {
         this.events.emit('tracer', { x1, y1, z1, x2, y2, z2, color });
       },
       onRicochet: (x, y, z) => this.events.emit('ricochet', { x, y, z }),
-      onGlassBreak: (x, y, z) => this.events.emit('glassBreak', { x, y, z }),
-      onDestructibleDamaged: (id, x, y, z, destroyed) => {
-        if (destroyed) this.events.emit('destructibleDestroyed', { id, x, y, z });
+      onGlassBreak: (destructibleId, x, y, z) => this.events.emit('glassBreak', { destructibleId, x, y, z }),
+      onDestructibleDamaged: (id, destructibleId, x, y, z, destroyed) => {
+        if (destroyed) this.events.emit('destructibleDestroyed', { id, destructibleId, x, y, z });
       },
       onMeleeSwing: (a, x, y, z) => {
         this.events.emit('meleeSwing', { actorId: a.id, x, y, z, yaw: a.yaw });
