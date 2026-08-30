@@ -47,7 +47,7 @@ function fakeBody(x: number, y: number, z: number, actorId = 0): CharBodyType {
 }
 
 function actorAtFeet(name: string, x: number, feetY: number, z: number, actorId = 0): Actor {
-  return new Actor(name, true, fakeBody(x, feetY + CAPSULE_CENTER_OFFSET, z, actorId), 0x5fd0ff);
+  return new Actor(name, fakeBody(x, feetY + CAPSULE_CENTER_OFFSET, z, actorId), 0x5fd0ff);
 }
 
 describe('authoritative character-space coordinates', () => {
@@ -152,7 +152,7 @@ describe('authoritative character-space coordinates', () => {
   it('ignores the owning actor during a TPS camera sweep and shortens only against scenery', () => {
     const phys = new PhysicsWorld();
     const body = new CharBody(phys, 1, 0, CAPSULE_CENTER_OFFSET, 0);
-    const actor = new Actor('TPS_OWNER', true, body, 0x5fd0ff);
+    const actor = new Actor('TPS_OWNER', body, 0x5fd0ff);
     phys.flush();
 
     const rig = new CameraRig(16 / 9);
@@ -172,7 +172,7 @@ describe('authoritative character-space coordinates', () => {
   it('never forces a short TPS boom through a wall close to the actor', () => {
     const phys = new PhysicsWorld();
     const body = new CharBody(phys, 2, 0, CAPSULE_CENTER_OFFSET, 0);
-    const actor = new Actor('TPS_NEAR_WALL', true, body, 0x5fd0ff);
+    const actor = new Actor('TPS_NEAR_WALL', body, 0x5fd0ff);
     // Near face at z=0.55: clear of the 0.42 m actor capsule, but closer than
     // the old hard-coded 0.75 m camera minimum.
     phys.addStaticBox(0, 2, 0.65, 4, 2, 0.1, 0, 'stone');
@@ -336,7 +336,7 @@ describe('authoritative character-space coordinates', () => {
   it('detects chest-deep water using foot-relative torso height', () => {
     const phys = new PhysicsWorld();
     const body = new CharBody(phys, 77, 0, CAPSULE_CENTER_OFFSET, 0);
-    const actor = new Actor('SWIM', true, body, 0x5fd0ff);
+    const actor = new Actor('SWIM', body, 0x5fd0ff);
     const movement = new MovementSystem(phys, noMovementEvents);
     movement.waterAt = (_x, y) => y <= 2.2
       ? { minX: -10, maxX: 10, minZ: -10, maxZ: 10, surfaceY: 2, depth: 5 }

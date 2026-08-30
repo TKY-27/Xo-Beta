@@ -6,9 +6,9 @@
  */
 
 import {
-  BOT_PERSONALITIES, DIFFICULTY, GAMEPLAY, HEALTH_MAX, HEAL_ITEMS, MATCH, MOVE,
+  DIFFICULTY, GAMEPLAY, HEALTH_MAX, HEAL_ITEMS, MATCH, MOVE,
   SHIELD_MAX, WEAPONS,
-  type BotPersonality, type Difficulty, type WeaponId,
+  type Difficulty, type WeaponId,
 } from '../core/balance';
 import { EventBus } from '../core/events';
 import { Rng, setGameSeed } from '../core/rng';
@@ -32,6 +32,19 @@ import { MovementSystem, CAPSULE_CENTER_OFFSET, type MovementEvents } from './mo
 import { CombatSystem, type CombatEvents } from './combat';
 import { LootSystem, type LootEvents, type WorldItem } from './loot';
 import { Storm, type StormEvents } from './storm';
+import {
+  ActorDamagePolicy,
+  areRosterEntriesHostile,
+  isTeamMode,
+  personalityForRosterEntry,
+  validateRoster,
+  type ConnectionState,
+  type MatchMode,
+  type PeerId,
+  type RosterEntry,
+  type TeamId,
+} from './roster';
+import type { GameStateView, MatchWinnerView, TeamResult, TeamView } from './gameStateView';
 
 export type MatchPhase = 'transport' | 'drop' | 'live' | 'results';
 
@@ -91,7 +104,7 @@ export interface MatchEventsMap {
   impact: { x: number; y: number; z: number; nx: number; ny: number; nz: number; material: string };
   tracer: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; color: number };
   ricochet: { x: number; y: number; z: number };
-  glassBreak: { destructibleId: string; x: number; y: number; z: number };
+  glassBreak: { destructibleId: string; actorId: number; x: number; y: number; z: number };
   destructibleDestroyed: { id: number; destructibleId: string; x: number; y: number; z: number };
   actorHit: { targetId: number; attackerId: number; damage: number; region: string; killed: boolean; headshot: boolean; weaponId: WeaponId | 'melee'; shieldDamage: number };
   shieldBroken: { actorId: number };
@@ -99,7 +112,7 @@ export interface MatchEventsMap {
   eliminated: { victimId: number; killerId: number; weaponId: WeaponId | null; headshot: boolean; storm: boolean; placement: number };
   itemSpawned: { itemId: number };
   itemPickedUp: { itemId: number; actorId: number; rare?: boolean };
-  chestOpened: { chestId: number; kind: string; tier: number; x: number; y: number; z: number };
+  chestOpened: { chestId: number; actorId: number; kind: string; tier: number; x: number; y: number; z: number };
   stormWaiting: { index: number; waitTime: number; targetRadius: number };
   stormShrinking: { index: number; shrinkTime: number };
   stormFinal: Record<string, never>;
@@ -121,7 +134,7 @@ export interface MatchEventsMap {
    * jump gate unlocks. */
   transportGateOpened: Record<string, never>;
   phaseChanged: { phase: MatchPhase };
-  matchWon: { winnerId: number; winnerName: string };
+  matchWon: { winnerId: number; winnerName: string; teamId: TeamId | null };
   reloadStarted: { actorId: number; empty: boolean };
   meleeSwing: { actorId: number; x: number; y: number; z: number; yaw: number };
   meleeHit: { targetId: number; attackerId: number; damage: number; killed: boolean; headshot: boolean };
@@ -131,12 +144,14 @@ export interface MatchConfig {
   mapDef: MapDef;
   seed: number;
   difficulty: Difficulty;
-  withPlayer: boolean;
+  mode: MatchMode;
+  roster: readonly RosterEntry[];
   /** Solo exploration mode: no bots, no storm, no win condition. */
   practice?: boolean;
 }
 
 export interface ActorController {
+  readonly kind?: 'human' | 'bot';
   updateCommand(actor: Actor, dt: number): InputCommand;
 }
 
@@ -163,12 +178,15 @@ export class Match {
   readonly mapDef: MapDef;
   readonly difficulty: Difficulty;
   readonly practice: boolean;
+  readonly mode: MatchMode;
+  readonly roster: RosterEntry[];
+  readonly localActorId: number | null;
+  readonly damagePolicy: ActorDamagePolicy;
   practiceStart: { x: number; y: number; z: number; poi: string } | null = null;
   /** QA-only input override applied to the player command (see fixedUpdate). */
   qaInput: Partial<InputCommand> | null = null;
 
   actors: Actor[] = [];
-  player: Actor | null = null;
   controllers = new Map<number, ActorController>();
 
   phase: MatchPhase = 'transport';
@@ -192,6 +210,8 @@ export class Match {
   /** Sequentially-claimed drop targets so bots spread across the map. */
   dropClaims: Array<{ x: number; z: number }> = [];
   winner: Actor | null = null;
+  winnerView: MatchWinnerView | null = null;
+  teamResults: TeamResult[] = [];
   aliveCount = 0;
   finished = false;
 
@@ -199,12 +219,23 @@ export class Match {
   private commands = new Map<number, InputCommand>();
   private pendingEliminations: Array<{ victim: Actor; killer: Actor | null; weaponId: WeaponId | null; headshot: boolean; storm: boolean }> = [];
   private processedEliminations = new Set<number>();
+  private teamEliminations = new Map<TeamId, number>();
 
   constructor(cfg: MatchConfig) {
     this.seed = cfg.seed;
     this.mapDef = cfg.mapDef;
     this.difficulty = cfg.difficulty;
     this.practice = cfg.practice === true;
+    this.mode = cfg.mode;
+    this.roster = cfg.roster.map((entry): RosterEntry => ({
+      ...entry,
+      ownership: entry.ownership.kind === 'bot'
+        ? { kind: 'bot' }
+        : { kind: entry.ownership.kind, peerId: entry.ownership.peerId },
+    })).sort((a, b) => a.slotId - b.slotId || a.actorId - b.actorId);
+    validateRoster(this.mode, this.roster, this.practice);
+    this.localActorId = this.roster.find((entry) => entry.ownership.kind === 'local-human')?.actorId ?? null;
+    this.damagePolicy = new ActorDamagePolicy(this.mode, (actorId) => this.rosterEntryForActor(actorId));
     this.rng = new Rng(cfg.seed);
     setGameSeed(cfg.seed ^ 0x5f3759df);
     this.phys = new PhysicsWorld();
@@ -241,6 +272,7 @@ export class Match {
     this.movement.bounds = { half: this.mapDef.size / 2 - 8 };
     this.combat.waterAt = (x, y, z) => this.waterAt(x, y, z);
     this.combat.attackerLookup = (id) => this.actors.find((a) => a.id === id) ?? null;
+    this.combat.canAffectActor = (attacker, target) => this.damagePolicy.allows(attacker.id, target.id);
 
     // Fall damage can kill — route those deaths through the elimination pipeline.
     this.events.on('land', (e) => {
@@ -292,7 +324,7 @@ export class Match {
     }
 
     // Actors start aboard the transport
-    this.spawnActors(cfg);
+    this.spawnActors();
 
     if (this.practice) {
       // Solo exploration: already deployed on the ground, match never ends.
@@ -307,32 +339,20 @@ export class Match {
   // Setup helpers
   // -------------------------------------------------------------------------
 
-  private spawnActors(cfg: MatchConfig): void {
-    const roster = BOT_PERSONALITIES;
-    const names: string[] = [];
-    const colors: number[] = [];
-    const pers: (BotPersonality | null)[] = [];
-    if (cfg.withPlayer) {
-      names.push('YOU');
-      colors.push(0x5fd0ff);
-      pers.push(null);
-    }
-    const botCount = this.practice ? 0 : MATCH.combatantCount - (cfg.withPlayer ? 1 : 0);
-    for (let i = 0; i < botCount; i++) {
-      const p = roster[i % roster.length]!;
-      names.push(p.name);
-      colors.push(p.accentColor);
-      pers.push(p);
-    }
-
-    for (let i = 0; i < names.length; i++) {
+  private spawnActors(): void {
+    for (const entry of this.roster) {
       const sx = this.practice ? this.practiceSpawn().x : this.transportPos.x;
       const sy = this.practice ? this.practiceSpawn().y : this.transportPos.y;
       const sz = this.practice ? this.practiceSpawn().z : this.transportPos.z;
-      const body = new CharBody(this.phys, i + 1, sx, sy, sz);
-      const actor = new Actor(names[i]!, i === 0 && cfg.withPlayer, body, colors[i]!, pers[i]);
+      const body = new CharBody(this.phys, entry.actorId, sx, sy, sz);
+      const actor = new Actor(
+        entry.displayName,
+        body,
+        entry.accentColor,
+        personalityForRosterEntry(entry),
+        entry.skinId,
+      );
       this.actors.push(actor);
-      if (actor.isPlayer) this.player = actor;
     }
   }
 
@@ -371,6 +391,193 @@ export class Match {
     this.practiceSpawnCache = { x, y, z };
     this.practiceStart = { x, y, z, poi: poi?.name ?? 'Map centre' };
     return this.practiceSpawnCache;
+  }
+
+  get localActor(): Actor | null {
+    return this.localActorId === null
+      ? null
+      : this.actors.find((actor) => actor.id === this.localActorId) ?? null;
+  }
+
+  rosterEntryForActor(actorId: number): RosterEntry | null {
+    return this.roster.find((entry) => entry.actorId === actorId) ?? null;
+  }
+
+  rosterEntryForPeer(peerId: PeerId): RosterEntry | null {
+    return this.roster.find((entry) => entry.ownership.kind !== 'bot' && entry.ownership.peerId === peerId) ?? null;
+  }
+
+  rosterEntryForSlot(slotId: number): RosterEntry | null {
+    return this.roster.find((entry) => entry.slotId === slotId) ?? null;
+  }
+
+  teamForActor(actorOrId: Actor | number): TeamId | null {
+    const actorId = typeof actorOrId === 'number' ? actorOrId : actorOrId.id;
+    return this.rosterEntryForActor(actorId)?.teamId ?? null;
+  }
+
+  isLocalActor(actorOrId: Actor | number): boolean {
+    const actorId = typeof actorOrId === 'number' ? actorOrId : actorOrId.id;
+    return this.localActorId !== null && actorId === this.localActorId;
+  }
+
+  isHumanActor(actorOrId: Actor | number): boolean {
+    const actorId = typeof actorOrId === 'number' ? actorOrId : actorOrId.id;
+    const entry = this.rosterEntryForActor(actorId);
+    return entry !== null && entry.ownership.kind !== 'bot';
+  }
+
+  isBotActor(actorOrId: Actor | number): boolean {
+    const actorId = typeof actorOrId === 'number' ? actorOrId : actorOrId.id;
+    return this.rosterEntryForActor(actorId)?.ownership.kind === 'bot';
+  }
+
+  areTeammates(first: Actor | number, second: Actor | number): boolean {
+    if (!isTeamMode(this.mode)) return false;
+    const firstId = typeof first === 'number' ? first : first.id;
+    const secondId = typeof second === 'number' ? second : second.id;
+    if (firstId === secondId) return false;
+    const firstEntry = this.rosterEntryForActor(firstId);
+    const secondEntry = this.rosterEntryForActor(secondId);
+    return firstEntry !== null && secondEntry !== null && firstEntry.teamId === secondEntry.teamId;
+  }
+
+  areHostile(first: Actor | number, second: Actor | number): boolean {
+    const firstId = typeof first === 'number' ? first : first.id;
+    const secondId = typeof second === 'number' ? second : second.id;
+    const firstEntry = this.rosterEntryForActor(firstId);
+    const secondEntry = this.rosterEntryForActor(secondId);
+    return firstEntry !== null && secondEntry !== null
+      && areRosterEntriesHostile(this.mode, firstEntry, secondEntry);
+  }
+
+  connectionStateForActor(actorOrId: Actor | number): ConnectionState | null {
+    const actorId = typeof actorOrId === 'number' ? actorOrId : actorOrId.id;
+    return this.rosterEntryForActor(actorId)?.connectionState ?? null;
+  }
+
+  markPeerDisconnected(peerId: PeerId): boolean {
+    const entry = this.rosterEntryForPeer(peerId);
+    if (!entry || entry.connectionState !== 'connected') return false;
+    entry.connectionState = 'disconnected';
+    const actor = this.actors.find((candidate) => candidate.id === entry.actorId);
+    if (actor) {
+      if (actor.healing) {
+        actor.healing = null;
+        this.events.emit('healCancelled', { actorId: actor.id });
+      }
+      actor.interactTimer = 0;
+      actor.adsHeld = false;
+      actor.jumpBuffered = 0;
+      actor.dashTimer = 0;
+      if (actor.grappleActive) this.movement.releaseGrapple(actor);
+      this.commands.delete(actor.id);
+    }
+    return true;
+  }
+
+  restorePeerControl(peerId: PeerId): boolean {
+    const entry = this.rosterEntryForPeer(peerId);
+    if (!entry || entry.connectionState !== 'disconnected') return false;
+    entry.connectionState = 'connected';
+    return true;
+  }
+
+  get teams(): readonly TeamView[] {
+    if (!isTeamMode(this.mode)) return [];
+    const ids = [...new Set(this.roster.map((entry) => entry.teamId))]
+      .filter((teamId): teamId is TeamId => teamId !== null)
+      .sort((a, b) => a - b);
+    return ids.map((teamId) => {
+      const entries = this.roster.filter((entry) => entry.teamId === teamId);
+      const members = entries.map((entry) => ({
+        actorId: entry.actorId,
+        slotId: entry.slotId,
+        displayName: entry.displayName,
+        accentColor: entry.accentColor,
+        alive: this.actors.find((actor) => actor.id === entry.actorId)?.alive === true,
+        connectionState: entry.connectionState,
+      }));
+      return Object.freeze({
+        teamId,
+        members: Object.freeze(members),
+        aliveCount: members.filter((member) => member.alive).length,
+      });
+    });
+  }
+
+  get localTeamId(): TeamId | null {
+    return this.localActorId === null ? null : this.teamForActor(this.localActorId);
+  }
+
+  get enemyTeamIds(): readonly TeamId[] {
+    const localTeamId = this.localTeamId;
+    if (localTeamId === null) return [];
+    return this.teams.map((team) => team.teamId).filter((teamId) => teamId !== localTeamId);
+  }
+
+  toGameStateView(): GameStateView {
+    const actors = this.actors.map((actor) => {
+      const entry = this.rosterEntryForActor(actor.id)!;
+      return Object.freeze({
+        id: actor.id,
+        displayName: actor.name,
+        ownership: Object.freeze(entry.ownership.kind === 'bot'
+          ? { kind: 'bot' as const }
+          : { kind: entry.ownership.kind, peerId: entry.ownership.peerId }),
+        connectionState: entry.connectionState,
+        teamId: entry.teamId,
+        skinId: actor.skinId,
+        accentColor: actor.accentColor,
+        alive: actor.alive,
+        health: actor.health,
+        shield: actor.shield,
+        position: Object.freeze({ ...actor.body.position }),
+        yaw: actor.yaw,
+        pitch: actor.pitch,
+        placement: actor.placement,
+        stats: Object.freeze({ ...actor.stats }),
+      });
+    });
+    const chests = this.chests.map((chest) => Object.freeze({
+      id: chest.id,
+      kind: chest.kind,
+      x: chest.x,
+      y: chest.y,
+      z: chest.z,
+      opened: chest.opened,
+    }));
+    const loot = this.loot.items.map((item) => Object.freeze({
+      id: item.id,
+      kind: item.kind,
+      x: item.x,
+      y: item.y,
+      z: item.z,
+      rarity: item.rarity,
+    }));
+    const teams = Object.freeze([...this.teams]);
+    return Object.freeze({
+      phase: this.phase,
+      actors: Object.freeze(actors),
+      localActorId: this.localActorId,
+      teams,
+      mode: this.mode,
+      chests: Object.freeze(chests),
+      loot: Object.freeze(loot),
+      storm: Object.freeze({
+        state: this.storm.state,
+        phaseIndex: this.storm.phaseIndex,
+        timer: this.storm.timer,
+        centerX: this.storm.centerX,
+        centerZ: this.storm.centerZ,
+        radius: this.storm.radius,
+      }),
+      winner: this.winnerView ? Object.freeze({ ...this.winnerView }) : null,
+      teamResults: Object.freeze(this.teamResults.map((result) => Object.freeze({
+        ...result,
+        survivingActorIds: Object.freeze([...result.survivingActorIds]),
+      }))),
+    });
   }
 
   waterAt(x: number, y: number, z: number): WaterVolume | null {
@@ -436,6 +643,7 @@ export class Match {
   private poundAoE(source: Actor, x: number, y: number, z: number): void {
     for (const other of this.actors) {
       if (!other.alive || other === source) continue;
+      if (!this.damagePolicy.allows(source.id, other.id)) continue;
       const dx = other.body.position.x - x;
       const dy = other.body.position.y - y;
       const dz = other.body.position.z - z;
@@ -477,7 +685,7 @@ export class Match {
           targetId: target.id, attackerId: attacker?.id ?? -1, damage, region, killed, headshot, weaponId,
           shieldDamage: target.lastShieldDamage,
         });
-        if (headshot && attacker?.isPlayer && !killed) {
+        if (headshot && attacker && this.isLocalActor(attacker) && !killed) {
           this.events.emit('headshotFeedback', { attackerId: attacker.id });
         }
         if (target.healing) {
@@ -497,7 +705,7 @@ export class Match {
         this.events.emit('tracer', { x1, y1, z1, x2, y2, z2, color });
       },
       onRicochet: (x, y, z) => this.events.emit('ricochet', { x, y, z }),
-      onGlassBreak: (destructibleId, x, y, z) => this.events.emit('glassBreak', { destructibleId, x, y, z }),
+      onGlassBreak: (destructibleId, x, y, z, actorId) => this.events.emit('glassBreak', { destructibleId, actorId, x, y, z }),
       onDestructibleDamaged: (id, destructibleId, x, y, z, destroyed) => {
         if (destroyed) this.events.emit('destructibleDestroyed', { id, destructibleId, x, y, z });
       },
@@ -558,11 +766,16 @@ export class Match {
     commands.clear();
     for (const a of this.actors) {
       if (!a.alive) continue;
-      const ctrl = this.controllers.get(a.id);
+      const disconnected = this.connectionStateForActor(a) === 'disconnected';
+      const ctrl = disconnected ? undefined : this.controllers.get(a.id);
       const cmd = ctrl ? ctrl.updateCommand(a, dt) : emptyCommand();
+      if (disconnected) {
+        cmd.yaw = a.yaw;
+        cmd.pitch = a.pitch;
+      }
       // QA-harness override (browser automation cannot engage pointer lock,
       // so it drives fire/ADS through here; null during normal play).
-      if (a.isPlayer && this.qaInput) Object.assign(cmd, this.qaInput);
+      if (!disconnected && this.isLocalActor(a) && this.qaInput) Object.assign(cmd, this.qaInput);
       commands.set(a.id, cmd);
     }
 
@@ -715,7 +928,7 @@ export class Match {
 
       if (cmd.interactPressed) this.tryInteract(a);
 
-      this.autoPickupAmmo(a);
+      if (this.connectionStateForActor(a) !== 'disconnected') this.autoPickupAmmo(a);
     }
 
     this.combat.update(dt, this.actors);
@@ -742,7 +955,7 @@ export class Match {
 
   /** Select a live player's inventory slot from the UI. */
   selectPlayerInventorySlot(slot: number): boolean {
-    const player = this.player;
+    const player = this.localActor;
     if (!player || !player.alive) return false;
     return this.selectInventorySlot(player, slot);
   }
@@ -757,7 +970,7 @@ export class Match {
 
   /** Reorder two live player's inventory slots from the inventory UI. */
   reorderPlayerInventory(from: number, to: number): boolean {
-    const player = this.player;
+    const player = this.localActor;
     if (!player || !player.alive) return false;
     if (from === to) return player.inv.swapSlots(from, to);
     const selectedWeapon = player.inv.selectedWeapon;
@@ -773,7 +986,7 @@ export class Match {
 
   /** Drop any live player's inventory item, including healing stacks. */
   dropPlayerInventorySlot(slot: number): boolean {
-    const player = this.player;
+    const player = this.localActor;
     if (!player || !player.alive) return false;
     return this.dropInventorySlot(player, slot);
   }
@@ -845,6 +1058,7 @@ export class Match {
   }
 
   tryInteract(a: Actor): void {
+    if (this.connectionStateForActor(a) === 'disconnected') return;
     const p = a.body.position;
     const feetY = p.y - CAPSULE_CENTER_OFFSET;
     const bestChest = this.nearestInteractableChest(a);
@@ -853,7 +1067,7 @@ export class Match {
       a.interactTimer = 0.6;
       this.loot.openChest(bestChest.kind, bestChest.x, bestChest.y + 0.4, bestChest.z, this.rng);
       const chestTier = bestChest.kind === 'vault' ? 2 : bestChest.kind === 'elite' ? 1 : 0;
-      this.events.emit('chestOpened', { chestId: bestChest.id, kind: bestChest.kind, tier: chestTier, x: bestChest.x, y: bestChest.y, z: bestChest.z });
+      this.events.emit('chestOpened', { chestId: bestChest.id, actorId: a.id, kind: bestChest.kind, tier: chestTier, x: bestChest.x, y: bestChest.y, z: bestChest.z });
       return;
     }
     const candidates = this.interactableItems(a);
@@ -863,7 +1077,7 @@ export class Match {
       // cannot be stored (for example a full heal stack while unarmed), try the
       // next deterministic candidate rather than making the prompt a dead end.
       const hadWeapon = a.inv.slots.some((s) => s !== null && s.kind === 'weapon');
-      const displaced = this.loot.pickup(item, a, !a.isPlayer);
+      const displaced = this.loot.pickup(item, a, this.controllers.get(a.id)?.kind === 'bot');
       if (displaced === false) continue;
       a.interactTimer = 0.5;
       if (displaced && displaced.kind === 'weapon') {
@@ -989,12 +1203,21 @@ export class Match {
       const aliveBefore = this.actors.filter((a) => a.alive).length + 1;
       victim.placement = aliveBefore;
       victim.deathTime = this.time;
-      if (e.killer && e.killer !== victim) e.killer.stats.kills++;
+      const creditedKiller = e.killer && e.killer !== victim
+        && this.damagePolicy.allows(e.killer.id, victim.id)
+        ? e.killer
+        : null;
+      if (creditedKiller) {
+        creditedKiller.stats.kills++;
+        victim.eliminatedById = creditedKiller.id;
+        const teamId = this.teamForActor(creditedKiller);
+        if (teamId !== null) this.teamEliminations.set(teamId, (this.teamEliminations.get(teamId) ?? 0) + 1);
+      }
 
       this.killFeed.push({
         time: this.time,
-        killerName: e.killer ? e.killer.name : null,
-        killerId: e.killer?.id ?? -1,
+        killerName: creditedKiller?.name ?? null,
+        killerId: creditedKiller?.id ?? -1,
         victimName: victim.name,
         victimId: victim.id,
         weaponId: e.weaponId,
@@ -1012,7 +1235,7 @@ export class Match {
       this.aliveCount = this.actors.filter((a) => a.alive).length;
       this.events.emit('eliminated', {
         victimId: victim.id,
-        killerId: e.killer?.id ?? -1,
+        killerId: creditedKiller?.id ?? -1,
         weaponId: e.weaponId,
         headshot: e.headshot,
         storm: e.storm,
@@ -1025,21 +1248,51 @@ export class Match {
     if (this.practice) return;
     if (this.finished || this.phase === 'results') return;
     if (this.phase === 'transport' || this.phase === 'drop') return;
+    if (this.pendingEliminations.length > 0) return;
     const alive = this.actors.filter((a) => a.alive);
-    if (alive.length <= 1) {
+    if (isTeamMode(this.mode)) {
+      const livingTeams = [...new Set(alive.map((actor) => this.teamForActor(actor)))]
+        .filter((teamId): teamId is TeamId => teamId !== null);
+      if (livingTeams.length !== 1) return;
+      const winningTeamId = livingTeams[0]!;
+      const representative = alive
+        .filter((actor) => this.teamForActor(actor) === winningTeamId)
+        .sort((a, b) => a.id - b.id)[0]!;
       this.finished = true;
-      const winner = alive[0] ?? this.actors.reduce((last, a) => (a.deathTime > last.deathTime ? a : last), this.actors[0]!);
-      winner.placement = 1;
-      this.winner = winner;
-      // Final placements: survivors first (by survival time), then by death order.
-      const sorted = [...this.actors].sort((x, y) => {
-        if (x.alive !== y.alive) return x.alive ? -1 : 1;
-        return y.deathTime - x.deathTime;
-      });
-      sorted.forEach((a, i) => { a.placement = i + 1; });
+      this.winner = representative;
+      this.winnerView = { kind: 'team', teamId: winningTeamId };
+      this.finalizePlacements();
+      this.teamResults = this.teams.map((team) => Object.freeze({
+        teamId: team.teamId,
+        won: team.teamId === winningTeamId,
+        eliminations: this.teamEliminations.get(team.teamId) ?? 0,
+        survivingActorIds: Object.freeze(team.members.filter((member) => member.alive).map((member) => member.actorId)),
+      }));
       this.setPhase('results');
-      this.events.emit('matchWon', { winnerId: winner.id, winnerName: winner.name });
+      this.events.emit('matchWon', {
+        winnerId: representative.id,
+        winnerName: representative.name,
+        teamId: winningTeamId,
+      });
+      return;
     }
+    if (alive.length > 1) return;
+    this.finished = true;
+    const winner = alive[0] ?? this.actors.reduce((last, a) => (a.deathTime > last.deathTime ? a : last), this.actors[0]!);
+    this.winner = winner;
+    this.winnerView = { kind: 'actor', actorId: winner.id, displayName: winner.name };
+    this.finalizePlacements();
+    this.setPhase('results');
+    this.events.emit('matchWon', { winnerId: winner.id, winnerName: winner.name, teamId: null });
+  }
+
+  private finalizePlacements(): void {
+    const sorted = [...this.actors].sort((x, y) => {
+      if (x.alive !== y.alive) return x.alive ? -1 : 1;
+      if (x.alive && y.alive) return x.id - y.id;
+      return y.deathTime - x.deathTime || x.id - y.id;
+    });
+    sorted.forEach((actor, index) => { actor.placement = index + 1; });
   }
 
   /** Initial world loot scatter (call once after construction). */
@@ -1104,7 +1357,12 @@ export class Match {
   }
 
   spectatorTargets(): Actor[] {
-    return this.actors.filter((a) => a.alive);
+    const living = this.actors.filter((actor) => actor.alive);
+    const localTeamId = this.localTeamId;
+    if (!isTeamMode(this.mode) || localTeamId === null) return living;
+    const teammates = living.filter((actor) => this.teamForActor(actor) === localTeamId);
+    if (teammates.length === 0) return living;
+    return [...teammates, ...living.filter((actor) => this.teamForActor(actor) !== localTeamId)];
   }
 
   /**

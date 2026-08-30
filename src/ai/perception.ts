@@ -45,7 +45,10 @@ export class Perception {
   private clock = 0;
   private self: Actor;
 
-  constructor(self: Actor) {
+  constructor(
+    self: Actor,
+    private readonly isHostile: (other: Actor) => boolean = (other) => other !== self,
+  ) {
     this.self = self;
   }
 
@@ -53,7 +56,7 @@ export class Perception {
    * Periodic vision update. `actors` are all alive actors; we only use their
    * public transform (equivalent of what renders on screen).
    */
-  updateVision(dt: number, actors: Actor[], losBlocked: (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => boolean, awarenessMult: number, rangeMult = 1): void {
+  updateVision(dt: number, actors: readonly Actor[], losBlocked: (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => boolean, awarenessMult: number, rangeMult = 1): void {
     this.visionTimer -= dt;
     if (this.visionTimer > 0) return;
     this.visionTimer = 0.12;
@@ -65,7 +68,11 @@ export class Perception {
     const cosFov = Math.cos(VISION_FOV / 2);
 
     for (const other of actors) {
-      if (other === this.self || !other.alive) continue;
+      if (other === this.self || !other.alive || !this.isHostile(other)) {
+        this.visible.delete(other.id);
+        this.memories.delete(other.id);
+        continue;
+      }
       const op = other.body.position;
       const dx = op.x - p.x;
       const dz = op.z - p.z;
@@ -174,10 +181,16 @@ export class Perception {
     }
   }
 
+  forgetActor(actorId: number): void {
+    this.visible.delete(actorId);
+    this.memories.delete(actorId);
+  }
+
   bestVisibleTarget(rangePref: number): { actor: Actor; dist: number } | null {
     let best: { actor: Actor; dist: number } | null = null;
     let bestScore = -Infinity;
     for (const v of this.visible.values()) {
+      if (!this.isHostile(v.actor)) continue;
       const rangeScore = 1 - Math.min(1, Math.abs(v.dist - rangePref) / 90);
       const score = rangeScore * 2 - v.dist / 200;
       if (score > bestScore) {

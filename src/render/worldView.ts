@@ -1875,7 +1875,7 @@ export class WorldView {
       this.stormMesh.visible = false;
       return;
     }
-    const me = match.player;
+    const me = match.localActor;
     const mat = this.stormMesh.material as THREE.ShaderMaterial;
     if (!me) {
       this.stormMesh.visible = false;

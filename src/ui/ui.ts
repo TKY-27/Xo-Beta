@@ -923,7 +923,7 @@ export class Hud {
   }
 
   syncPlayerState(match: Match, dt = 1 / 60): void {
-    const p = match.player;
+    const p = match.localActor;
     if (!p) return;
 
     // Dynamic crosshair: expands with fire bloom, tightens while aiming
@@ -1068,7 +1068,7 @@ export class Hud {
   }
 
   private syncInventoryOverlay(match: Match): void {
-    const p = match.player;
+    const p = match.localActor;
     if (!p) return;
     const selected = p.inv.selectedItem;
     const detailIcon = $('inventory-detail-icon');
@@ -1442,7 +1442,7 @@ export class Hud {
 
     // route to safety: straight line + arrow from the player toward the safe
     // zone (only when actually outside it)
-    const me = match.player;
+    const me = match.localActor;
     if (me?.alive && routeTarget) {
       const pdx = me.body.position.x - routeTarget.x;
       const pdz = me.body.position.z - routeTarget.z;
@@ -1533,7 +1533,7 @@ export class Hud {
     if (!ctx) return;
     const size = 188;
     const scale = size / (match.mapDef.size * 0.62);
-    const me = match.player;
+    const me = match.localActor;
     const cx = me ? me.body.position.x : 0;
     const cz = me ? me.body.position.z : 0;
 

@@ -28,8 +28,8 @@ describe('authoritative upper-floor glass combat', () => {
     const phys = new PhysicsWorld();
     const shooterBody = new CharBody(phys, 1, 0, CAPSULE_CENTER_OFFSET, 0);
     const targetBody = new CharBody(phys, 2, 0, CAPSULE_CENTER_OFFSET, -7);
-    const shooter = new Actor('SHOOTER', true, shooterBody, 0xffffff);
-    const target = new Actor('TARGET', false, targetBody, 0xffaa44);
+    const shooter = new Actor('SHOOTER', shooterBody, 0xffffff);
+    const target = new Actor('TARGET', targetBody, 0xffaa44);
     shooter.inv.add({ kind: 'weapon', weaponId: 'sniper', rarity: 'common', ammoInMag: 1 });
     shooter.inv.select(0);
 
