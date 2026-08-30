@@ -171,6 +171,7 @@ export class CharacterFactory {
     const skin = SKIN_SPECS[skinId] ?? SKIN_SPECS.vanguard;
 
     const group = new THREE.Group();
+    group.userData.xoSkinId = skin.id;
     const accents: THREE.MeshStandardMaterial[] = [];
     const baseMats: THREE.MeshStandardMaterial[] = [];
 

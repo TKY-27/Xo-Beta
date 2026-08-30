@@ -109,12 +109,14 @@
     </header>
     <div class="play-body">
       <div id="map-list" class="map-list"></div>
+      <section id="selected-arena" class="selected-arena" aria-live="polite" aria-labelledby="selected-arena-title"></section>
       <div class="play-side">
+        <section id="skin-selector" aria-labelledby="skin-selector-title"></section>
         <div id="difficulty-block">
           <h3 data-i18n="menu.difficulty">BOT DIFFICULTY</h3>
           <div id="difficulty-list" class="difficulty-list"></div>
         </div>
-        <button id="btn-play-start" class="btn-play deploy" data-i18n="common.startMatch">START MATCH</button>
+        <button id="btn-play-start" class="btn-play deploy">START MATCH</button>
         <button id="btn-practice-start" class="btn-quiet practice" data-i18n="menu.practice">PRACTICE MODE</button>
       </div>
     </div>

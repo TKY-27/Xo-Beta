@@ -10,7 +10,7 @@ import {
 import type { Actor } from './actor';
 import { MovementSystem } from './movement';
 import type { PhysicsWorld } from '../physics/physics';
-import type { WaterVolume } from '../world/types';
+import type { MapDef, WaterVolume } from '../world/types';
 import { gameNext } from '../core/rng';
 
 export interface Projectile {
@@ -50,17 +50,18 @@ export interface CombatEvents {
   onShieldBroken?(target: Actor): void;
   onTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number): void;
   onRicochet(x: number, y: number, z: number): void;
-  onGlassBreak(x: number, y: number, z: number): void;
-  onDestructibleDamaged(id: number, x: number, y: number, z: number, destroyed: boolean): void;
+  onGlassBreak(destructibleId: string, x: number, y: number, z: number): void;
+  onDestructibleDamaged(id: number, destructibleId: string, x: number, y: number, z: number, destroyed: boolean): void;
   onMeleeSwing(actor: Actor, x: number, y: number, z: number): void;
   onMeleeHit(target: Actor, attacker: Actor, damage: number, killed: boolean, headshot: boolean): void;
 }
 
 interface DestructibleRef {
   id: number;
+  stableId: string;
   hp: number;
   collider: unknown;
-  geo: { kind: string; x: number; y: number; z: number; sx?: number; sy?: number; sz?: number; r?: number; h?: number };
+  geo: MapDef['destructibles'][number]['geo'];
   type: string;
   alive: boolean;
 }
@@ -428,9 +429,29 @@ export class CombatSystem {
 
     const stepLen = Math.max(speed * dt, 0.001);
     const dx = p.vx / speed, dy = p.vy / speed, dz = p.vz / speed;
+    let cursorX = p.x;
+    let cursorY = p.y;
+    let cursorZ = p.z;
+    let remaining = stepLen;
+    let collisionPasses = 0;
 
-    const hit = this.phys.raycast(p.x, p.y, p.z, dx, dy, dz, stepLen + 0.05);
-    if (hit) {
+    // A single fixed tick can cross several metres at firearm speeds. Resolve
+    // the remainder of that segment after a glass pane is removed; otherwise
+    // the old one-ray path advanced past an actor behind the pane and made the
+    // first upper-floor hit look like a solid stop.
+    while (remaining > 1e-5 && collisionPasses++ < 12) {
+      const hit = this.phys.raycast(cursorX, cursorY, cursorZ, dx, dy, dz, remaining + 0.05);
+      if (!hit || hit.dist > remaining + 1e-4) {
+        cursorX += dx * remaining;
+        cursorY += dy * remaining;
+        cursorZ += dz * remaining;
+        p.dist += remaining;
+        remaining = 0;
+        break;
+      }
+
+      const consumed = Math.min(remaining, Math.max(hit.dist, 0.01));
+      p.dist += consumed;
       const meta = this.phys.metaOf(hit.collider);
       if (meta?.kind === 'actor') {
         const target = actors.find((ac) => ac.id === meta.actorId);
@@ -440,8 +461,15 @@ export class CombatSystem {
           p.active = false;
           return;
         }
-        // Own collider or dead actor: pass through
-      } else if (meta?.kind === 'destructible') {
+        // Own collider or dead actor: advance beyond the hit and continue.
+        cursorX = hit.point.x + dx * 0.05;
+        cursorY = hit.point.y + dy * 0.05;
+        cursorZ = hit.point.z + dz * 0.05;
+        remaining = Math.max(0, remaining - Math.max(consumed, 0.05));
+        continue;
+      }
+
+      if (meta?.kind === 'destructible') {
         const d = this.destructibles.get(meta.id);
         if (d && d.alive) {
           emitTracer(hit.point.x, hit.point.y, hit.point.z);
@@ -450,53 +478,56 @@ export class CombatSystem {
           if (gone) {
             d.alive = false;
             this.phys.removeCollider(d.collider as never);
-            if (d.type === 'glass') this.events.onGlassBreak(d.geo.x, d.geo.y, d.geo.z);
-            else this.events.onDestructibleDamaged(meta.id, d.geo.x, d.geo.y, d.geo.z, true);
+            if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z);
+            else this.events.onDestructibleDamaged(meta.id, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
           } else {
-            this.events.onDestructibleDamaged(meta.id, hit.point.x, hit.point.y, hit.point.z, false);
+            this.events.onDestructibleDamaged(meta.id, d.stableId, hit.point.x, hit.point.y, hit.point.z, false);
           }
           if (d.type !== 'glass') {
-            // Non-glass destructibles stop the round
+            // Non-glass destructibles stop the round.
             this.events.onImpact(hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, meta.material, true);
             p.active = false;
             return;
           }
-          // Glass penetrated: continue flight with slight deviation
-        } else {
-          // Already-destroyed leftover collider (shouldn't happen) — ignore
+          // Glass has now been removed. Continue the same swept segment so a
+          // target immediately behind the opening remains hittable.
         }
-      } else {
-        // World geometry (or unknown): impact or ricochet
-        const shallowDot = -(dx * hit.normal.x + dy * hit.normal.y + dz * hit.normal.z);
-        const canRicochet =
-          p.weaponId === 'sniper' && p.ricochets < 1 && shallowDot < 0.22;
-        if (canRicochet) {
-          emitTracer(hit.point.x, hit.point.y, hit.point.z);
-          p.ricochets++;
-          // Reflect velocity
-          const dot = p.vx * hit.normal.x + p.vy * hit.normal.y + p.vz * hit.normal.z;
-          p.vx -= 2 * dot * hit.normal.x;
-          p.vy -= 2 * dot * hit.normal.y;
-          p.vz -= 2 * dot * hit.normal.z;
-          p.vx *= 0.55; p.vy *= 0.55; p.vz *= 0.55;
-          p.damage *= 0.5;
-          p.x = hit.point.x + hit.normal.x * 0.05;
-          p.y = hit.point.y + hit.normal.y * 0.05;
-          p.z = hit.point.z + hit.normal.z * 0.05;
-          this.events.onRicochet(hit.point.x, hit.point.y, hit.point.z);
-          return;
-        }
+        cursorX = hit.point.x + dx * 0.05;
+        cursorY = hit.point.y + dy * 0.05;
+        cursorZ = hit.point.z + dz * 0.05;
+        remaining = Math.max(0, remaining - Math.max(consumed, 0.05));
+        continue;
+      }
+
+      // World geometry (or unknown): impact or ricochet.
+      const shallowDot = -(dx * hit.normal.x + dy * hit.normal.y + dz * hit.normal.z);
+      const canRicochet =
+        p.weaponId === 'sniper' && p.ricochets < 1 && shallowDot < 0.22;
+      if (canRicochet) {
         emitTracer(hit.point.x, hit.point.y, hit.point.z);
-        this.events.onImpact(hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, 'stone', true);
-        p.active = false;
+        p.ricochets++;
+        // Reflect velocity.
+        const dot = p.vx * hit.normal.x + p.vy * hit.normal.y + p.vz * hit.normal.z;
+        p.vx -= 2 * dot * hit.normal.x;
+        p.vy -= 2 * dot * hit.normal.y;
+        p.vz -= 2 * dot * hit.normal.z;
+        p.vx *= 0.55; p.vy *= 0.55; p.vz *= 0.55;
+        p.damage *= 0.5;
+        p.x = hit.point.x + hit.normal.x * 0.05;
+        p.y = hit.point.y + hit.normal.y * 0.05;
+        p.z = hit.point.z + hit.normal.z * 0.05;
+        this.events.onRicochet(hit.point.x, hit.point.y, hit.point.z);
         return;
       }
+      emitTracer(hit.point.x, hit.point.y, hit.point.z);
+      this.events.onImpact(hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, 'stone', true);
+      p.active = false;
+      return;
     }
 
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.z += p.vz * dt;
-    p.dist += stepLen;
+    p.x = cursorX;
+    p.y = cursorY;
+    p.z = cursorZ;
 
     // Publish the segment that was actually simulated. This keeps the tracer
     // event path alive even though renderers do not poll projectile state.
@@ -544,7 +575,8 @@ export class CombatSystem {
     if (d.hp <= 0) {
       d.alive = false;
       this.phys.removeCollider(d.collider as never);
-      this.events.onDestructibleDamaged(id, d.geo.x, d.geo.y, d.geo.z, true);
+      if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z);
+      else this.events.onDestructibleDamaged(id, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
       return true;
     }
     return false;
@@ -552,6 +584,23 @@ export class CombatSystem {
 
   destructibleList(): DestructibleRef[] {
     return [...this.destructibles.values()];
+  }
+
+  /** Iterate the authoritative map without allocating a snapshot. */
+  forEachDestructible(fn: (destructible: DestructibleRef) => void): void {
+    this.destructibles.forEach(fn);
+  }
+
+  destructibleCount(): number {
+    return this.destructibles.size;
+  }
+
+  aliveGlassCount(): number {
+    let count = 0;
+    this.destructibles.forEach((destructible) => {
+      if (destructible.type === 'glass' && destructible.alive) count++;
+    });
+    return count;
   }
 
   private alloc(): Projectile {

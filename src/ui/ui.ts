@@ -6,8 +6,9 @@
 import {
   HEAL_ITEMS, RARITY_CSS, WEAPONS, type AmmoType, type Difficulty, type WeaponId,
 } from '../core/balance';
-import { getSettings, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
-import { SKIN_IDS, SKIN_SPECS } from '../render/characters';
+import { getSettings, onSettingsChanged, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
+import { SKIN_IDS } from '../render/characters';
+import { SkinSelector, skinTextKey } from './skinSelector';
 import {
   t, setLang, getLang, isTextKey, localizePoiName, onLangChanged, type TextKey,
 } from '../core/i18n';
@@ -22,6 +23,19 @@ export interface PlaySelection {
   map: MapId;
   difficulty: DifficultyChoice;
   practice?: boolean;
+}
+
+export interface MapMenuOption {
+  id: MapId;
+  nameKey?: string;
+  name: string;
+  descKey?: string;
+  description: string;
+  traits: {
+    verticality: string;
+    visibility: string;
+    combatRange: string;
+  };
 }
 
 /** Hydrate every [data-i18n] element; re-run on language change. */
@@ -54,8 +68,12 @@ export class Menus {
   private onOpenSettingsFromPause = false;
   private unsubs: Array<() => void> = [];
   private controlId = 0;
+  private skinSelector: SkinSelector | null = null;
+  private settingsSkinSelect: HTMLSelectElement | null = null;
+  private menuGamepadFrame = 0;
+  private menuGamepadButtons = new Array<boolean>(16).fill(false);
 
-  constructor(private maps: Array<{ id: MapId; nameKey?: string; name: string; descKey?: string; description: string }>) {
+  constructor(private maps: MapMenuOption[]) {
     this.bindButtons();
     this.bindOnboarding();
     this.buildPlayMenu();
@@ -63,6 +81,10 @@ export class Menus {
     hydrateStatic();
     if (!getSettings().onboarded) this.showOnboarding();
     else this.show('main-menu');
+    this.menuGamepadFrame = requestAnimationFrame(() => this.pollMenuGamepad());
+    this.unsubs.push(onSettingsChanged((settings) => {
+      if (this.settingsSkinSelect) this.settingsSkinSelect.value = settings.playerSkin;
+    }));
     this.unsubs.push(onLangChanged(() => {
       hydrateStatic();
       this.buildPlayMenu();
@@ -71,6 +93,8 @@ export class Menus {
   }
 
   dispose(): void {
+    cancelAnimationFrame(this.menuGamepadFrame);
+    this.skinSelector?.dispose();
     for (const u of this.unsubs) u();
   }
 
@@ -82,6 +106,59 @@ export class Menus {
     for (const other of ids) $(other).classList.add('hidden');
     if (id) $(id).classList.remove('hidden');
     this.onScreenChanged(id);
+    if (id === 'play-menu') {
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+      });
+    }
+  }
+
+  /** Small menu-only Gamepad API bridge; gameplay owns GamepadInput. */
+  private pollMenuGamepad(): void {
+    this.menuGamepadFrame = requestAnimationFrame(() => this.pollMenuGamepad());
+    const playMenu = $('play-menu');
+    if (playMenu.classList.contains('hidden') || !getSettings().gamepadEnabled || !navigator.getGamepads) {
+      this.menuGamepadButtons.fill(false);
+      return;
+    }
+    const pad = [...navigator.getGamepads()].find((candidate) => candidate?.connected) ?? null;
+    if (!pad) {
+      this.menuGamepadButtons.fill(false);
+      return;
+    }
+    const edge = (index: number): boolean => {
+      const pressed = !!pad.buttons[index]?.pressed;
+      const rising = pressed && !this.menuGamepadButtons[index];
+      this.menuGamepadButtons[index] = pressed;
+      return rising;
+    };
+    const active = document.activeElement as HTMLElement | null;
+    const skinFocused = active?.closest('#skin-selector') != null;
+    const previousHorizontal = edge(14);
+    const previousVertical = edge(12);
+    const nextHorizontal = edge(15);
+    const nextVertical = edge(13);
+    const previous = previousHorizontal || previousVertical;
+    const next = nextHorizontal || nextVertical;
+    if (previous) {
+      if (skinFocused) this.skinSelector?.selectByOffset(-1);
+      else {
+        this.selectMapByOffset(-1);
+        document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+      }
+    }
+    if (next) {
+      if (skinFocused) this.skinSelector?.selectByOffset(1);
+      else {
+        this.selectMapByOffset(1);
+        document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+      }
+    }
+    if (edge(0)) {
+      if (active instanceof HTMLButtonElement) active.click();
+      else document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.click();
+    }
+    if (edge(1)) $('btn-play-back').click();
   }
 
   showMainMenu(): void { this.show('main-menu'); }
@@ -194,9 +271,25 @@ export class Menus {
     }, 'confirm');
   }
 
+  selectMap(id: MapId): void {
+    if (!this.maps.some((map) => map.id === id)) return;
+    this.selectedMap = id;
+    this.renderMapSelection();
+  }
+
+  selectMapByOffset(offset: number): void {
+    const index = Math.max(0, this.maps.findIndex((map) => map.id === this.selectedMap));
+    const next = (index + offset) % this.maps.length;
+    this.selectMap(this.maps[(next + this.maps.length) % this.maps.length]!.id);
+  }
+
   private buildPlayMenu(): void {
     const list = $('map-list');
+    list.setAttribute('role', 'listbox');
+    list.setAttribute('aria-label', t('menu.selectArena'));
     list.innerHTML = '';
+    this.skinSelector?.dispose();
+    this.skinSelector = null;
     const accents: Record<string, string> = {
       neocity: 'var(--map-neocity)',
       oldfront: 'var(--map-oldfront)',
@@ -205,8 +298,13 @@ export class Menus {
     };
     for (const m of this.maps) {
       const card = document.createElement('button');
+      card.type = 'button';
       card.className = 'map-card' + (m.id === this.selectedMap ? ' selected' : '');
+      card.setAttribute('role', 'option');
+      card.tabIndex = m.id === this.selectedMap ? 0 : -1;
       card.setAttribute('aria-pressed', String(m.id === this.selectedMap));
+      card.setAttribute('aria-selected', String(m.id === this.selectedMap));
+      card.dataset.mapId = m.id;
       card.style.setProperty('--mc-accent', accents[m.id] ?? 'var(--accent)');
       const art = document.createElement('div');
       art.className = 'mc-art';
@@ -220,25 +318,47 @@ export class Menus {
       const check = document.createElement('span');
       check.className = 'mc-check';
       check.textContent = '✓';
+      const badge = document.createElement('span');
+      badge.className = 'mc-badge';
+      badge.textContent = t('menu.selectedBadge');
       const render = () => {
         nameEl.textContent = m.nameKey ? t(m.nameKey as TextKey) : m.name;
         descEl.textContent = m.descKey ? t(m.descKey as TextKey) : m.description;
       };
       render();
       body.append(nameEl, descEl);
-      card.append(art, scrim, body, check);
+      card.append(art, scrim, body, check, badge);
       card.addEventListener('click', () => {
-        this.selectedMap = m.id;
-        list.querySelectorAll<HTMLButtonElement>('.map-card').forEach((c) => {
-          c.classList.remove('selected');
-          c.setAttribute('aria-pressed', 'false');
-        });
-        card.classList.add('selected');
-        card.setAttribute('aria-pressed', 'true');
+        this.selectMap(m.id);
         this.onUiSound?.('click');
+      });
+      card.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+          event.preventDefault();
+          this.selectMapByOffset(-1);
+          list.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          this.selectMapByOffset(1);
+          list.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+        } else if (event.key === 'Home') {
+          event.preventDefault();
+          this.selectMap(this.maps[0]!.id);
+          list.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+        } else if (event.key === 'End') {
+          event.preventDefault();
+          this.selectMap(this.maps.at(-1)!.id);
+          list.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+        }
       });
       list.appendChild(card);
     }
+
+    this.renderMapSelection();
+    this.skinSelector = new SkinSelector($('skin-selector'), (id) => {
+      void id;
+      this.onUiSound?.('click');
+    });
 
     const diffs: Array<[DifficultyChoice, TextKey]> = [
       ['normal', 'diff.normal'], ['hard', 'diff.hard'], ['elite', 'diff.elite'], ['nightmare', 'diff.nightmare'],
@@ -262,6 +382,57 @@ export class Menus {
       });
       dlist.appendChild(btn);
     }
+  }
+
+  private renderMapSelection(): void {
+    const selected = this.maps.find((map) => map.id === this.selectedMap) ?? this.maps[0];
+    if (!selected) return;
+    this.selectedMap = selected.id;
+    const list = $('map-list');
+    list.querySelectorAll<HTMLButtonElement>('.map-card').forEach((card) => {
+      const isSelected = card.dataset.mapId === selected.id;
+      card.classList.toggle('selected', isSelected);
+      card.setAttribute('aria-pressed', String(isSelected));
+      card.setAttribute('aria-selected', String(isSelected));
+      card.tabIndex = isSelected ? 0 : -1;
+    });
+
+    const panel = $('selected-arena');
+    panel.replaceChildren();
+    const label = document.createElement('span');
+    label.className = 'selected-arena-label';
+    label.textContent = t('menu.selectedArena');
+    const preview = document.createElement('div');
+    preview.className = 'selected-arena-preview';
+    preview.style.backgroundImage = `url('/assets/maps/${selected.id}.jpg')`;
+    preview.setAttribute('role', 'img');
+    preview.setAttribute('aria-label', selected.nameKey ? t(selected.nameKey as TextKey) : selected.name);
+    const content = document.createElement('div');
+    content.className = 'selected-arena-content';
+    const title = document.createElement('h3');
+    title.id = 'selected-arena-title';
+    title.textContent = selected.nameKey ? t(selected.nameKey as TextKey) : selected.name;
+    const desc = document.createElement('p');
+    desc.textContent = selected.descKey ? t(selected.descKey as TextKey) : selected.description;
+    const traits = document.createElement('dl');
+    traits.className = 'map-traits';
+    const traitItems: Array<[TextKey, string]> = [
+      ['menu.traitVerticality', selected.traits.verticality],
+      ['menu.traitVisibility', selected.traits.visibility],
+      ['menu.traitRange', selected.traits.combatRange],
+    ];
+    for (const [labelKey, valueKey] of traitItems) {
+      const term = document.createElement('dt');
+      term.textContent = t(labelKey);
+      const value = document.createElement('dd');
+      value.textContent = t(valueKey as TextKey);
+      traits.append(term, value);
+    }
+    content.append(title, desc, traits);
+    panel.append(label, preview, content);
+
+    const start = $('btn-play-start') as HTMLButtonElement;
+    start.textContent = t('menu.startMatchMap', { name: title.textContent ?? selected.name });
   }
 
   // -------------------------------------------------------------------------
@@ -310,6 +481,7 @@ export class Menus {
 
   private buildSettings(): void {
     const s = getSettings();
+    this.settingsSkinSelect = null;
     this.controlId = 0;
     // Idempotent: cleared and rebuilt (also on language change).
     for (const id of ['settings-controls', 'settings-graphics', 'settings-audio', 'settings-gameplay']) {
@@ -387,14 +559,13 @@ export class Menus {
         (v) => updateSettings({ tpsCharacterSide: v as never }),
       ),
     ));
-    gameplay.appendChild(this.row(
-      settingCopy('Player skin', 'プレイヤースキン'),
-      this.select(
-        SKIN_IDS.map((id) => [id, SKIN_SPECS[id].label]),
-        s.playerSkin,
-        (v) => updateSettings({ playerSkin: v as never }),
-      ),
-    ));
+    const settingsSkinSelect = this.select(
+      SKIN_IDS.map((id) => [id, t(skinTextKey(id))]),
+      s.playerSkin,
+      (v) => updateSettings({ playerSkin: v as never }),
+    );
+    this.settingsSkinSelect = settingsSkinSelect;
+    gameplay.appendChild(this.row(settingCopy('Player skin', 'プレイヤースキン'), settingsSkinSelect));
     const rerun = document.createElement('button');
     rerun.id = 'btn-rerun-onboarding';
     rerun.className = 'btn-quiet small';

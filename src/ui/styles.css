@@ -258,18 +258,18 @@ html[lang='ja'] .screen-head h2 { letter-spacing: 0.14em; }
 
 .play-body {
   position: absolute; inset: 7rem 3.2rem 3rem;
-  display: flex; gap: 2.4rem; align-items: stretch;
+  display: grid; grid-template-columns: minmax(21rem, 0.82fr) minmax(18rem, 1.08fr) 20rem;
+  gap: 1.25rem; align-items: stretch;
   animation: rise 0.45s 0.06s both;
 }
 .map-list {
-  flex: 1 1 auto; display: flex; flex-direction: column; gap: 0.9rem;
-  min-width: 0; max-width: 30rem;
+  min-width: 0; display: flex; flex-direction: column; gap: 0.72rem;
 }
 .map-card {
   position: relative; text-align: left; cursor: pointer;
-  border: 1px solid var(--panel-border);
+  border: 2px solid var(--panel-border);
   background: var(--panel); color: var(--text);
-  padding: 0; overflow: hidden; min-height: 7.4rem;
+  padding: 0; overflow: hidden; min-height: 6.4rem;
   transition: border-color 0.16s ease, transform 0.16s ease;
   clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
 }
@@ -298,7 +298,11 @@ html[lang='ja'] .map-card h3 { letter-spacing: 0.1em; }
   transition: opacity 0.16s ease, width 0.16s ease; z-index: 2;
 }
 .map-card:hover { transform: translateX(3px); }
-.map-card.selected { border-color: color-mix(in srgb, var(--mc-accent, var(--accent)) 55%, transparent); }
+.map-card:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+.map-card.selected {
+  border-color: var(--mc-accent, var(--accent));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mc-accent, var(--accent)) 40%, transparent), 0 0 18px color-mix(in srgb, var(--mc-accent, var(--accent)) 18%, transparent);
+}
 .map-card.selected .mc-art { opacity: 0.78; }
 .map-card.selected::before { width: 4px; opacity: 1; }
 .map-card .mc-check {
@@ -307,11 +311,83 @@ html[lang='ja'] .map-card h3 { letter-spacing: 0.1em; }
   color: var(--mc-accent, var(--accent)); opacity: 0; transition: opacity 0.16s ease; z-index: 2;
 }
 .map-card.selected .mc-check { opacity: 1; }
+.map-card .mc-badge {
+  position: absolute; right: 1rem; bottom: .8rem; z-index: 2;
+  padding: .2rem .38rem; color: var(--mc-accent, var(--accent));
+  border: 1px solid currentColor; background: rgba(5, 10, 15, .78);
+  font: 700 .58rem/1 var(--font-display); letter-spacing: .12em;
+  opacity: 0; transform: translateY(3px); transition: opacity .16s ease, transform .16s ease;
+}
+html[lang='ja'] .map-card .mc-badge { letter-spacing: .02em; }
+.map-card.selected .mc-badge { opacity: 1; transform: translateY(0); }
+
+/* Canonical selected-arena detail panel. It mirrors the selected card but does
+   not own selection state; Menus.renderMapSelection updates both surfaces. */
+.selected-arena {
+  min-width: 0; min-height: 0; display: flex; flex-direction: column;
+  padding: 1rem; background: linear-gradient(145deg, rgba(19, 29, 40, .82), rgba(7, 10, 15, .9));
+  border: 1px solid rgba(150, 210, 240, .22);
+  border-top: 3px solid var(--accent);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .22);
+}
+.selected-arena-label {
+  color: var(--accent); font-family: var(--font-display); font-size: .78rem;
+  letter-spacing: .28em; font-weight: 700; margin-bottom: .7rem;
+}
+html[lang='ja'] .selected-arena-label { letter-spacing: .12em; }
+.selected-arena-preview {
+  flex: 1 1 12rem; min-height: 10rem; max-height: 18rem;
+  background-size: cover; background-position: center; border: 1px solid rgba(255, 255, 255, .2);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .22), 0 8px 20px rgba(0, 0, 0, .24);
+}
+.selected-arena-content { padding-top: .9rem; }
+.selected-arena-content h3 {
+  font-family: var(--font-display); font-size: 1.7rem; letter-spacing: .18em; line-height: 1;
+}
+html[lang='ja'] .selected-arena-content h3 { letter-spacing: .08em; }
+.selected-arena-content p { color: var(--dim); font-size: .84rem; line-height: 1.55; margin-top: .45rem; }
+.map-traits {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: .45rem; margin-top: .9rem;
+}
+.map-traits dt { color: var(--dim); font: 600 .62rem/1.1 var(--font-display); letter-spacing: .1em; }
+.map-traits dd { color: var(--text); font: 700 .86rem/1.2 var(--font-display); margin-top: .2rem; }
+html[lang='ja'] .map-traits dt { letter-spacing: .02em; }
+
+/* Shared skin picker surface used by the offline play flow and future lobby. */
+#skin-selector {
+  min-width: 0; padding: .8rem; background: rgba(12, 18, 25, .8);
+  border: 1px solid var(--panel-border); border-top: 2px solid rgba(150, 210, 240, .34);
+}
+.skin-selector h3 {
+  font: 700 .82rem/1 var(--font-display); letter-spacing: .22em; color: var(--text);
+}
+html[lang='ja'] .skin-selector h3 { letter-spacing: .08em; }
+.skin-summary { display: flex; align-items: baseline; justify-content: space-between; gap: .6rem; margin: .65rem 0 .55rem; }
+.skin-summary-label { color: var(--dim); font-size: .67rem; letter-spacing: .08em; }
+.skin-selected-name { color: var(--accent); font: 700 .98rem/1 var(--font-display); letter-spacing: .08em; }
+.skin-nav { display: flex; gap: .4rem; margin-bottom: .55rem; }
+.skin-nav-button {
+  flex: 1; min-height: 1.8rem; cursor: pointer; color: var(--dim); background: rgba(255,255,255,.04);
+  border: 1px solid var(--panel-border); font: 700 1rem/1 var(--font-display);
+}
+.skin-nav-button:hover, .skin-nav-button:focus-visible { color: var(--text); border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
+.skin-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .4rem; }
+.skin-card {
+  min-width: 0; min-height: 3.1rem; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: .28rem; cursor: pointer; color: var(--dim); background: rgba(255,255,255,.035);
+  border: 1px solid rgba(150,180,215,.16); padding: .35rem .2rem;
+}
+.skin-card:hover { color: var(--text); border-color: var(--skin-accent); }
+.skin-card:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.skin-card.selected { color: var(--text); border-color: var(--skin-accent); background: color-mix(in srgb, var(--skin-primary) 55%, rgba(10, 15, 21, .95)); box-shadow: inset 0 -2px 0 var(--skin-accent); }
+.skin-swatch { width: 1.25rem; height: .42rem; background: linear-gradient(90deg, var(--skin-primary), var(--skin-accent)); border-radius: 999px; }
+.skin-card-label { overflow: hidden; text-overflow: ellipsis; max-width: 100%; font: 600 .62rem/1 var(--font-display); letter-spacing: .04em; white-space: nowrap; }
+html[lang='ja'] .skin-card-label { font-family: var(--font-jp); letter-spacing: 0; font-size: .62rem; }
 
 /* Right side: difficulty + deploy */
 .play-side {
-  flex: 0 0 21rem; display: flex; flex-direction: column; justify-content: flex-end;
-  gap: 1.6rem; margin-left: auto;
+  min-width: 0; display: flex; flex-direction: column; justify-content: flex-end;
+  gap: 1rem; margin-left: auto;
 }
 #difficulty-block h3 {
   font-family: var(--font-display);
@@ -332,6 +408,33 @@ html[lang='ja'] .diff-btn { letter-spacing: 0.1em; }
 .diff-btn.selected {
   background: color-mix(in srgb, var(--accent) 16%, var(--panel));
   color: var(--text); border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+@media (max-width: 1180px) {
+  .play-body { grid-template-columns: minmax(18rem, .9fr) minmax(17rem, 1fr) 18rem; gap: .85rem; inset-inline: 2rem; }
+  .selected-arena { padding: .8rem; }
+  .selected-arena-preview { min-height: 8.5rem; }
+  .map-card { min-height: 5.8rem; }
+  .map-card .mc-body { padding: .78rem .9rem; }
+  .map-card h3 { font-size: 1.16rem; }
+  .map-card p { font-size: .72rem; }
+}
+
+@media (max-height: 760px) and (min-width: 901px) {
+  .play-body { top: 6.3rem; bottom: 1.5rem; }
+  .map-list { gap: .48rem; }
+  .map-card { min-height: 5.2rem; }
+  .map-card .mc-body { padding: .58rem .85rem; }
+  .map-card h3 { font-size: 1.08rem; }
+  .map-card p { margin-top: .18rem; line-height: 1.25; }
+  .selected-arena-preview { min-height: 7.5rem; }
+  .selected-arena-content { padding-top: .55rem; }
+  .selected-arena-content h3 { font-size: 1.4rem; }
+  .selected-arena-content p { font-size: .74rem; margin-top: .3rem; }
+  .map-traits { margin-top: .5rem; }
+  #skin-selector { padding: .6rem; }
+  .skin-card { min-height: 2.55rem; }
+  .play-side { gap: .65rem; }
 }
 
 /* ------------------------------------------------------------------ */

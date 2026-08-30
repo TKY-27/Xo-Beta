@@ -7,6 +7,7 @@
 
 import type { EventBus } from '../core/events';
 import type { MatchEventsMap } from '../sim/match';
+import { createLocalActorIdentity, isLocalActor } from '../core/ownership';
 import { getSettings } from '../core/settings';
 import { fetchAudio } from '../assets/assets';
 
@@ -112,6 +113,84 @@ export function sampleGainFor(key: string): number {
   return 10 ** ((AUDIO_SAMPLE_TRIM_DB[key] ?? 0) / 20);
 }
 
+export type GunshotDistanceBand = 'local' | 'remote-near' | 'remote-mid' | 'remote-far';
+
+export interface GunshotPresentationProfile {
+  band: GunshotDistanceBand;
+  priority: number;
+  reportGain: number;
+  crackGain: number;
+  bodyGain: number;
+  tailGain: number;
+  subGain: number;
+  reportLp: number;
+  crackLp: number;
+  bodyLp: number;
+  tailLp: number;
+  subLp: number;
+  reportRefDist: number;
+  crackRefDist: number;
+  bodyRefDist: number;
+  tailRefDist: number;
+  subRefDist: number;
+  reportRolloff: number;
+  crackRolloff: number;
+  bodyRolloff: number;
+  tailRolloff: number;
+  subRolloff: number;
+}
+
+const GUNSHOT_PROFILES: Readonly<Record<GunshotDistanceBand, GunshotPresentationProfile>> = Object.freeze({
+  local: {
+    band: 'local', priority: 4,
+    reportGain: 1.1, crackGain: 1.1, bodyGain: 1, tailGain: 1, subGain: 1,
+    reportLp: 18000, crackLp: 12000, bodyLp: 6800, tailLp: 6200, subLp: 5200,
+    reportRefDist: 7, crackRefDist: 8, bodyRefDist: 9, tailRefDist: 15, subRefDist: 12,
+    reportRolloff: 1.05, crackRolloff: 1.05, bodyRolloff: 1, tailRolloff: 0.82, subRolloff: 0.9,
+  },
+  'remote-near': {
+    band: 'remote-near', priority: 3,
+    reportGain: 0.95, crackGain: 0.68, bodyGain: 0.9, tailGain: 0.9, subGain: 0.75,
+    reportLp: 15000, crackLp: 9500, bodyLp: 6500, tailLp: 5600, subLp: 3500,
+    reportRefDist: 6.5, crackRefDist: 7.5, bodyRefDist: 9, tailRefDist: 14, subRefDist: 12,
+    reportRolloff: 1.1, crackRolloff: 1.15, bodyRolloff: 1.1, tailRolloff: 0.9, subRolloff: 0.95,
+  },
+  'remote-mid': {
+    band: 'remote-mid', priority: 2,
+    reportGain: 0.6, crackGain: 0.32, bodyGain: 0.45, tailGain: 0.65, subGain: 0.38,
+    reportLp: 8000, crackLp: 6000, bodyLp: 4200, tailLp: 3200, subLp: 2000,
+    reportRefDist: 6, crackRefDist: 7, bodyRefDist: 8, tailRefDist: 13, subRefDist: 11,
+    reportRolloff: 1.2, crackRolloff: 1.25, bodyRolloff: 1.2, tailRolloff: 0.98, subRolloff: 1.05,
+  },
+  'remote-far': {
+    band: 'remote-far', priority: 1,
+    reportGain: 0.3, crackGain: 0.08, bodyGain: 0.2, tailGain: 0.48, subGain: 0.22,
+    reportLp: 3600, crackLp: 2600, bodyLp: 2400, tailLp: 1700, subLp: 1300,
+    reportRefDist: 5, crackRefDist: 6, bodyRefDist: 8, tailRefDist: 12, subRefDist: 10,
+    reportRolloff: 1.35, crackRolloff: 1.4, bodyRolloff: 1.3, tailRolloff: 1, subRolloff: 1.1,
+  },
+});
+
+export function gunshotDistanceBand(distance: number, isLocal: boolean): GunshotDistanceBand {
+  if (isLocal) return 'local';
+  const d = Number.isFinite(distance) ? Math.max(0, distance) : Number.POSITIVE_INFINITY;
+  if (d <= 25) return 'remote-near';
+  if (d <= 75) return 'remote-mid';
+  return 'remote-far';
+}
+
+export function gunshotProfileFor(distance: number, isLocal: boolean): GunshotPresentationProfile {
+  return GUNSHOT_PROFILES[gunshotDistanceBand(distance, isLocal)];
+}
+
+export const REMOTE_GUNSHOT_VOICE_LIMITS: Readonly<Record<Exclude<GunshotDistanceBand, 'local'>, number>> = Object.freeze({
+  'remote-near': 4,
+  'remote-mid': 3,
+  'remote-far': 2,
+});
+
+const MAX_REMOTE_GUNSHOT_VOICES = 6;
+
 export class AudioEngine {
   private static listenerInstance: AudioEngine | null = null;
   private ctx: AudioContext | null = null;
@@ -134,6 +213,25 @@ export class AudioEngine {
   private ambienceGeneration = 0;
   private matchEffectGeneration = 0;
   private matchEffectTimers = new Set<number>();
+  private remoteGunshotVoices: Array<{ band: Exclude<GunshotDistanceBand, 'local'>; until: number }> = [];
+
+  private reserveRemoteGunshotVoice(profile: GunshotPresentationProfile): boolean {
+    const band = profile.band;
+    if (band === 'local') return true;
+    const now = this.now();
+    this.remoteGunshotVoices = this.remoteGunshotVoices.filter((voice) => voice.until > now);
+    const activeTotal = this.remoteGunshotVoices.length;
+    const activeInBand = this.remoteGunshotVoices.filter((voice) => voice.band === band).length;
+    // Near shots have the highest remote priority; far shots are deliberately
+    // capped first so nine bots cannot turn the spatial mix into a wall of
+    // identical reports. Each accepted event owns all of its short layers.
+    if (activeTotal >= MAX_REMOTE_GUNSHOT_VOICES) return false;
+    // Preserve slots for close, high-priority shots when the mix is already busy.
+    if (profile.priority <= 1 && activeTotal >= MAX_REMOTE_GUNSHOT_VOICES - 1) return false;
+    if (activeInBand >= REMOTE_GUNSHOT_VOICE_LIMITS[band]) return false;
+    this.remoteGunshotVoices.push({ band, until: now + 0.72 });
+    return true;
+  }
 
   private scheduleMatchEffect(fn: () => void, delayMs: number): void {
     const generation = this.matchEffectGeneration;
@@ -321,20 +419,9 @@ export class AudioEngine {
     const keys = table[kind] ?? table.pistol!;
     const key = keys[Math.floor(Math.random() * keys.length)]!;
     const dist = Math.hypot(x - cameraCenter.x, z - cameraCenter.z);
-    const lp = Math.max(900, 18000 - dist * 90);
-    // Player shots originate just below the listener. The previous 0.55
-    // multiplier made the weapon deliberately quiet at the exact moment it
-    // should provide the clearest transient. Use a short near-field radius
-    // for the local report while preserving exponential attenuation for
-    // every other actor.
-    const nearField = Math.max(0, 1 - dist / 20);
-    const nearVol = isLocal ? 1.1 : 1 + nearField * 0.2;
-    // The local actor can be almost five metres from the listener in TPS.
-    // Keep its report inside the near-field radius; reducing refDistance here
-    // would reintroduce the quiet-own-gun defect as soon as TPS is selected.
-    const reportRefDist = 7;
-    const crackRefDist = 8;
-    const profile = {
+    const distanceProfile = gunshotProfileFor(dist, isLocal);
+    if (!isLocal && distanceProfile.band !== 'local' && !this.reserveRemoteGunshotVoice(distanceProfile)) return;
+    const weaponProfile = {
       pistol: { report: 0.92, crack: 0.12, body: 'boom/a', bodyVol: 0.055, bodyRate: 2.35, tail: 0.075 },
       smg: { report: 0.86, crack: 0.09, body: 'boom/a', bodyVol: 0.045, bodyRate: 2.55, tail: 0.055 },
       ar: { report: 0.98, crack: 0.14, body: 'boom/a', bodyVol: 0.09, bodyRate: 2.05, tail: 0.085 },
@@ -347,27 +434,35 @@ export class AudioEngine {
     // layers that disappear when a real shot is reduced to a single sample.
     this.play(key, {
       x, y, z,
-      vol: profile.report * nearVol,
+      vol: weaponProfile.report * distanceProfile.reportGain,
       rate: 0.94 + Math.random() * 0.12,
-      lp,
-      refDist: reportRefDist,
+      lp: distanceProfile.reportLp,
+      refDist: distanceProfile.reportRefDist,
+      rolloff: distanceProfile.reportRolloff,
     });
-    this.gunCrack(x, y, z, profile.crack * (isLocal ? 1.1 : 1), crackRefDist);
-    this.play(profile.body, {
+    this.gunCrack(
       x, y, z,
-      vol: profile.bodyVol,
-      rate: profile.bodyRate + Math.random() * 0.08,
-      lp: kind === 'shotgun' || kind === 'sniper' ? 5200 : 6800,
-      refDist: 9,
+      weaponProfile.crack * distanceProfile.crackGain,
+      distanceProfile.crackRefDist,
+      distanceProfile.crackLp,
+      distanceProfile.crackRolloff,
+    );
+    this.play(weaponProfile.body, {
+      x, y, z,
+      vol: weaponProfile.bodyVol * distanceProfile.bodyGain,
+      rate: weaponProfile.bodyRate + Math.random() * 0.08,
+      lp: distanceProfile.bodyLp,
+      refDist: distanceProfile.bodyRefDist,
+      rolloff: distanceProfile.bodyRolloff,
       delay: 0.012,
     });
     this.play(key, {
       x, y, z,
-      vol: profile.tail,
+      vol: weaponProfile.tail * distanceProfile.tailGain,
       rate: 0.72 + Math.random() * 0.06,
-      lp: Math.max(1200, 6200 - dist * 35),
-      refDist: 15,
-      rolloff: 0.82,
+      lp: distanceProfile.tailLp,
+      refDist: distanceProfile.tailRefDist,
+      rolloff: distanceProfile.tailRolloff,
       delay: kind === 'sniper' ? 0.085 : 0.055,
     });
 
@@ -375,21 +470,24 @@ export class AudioEngine {
     // as much as heard.
     if (kind === 'shotgun' || kind === 'sniper') {
       this.play('boom/sub', {
-        x, y, z, vol: kind === 'sniper' ? 0.38 : 0.32,
+        x, y, z, vol: (kind === 'sniper' ? 0.38 : 0.32) * distanceProfile.subGain,
         rate: 1.08 + Math.random() * 0.14,
+        lp: distanceProfile.subLp,
+        refDist: distanceProfile.subRefDist,
+        rolloff: distanceProfile.subRolloff,
         delay: 0.018,
       });
     }
   }
 
   /** Brief high-frequency muzzle crack layered over recorded firearm reports. */
-  private gunCrack(x: number, y: number, z: number, volume: number, refDist: number): void {
+  private gunCrack(x: number, y: number, z: number, volume: number, refDist: number, lpFrequency: number, rolloff: number): void {
     if (!this.ctx || !this.noiseBuffer) return;
     const p = this.ctx.createPanner();
     p.panningModel = 'HRTF';
     p.distanceModel = 'exponential';
     p.refDistance = refDist;
-    p.rolloffFactor = 1.05;
+    p.rolloffFactor = rolloff;
     p.positionX.value = x;
     p.positionY.value = y;
     p.positionZ.value = z;
@@ -402,7 +500,7 @@ export class AudioEngine {
     hp.frequency.value = 1700;
     const lp = this.ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 9200;
+    lp.frequency.value = lpFrequency;
     const gain = this.ctx.createGain();
     const now = this.now();
     gain.gain.setValueAtTime(0.0001, now);
@@ -815,9 +913,10 @@ const cameraCenter = { x: 0, z: 0 };
 /** Wire all match events to audio. */
 export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<MatchEventsMap>): () => void {
   const offs: Array<() => void> = [];
+  const localActor = createLocalActorIdentity(match.player?.id);
   const on = <K extends keyof MatchEventsMap>(k: K, fn: (p: MatchEventsMap[K]) => void) => offs.push(bus.on(k, fn));
 
-  on('shotFired', (e) => audio.gunshot(e.weaponId, e.x, e.y, e.z, e.dry, e.actorId === match.player?.id));
+  on('shotFired', (e) => audio.gunshot(e.weaponId, e.x, e.y, e.z, e.dry, isLocalActor(e.actorId, localActor)));
   on('impact', (e) => audio.impact(e.x, e.y, e.z, e.material));
   on('ricochet', (e) => audio.ricochet(e.x, e.y, e.z));
   on('glassBreak', (e) => audio.glassBreak(e.x, e.y, e.z));
@@ -841,7 +940,9 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
   on('grappleAttach', (e) => audio.grappleFire(e.x, e.y, e.z));
   on('splash', (e) => audio.splashFx(e.x, e.y, e.z, e.heavy));
   on('chestOpened', (e) => audio.chestOpen(e.x, e.y, e.z, e.tier ?? 0));
-  on('itemPickedUp', (e) => audio.pickupUi(e.rare ?? false));
+  on('itemPickedUp', (e) => {
+    if (isLocalActor(e.actorId, localActor)) audio.pickupUi(e.rare ?? false);
+  });
   on('healDone', () => audio.healComplete());
   on('reloadStarted', (e) => audio.reloadClick(e.empty));
   on('actorHit', (e) => {

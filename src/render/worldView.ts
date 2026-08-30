@@ -436,9 +436,88 @@ class StaticLightPool {
   }
 }
 
+interface GlassInstanceEntry {
+  id: number;
+  stableId: string;
+  geo: { x: number; y: number; z: number; sx: number; sy: number; sz: number; yaw?: number };
+}
+
+/** One bounded draw pool for all live glass panes in a map. */
+export class GlassInstancePool {
+  readonly mesh: THREE.InstancedMesh;
+  private readonly idToSlot = new Map<number, number>();
+  private readonly stableIdToSlot = new Map<string, number>();
+  private readonly stableIdToId = new Map<string, number>();
+  private readonly hidden = new Set<number>();
+  private disposed = false;
+  private readonly hiddenMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+
+  constructor(entries: readonly GlassInstanceEntry[], material: THREE.Material) {
+    this.mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, Math.max(1, entries.length));
+    this.mesh.geometry.userData.glassPoolOwned = true;
+    this.mesh.name = 'destructible-glass-pool';
+    this.mesh.count = entries.length;
+    this.mesh.castShadow = false;
+    this.mesh.receiveShadow = false;
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const position = new THREE.Vector3();
+    for (let slot = 0; slot < entries.length; slot++) {
+      const entry = entries[slot]!;
+      this.idToSlot.set(entry.id, slot);
+      this.stableIdToSlot.set(entry.stableId, slot);
+      this.stableIdToId.set(entry.stableId, entry.id);
+      position.set(entry.geo.x, entry.geo.y, entry.geo.z);
+      rotation.setFromAxisAngle(_Y_AXIS, entry.geo.yaw ?? 0);
+      scale.set(entry.geo.sx, entry.geo.sy, entry.geo.sz);
+      matrix.compose(position, rotation, scale);
+      this.mesh.setMatrixAt(slot, matrix);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  hide(id: number): boolean {
+    if (this.disposed || this.hidden.has(id)) return false;
+    const slot = this.idToSlot.get(id);
+    if (slot === undefined) return false;
+    this.mesh.setMatrixAt(slot, this.hiddenMatrix);
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.hidden.add(id);
+    return true;
+  }
+
+  hideStableId(stableId: string): boolean {
+    const id = this.stableIdToId.get(stableId);
+    return id === undefined ? false : this.hide(id);
+  }
+
+  hasStableId(stableId: string): boolean {
+    return this.stableIdToSlot.has(stableId);
+  }
+
+  get visibleCount(): number {
+    return this.mesh.count - this.hidden.size;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.mesh.geometry.dispose();
+    this.idToSlot.clear();
+    this.stableIdToSlot.clear();
+    this.stableIdToId.clear();
+    this.hidden.clear();
+  }
+}
+
+const _Y_AXIS = new THREE.Vector3(0, 1, 0);
+
 export class WorldView {
   readonly group = new THREE.Group();
   private destructibleMeshes = new Map<number, THREE.Object3D>();
+  private glassPool: GlassInstancePool | null = null;
   private chestMats = new Map<number, { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial }>();
   private lootViews = new Map<number, { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D }>();
   stormMesh!: THREE.Mesh;
@@ -1347,8 +1426,13 @@ export class WorldView {
   // -------------------------------------------------------------------------
 
   private trackDestructibles(match: Match, _props: PropLibrary): void {
+    const glassEntries: GlassInstanceEntry[] = [];
     for (const d of match.combat.destructibleList()) {
       const g = d.geo;
+      if (d.type === 'glass' && g.kind === 'box') {
+        glassEntries.push({ id: d.id, stableId: d.stableId, geo: g });
+        continue;
+      }
       let mesh: THREE.Object3D;
       const matKey = ((g as unknown as { mat: MatKey }).mat ?? 'wood') as MatKey;
       const material = this.mats.get(matKey);
@@ -1358,7 +1442,7 @@ export class WorldView {
         const yaw = (g as unknown as { yaw?: number }).yaw ?? 0;
         mesh.rotation.y = yaw;
       } else {
-        mesh = new THREE.Mesh(new THREE.CylinderGeometry(g.r ?? 0.5, g.r ?? 0.5, g.h ?? 1, 10), material);
+        mesh = new THREE.Mesh(new THREE.CylinderGeometry(g.r ?? 0.5, g.r ?? 0.5, 'h' in g ? g.h : 1, 10), material);
         mesh.position.set(g.x, g.y, g.z);
       }
       mesh.castShadow = true;
@@ -1366,11 +1450,16 @@ export class WorldView {
       this.destructibleMeshes.set(d.id, mesh);
       this.group.add(mesh);
     }
+    if (glassEntries.length > 0) {
+      this.glassPool = new GlassInstancePool(glassEntries, this.mats.get('glass'));
+      this.group.add(this.glassPool.mesh);
+    }
   }
 
   syncDestructibles(match: Match): void {
-    for (const d of match.combat.destructibleList()) {
+    match.combat.forEachDestructible((d) => {
       if (!d.alive) {
+        if (d.type === 'glass' && this.glassPool?.hide(d.id)) return;
         const mesh = this.destructibleMeshes.get(d.id);
         if (mesh) {
           this.group.remove(mesh);
@@ -1379,7 +1468,15 @@ export class WorldView {
           this.destructibleMeshes.delete(d.id);
         }
       }
-    }
+    });
+  }
+
+  getDestructibleRenderStats(): { glassInstances: number; glassVisible: number; individual: number } {
+    return {
+      glassInstances: this.glassPool?.mesh.count ?? 0,
+      glassVisible: this.glassPool?.visibleCount ?? 0,
+      individual: this.destructibleMeshes.size,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1931,7 +2028,8 @@ export class WorldView {
       if (!asMesh.isMesh && !asLine.isLine) return;
       const renderable = object as THREE.Mesh;
       const geometry = renderable.geometry;
-      if (geometry && !geometry.userData.externalShared && !geometry.userData.weaponFactoryOwned) {
+      if (geometry && !geometry.userData.externalShared && !geometry.userData.weaponFactoryOwned
+        && !geometry.userData.glassPoolOwned) {
         geometries.add(geometry);
       }
       const material = renderable.material;
@@ -1945,6 +2043,8 @@ export class WorldView {
     for (const texture of textures) texture.dispose();
     for (const material of materials) material.dispose();
     for (const geometry of geometries) geometry.dispose();
+    this.glassPool?.dispose();
+    this.glassPool = null;
     this.destructibleMeshes.clear();
     this.chestMats.clear();
     this.chestSlots.clear();

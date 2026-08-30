@@ -37,6 +37,11 @@ export const MAP_LIST: Array<{
   description: string;
   nameKey: string;
   descKey: string;
+  traits: {
+    verticality: string;
+    visibility: string;
+    combatRange: string;
+  };
 }> = [
   {
     id: 'neocity',
@@ -44,6 +49,11 @@ export const MAP_LIST: Array<{
     description: 'Rain-slicked neon streets, rooftops and an underground transit hub.',
     nameKey: 'map.neocity.name',
     descKey: 'map.neocity.desc',
+    traits: {
+      verticality: 'map.neocity.trait.verticality',
+      visibility: 'map.neocity.trait.visibility',
+      combatRange: 'map.neocity.trait.range',
+    },
   },
   {
     id: 'oldfront',
@@ -51,6 +61,11 @@ export const MAP_LIST: Array<{
     description: 'A worn frontier town: cathedral square, keep ruins and war remnants.',
     nameKey: 'map.oldfront.name',
     descKey: 'map.oldfront.desc',
+    traits: {
+      verticality: 'map.oldfront.trait.verticality',
+      visibility: 'map.oldfront.trait.visibility',
+      combatRange: 'map.oldfront.trait.range',
+    },
   },
   {
     id: 'eden',
@@ -58,6 +73,11 @@ export const MAP_LIST: Array<{
     description: 'Lakeside research station swallowed by green. Water routes and cliffs.',
     nameKey: 'map.eden.name',
     descKey: 'map.eden.desc',
+    traits: {
+      verticality: 'map.eden.trait.verticality',
+      visibility: 'map.eden.trait.visibility',
+      combatRange: 'map.eden.trait.range',
+    },
   },
   {
     id: 'ashara',
@@ -65,6 +85,11 @@ export const MAP_LIST: Array<{
     description: 'Dense desert compounds, dry wadis, industrial yards and long-range ridges.',
     nameKey: 'map.ashara.name',
     descKey: 'map.ashara.desc',
+    traits: {
+      verticality: 'map.ashara.trait.verticality',
+      visibility: 'map.ashara.trait.visibility',
+      combatRange: 'map.ashara.trait.range',
+    },
   },
 ];
 
