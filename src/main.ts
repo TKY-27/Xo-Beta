@@ -13,6 +13,13 @@ import type { WeaponId, Rarity } from './core/balance';
 import { feetYFromBodyCenter } from './sim/movement';
 import type { WeaponInstance } from './sim/inventory';
 import type { Actor } from './sim/actor';
+import {
+  buildRoster,
+  localHumanRosterEntry,
+  remoteHumanRosterEntry,
+  type MatchMode,
+  type RosterEntry,
+} from './sim/roster';
 import { Rng } from './core/rng';
 import { onSettingsChanged, updateSettings, getSettings, flushSettingsPersist } from './core/settings';
 import { createMaterials, type MaterialLibrary } from './render/materials';
@@ -24,7 +31,7 @@ import { WorldView } from './render/worldView';
 import { VfxSystem } from './render/vfx';
 import { CameraRig } from './render/cameraRig';
 import { ViewModel } from './render/viewmodel';
-import { CharacterFactory, skinForName, updateEliminationFx, type CharacterRig } from './render/characters';
+import { CharacterFactory, updateEliminationFx, type CharacterRig } from './render/characters';
 import { WeaponModelFactory } from './render/weaponModels';
 import { loadGltf } from './assets/assets';
 import { PlayerController } from './player/controller';
@@ -221,6 +228,34 @@ const QA_MODE = import.meta.env.DEV && QA_PARAMS.has('qa');
 const QA_HERO_MODE = QA_MODE && QA_PARAMS.has('hero');
 if (QA_HERO_MODE) document.documentElement.dataset.xoQaHero = '1';
 
+function qaRosterFixture(seed: number): { mode: MatchMode; roster: RosterEntry[] } | null {
+  if (!QA_MODE) return null;
+  const fixture = QA_PARAMS.get('roster');
+  if (fixture !== '2v2' && fixture !== '5v5' && fixture !== '4v6') return null;
+  const teamIds = fixture === '4v6' ? [0, 0, 0, 0] : [0, 0, 1, 1];
+  const humans = [
+    localHumanRosterEntry({
+      peerId: 'qa-local',
+      displayName: 'QA LOCAL',
+      teamId: teamIds[0],
+      skinId: getSettings().playerSkin,
+    }),
+    ...teamIds.slice(1).map((teamId, index) => remoteHumanRosterEntry({
+      slotId: index + 1,
+      actorId: index + 2,
+      peerId: `qa-peer-${index + 2}`,
+      displayName: `QA HUMAN ${index + 2}`,
+      teamId,
+    })),
+  ];
+  const mode: MatchMode = fixture === '2v2'
+    ? 'teams'
+    : fixture === '5v5'
+      ? 'teams-bot-fill'
+      : 'humans-vs-bots';
+  return { mode, roster: buildRoster({ mode, humans, seed }) };
+}
+
 interface QaConsoleCapture {
   issues: string[];
 }
@@ -340,7 +375,7 @@ async function boot(): Promise<void> {
     if (
       live
       && live.player.enabled
-      && live.match.player?.alive === true
+      && live.match.localActor?.alive === true
       && !paused
       && live.match.phase !== 'results'
       && !menus.isAnyMenuOpen()
@@ -441,11 +476,21 @@ async function startMatchImpl(
   const loaded = loadMap(sel.map);
   qaGlassBreakTimes = [];
   qaGlassBreakFrames = [];
+  const matchSeed = Date.now() % 1000000;
+  const qaFixture = sel.practice ? null : qaRosterFixture(matchSeed);
+  const mode = qaFixture?.mode ?? 'solo';
+  const roster = qaFixture?.roster ?? buildRoster({
+      mode,
+      humans: [localHumanRosterEntry({ skinId: getSettings().playerSkin })],
+      practice: sel.practice === true,
+      seed: matchSeed,
+    });
   const match = new Match({
     mapDef: loaded.def,
-    seed: Date.now() % 1000000,
+    seed: matchSeed,
     difficulty: sel.difficulty,
-    withPlayer: true,
+    mode,
+    roster,
     practice: sel.practice === true,
   });
   registerStartCleanup(generation, () => match.dispose());
@@ -504,7 +549,7 @@ async function startMatchImpl(
     onPauseRequest: () => handlePauseOrSpectateExit(),
     onSlotRequest: () => undefined,
     onMeleePress: () => {
-      const p = live?.match.player;
+      const p = live?.match.localActor;
       if (p?.alive) {
         p.inv.selectMelee();
         lastWeaponKey = null;
@@ -554,7 +599,7 @@ async function startMatchImpl(
   registerStartCleanup(generation, () => tacCanvas?.removeEventListener('click', onTacClick));
 
   function toggleTacMap(): void {
-    if (!match.player?.alive || match.phase === 'results') return;
+    if (!match.localActor?.alive || match.phase === 'results') return;
     if (hud.isInventoryOpen()) hud.setInventoryOpen(false);
     hud.toggleTacMap();
     if (hud.isTacMapOpen()) {
@@ -568,7 +613,7 @@ async function startMatchImpl(
     const currentlyOpen = hud.isInventoryOpen();
     const open = force ?? !currentlyOpen;
     if (open === currentlyOpen) return;
-    if (open && (!match.player?.alive || match.phase === 'results' || paused)) return;
+    if (open && (!match.localActor?.alive || match.phase === 'results' || paused)) return;
     if (open && hud.isTacMapOpen()) hud.toggleTacMap();
     hud.setInventoryOpen(open);
     rig.resetAimState();
@@ -605,19 +650,19 @@ async function startMatchImpl(
   });
 
   function placePingAtAim(): void {
-    if (!match.player?.alive || hud.isTacMapOpen()) return;
-    const p = match.player.body.position;
-    const dirX = -Math.sin(match.player.yaw) * Math.cos(match.player.pitch);
-    const dirY = Math.sin(match.player.pitch);
-    const dirZ = -Math.cos(match.player.yaw) * Math.cos(match.player.pitch);
-    const hit = match.phys.raycast(p.x, match.player.eyeY, p.z, dirX, dirY, dirZ, 260, PHYS_GROUPS.rayWorldOnly);
+    if (!match.localActor?.alive || hud.isTacMapOpen()) return;
+    const p = match.localActor.body.position;
+    const dirX = -Math.sin(match.localActor.yaw) * Math.cos(match.localActor.pitch);
+    const dirY = Math.sin(match.localActor.pitch);
+    const dirZ = -Math.cos(match.localActor.yaw) * Math.cos(match.localActor.pitch);
+    const hit = match.phys.raycast(p.x, match.localActor.eyeY, p.z, dirX, dirY, dirZ, 260, PHYS_GROUPS.rayWorldOnly);
     if (hit) {
       hud.tacMarker = { x: hit.point.x, z: hit.point.z };
       audio.uiClick('confirm');
     }
   }
   for (const actor of match.actors) {
-    if (actor.isPlayer) {
+    if (match.isLocalActor(actor)) {
       // Transport follows the flight line. Practice instead faces toward the
       // map centre from its spacious seeded spawn, avoiding a first frame into
       // a nearby wall and preserving the requested full-body TPS composition.
@@ -637,14 +682,13 @@ async function startMatchImpl(
   // Character rigs (skinned GLB combatants)
   const females = ['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX'];
   const deathPipelineActors = new Set<number>();
-  const firstFemaleBot = match.actors.find((actor) => !actor.isPlayer && females.includes(actor.name));
-  const firstMaleBot = match.actors.find((actor) => !actor.isPlayer && !females.includes(actor.name));
+  const firstFemaleBot = match.actors.find((actor) => match.isBotActor(actor) && females.includes(actor.name));
+  const firstMaleBot = match.actors.find((actor) => match.isBotActor(actor) && !females.includes(actor.name));
   if (firstFemaleBot) deathPipelineActors.add(firstFemaleBot.id);
   if (firstMaleBot) deathPipelineActors.add(firstMaleBot.id);
   const rigs = new Map<number, CharacterRig>();
   for (const actor of match.actors) {
-    const skinId = actor.isPlayer ? getSettings().playerSkin : skinForName(actor.name);
-    const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name), null, skinId);
+    const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name), null, actor.skinId);
     // Keep one representative of each body archetype on the death pipeline
     // from loading onward. Opacity 1 remains visually opaque, while avoiding
     // transparent sorting overhead on every living actor.
@@ -655,7 +699,7 @@ async function startMatchImpl(
     }
     // QA metadata (read-only; used by the automated browser harness).
     charRig.group.userData.isCharacterRig = true;
-    charRig.group.userData.isPlayerRig = actor.isPlayer;
+    charRig.group.userData.isPlayerRig = match.isLocalActor(actor);
     charRig.prewarmDeath?.();
     rigs.set(actor.id, charRig);
     world.group.add(charRig.group);
@@ -687,7 +731,7 @@ async function startMatchImpl(
     viewmodel.dispose();
   });
   {
-    const w0 = match.player?.inv.selectedWeapon;
+    const w0 = match.localActor?.inv.selectedWeapon;
     // Player starts unarmed on the permanent fists slot.
     viewmodel.setWeapon(w0 ? w0.weaponId : null, w0?.rarity ?? 'common');
   }
@@ -766,7 +810,7 @@ async function startMatchImpl(
     world.transportGroup.visible = true;
     world.transportGroup.position.copy(rig.camera.position).addScaledVector(cameraForward, 12);
     const deathMaterials = new Set<THREE.MeshStandardMaterial>();
-    const representativeDeathRig = rigs.get(match.actors.find((actor) => !actor.isPlayer)?.id ?? -1);
+    const representativeDeathRig = rigs.get(match.actors.find((actor) => match.isBotActor(actor))?.id ?? -1);
     if (representativeDeathRig) {
       const characterRig = representativeDeathRig;
       for (const material of [...characterRig.baseMats, ...characterRig.accentMats]) deathMaterials.add(material);
@@ -859,7 +903,7 @@ async function startMatchImpl(
       window.dispatchEvent(new MouseEvent(held ? 'mousedown' : 'mouseup', { button: 2, bubbles: true }));
     };
     const placeQaSwimmerAtShore = (): boolean => {
-      const p = match.player;
+      const p = match.localActor;
       if (!p) return false;
       const candidates = match.nav.nodes.flatMap((source) => {
         if (!source.water) return [];
@@ -898,7 +942,7 @@ async function startMatchImpl(
       return false;
     };
     const onQaKey = (e: KeyboardEvent) => {
-      const p = match.player;
+      const p = match.localActor;
       if (!p) return;
       if (e.code === 'F5') {
         const stress = (window as unknown as Record<string, unknown>).__xoStress;
@@ -1109,7 +1153,7 @@ function handlePauseOrSpectateExit(): void {
     }
     return;
   }
-  if (live?.match.player?.alive === false && live.match.phase !== 'results') {
+  if (live?.match.localActor?.alive === false && live.match.phase !== 'results') {
     menus.onQuitRequested();
     return;
   }
@@ -1122,7 +1166,7 @@ function handlePauseOrSpectateExit(): void {
 
 function cycleSpectate(dir: number): void {
   const m = live?.match;
-  if (!m || m.player?.alive !== false) return;
+  if (!m || m.localActor?.alive !== false) return;
   const targets = m.spectatorTargets();
   if (!targets.length) return;
   const idx = targets.findIndex((t) => t.id === spectateTargetId);
@@ -1150,7 +1194,7 @@ function wirePresentation(
 
   const HEAVY_FLASH: Partial<Record<WeaponId, boolean>> = { shotgun: true, sniper: true };
   match.events.on('muzzleFlash', (e) => {
-    const isPlayer = e.actorId === match.player?.id;
+    const isPlayer = e.actorId === match.localActor?.id;
     if (isPlayer && rig.mode === 'fps') {
       viewmodel.kick(WEAPON_KICK[e.weaponId] ?? 1);
       viewmodel.muzzlePulse(isPlayer ? 0.8 : 1.15);
@@ -1181,7 +1225,7 @@ function wirePresentation(
   });
   match.events.on('destructibleDestroyed', (e) => vfx.debrisBurst(e.x, e.y, e.z, 0xa07848));
   match.events.on('actorHit', (e) => {
-    if (e.attackerId === match.player?.id) {
+    if (e.attackerId === match.localActor?.id) {
       hud.hitmarker(e.headshot);
       if (!e.headshot) audio.play('ui/click', { bus: 'ui', vol: 0.2, rate: 2.1 });
       const target = match.actors.find((a) => a.id === e.targetId);
@@ -1195,13 +1239,13 @@ function wirePresentation(
         );
       }
     }
-    if (e.targetId === match.player?.id) rig.addShake(Math.min(0.5, e.damage / 60));
+    if (e.targetId === match.localActor?.id) rig.addShake(Math.min(0.5, e.damage / 60));
   });
   match.events.on('shieldBroken', (e) => {
     const a = match.actors.find((x) => x.id === e.actorId);
     if (a) {
       vfx.shieldBreakBurst(a.body.position.x, a.body.position.y + 1.1, a.body.position.z);
-      if (a.isPlayer) hud.caption(t('cap.shieldBreak'), true);
+      if (match.isLocalActor(a)) hud.caption(t('cap.shieldBreak'), true);
     }
   });
   match.events.on('eliminated', (e) => {
@@ -1223,12 +1267,12 @@ function wirePresentation(
       e.storm,
     );
     hud.caption(t('cap.elimination'), false);
-    if (killer?.isPlayer && victim) hud.elimination(`✕ ${victim.name}`);
-    if (victim?.isPlayer) hud.banner(t('banner.eliminatedYou'), 4);
+    if (killer && match.isLocalActor(killer) && victim) hud.elimination(`✕ ${victim.name}`);
+    if (victim && match.isLocalActor(victim)) hud.banner(t('banner.eliminatedYou'), 4);
   });
   match.events.on('shotFired', (e) => {
-    if (e.actorId === match.player?.id && !e.dry && match.player) {
-      const a = match.player;
+    if (e.actorId === match.localActor?.id && !e.dry && match.localActor) {
+      const a = match.localActor;
       // Eject toward the camera-right side, slightly back
       const rx = Math.cos(a.yaw);
       const rz = -Math.sin(a.yaw);
@@ -1242,19 +1286,19 @@ function wirePresentation(
   match.events.on('meleeSwing', (e) => {
     const attacker = match.actors.find((a) => a.id === e.actorId);
     audio.meleeSwing(e.x, attacker?.eyeY ?? e.y, e.z);
-    if (e.actorId === match.player?.id && rig.mode === 'fps') viewmodel.punch();
+    if (e.actorId === match.localActor?.id && rig.mode === 'fps') viewmodel.punch();
   });
   match.events.on('meleeHit', (e) => {
     const target = match.actors.find((a) => a.id === e.targetId);
     if (target) audio.meleeHit(target.body.position.x, target.body.position.y + 0.3, target.body.position.z);
-    if (e.attackerId === match.player?.id) {
+    if (e.attackerId === match.localActor?.id) {
       hud.hitmarker(e.headshot);
       rig.addShake(e.killed ? 0.22 : 0.08);
     }
-    if (e.targetId === match.player?.id) rig.addShake(0.18);
+    if (e.targetId === match.localActor?.id) rig.addShake(0.18);
   });
   match.events.on('land', (e) => {
-    if (e.actorId === match.player?.id) rig.addShake(Math.min(0.4, e.impactSpeed / 70));
+    if (e.actorId === match.localActor?.id) rig.addShake(Math.min(0.4, e.impactSpeed / 70));
   });
   match.events.on('stormWaiting', (e) => {
     hud.stormWarning(t('storm.advancing', { n: e.index + 1, s: Math.round(e.waitTime) }), 4);
@@ -1272,7 +1316,7 @@ function wirePresentation(
   });
   // Weapon swap sync
   const interval = window.setInterval(() => {
-    const p = match.player;
+    const p = match.localActor;
     if (!p) return;
     const w = p.inv.selectedWeapon;
     const key = w ? `${w.weaponId}:${w.rarity}` : null;
@@ -1379,7 +1423,7 @@ function updateMusicState(m: Match): void {
   if (!audio) return;
   // Matches carry no continuous score — soundscape only. Stings at results.
   if (m.phase === 'results') {
-    audio.setMusicState(m.winner?.isPlayer ? 'victory' : 'defeat');
+    audio.setMusicState(didLocalActorWin(m) ? 'victory' : 'defeat');
   }
 }
 
@@ -1394,13 +1438,13 @@ function present(dtReal: number): void {
   // Debug/QA introspection hook. Development-only because the related helpers
   // below can mutate match state and must not ship as a production backdoor.
   if (QA_MODE) {
-    const qaPlayerPosition = m.player?.body.position;
-    const qaPenetrations = m.player && qaPlayerPosition
+    const qaPlayerPosition = m.localActor?.body.position;
+    const qaPenetrations = m.localActor && qaPlayerPosition
       ? m.phys.characterPenetrationsAt(
         qaPlayerPosition.x,
         qaPlayerPosition.y,
         qaPlayerPosition.z,
-        m.player.body.body,
+        m.localActor.body.body,
       )
       : [];
     const qaMaxPenetration = qaPenetrations.reduce((max, hit) => Math.max(max, hit.depth), 0);
@@ -1444,7 +1488,7 @@ function present(dtReal: number): void {
       stormCenterX: m.storm.centerX,
       stormCenterZ: m.storm.centerZ,
       stormState: m.storm.state,
-      stormOutside: m.player ? m.storm.distanceOutside(m.player.body.position.x, m.player.body.position.z) : null,
+      stormOutside: m.localActor ? m.storm.distanceOutside(m.localActor.body.position.x, m.localActor.body.position.z) : null,
       items: m.loot.items.length,
       scene: renderer.scene,
       cameraMode: rig.mode,
@@ -1478,7 +1522,7 @@ function present(dtReal: number): void {
         triangles: renderer.renderer.info.render.triangles,
       },
       playerSkin: getSettings().playerSkin,
-      playerRigSkin: m.player ? rigs.get(m.player.id)?.group.userData.xoSkinId ?? null : null,
+      playerRigSkin: m.localActor ? rigs.get(m.localActor.id)?.group.userData.xoSkinId ?? null : null,
       worldConstructionMs: +live.worldConstructionMs.toFixed(2),
       destructibleCount: m.combat.destructibleCount(),
       aliveGlassCount: m.combat.aliveGlassCount(),
@@ -1506,9 +1550,9 @@ function present(dtReal: number): void {
         opened: c.opened,
         tier: c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0,
       })),
-      lootNear: m.player
+      lootNear: m.localActor
         ? m.loot.items
-            .map((it) => ({ it, d: Math.hypot(it.x - m.player!.body.position.x, it.z - m.player!.body.position.z) }))
+            .map((it) => ({ it, d: Math.hypot(it.x - m.localActor!.body.position.x, it.z - m.localActor!.body.position.z) }))
             .sort((a, b) => a.d - b.d)
             .filter(({ it }) => it.kind === 'weapon' || it.kind === 'heal')
             .slice(0, 8)
@@ -1522,28 +1566,28 @@ function present(dtReal: number): void {
               d: +d.toFixed(1),
             }))
         : [],
-      player: m.player
+      player: m.localActor
         ? {
-            x: +m.player.body.position.x.toFixed(1),
-            y: +m.player.body.position.y.toFixed(1),
-            z: +m.player.body.position.z.toFixed(1),
-            state: m.player.state,
-            grounded: m.player.body.grounded,
-            inWater: m.player.inWater,
-            submerged: m.player.submerged,
-            waterSurfaceY: Number.isFinite(m.player.waterSurfaceY)
-              ? +m.player.waterSurfaceY.toFixed(4)
+            x: +m.localActor.body.position.x.toFixed(1),
+            y: +m.localActor.body.position.y.toFixed(1),
+            z: +m.localActor.body.position.z.toFixed(1),
+            state: m.localActor.state,
+            grounded: m.localActor.body.grounded,
+            inWater: m.localActor.inWater,
+            submerged: m.localActor.submerged,
+            waterSurfaceY: Number.isFinite(m.localActor.waterSurfaceY)
+              ? +m.localActor.waterSurfaceY.toFixed(4)
               : null,
-            weapon: m.player.inv.selectedWeapon?.weaponId ?? null,
-            ads: +m.player.wpn.adsAmount.toFixed(2),
-            spread: +m.player.wpn.currentSpread.toFixed(4),
-            bloom: +m.player.wpn.bloom.toFixed(4),
-            shots: m.player.stats.shotsFired,
-            health: Math.round(m.player.health),
-            vy: +m.player.body.velocity.y.toFixed(2),
-            jumpsUsed: m.player.jumpsUsed,
-            coyote: +m.player.coyote.toFixed(2),
-            jumpBuffered: +m.player.jumpBuffered.toFixed(2),
+            weapon: m.localActor.inv.selectedWeapon?.weaponId ?? null,
+            ads: +m.localActor.wpn.adsAmount.toFixed(2),
+            spread: +m.localActor.wpn.currentSpread.toFixed(4),
+            bloom: +m.localActor.wpn.bloom.toFixed(4),
+            shots: m.localActor.stats.shotsFired,
+            health: Math.round(m.localActor.health),
+            vy: +m.localActor.body.velocity.y.toFixed(2),
+            jumpsUsed: m.localActor.jumpsUsed,
+            coyote: +m.localActor.coyote.toFixed(2),
+            jumpBuffered: +m.localActor.jumpBuffered.toFixed(2),
             penetrationCount: qaPenetrations.length,
             maxPenetration: +qaMaxPenetration.toFixed(4),
             supportError: qaSupportError === null ? null : +qaSupportError.toFixed(4),
@@ -1554,7 +1598,7 @@ function present(dtReal: number): void {
               ? null
               : +qaCameraForwardClearance.toFixed(4),
             fov: Math.round(rig.camera.fov),
-            anim: rigs.get(m.player.id)?.animName ?? null,
+            anim: rigs.get(m.localActor.id)?.animName ?? null,
           }
         : null,
     };
@@ -1566,43 +1610,43 @@ function present(dtReal: number): void {
     const qaNow = performance.now();
     if (qaNow - lastQaDomUpdate >= 250) {
       lastQaDomUpdate = qaNow;
-      const p = m.player?.body.position;
+      const p = m.localActor?.body.position;
       const start = m.practiceStart;
       const data = document.documentElement.dataset;
       data.xoQaMap = m.mapDef.id;
       data.xoQaSeed = String(m.seed);
       data.xoQaPhase = m.phase;
       data.xoQaPosition = p ? `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}` : '';
-      data.xoQaLook = m.player
-        ? `${m.player.yaw.toFixed(2)},${m.player.pitch.toFixed(2)},${rig.mode}`
+      data.xoQaLook = m.localActor
+        ? `${m.localActor.yaw.toFixed(2)},${m.localActor.pitch.toFixed(2)},${rig.mode}`
         : '';
-      data.xoQaMovement = m.player
-        ? `${m.player.state}|${rigs.get(m.player.id)?.animName ?? 'none'}|hs=${Math.hypot(m.player.body.velocity.x, m.player.body.velocity.z).toFixed(2)}|vx=${m.player.body.velocity.x.toFixed(2)}|vy=${m.player.body.velocity.y.toFixed(2)}|vz=${m.player.body.velocity.z.toFixed(2)}|jumps=${m.player.jumpsUsed}|wallChains=${m.player.wallrunChains}|wallLanded=${m.player.wallrunLanded ? 1 : 0}|dash=${m.player.dashTimer.toFixed(2)}`
+      data.xoQaMovement = m.localActor
+        ? `${m.localActor.state}|${rigs.get(m.localActor.id)?.animName ?? 'none'}|hs=${Math.hypot(m.localActor.body.velocity.x, m.localActor.body.velocity.z).toFixed(2)}|vx=${m.localActor.body.velocity.x.toFixed(2)}|vy=${m.localActor.body.velocity.y.toFixed(2)}|vz=${m.localActor.body.velocity.z.toFixed(2)}|jumps=${m.localActor.jumpsUsed}|wallChains=${m.localActor.wallrunChains}|wallLanded=${m.localActor.wallrunLanded ? 1 : 0}|dash=${m.localActor.dashTimer.toFixed(2)}`
         : '';
-      data.xoQaWater = m.player
-        ? `in=${m.player.inWater ? 1 : 0}|submerged=${m.player.submerged ? 1 : 0}|surface=${Number.isFinite(m.player.waterSurfaceY) ? m.player.waterSurfaceY.toFixed(4) : 'none'}`
+      data.xoQaWater = m.localActor
+        ? `in=${m.localActor.inWater ? 1 : 0}|submerged=${m.localActor.submerged ? 1 : 0}|surface=${Number.isFinite(m.localActor.waterSurfaceY) ? m.localActor.waterSurfaceY.toFixed(4) : 'none'}`
         : 'none';
-      data.xoQaCollision = m.player
-        ? `count=${qaPenetrations.length}|depth=${qaMaxPenetration.toFixed(4)}|support=${qaSupportError?.toFixed(4) ?? 'none'}|grounded=${m.player.body.grounded ? 1 : 0}`
+      data.xoQaCollision = m.localActor
+        ? `count=${qaPenetrations.length}|depth=${qaMaxPenetration.toFixed(4)}|support=${qaSupportError?.toFixed(4) ?? 'none'}|grounded=${m.localActor.body.grounded ? 1 : 0}`
         : 'none';
-      data.xoQaWorld = m.player
+      data.xoQaWorld = m.localActor
         ? `terrain=${qaTerrainY?.toFixed(4) ?? 'none'}|delta=${qaTerrainDelta?.toFixed(4) ?? 'none'}|side=${qaTerrainSide}|view=${qaCameraForwardClearance?.toFixed(4) ?? 'clear'}`
         : 'none';
       data.xoQaStart = start
         ? `${start.poi}|${start.x.toFixed(1)},${start.y.toFixed(1)},${start.z.toFixed(1)}`
         : '';
-      const nearestChest = m.player
+      const nearestChest = m.localActor
         ? m.chests
           .filter((chest) => !chest.opened)
           .sort((a, b) =>
-            Math.hypot(a.x - m.player!.body.position.x, a.z - m.player!.body.position.z)
-            - Math.hypot(b.x - m.player!.body.position.x, b.z - m.player!.body.position.z))[0]
+            Math.hypot(a.x - m.localActor!.body.position.x, a.z - m.localActor!.body.position.z)
+            - Math.hypot(b.x - m.localActor!.body.position.x, b.z - m.localActor!.body.position.z))[0]
         : undefined;
       data.xoQaChest = nearestChest
         ? `${nearestChest.x.toFixed(1)},${nearestChest.y.toFixed(1)},${nearestChest.z.toFixed(1)}|open=0`
         : 'none';
-      data.xoQaPlayer = m.player
-        ? `${m.player.inv.selectedWeapon?.weaponId ?? m.player.inv.selectedItem?.kind ?? 'empty'}|shots=${m.player.stats.shotsFired}|hp=${Math.round(m.player.health)}|shield=${Math.round(m.player.shield)}|heal=${m.player.healing?.itemId ?? 'none'}`
+      data.xoQaPlayer = m.localActor
+        ? `${m.localActor.inv.selectedWeapon?.weaponId ?? m.localActor.inv.selectedItem?.kind ?? 'empty'}|shots=${m.localActor.stats.shotsFired}|hp=${Math.round(m.localActor.health)}|shield=${Math.round(m.localActor.shield)}|heal=${m.localActor.healing?.itemId ?? 'none'}`
         : 'none';
       data.xoQaPerf = `${framePercentile(0.95).toFixed(1)},${framePercentile(0.99).toFixed(1)},${worstFrameMs.toFixed(1)}`;
       data.xoQaPerfDetail = `frames=${framesTotal}|gt33=${spikes33}|gt50=${spikes50}`;
@@ -1626,7 +1670,7 @@ function present(dtReal: number): void {
       pitch = -0.12,
       mode: 'standing' | 'swim' = 'standing',
     ): boolean => {
-      const p = m.player;
+      const p = m.localActor;
       if (!p || !p.alive) return false;
       if (mode === 'swim') {
         const water = m.mapDef.water.find((candidate) => (
@@ -1762,11 +1806,11 @@ function present(dtReal: number): void {
       } catch {
         // Invalid QA commands fail closed and are acknowledged as unsuccessful.
       }
-      const resolved = ok && m.player
+      const resolved = ok && m.localActor
         ? {
-            x: +m.player.body.position.x.toFixed(4),
-            y: +m.player.body.position.y.toFixed(4),
-            z: +m.player.body.position.z.toFixed(4),
+            x: +m.localActor.body.position.x.toFixed(4),
+            y: +m.localActor.body.position.y.toFixed(4),
+            z: +m.localActor.body.position.z.toFixed(4),
           }
         : null;
       qaData.xoQaTeleportResult = JSON.stringify({ nonce, ok, resolved });
@@ -1774,14 +1818,14 @@ function present(dtReal: number): void {
     // QA stress hook: ring all living bots tightly around the player to
     // force maximum concurrent AI/combat/VFX load. Dev builds only.
     (window as unknown as Record<string, unknown>).__xoStress = () => {
-      const p = m.player;
+      const p = m.localActor;
       if (!p) return {
         ok: false, expected: 0, placed: 0, rejected: 0, placedIds: [], rejectedIds: [],
       };
       p.deployed = true;
       p.state = p.body.grounded ? 'ground' : 'air';
       p.body.velocity.x = 0; p.body.velocity.y = 0; p.body.velocity.z = 0;
-      const alive = m.actors.filter((a) => a.alive && !a.isPlayer);
+      const alive = m.actors.filter((a) => a.alive && !m.isLocalActor(a));
       const placedIds: number[] = [];
       const rejectedIds: number[] = [];
       alive.forEach((a, i) => {
@@ -1827,7 +1871,7 @@ function present(dtReal: number): void {
     // QA helper: grant + equip a weapon by id ('pistol'|'smg'|'ar'|
     // 'shotgun'|'sniper', optional rarity). Dev/QA builds only.
     (window as unknown as Record<string, unknown>).__xoGive = (weaponId: string, rarity?: string) => {
-      const p = m.player;
+      const p = m.localActor;
       if (!p || !p.alive) return false;
       const def = WEAPONS[weaponId as WeaponId];
       if (!def) return false;
@@ -1865,7 +1909,7 @@ function present(dtReal: number): void {
     };
   }
 
-  const spectating = !m.player?.alive && m.phase !== 'results';
+  const spectating = !m.localActor?.alive && m.phase !== 'results';
   const presentationAlpha = THREE.MathUtils.clamp(accumulator / SIM.fixedDt, 0, 1);
   presentationTransportPos.set(
     THREE.MathUtils.lerp(m.previousTransportPos.x, m.transportPos.x, presentationAlpha),
@@ -1889,7 +1933,7 @@ function present(dtReal: number): void {
     rig.endSpectate();
   }
   wasSpectating = spectating;
-  const playerAboard = !!m.player && !m.player.deployed;
+  const playerAboard = !!m.localActor && !m.localActor.deployed;
   const inTransport = m.phase === 'transport' && !spectating && playerAboard;
   // Drop-rig slots: combatants hang in a row beneath the hull, spread along
   // the flight axis. The player rides the front slot with the line of
@@ -1920,15 +1964,15 @@ function present(dtReal: number): void {
       rig.camera.position.lerp(fallback, 1 - Math.exp(-dtReal * 4));
       rig.camera.lookAt(0, 0, 0);
     }
-  } else if (inTransport && m.player) {
-    const slot = slotOf(m.player);
-    rig.updateTransport(presentationTransportPos, slot, m.player.yaw, m.player.pitch, now() / 1000, dtReal);
+  } else if (inTransport && m.localActor) {
+    const slot = slotOf(m.localActor);
+    rig.updateTransport(presentationTransportPos, slot, m.localActor.yaw, m.localActor.pitch, now() / 1000, dtReal);
     hud.hideSpectate();
-  } else if (m.player) {
+  } else if (m.localActor) {
     if (wasInTransport) {
       rig.beginGameplayBlend();
     }
-    rig.update(m.player, dtReal, m.phys, {});
+    rig.update(m.localActor, dtReal, m.phys, {});
     hud.hideSpectate();
   }
   wasInTransport = inTransport && m.phase === 'transport';
@@ -1940,7 +1984,7 @@ function present(dtReal: number): void {
   for (const a of m.actors) {
     const charRig = rigs.get(a.id);
     if (!charRig) continue;
-    if (a.isPlayer && rig.mode === 'fps' && a.alive && !spectating) {
+    if (m.isLocalActor(a) && rig.mode === 'fps' && a.alive && !spectating) {
       charRig.group.visible = false;
       continue;
     }
@@ -1975,8 +2019,8 @@ function present(dtReal: number): void {
     }
   }
 
-  if (!spectating && rig.mode === 'tps' && m.player?.alive) {
-    const p = m.player.body.position;
+  if (!spectating && rig.mode === 'tps' && m.localActor?.alive) {
+    const p = m.localActor.body.position;
     const towardCamera = presentationFillDirection.set(
       rig.camera.position.x - p.x,
       0,
@@ -2012,9 +2056,9 @@ function present(dtReal: number): void {
   // Viewmodel (hidden while riding the transport — the unified transport
   // camera frames the drop rig instead of a weapon; hidden at full sniper
   // scope where the scope overlay replaces the world view).
-  if (m.player?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
-    const speed = Math.hypot(m.player.body.velocity.x, m.player.body.velocity.z);
-    viewmodel.update(m.player, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
+  if (m.localActor?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
+    const speed = Math.hypot(m.localActor.body.velocity.x, m.localActor.body.velocity.z);
+    viewmodel.update(m.localActor, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
     viewmodel.group.visible = true;
   } else {
     viewmodel.update(null, dtReal, 0, 0, 0);
@@ -2039,7 +2083,7 @@ function present(dtReal: number): void {
   hud.drawMinimap(m, () => hud.minimapContext(), dtReal);
   if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
-    const info = !spectating && m.player?.alive && !paused && !hud.isTacMapOpen() && !hud.isInventoryOpen()
+    const info = !spectating && m.localActor?.alive && !paused && !hud.isTacMapOpen() && !hud.isInventoryOpen()
       ? findInteractInfo(m)
       : null;
     hud.interactPrompt(info && info.prompt ? info.prompt : null);
@@ -2062,7 +2106,7 @@ interface InteractInfo {
 }
 
 function findInteractInfo(m: Match): InteractInfo | null {
-  const p = m.player;
+  const p = m.localActor;
   if (!p) return null;
   const chest = m.nearestInteractableChest(p);
   if (chest) {
@@ -2123,15 +2167,17 @@ function prettyBind(code: string): string {
 }
 
 function showResults(m: Match): void {
-  const p = m.player;
-  const won = m.winner?.isPlayer === true;
+  const p = m.localActor;
+  const won = didLocalActorWin(m);
   hud.show(false);
   live?.player.releaseLock();
   audio.setMusicState(won ? 'victory' : 'defeat');
   audio.victoryFanfare(won);
   menus.showResults({
     won,
-    winnerName: m.winner?.name ?? '—',
+    winnerName: m.winnerView?.kind === 'team'
+      ? t('results.teamName', { n: m.winnerView.teamId + 1 })
+      : m.winnerView?.displayName ?? '—',
     placement: p?.placement ?? m.actors.length,
     kills: p?.stats.kills ?? 0,
     damage: p?.stats.damageDealt ?? 0,
@@ -2139,6 +2185,13 @@ function showResults(m: Match): void {
     headshots: p?.stats.headshots ?? 0,
     survivalTime: p?.stats.survivalTime ?? 0,
   });
+}
+
+function didLocalActorWin(match: Match): boolean {
+  if (match.localActorId === null || match.winnerView === null) return false;
+  return match.winnerView.kind === 'team'
+    ? match.localTeamId === match.winnerView.teamId
+    : match.localActorId === match.winnerView.actorId;
 }
 
 /** High-res time source shared by animation code. */

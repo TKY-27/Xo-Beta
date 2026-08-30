@@ -4,6 +4,7 @@ import type { Actor } from '../../src/sim/actor';
 import { emptyCommand } from '../../src/sim/input';
 import { loadMap, type MapId } from '../../src/world';
 import { RAPIER_READY } from '../../src/world/rapierReady';
+import { buildSoloRoster } from '../../src/sim/roster';
 
 const STEP = 1 / 60;
 
@@ -49,9 +50,10 @@ describe('all-map character transition matrix', () => {
         mapDef: loaded.def,
         seed: 703119,
         difficulty: 'normal',
-        withPlayer: true,
+        mode: 'solo',
+        roster: buildSoloRoster(703119),
       });
-      const player = match.player!;
+      const player = match.localActor!;
       const controller = new MatrixPlayerController();
       match.controllers.set(player.id, controller);
       const origin = { ...player.body.position };
@@ -84,7 +86,7 @@ describe('all-map character transition matrix', () => {
             expect(actor.body.grounded, `${id} frame ${frame} actor ${actor.id} false ground`).toBe(true);
           }
           const flying = actor.state === 'freefall' || actor.state === 'glide';
-          if (actor.isPlayer) {
+          if (match.isLocalActor(actor)) {
             sawPlayerFlight ||= flying;
             sawPlayerGround ||= actor.state === 'ground' && actor.body.grounded;
           } else {

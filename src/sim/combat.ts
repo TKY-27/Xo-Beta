@@ -50,7 +50,7 @@ export interface CombatEvents {
   onShieldBroken?(target: Actor): void;
   onTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number): void;
   onRicochet(x: number, y: number, z: number): void;
-  onGlassBreak(destructibleId: string, x: number, y: number, z: number): void;
+  onGlassBreak(destructibleId: string, x: number, y: number, z: number, actorId: number): void;
   onDestructibleDamaged(id: number, destructibleId: string, x: number, y: number, z: number, destroyed: boolean): void;
   onMeleeSwing(actor: Actor, x: number, y: number, z: number): void;
   onMeleeHit(target: Actor, attacker: Actor, damage: number, killed: boolean, headshot: boolean): void;
@@ -91,6 +91,8 @@ export class CombatSystem {
   }
 
   waterAt: (x: number, y: number, z: number) => WaterVolume | null = () => null;
+  /** Central Match policy for every actor-to-actor damage and impulse route. */
+  canAffectActor: (attacker: Actor, target: Actor) => boolean = () => true;
 
   registerDestructibles(list: DestructibleRef[]): void {
     for (const d of list) this.destructibles.set(d.id, d);
@@ -217,6 +219,7 @@ export class CombatSystem {
 
     for (const t of actors) {
       if (t === a || !t.alive) continue;
+      if (!this.canAffectActor(a, t)) continue;
       const dx = t.body.position.x - px;
       const dy = t.body.position.y - py;
       const dz = t.body.position.z - pz;
@@ -456,6 +459,17 @@ export class CombatSystem {
       if (meta?.kind === 'actor') {
         const target = actors.find((ac) => ac.id === meta.actorId);
         if (target && target.alive && target.id !== p.ownerId) {
+          const attacker = this.attackerLookup?.(p.ownerId) ?? null;
+          if (attacker && !this.canAffectActor(attacker, target)) {
+            // Allied hit regions are transparent to friendly rounds. Advance
+            // through this bounded swept segment and retain the remaining
+            // travel so an enemy behind the ally can still be hit.
+            cursorX = hit.point.x + dx * 0.05;
+            cursorY = hit.point.y + dy * 0.05;
+            cursorZ = hit.point.z + dz * 0.05;
+            remaining = Math.max(0, remaining - Math.max(consumed, 0.05));
+            continue;
+          }
           emitTracer(hit.point.x, hit.point.y, hit.point.z);
           this.resolveActorHit(p, target, hit.point.x, hit.point.y, hit.point.z, meta.region);
           p.active = false;
@@ -478,7 +492,7 @@ export class CombatSystem {
           if (gone) {
             d.alive = false;
             this.phys.removeCollider(d.collider as never);
-            if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z);
+            if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z, p.ownerId);
             else this.events.onDestructibleDamaged(meta.id, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
           } else {
             this.events.onDestructibleDamaged(meta.id, d.stableId, hit.point.x, hit.point.y, hit.point.z, false);
@@ -536,6 +550,7 @@ export class CombatSystem {
 
   private resolveActorHit(p: Projectile, target: Actor, hx: number, hy: number, hz: number, region: string): void {
     const attacker = this.attackerLookup?.(p.ownerId) ?? null;
+    if (attacker && !this.canAffectActor(attacker, target)) return;
     let mult = 1;
     let headshot = false;
     if (region === 'head') { mult = p.headMult; headshot = true; }
@@ -575,7 +590,7 @@ export class CombatSystem {
     if (d.hp <= 0) {
       d.alive = false;
       this.phys.removeCollider(d.collider as never);
-      if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z);
+      if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z, -1);
       else this.events.onDestructibleDamaged(id, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
       return true;
     }

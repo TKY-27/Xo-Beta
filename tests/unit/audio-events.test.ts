@@ -8,7 +8,7 @@ function setup() {
   const pickupUi = vi.fn();
   const cancelMatchEffects = vi.fn();
   const audio = { pickupUi, cancelMatchEffects };
-  const match = { actors: [], player: { id: 7 } };
+  const match = { actors: [], localActorId: 7 };
   const dispose = attachAudio(match as never, audio as never, bus);
   return { bus, pickupUi, cancelMatchEffects, dispose };
 }
@@ -35,7 +35,7 @@ describe('local-only pickup presentation', () => {
     expect(pickupUi).not.toHaveBeenCalled();
   });
 
-  it('keeps another human actor silent until multiplayer ownership replaces the boundary', () => {
+  it('keeps a remote human actor silent at the multiplayer presentation boundary', () => {
     const { bus, pickupUi } = setup();
 
     bus.emit('itemPickedUp', pickup(8));

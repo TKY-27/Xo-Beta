@@ -29,6 +29,7 @@ interface EffectiveParams {
 }
 
 export class BotController {
+  readonly kind = 'bot' as const;
   mode: BotMode = 'drop';
   perception: Perception;
   navigator: BotNavigator;
@@ -54,7 +55,7 @@ export class BotController {
     public personality: BotPersonality,
     difficulty: Difficulty,
   ) {
-    this.perception = new Perception(actor);
+    this.perception = new Perception(actor, (other) => match.areHostile(actor, other));
     this.navigator = new BotNavigator(match.nav, actor);
     const base = DIFFICULTY[difficulty];
     if (personality.elite) {
@@ -85,25 +86,29 @@ export class BotController {
     });
     // Subscribe to relevant world events for hearing
     match.events.on('shotFired', (e) => {
-      if (e.actorId !== actor.id && !e.dry) {
+      if (e.actorId !== actor.id && !e.dry && match.areHostile(actor.id, e.actorId)) {
         this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: 1, kind: 'shot', actorId: e.actorId }, this.params.awareness);
       }
     });
     match.events.on('footstep', (e) => {
-      if (e.actorId !== actor.id) {
+      if (e.actorId !== actor.id && match.areHostile(actor.id, e.actorId)) {
         this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: e.running ? 0.75 : 0.45, kind: 'footstep', actorId: e.actorId }, this.params.awareness);
       }
     });
     match.events.on('chestOpened', (e) => {
-      this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: 0.4, kind: 'chest', actorId: -1 }, this.params.awareness);
+      if (match.areHostile(actor.id, e.actorId)) {
+        this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: 0.4, kind: 'chest', actorId: e.actorId }, this.params.awareness);
+      }
     });
     match.events.on('glassBreak', (e) => {
-      this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: 0.55, kind: 'glass', actorId: -1 }, this.params.awareness);
+      if (e.actorId < 0 || match.areHostile(actor.id, e.actorId)) {
+        this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: 0.55, kind: 'glass', actorId: e.actorId }, this.params.awareness);
+      }
     });
     match.events.on('actorHit', (e) => {
       if (e.targetId === actor.id && e.attackerId > 0) {
         const attacker = match.actors.find((a) => a.id === e.attackerId);
-        if (attacker) {
+        if (attacker && match.areHostile(actor, attacker)) {
           this.perception.onDamagedBy(attacker.body.position, attacker.id);
           this.lastDamageResponse = match.time;
         }
@@ -119,6 +124,15 @@ export class BotController {
 
     // Perception tick
     this.perception.tick(dt);
+    const staleTarget = this.combat.target;
+    if (staleTarget && !this.match.areHostile(this.actor, staleTarget)) {
+      this.perception.forgetActor(staleTarget.id);
+      this.combat.clearTarget();
+    }
+    for (const actorId of this.perception.memories.keys()) {
+      const remembered = this.match.actors.find((candidate) => candidate.id === actorId);
+      if (remembered && !this.match.areHostile(this.actor, remembered)) this.perception.forgetActor(actorId);
+    }
     // Early game, bots are loot-focused: reduced sight range keeps the first
     // minute or two about gearing up, not long-range engagements.
     const earlyFactor = this.match.time < 90 ? 0.5 : this.match.time < 130 ? 0.75 : 1;
@@ -229,7 +243,7 @@ export class BotController {
       return;
     }
     const currentTarget = this.combat.target;
-    if (currentTarget && currentTarget.alive && this.mode === 'combat' && !outsideNow) {
+    if (currentTarget && currentTarget.alive && m.areHostile(a, currentTarget) && this.mode === 'combat' && !outsideNow) {
       const mem = this.perception.memories.get(currentTarget.id);
       if (mem && mem.time < 2.2) {
         return; // hold engagement
@@ -353,7 +367,7 @@ export class BotController {
     if (this.fightWatchInit) return;
     this.fightWatchInit = true;
     this.match.events.on('shotFired', (e) => {
-      if (e.actorId !== this.actor.id) {
+      if (e.actorId !== this.actor.id && this.match.areHostile(this.actor.id, e.actorId)) {
         this.recentFights.push({ x: e.x, y: e.y, z: e.z, t: this.match.time });
         if (this.recentFights.length > 24) this.recentFights.shift();
       }
@@ -534,7 +548,9 @@ export class BotController {
     const visible = visEntry !== undefined && this.combat.target !== null;
     const t = this.combat.target;
 
-    if (!t) {
+    if (!t || !this.match.areHostile(a, t)) {
+      if (t) this.perception.forgetActor(t.id);
+      this.combat.clearTarget();
       this.mode = 'wander';
       return;
     }

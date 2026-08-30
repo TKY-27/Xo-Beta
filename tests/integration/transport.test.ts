@@ -4,6 +4,7 @@ import type { Actor } from '../../src/sim/actor';
 import { loadMap } from '../../src/world';
 import { RAPIER_READY } from '../../src/world/rapierReady';
 import { emptyCommand } from '../../src/sim/input';
+import { buildSoloRoster } from '../../src/sim/roster';
 
 type Loaded = Awaited<ReturnType<typeof loadMap>>;
 let loaded: Loaded;
@@ -47,7 +48,7 @@ class StubController implements ActorController {
 }
 
 function makeMatch(): Match {
-  return new Match({ mapDef: loaded.def, seed: 777, difficulty: 'normal', withPlayer: true });
+  return new Match({ mapDef: loaded.def, seed: 777, difficulty: 'normal', mode: 'solo', roster: buildSoloRoster(777) });
 }
 
 describe('transport / drop lifecycle', () => {
@@ -69,7 +70,7 @@ describe('transport / drop lifecycle', () => {
 
   it('keeps aboard physics bodies parked until their one deployment placement', () => {
     const m = makeMatch();
-    const player = m.player!;
+    const player = m.localActor!;
     const stub = new StubController();
     m.controllers.set(player.id, stub);
     const parked = { ...player.body.position };
@@ -99,8 +100,8 @@ describe('transport / drop lifecycle', () => {
 
   it('landed player keeps full control while other actors are still aboard', () => {
     const m = makeMatch();
-    const player = m.player!;
-    const bots = m.actors.filter((a) => !a.isPlayer);
+    const player = m.localActor!;
+    const bots = m.actors.filter((a) => m.isBotActor(a));
     expect(bots.length).toBeGreaterThan(0);
     const stub = new StubController();
     m.controllers.set(player.id, stub);

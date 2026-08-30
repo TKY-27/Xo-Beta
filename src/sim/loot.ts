@@ -46,11 +46,10 @@ export interface LootEvents {
   onPickup(item: WorldItem, actor: Actor): void;
 }
 
-let nextItemId = 1;
-
 export class LootSystem {
   items: WorldItem[] = [];
   time = 0;
+  private nextItemId = 1;
 
   constructor(public events: LootEvents) {}
 
@@ -104,7 +103,7 @@ export class LootSystem {
   private spawn(partial: Omit<WorldItem, 'id' | 'bobPhase' | 'yaw' | 'spawnT' | 'settled'>, rng: Rng): WorldItem {
     const item: WorldItem = {
       ...partial,
-      id: nextItemId++,
+      id: this.nextItemId++,
       bobPhase: rng.angle(),
       yaw: rng.angle(),
       spawnT: this.time,

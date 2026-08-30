@@ -7,6 +7,7 @@ import type { BotPersonality, HitRegion, WeaponId } from '../core/balance';
 import { HEALTH_MAX, SHIELD_MAX } from '../core/balance';
 import { eyeYFromBodyCenter, type CharBody } from '../physics/physics';
 import { Inventory } from './inventory';
+import type { SkinId } from '../core/settings';
 
 export type MoveState =
   | 'ground' | 'air' | 'slide' | 'wallrun' | 'mantle'
@@ -55,7 +56,7 @@ export class Actor {
   /** Match-local identity shared with every collider on this body. */
   readonly id: number;
   readonly name: string;
-  readonly isPlayer: boolean;
+  readonly skinId: SkinId;
   personality: BotPersonality | null;
   accentColor: number;
 
@@ -153,13 +154,19 @@ export class Actor {
     kills: 0, damageDealt: 0, shotsFired: 0, shotsHit: 0, headshots: 0, survivalTime: 0,
   };
 
-  constructor(name: string, isPlayer: boolean, body: CharBody, accentColor: number, personality: BotPersonality | null = null) {
+  constructor(
+    name: string,
+    body: CharBody,
+    accentColor: number,
+    personality: BotPersonality | null = null,
+    skinId: SkinId = 'vanguard',
+  ) {
     // Collider metadata is authoritative for projectile hit resolution. A
     // module-global actor counter used to diverge from the 1..10 collider IDs
     // on the second headless match in one process, making every bullet miss.
     this.id = body.actorId;
     this.name = name;
-    this.isPlayer = isPlayer;
+    this.skinId = skinId;
     this.body = body;
     this.accentColor = accentColor;
     this.personality = personality;

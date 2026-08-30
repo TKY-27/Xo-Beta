@@ -8,8 +8,14 @@ import { ensureWorldReady, loadMap, type MapId } from '../world/index';
 import { Match } from './match';
 import { BotController } from '../ai/bot';
 import type { Difficulty } from '../core/balance';
-import { SIM } from '../core/balance';
+import { BOT_PERSONALITIES, SIM } from '../core/balance';
 import { Rng } from '../core/rng';
+import {
+  buildRoster,
+  localHumanRosterEntry,
+  type MatchMode,
+  type RosterEntry,
+} from './roster';
 
 export interface SimResult {
   seed: number;
@@ -25,6 +31,8 @@ export interface SimResult {
   itemsPickedUp: number;
   navFailures: number;
   feed: Array<{ t: number; s: string }>;
+  winnerTeamId: number | null;
+  friendlyFireHits: number;
 }
 
 export async function runHeadlessMatch(opts: {
@@ -33,38 +41,45 @@ export async function runHeadlessMatch(opts: {
   difficulty: Difficulty;
   maxSeconds?: number;
   onProgress?: (simTime: number, alive: number) => void;
+  mode?: MatchMode;
+  humans?: readonly RosterEntry[];
 }): Promise<SimResult> {
   await ensureWorldReady();
   const loaded = loadMap(opts.mapId);
+  const mode = opts.mode ?? 'solo';
+  const humans = opts.humans ?? [localHumanRosterEntry()];
+  const roster = buildRoster({ mode, humans, seed: opts.seed });
   const match = new Match({
     mapDef: loaded.def,
     seed: opts.seed,
     difficulty: opts.difficulty,
-    withPlayer: false,
+    mode,
+    roster,
   });
   match.populateInitialLoot();
 
-  // Attach bot controllers (10 bots; roster wraps with suffixes)
-  let dup = 0;
+  // Headless QA supplies deterministic Bot controllers to every connected
+  // roster slot. Ownership remains unchanged and is still what the Match
+  // uses for peer/team/local semantics.
+  let humanControllerIndex = 0;
   for (const actor of match.actors) {
-    if (!actor.personality) continue;
-    let name = actor.name;
-    if (match.actors.filter((a) => a.name === name).length > 1 && actor.name.length <= 5) {
-      dup++;
-      name = `${actor.name}-${dup}`;
-      Object.defineProperty(actor, 'name', { value: name });
-    }
-    const ctrl = new BotController(actor, match, new Rng(match.rng.next() * 0xffffffff), actor.personality, opts.difficulty);
+    const personality = actor.personality
+      ?? BOT_PERSONALITIES[(BOT_PERSONALITIES.length - 1 - humanControllerIndex++) % BOT_PERSONALITIES.length]!;
+    const ctrl = new BotController(actor, match, new Rng(match.rng.next() * 0xffffffff), personality, opts.difficulty);
     match.controllers.set(actor.id, ctrl);
   }
 
   let chestOpens = 0;
   let itemsPickedUp = 0;
   const navFailures = 0;
+  let friendlyFireHits = 0;
   match.events.on('chestOpened', () => chestOpens++);
   match.events.on('itemPickedUp', () => itemsPickedUp++);
   match.events.on('eliminated', (e) => {
     if (e.storm) void e;
+  });
+  match.events.on('actorHit', (event) => {
+    if (event.attackerId > 0 && !match.areHostile(event.attackerId, event.targetId)) friendlyFireHits++;
   });
 
   const dt = SIM.fixedDt;
@@ -98,5 +113,7 @@ export async function runHeadlessMatch(opts: {
     itemsPickedUp,
     navFailures,
     feed: match.killFeed.map((k) => ({ t: k.time, s: `${k.killerName ?? (k.storm ? 'STORM' : 'FALL')} ${k.headshot ? '[HS] ' : ''}-> ${k.victimName}`})),
+    winnerTeamId: match.winnerView?.kind === 'team' ? match.winnerView.teamId : null,
+    friendlyFireHits,
   };
 }
