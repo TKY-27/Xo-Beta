@@ -62,6 +62,8 @@ export class Menus {
   selectedMap: MapId = 'neocity';
   selectedDifficulty: DifficultyChoice = 'hard';
   onPlayRequested: (sel: PlaySelection) => void = () => undefined;
+  onCreateRoomRequested: () => void = () => undefined;
+  onJoinRoomRequested: () => void = () => undefined;
   onResumeRequested: () => void = () => undefined;
   onQuitRequested: () => void = () => undefined;
   onUiSound?: (kind: 'click' | 'hover' | 'back' | 'confirm' | 'error') => void;
@@ -102,7 +104,10 @@ export class Menus {
   onScreenChanged: (id: string) => void = () => undefined;
 
   private show(id: string): void {
-    const ids = ['main-menu', 'play-menu', 'settings-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen'];
+    const ids = [
+      'main-menu', 'play-menu', 'create-room-menu', 'join-room-menu', 'online-lobby-menu',
+      'settings-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
+    ];
     for (const other of ids) $(other).classList.add('hidden');
     if (id) $(id).classList.remove('hidden');
     this.onScreenChanged(id);
@@ -162,6 +167,9 @@ export class Menus {
   }
 
   showMainMenu(): void { this.show('main-menu'); }
+  showOnlineScreen(id: 'main-menu' | 'create-room-menu' | 'join-room-menu' | 'online-lobby-menu'): void {
+    this.show(id);
+  }
   hideAll(): void { this.show(''); }
 
   setPlayEnabled(enabled: boolean): void {
@@ -237,6 +245,9 @@ export class Menus {
   isAnyMenuOpen(): boolean {
     return !document.getElementById('main-menu')!.classList.contains('hidden') ||
       !document.getElementById('play-menu')!.classList.contains('hidden') ||
+      !document.getElementById('create-room-menu')!.classList.contains('hidden') ||
+      !document.getElementById('join-room-menu')!.classList.contains('hidden') ||
+      !document.getElementById('online-lobby-menu')!.classList.contains('hidden') ||
       !document.getElementById('settings-menu')!.classList.contains('hidden') ||
       !document.getElementById('credits-menu')!.classList.contains('hidden') ||
       !document.getElementById('pause-menu')!.classList.contains('hidden');
@@ -250,6 +261,8 @@ export class Menus {
       });
     };
     click('btn-play', () => this.show('play-menu'));
+    click('btn-create-room', () => this.onCreateRoomRequested());
+    click('btn-join-room', () => this.onJoinRoomRequested());
     click('btn-settings', () => { this.onOpenSettingsFromPause = false; this.show('settings-menu'); });
     click('btn-credits', () => this.show('credits-menu'));
     click('btn-credits-back', () => this.show('main-menu'), 'back');

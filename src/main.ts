@@ -36,6 +36,8 @@ import { WeaponModelFactory } from './render/weaponModels';
 import { loadGltf } from './assets/assets';
 import { PlayerController } from './player/controller';
 import { Hud, Menus, type PlaySelection, type LootPanelInfo } from './ui/ui';
+import { OnlineLobbyUi } from './ui/onlineLobby';
+import { PrivateRoomController } from './net/privateRoom';
 import { t, initLang } from './core/i18n';
 import { GamepadInput } from './player/gamepad';
 import { AudioEngine, attachAudio } from './audio/audio';
@@ -349,10 +351,22 @@ async function boot(): Promise<void> {
   await setLoad(0.6, t('load.warming'));
 
   menus = new Menus(MAP_LIST);
+  let onlineUi: OnlineLobbyUi | null = null;
+  const onlineRoom = new PrivateRoomController({
+    onView: (view) => onlineUi?.renderLobby(view),
+    onError: (code) => onlineUi?.showError(code),
+  });
+  onlineUi = new OnlineLobbyUi({
+    maps: MAP_LIST,
+    actions: onlineRoom,
+    showScreen: (id) => menus.showOnlineScreen(id),
+  });
   menus.onUiSound = (kind) => audio.uiClick(kind);
   menus.onScreenChanged = (id) => lobby.compose(id === 'settings-menu' ? 'settings' : 'main');
   menus.onPlayRequested = (sel) =>
     void startMatch(sel, sharedMats, sharedProps, characterFactory, weaponFactory, lobby);
+  menus.onCreateRoomRequested = () => onlineUi?.showCreate();
+  menus.onJoinRoomRequested = () => onlineUi?.showJoin();
   menus.onResumeRequested = resumeFromPause;
   menus.onQuitRequested = quitToMenu;
   $('btn-spectate-exit').addEventListener('click', () => menus.onQuitRequested());
@@ -404,7 +418,19 @@ async function boot(): Promise<void> {
     hud.applyCrosshair();
     audio.applyVolumes();
   });
-  window.addEventListener('pagehide', flushSettingsPersist);
+  window.addEventListener('pagehide', () => {
+    flushSettingsPersist();
+    // Keep a guest invite fragment across reload so its sessionStorage-only
+    // reconnect token can reclaim the same slot with a new browser peer ID.
+    void onlineRoom.leaveRoom(true);
+  });
+
+  const inviteOnLoad = location.hash.startsWith('#join=') ? location.href : '';
+  if (inviteOnLoad) {
+    const openInvite = () => onlineUi?.showJoin(inviteOnLoad);
+    if (getSettings().onboarded) openInvite();
+    else menus.onOnboardingDone = openInvite;
+  }
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && live && !paused && live.match.phase !== 'results') openPause();

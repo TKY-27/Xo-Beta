@@ -22,6 +22,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:browser:online": "tsx tests/browser/online-lobby-e2e.ts",
     "test:watch": "vitest",
     "sim": "tsx tests/sim/run-sim.ts",
     "lint": "eslint .",
@@ -33,7 +34,8 @@
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.20.0",
-    "three": "0.185.1"
+    "three": "0.185.1",
+    "trystero": "0.25.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

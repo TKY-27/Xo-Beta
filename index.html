@@ -91,7 +91,9 @@
       <p class="tagline" data-i18n="menu.tagline">Single-player battle royale · 10 combatants · last one standing</p>
     </header>
     <nav class="menu-rail">
-      <button id="btn-play" class="btn-play" data-i18n="common.play">PLAY</button>
+      <button id="btn-play" class="btn-play" data-i18n="menu.soloPlay">SOLO PLAY</button>
+      <button id="btn-create-room" class="btn-quiet" data-i18n="room.createPrivate">CREATE PRIVATE ROOM</button>
+      <button id="btn-join-room" class="btn-quiet" data-i18n="room.joinPrivate">JOIN PRIVATE ROOM</button>
       <button id="btn-settings" class="btn-quiet" data-i18n="common.settings">SETTINGS</button>
       <button id="btn-credits" class="btn-quiet" data-i18n="common.credits">CREDITS</button>
     </nav>
@@ -119,6 +121,108 @@
         <button id="btn-play-start" class="btn-play deploy">START MATCH</button>
         <button id="btn-practice-start" class="btn-quiet practice" data-i18n="menu.practice">PRACTICE MODE</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Private-room creation. The host exists only while this page remains open. -->
+  <div id="create-room-menu" class="screen hidden">
+    <div class="menu-shade full"></div>
+    <header class="screen-head">
+      <button id="btn-create-room-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
+      <h2 data-i18n="room.createPrivate">CREATE PRIVATE ROOM</h2>
+    </header>
+    <div class="room-setup-body">
+      <form id="create-room-form" class="room-setup-form">
+        <label class="room-field">
+          <span data-i18n="room.displayName">DISPLAY NAME</span>
+          <input id="create-display-name" name="displayName" type="text" maxlength="24" autocomplete="nickname" required />
+        </label>
+        <section id="create-room-skin-selector" aria-labelledby="create-room-skin-title"></section>
+        <p class="room-privacy" data-i18n="room.ipNotice">Direct P2P may reveal your IP address to invited peers. Share only with people you trust.</p>
+        <button id="btn-confirm-create-room" class="btn-play deploy" type="submit" data-i18n="room.confirmCreate">CREATE ROOM</button>
+        <p id="create-room-error" class="room-error" role="alert" aria-live="polite"></p>
+      </form>
+      <aside class="room-explainer">
+        <h3 data-i18n="room.privateFriends">FRIENDS-ONLY PRIVATE ROOM</h3>
+        <p data-i18n="room.zeroCostNote">Discovery uses encrypted public Nostr signaling. Gameplay connections are direct and never use a paid relay.</p>
+        <p data-i18n="room.failureNote">Some networks cannot establish direct P2P. In that case the room fails cleanly instead of using TURN.</p>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Private-room join by fragment invite or grouped manual code. -->
+  <div id="join-room-menu" class="screen hidden">
+    <div class="menu-shade full"></div>
+    <header class="screen-head">
+      <button id="btn-join-room-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
+      <h2 data-i18n="room.joinPrivate">JOIN PRIVATE ROOM</h2>
+    </header>
+    <div class="room-setup-body">
+      <form id="join-room-form" class="room-setup-form">
+        <label class="room-field">
+          <span data-i18n="room.invite">INVITE LINK OR ROOM CODE</span>
+          <textarea id="join-room-invite" name="invite" rows="3" maxlength="256" autocomplete="off" spellcheck="false" required></textarea>
+        </label>
+        <label class="room-field">
+          <span data-i18n="room.displayName">DISPLAY NAME</span>
+          <input id="join-display-name" name="displayName" type="text" maxlength="24" autocomplete="nickname" required />
+        </label>
+        <section id="join-room-skin-selector" aria-labelledby="join-room-skin-title"></section>
+        <p class="room-privacy" data-i18n="room.ipNotice">Direct P2P may reveal your IP address to invited peers. Share only with people you trust.</p>
+        <button id="btn-confirm-join-room" class="btn-play deploy" type="submit" data-i18n="room.joinRoom">JOIN ROOM</button>
+        <p id="join-room-error" class="room-error" role="alert" aria-live="polite"></p>
+      </form>
+      <aside class="room-explainer">
+        <h3 data-i18n="room.noAccount">NO ACCOUNT REQUIRED</h3>
+        <p data-i18n="room.inviteFragmentNote">Invite secrets stay in the URL fragment and are not sent to the static host.</p>
+        <p data-i18n="room.failureNote">Some networks cannot establish direct P2P. In that case the room fails cleanly instead of using TURN.</p>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Host-authoritative online lobby. Phase 3 never launches a live match. -->
+  <div id="online-lobby-menu" class="screen hidden">
+    <div class="menu-shade full"></div>
+    <header class="screen-head online-lobby-head">
+      <h2 data-i18n="lobby.title">PRIVATE ROOM</h2>
+      <div class="room-invite-actions">
+        <code id="online-room-code" aria-label="Room code"></code>
+        <button id="btn-copy-invite-link" class="btn-quiet small" data-i18n="room.copyLink">COPY INVITE LINK</button>
+        <button id="btn-copy-room-code" class="btn-quiet small" data-i18n="room.copyCode">COPY ROOM CODE</button>
+      </div>
+    </header>
+    <div class="online-lobby-body">
+      <section class="lobby-players" aria-labelledby="lobby-players-title">
+        <h3 id="lobby-players-title" data-i18n="lobby.players">PLAYERS</h3>
+        <div id="lobby-player-slots" class="lobby-player-slots" aria-live="polite"></div>
+        <section id="lobby-skin-selector" aria-labelledby="lobby-skin-title"></section>
+      </section>
+      <section class="lobby-controls" aria-labelledby="lobby-settings-title">
+        <h3 id="lobby-settings-title" data-i18n="lobby.settings">ROOM SETTINGS</h3>
+        <div class="lobby-control-grid">
+          <label><span data-i18n="lobby.arena">ARENA</span><select id="lobby-arena"></select></label>
+          <label><span data-i18n="lobby.mode">GAME MODE</span><select id="lobby-mode"></select></label>
+          <label><span data-i18n="lobby.botFill">BOT FILL</span><select id="lobby-bot-fill"></select></label>
+          <label><span data-i18n="lobby.botDifficulty">BOT DIFFICULTY</span><select id="lobby-bot-difficulty"></select></label>
+        </div>
+        <div id="lobby-team-controls" class="lobby-team-controls"></div>
+        <div class="lobby-roster-preview">
+          <h3 data-i18n="lobby.rosterPreview">RESULTING ROSTER</h3>
+          <strong id="lobby-roster-summary"></strong>
+          <ol id="lobby-roster-list"></ol>
+        </div>
+      </section>
+      <aside class="lobby-network" aria-labelledby="lobby-network-title">
+        <h3 id="lobby-network-title" data-i18n="lobby.network">NETWORK</h3>
+        <p class="room-privacy" data-i18n="room.ipNotice">Direct P2P may reveal your IP address to invited peers. Share only with people you trust.</p>
+        <dl id="lobby-relay-status" class="network-status" aria-live="polite"></dl>
+        <dl id="lobby-direct-status" class="network-status" aria-live="polite"></dl>
+        <p id="lobby-status-message" class="lobby-status-message" aria-live="polite"></p>
+        <button id="btn-lobby-ready" class="btn-quiet lobby-ready" data-i18n="lobby.ready">READY</button>
+        <button id="btn-online-start" class="btn-play deploy" type="button" disabled data-i18n="lobby.startPhase3">START UNAVAILABLE — PHASE 4</button>
+        <p id="lobby-start-note" class="room-note" data-i18n="lobby.phase3Gate">Phase 3 verifies the lobby and direct channels only. A live online match is not launched.</p>
+        <button id="btn-leave-room" class="btn-quiet danger" data-i18n="lobby.leave">LEAVE ROOM</button>
+      </aside>
     </div>
   </div>
 
