@@ -53,6 +53,9 @@ interface LiveGame {
   player: PlayerController;
   mats: MaterialLibrary;
   qaSceneCensus: string;
+  qaGlassSpecs: Array<{ id: number; stableId: string; x: number; y: number; z: number; sx: number; sy: number; sz: number }>;
+  qaGlassBreakFrames: Array<{ time: number; presentMs: number }>;
+  worldConstructionMs: number;
   cleanup: Array<() => void>;
 }
 
@@ -192,6 +195,8 @@ let wasInTransport = false;
 let wasSpectating = false;
 let lastWeaponKey: string | null = null;
 const presentationTransportPos = new THREE.Vector3();
+let qaGlassBreakTimes: number[] = [];
+let qaGlassBreakFrames: Array<{ time: number; presentMs: number }> = [];
 
 const WEAPON_KICK: Record<string, number> = {
   pistol: 0.7,
@@ -434,6 +439,8 @@ async function startMatchImpl(
   ensureCurrentStart(generation);
 
   const loaded = loadMap(sel.map);
+  qaGlassBreakTimes = [];
+  qaGlassBreakFrames = [];
   const match = new Match({
     mapDef: loaded.def,
     seed: Date.now() % 1000000,
@@ -453,7 +460,9 @@ async function startMatchImpl(
   await renderer.setupSkyAndLights(loaded.def.sky);
   ensureCurrentStart(generation);
   if (loaded.def.sky.grade) renderer.setGrading(loaded.def.sky.grade);
+  const worldStart = performance.now();
   const world = await WorldView.create(loaded.def, sharedMats, match, sharedProps);
+  const worldConstructionMs = performance.now() - worldStart;
   ensureCurrentStart(generation);
   renderer.scene.add(world.group);
   registerStartCleanup(generation, () => {
@@ -826,6 +835,17 @@ async function startMatchImpl(
     player,
     mats: sharedMats,
     qaSceneCensus: QA_MODE ? buildQaSceneCensus(world.group) : '',
+    qaGlassSpecs: QA_MODE
+      ? match.combat.destructibleList()
+        .flatMap((d) => d.type === 'glass' && d.geo.kind === 'box'
+          ? [{
+              id: d.id, stableId: d.stableId, x: d.geo.x, y: d.geo.y, z: d.geo.z,
+              sx: d.geo.sx, sy: d.geo.sy, sz: d.geo.sz,
+            }]
+          : [])
+      : [],
+    qaGlassBreakFrames,
+    worldConstructionMs,
     cleanup,
   };
 
@@ -1154,6 +1174,11 @@ function wirePresentation(
   match.events.on('tracer', (e) => vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color));
   match.events.on('impact', (e) => vfx.impactSparks(e.x, e.y, e.z, e.nx, e.ny, e.nz, e.material === 'metal' ? 10 : 6));
   match.events.on('glassBreak', (e) => vfx.glassShards(e.x, e.y, e.z));
+  if (QA_MODE) match.events.on('glassBreak', () => {
+    const time = performance.now();
+    qaGlassBreakTimes.push(time);
+    qaGlassBreakFrames.push({ time, presentMs: perfStats.lastPresentMs });
+  });
   match.events.on('destructibleDestroyed', (e) => vfx.debrisBurst(e.x, e.y, e.z, 0xa07848));
   match.events.on('actorHit', (e) => {
     if (e.attackerId === match.player?.id) {
@@ -1408,6 +1433,11 @@ function present(dtReal: number): void {
       seed: m.seed,
       practiceStart: m.practiceStart,
       phase: m.phase,
+      transportPos: {
+        x: +m.transportPos.x.toFixed(3),
+        y: +m.transportPos.y.toFixed(3),
+        z: +m.transportPos.z.toFixed(3),
+      },
       time: m.time,
       aliveCount: m.aliveCount,
       stormRadius: m.storm.radius,
@@ -1447,6 +1477,15 @@ function present(dtReal: number): void {
         drawCalls: renderer.renderer.info.render.calls,
         triangles: renderer.renderer.info.render.triangles,
       },
+      playerSkin: getSettings().playerSkin,
+      playerRigSkin: m.player ? rigs.get(m.player.id)?.group.userData.xoSkinId ?? null : null,
+      worldConstructionMs: +live.worldConstructionMs.toFixed(2),
+      destructibleCount: m.combat.destructibleCount(),
+      aliveGlassCount: m.combat.aliveGlassCount(),
+      destructibleRender: world.getDestructibleRenderStats(),
+      glassSpecs: live.qaGlassSpecs,
+      glassBreakTimes: qaGlassBreakTimes.slice(),
+      glassBreakFrames: qaGlassBreakFrames.slice(),
       actors: m.actors
         .filter((a) => a.alive)
         .slice(0, 10)

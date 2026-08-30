@@ -139,12 +139,12 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     if (side === 0 || side === 2) {
       const paneX = x - hw + offset + width / 2;
       const paneZ = z + (side === 0 ? hd - inset : -hd + inset);
-      b.box(paneX, paneY, paneZ, width - 0.08, paneH, 0.035, 'glass', 0, { noCollide: true });
+      b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'x');
       b.box(paneX, paneY, paneZ + (side === 0 ? 0.022 : -0.022), 0.055, paneH, 0.045, trim, 0, { noCollide: true });
     } else {
       const paneX = x + (side === 1 ? hw - inset : -hw + inset);
       const paneZ = z - hd + offset + width / 2;
-      b.box(paneX, paneY, paneZ, 0.035, paneH, width - 0.08, 'glass', 0, { noCollide: true });
+      b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'z');
       b.box(paneX + (side === 1 ? 0.022 : -0.022), paneY, paneZ, 0.045, paneH, 0.055, trim, 0, { noCollide: true });
     }
   };

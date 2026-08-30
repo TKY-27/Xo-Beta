@@ -463,6 +463,7 @@ function fences(b: WorldBuilder, rng: Rng, cx: number, cz: number, w: number, d:
   for (let i = 0; i < 6; i++) {
     const fx = cx - w / 2 + (i / 5) * w;
     b.def.destructibles.push({
+      stableId: `${b.def.id}:fence:${i.toString(36).padStart(4, '0')}`,
       hp: 20, type: 'fence',
       geo: { kind: 'box', x: fx, y: terrainH(fx, cz) + 0.6, z: cz - d / 2, sx: 2.4, sy: 1.2, sz: 0.18, yaw: 0, mat: 'wood' },
     });
