@@ -82,8 +82,19 @@ See `docs/adr/`:
 - ADR-0003: Original and redistributed asset pipeline with verified provenance
 - ADR-0004: Simulation-first architecture & future multiplayer path
 
-## Future multiplayer
+## Multiplayer boundary
 
-The `InputCommand`/controller seam means a network controller could replace
-the local input source without touching simulation code. No fake networking
-exists today; nothing in the sim assumes single-player beyond spawn counts.
+Phase 2 introduced explicit one-to-four-human rosters, team assignments, actor
+ownership, and deterministic Bot fill in `src/sim/roster.ts`. Phase 3 adds a
+private host-authoritative lobby and direct connection setup in `src/net`
+without changing the simulation authority boundary.
+
+Encrypted Nostr/Trystero discovery carries admission, lobby control, and WebRTC
+signaling. A separate host-to-each-guest `RTCPeerConnection` owns four bounded
+DataChannels for future control, events, inputs, and snapshots. There is no
+TURN, SFU, game server, public matchmaking database, or server-side room state.
+
+The `InputCommand`/controller seam remains the future Phase 4 integration point.
+Phase 3 does not launch an online match; its production Start control is gated
+until authoritative match synchronization and recovery are complete. See
+`NETWORKING.md`, `PROTOCOL.md`, and `NETWORK_THREAT_MODEL.md`.

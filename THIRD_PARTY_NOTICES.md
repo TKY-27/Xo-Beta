@@ -63,6 +63,32 @@ as `assets/fonts/OFL-SairaCondensed.txt`,
 
 ## Code dependencies
 
+### Trystero — MIT License
+
+Bundled dependency: `trystero@0.25.4`, imported from the explicit Nostr entry
+point `trystero/nostr` — https://github.com/dmotz/trystero
+
+Trystero is used only for encrypted Nostr room discovery, admission, reliable
+lobby/control messages, and signaling the dedicated game connections. The
+high-frequency game path uses separate browser-native WebRTC DataChannels.
+The application overrides Trystero's ICE-server defaults with its own
+STUN-only configuration and never supplies `turnConfig`.
+
+Copyright © Dan Motzenbecker and Trystero contributors. Licensed under the MIT
+License; the MIT terms reproduced in the three.js section below apply.
+
+The bundled strategy packages `@trystero-p2p/core@0.25.4` and
+`@trystero-p2p/nostr@0.25.4` are also Trystero components distributed under
+the MIT License and covered by the same notice and terms.
+
+### @noble/secp256k1 — MIT License
+
+Transitive dependency: `@noble/secp256k1@3.1.0`, used by Trystero's Nostr
+strategy to sign Nostr events — https://github.com/paulmillr/noble-secp256k1
+
+Copyright © Paul Miller and contributors. Licensed under the MIT License; the
+MIT terms reproduced in the three.js section below apply.
+
 ### three.js — MIT License
 
 Bundled dependency: `three@0.185.1` — https://threejs.org —

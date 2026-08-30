@@ -64,6 +64,45 @@ if grep -R -E -q \
   exit 1
 fi
 
+# Multiplayer is direct-P2P and STUN-only. Scan executable production assets,
+# not documentation that explains the forbidden schemes.
+if find dist/assets -type f -name '*.js' -print0 \
+  | xargs -0 grep -E -i -q 'turns?:'; then
+  echo "dist audit FAILED — TURN URI scheme found in production JavaScript"
+  exit 1
+fi
+
+if find dist/assets -type f -name '*.js' -print0 \
+  | xargs -0 grep -E -q '(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36})'; then
+  echo "dist audit FAILED — provider credential pattern found in production JavaScript"
+  exit 1
+fi
+
+if find dist/assets -type f -name '*.js' -print0 \
+  | xargs -0 grep -E -q '#join=[0-9A-HJKMNP-TV-Z]{80,}'; then
+  echo "dist audit FAILED — invite-secret token literal found in production JavaScript"
+  exit 1
+fi
+
+unexpected_websockets=$(
+  find dist/assets -type f -name '*.js' -print0 \
+    | xargs -0 grep -Eho 'wss://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+' \
+    | sort -u \
+    | grep -Ev '^(wss://nos\.lol|wss://relay\.agorist\.space|wss://relay\.mostro\.network|wss://schnorr\.me)$' \
+    || true
+)
+if [ -n "$unexpected_websockets" ]; then
+  echo "dist audit FAILED — unexpected WebSocket endpoint found in production JavaScript"
+  printf '%s\n' "$unexpected_websockets"
+  exit 1
+fi
+
+if find dist/assets -type f -name '*.js' -print0 \
+  | xargs -0 grep -E -i -q '(realtime\.cloudflare\.com|\.workers\.dev|\.pages\.dev/api/|supabase|firebaseio|/api/(room|lobby|matchmaking))'; then
+  echo "dist audit FAILED — unintended multiplayer server endpoint found in production JavaScript"
+  exit 1
+fi
+
 header_rules=$(awk '/^[^[:space:]#]/ { count++ } END { print count + 0 }' dist/_headers)
 if [ "$header_rules" -gt 100 ]; then
   echo "dist audit FAILED — Cloudflare _headers rule limit exceeded: $header_rules"
@@ -85,4 +124,4 @@ for required_header in \
   fi
 done
 
-echo "dist audit: $file_count files, no oversized files, debug hooks, symlinks or missing notices"
+echo "dist audit: $file_count files; static-only bundle has no forbidden relay, credential, invite or endpoint literals"
