@@ -1,6 +1,6 @@
 {
-  "label": "quality-final-cinematic",
-  "capturedAt": "2026-08-31T07:26:35.427Z",
+  "label": "wind-final-cinematic",
+  "capturedAt": "2026-08-31T08:17:47.489Z",
   "browser": "Google Chrome (Playwright channel)",
   "viewport": {
     "width": 1920,
@@ -193,45 +193,45 @@
     }
   ],
   "frame": {
-    "p50Ms": 16.7,
-    "avgFps": 56,
-    "bestFps": 57,
-    "onePercentLowFps": 33,
-    "p95Ms": 25.1,
-    "p99Ms": 25.9,
-    "worstMs": 38.1,
+    "p50Ms": 16.4,
+    "avgFps": 68,
+    "bestFps": 69,
+    "onePercentLowFps": 36,
+    "p95Ms": 17.9,
+    "p99Ms": 25,
+    "worstMs": 33.3,
     "over33": 2,
     "over50": 0,
-    "durationMs": 9985.3,
-    "n": 563
+    "durationMs": 9991.7,
+    "n": 676
   },
   "synchronousRender": {
-    "firstVisibleFrameMs": 2.5,
-    "warmVisibleFrameMs": 2.8,
+    "firstVisibleFrameMs": 2.2,
+    "warmVisibleFrameMs": 2.3,
     "warmSamplesMs": [
-      2.8,
-      2.8,
-      2.7,
+      2.3,
+      2.1,
+      2.2,
       2.4,
-      2.8,
-      2.9,
+      2.3,
+      2.2,
+      2.3,
+      2.3,
+      2.1,
+      2.2,
       2.4,
-      2.8,
-      2.8,
-      3,
-      2.5,
-      2.5
+      2.1
     ]
   },
   "draw": {
-    "calls": 8,
-    "triangles": 75240,
-    "frames": 58
+    "calls": 7,
+    "triangles": 63246,
+    "frames": 69
   },
   "runtime": {
     "seed": 42042,
-    "worldConstructionMs": 229.3,
-    "presentMs": 2.26,
+    "worldConstructionMs": 232.1,
+    "presentMs": 2.05,
     "water": {
       "quality": "cinematic",
       "volumes": 3,

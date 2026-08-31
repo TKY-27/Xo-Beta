@@ -160,17 +160,17 @@ unchanged. These are local-device measurements, not a claim for other GPUs.
 | Preset | Build | p50 | p95 | p99 | Worst | First | Warm | Frames >50 ms |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | High | Phase 4 | 8.3 ms | 9.2 ms | 9.3 ms | 16.7 ms | 1.4 ms | 1.3 ms | 0 |
-| High | New | 8.3 ms | 8.7 ms | 9.2 ms | 16.6 ms | 1.6 ms | 1.3 ms | 0 |
+| High | New | 8.3 ms | 9.1 ms | 10.2 ms | 16.2 ms | 1.3 ms | 1.2 ms | 0 |
 | Ultra | Phase 4 | 17.0 ms | 25.1 ms | 26.4 ms | 35.6 ms | 2.6 ms | 2.4 ms | 0 |
-| Ultra | New | 16.6 ms | 17.4 ms | 17.5 ms | 34.1 ms | 6.3 ms | 3.4 ms | 0 |
+| Ultra | New | 9.9 ms | 17.7 ms | 18.3 ms | 25.3 ms | 2.0 ms | 2.1 ms | 0 |
 
-High p95 improved by 0.5 ms, p99 improved by 0.1 ms, and the synchronized warm
-frame was unchanged. The presentation EMA changed from 1.50 to 1.93 ms.
-Ultra p95 improved by 7.7 ms under the matched run, its synchronized warm frame
-changed from 2.4 to 3.4 ms, and its presentation EMA changed from 2.25 to
-2.57 ms. Both remain within the 1.5 ms High / 2.5 ms Ultra incremental budgets,
-with no frame over 50 ms. Cinematic measured p50 16.7 ms, p95 25.1 ms,
-p99 25.9 ms, worst 38.1 ms, and zero frames over 50 ms. Headed rAF pacing can
+High p95 improved by 0.1 ms, p99 changed by +0.9 ms, and the synchronized warm
+frame improved by 0.1 ms. The presentation EMA changed from 1.50 to 1.52 ms.
+Ultra p95 improved by 7.4 ms under the matched run, its synchronized warm frame
+improved from 2.4 to 2.1 ms, and its presentation EMA changed from 2.25 to
+1.76 ms. Both remain within the 1.5 ms High / 2.5 ms Ultra incremental budgets,
+with no frame over 50 ms. Cinematic measured p50 16.4 ms, p95 17.9 ms,
+p99 25.0 ms, worst 33.3 ms, and zero frames over 50 ms. Headed rAF pacing can
 still reflect Chrome/display scheduling, so the synchronized frame and
 presentation measurements are retained alongside the frame percentiles.
 
@@ -182,16 +182,16 @@ The matched renderer total above includes the terrain shoreline presentation.
 Low disables foam and reports 5 configured draws and 4,198 selected surface
 triangles.
 
-The final Low capture measured p50/p95/p99 8.3/9.1/9.3 ms, and Medium
-measured 8.3/9.2/9.3 ms; neither produced a frame over 50 ms. Ultra and
+The final Low capture measured p50/p95/p99 8.3/9.7/10.2 ms, and Medium
+measured 8.3/10.0/10.3 ms; neither produced a frame over 50 ms. Ultra and
 Cinematic each used 13,884 selected surface triangles. Resolution-normalized
 gradient data keeps Low calmer than High while preserving increasing detail in
 Ultra and Cinematic. Low/Medium/Cinematic first/warm visible frames were
-2.1/1.7 ms, 1.3/1.7 ms, and 2.5/2.8 ms respectively.
+1.5/1.3 ms, 1.2/1.2 ms, and 2.2/2.3 ms respectively.
 
 High renderer memory counters changed from 172 to 180 geometries and 129 to
 135 textures. Program count remained 116. First-visible time changed from
-1.4 to 1.6 ms; warm-visible remained 1.3 ms. No shader, console,
+1.4 to 1.3 ms; warm-visible changed from 1.3 to 1.2 ms. No shader, console,
 WebGL, additional-canvas, or first-visible multi-second failure occurred.
 
 ## Online invariants and bandwidth
@@ -211,15 +211,15 @@ not real-network compatibility evidence.
 - No external WebSocket, relay candidate, water channel, water packet, or
   water-related production request was observed.
 - Snapshot payload size was exactly 196 bytes before and 196 bytes after.
-  Phase 4 sent 21 observed snapshots (4,116 bytes); the final new build sent 24
-  (4,704 bytes) because the one-second observation crossed three more 20 Hz
+  Phase 4 sent 21 observed snapshots (4,116 bytes); the final new build sent 25
+  (4,900 bytes) because the one-second observation crossed four more 20 Hz
   ticks. Per-snapshot size was unchanged.
-- The one reliable control send was 4,599 bytes before and 4,595 bytes after;
+- The one reliable control send was 4,599 bytes before and 4,592 bytes after;
   the difference is payload data such as the random canonical match seed, not
   a water field.
 - RTC host upload over the observation windows was 20,185 bytes before and
-  21,111 bytes after. Channel labels and packet layouts were unchanged, and
-  the extra three snapshots account for 588 bytes of the timing-dependent RTC
+  20,644 bytes after. Channel labels and packet layouts were unchanged, and
+  the extra four snapshots account for 784 bytes of timing-dependent packet
   delta. No water channel, packet, or high-frequency field exists.
 
 Reconnect remains covered by the Phase 4 fake-transport and browser gameplay
@@ -255,7 +255,7 @@ Observed on 2026-08-31:
   packages, with no new dependency.
 - `npm audit --audit-level=high`: passed; zero vulnerabilities.
 - `npm run audit:water`: passed against source and the production bundle.
-- `npm test`: passed; 60 files and 614 tests.
+- `npm test`: passed; 60 files and 615 tests.
 - `npm run build`: passed; 119 modules and 233 audited production files. The
   existing large-chunk warning for Rapier/application bundles remains.
 - `npm run sim`: passed; hard NeoCity simulation, seed `83512`, RAZOR winner,
@@ -263,7 +263,7 @@ Observed on 2026-08-31:
   pickups.
 - `npm run cloudflare:dry-run`: passed; 280 static files and no bindings or
   server-side multiplayer path.
-- Focused water and physical-map-hash tests passed; 3 files and 29 tests. The
+- Focused water and physical-map-hash tests passed; 3 files and 30 tests. The
   full suite includes the Phase 4 impairment, reconnect, latency compensation,
   authority, and multi-roster cases.
 - `npm run test:browser:online:gameplay`: passed the full two-context path from
