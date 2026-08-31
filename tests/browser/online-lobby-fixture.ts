@@ -14,6 +14,7 @@ declare global {
       readonly controller: PrivateRoomController;
       latest: LobbyViewModel | null;
       lastError: RoomUiErrorCode | null;
+      rerender(): void;
     };
   }
 }
@@ -53,7 +54,14 @@ const showScreen = (id: (typeof screens)[number]) => {
 };
 const params = new URLSearchParams(location.search);
 let ui: OnlineLobbyUi | null = null;
-const state = { controller: null as unknown as PrivateRoomController, latest: null as LobbyViewModel | null, lastError: null as RoomUiErrorCode | null };
+const state = {
+  controller: null as unknown as PrivateRoomController,
+  latest: null as LobbyViewModel | null,
+  lastError: null as RoomUiErrorCode | null,
+  rerender() {
+    if (state.latest) ui?.renderLobby(state.latest);
+  },
+};
 const controller = new PrivateRoomController({
   buildId: params.get('build') ?? 'browser-test-build',
   baseUrl: `${location.origin}${location.pathname}`,

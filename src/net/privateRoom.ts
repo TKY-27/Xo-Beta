@@ -1052,6 +1052,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
       inviteLink: createInviteUrl(invite.token, this.baseUrl),
       isHost: this.role === 'host',
       localParticipantId: this.localParticipantId,
+      matchLocked: snapshot.matchLocked,
       players,
       map: snapshot.config.mapId,
       mode: snapshot.effectiveMode,

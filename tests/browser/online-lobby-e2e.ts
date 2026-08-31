@@ -322,6 +322,42 @@ async function main(): Promise<void> {
     await joinRoom(directFailure, failInvite.code, 'DIRECT FAIL', false);
     await directFailure.page.waitForFunction(() => document.querySelector('#lobby-status-message')?.textContent?.includes('no paid relay server'));
 
+    const lockHost = await openPeer(browser, hub);
+    peers.push(lockHost);
+    const lockInvite = await createRoom(lockHost, 'LOCK HOST');
+    const lockGuest = await openPeer(browser, hub);
+    peers.push(lockGuest);
+    await joinRoom(lockGuest, lockInvite.code, 'LOCK GUEST', false);
+    await waitUntil(
+      async () => latest(lockHost, (view) => view.players.every((player) => player.directState === 'open')),
+      'lock-room direct channels',
+      25_000,
+    );
+    await lockGuest.page.click('#btn-lobby-ready');
+    await waitUntil(async () => latest(lockHost, (view) => view.startEligible), 'lock-room start eligibility');
+    await lockHost.page.click('#btn-online-start');
+    await waitUntil(
+      async () => {
+        const [hostLocked, guestLocked] = await Promise.all([
+          latest(lockHost, (view) => view.matchLocked),
+          latest(lockGuest, (view) => view.matchLocked),
+        ]);
+        return hostLocked && guestLocked;
+      },
+      'canonical match lock',
+    );
+    for (const peer of [lockHost, lockGuest]) {
+      await peer.page.evaluate(() => {
+        document.getElementById('online-lobby-menu')?.classList.add('hidden');
+        (window as unknown as { __xoLobbyTest: { rerender(): void } }).__xoLobbyTest.rerender();
+      });
+      assert.equal(
+        await peer.page.locator('#online-lobby-menu').evaluate((element) => element.classList.contains('hidden')),
+        true,
+        'a locked lobby update must not reopen over an active match',
+      );
+    }
+
     console.log(JSON.stringify({
       participants: [2, 3, 4],
       productionShell: true,
@@ -330,7 +366,7 @@ async function main(): Promise<void> {
       cases: [
         'fifth-rejected', 'link', 'manual-code', 'skin', 'map', 'mode', 'team',
         'ready', 'host-leave', 'guest-leave', 'reclaim', 'wrong-build',
-        'wrong-secret', 'relay-failure', 'direct-failure-ui',
+        'wrong-secret', 'relay-failure', 'direct-failure-ui', 'locked-lobby-stays-hidden',
       ],
     }));
   } finally {
