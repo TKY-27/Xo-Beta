@@ -45,6 +45,13 @@ export interface HostMatchTransport {
   disconnect(peerId: string): void;
 }
 
+export interface HostReconnectTransaction {
+  readonly accepted: boolean;
+  readonly alive: boolean;
+  commit(): void;
+  rollback(): void;
+}
+
 export interface HostLagCompensationLike {
   recordTick(match: Match, hostTick: number): void;
   resolveAcceptedShot(input: {
@@ -190,35 +197,81 @@ export class HostAuthoritativeMatchSession {
   }
 
   reconnectParticipant(participantId: string, newPeerId: string): { accepted: boolean; alive: boolean } {
+    const transaction = this.prepareReconnectParticipant(participantId, newPeerId);
+    if (transaction.accepted) transaction.commit();
+    return Object.freeze({ accepted: transaction.accepted, alive: transaction.alive });
+  }
+
+  /**
+   * Prepare an Actor rebind without changing the live Match. The room may
+   * still be waiting for the authenticated admission response to cross the
+   * transport, so a pending reconnect must not change ownership or connection
+   * state observed by the fixed simulation or an existing guest snapshot.
+   */
+  prepareReconnectParticipant(participantId: string, newPeerId: string): HostReconnectTransaction {
     const runtime = this.peersByParticipant.get(participantId);
     if (!runtime || !this.canReconnectParticipant(participantId, newPeerId)) {
-      return Object.freeze({ accepted: false, alive: false });
+      return rejectedReconnectTransaction();
     }
-    const presenceWasAnnounced = runtime.noticeSent;
     const oldPeerId = runtime.binding.peerId;
-    this.peersByPeerId.delete(oldPeerId);
-    runtime.binding = Object.freeze({ ...runtime.binding, peerId: newPeerId });
-    runtime.controller = this.makeController(runtime.binding);
-    this.match.controllers.set(runtime.binding.actorId, runtime.controller);
-    runtime.disconnectedAtMs = null;
-    runtime.reconnectDeadlineMs = null;
-    runtime.noticeSent = false;
-    this.peersByPeerId.set(newPeerId, runtime);
-    const retiredBytes = this.bytesSentByPeer.get(oldPeerId) ?? 0;
-    this.bytesSentByPeer.delete(oldPeerId);
-    if (retiredBytes > 0) {
-      this.bytesSentByPeer.set(newPeerId, (this.bytesSentByPeer.get(newPeerId) ?? 0) + retiredBytes);
-    }
-    this.pingRate.delete(oldPeerId);
+    const oldBytes = this.bytesSentByPeer.get(oldPeerId);
+    const newBytes = this.bytesSentByPeer.get(newPeerId);
     const roster = this.match.rosterEntryForActor(runtime.binding.actorId);
-    if (roster && roster.ownership.kind !== 'bot') roster.ownership = { ...roster.ownership, peerId: newPeerId };
-    this.match.restorePeerControl(newPeerId);
-    const actor = this.match.actors.find((candidate) => candidate.id === runtime.binding.actorId);
-    if (presenceWasAnnounced) {
-      this.publishPresence('playerRejoin', runtime.binding.actorId, oldPeerId, newPeerId);
-      this.notifyPresenceNotice('rejoined', actor?.name ?? participantId);
+    if (!roster || roster.ownership.kind === 'bot' || roster.ownership.peerId !== oldPeerId
+      || roster.connectionState !== 'disconnected') {
+      return rejectedReconnectTransaction();
     }
-    return Object.freeze({ accepted: true, alive: actor?.alive === true });
+    const nextBinding = Object.freeze({ ...runtime.binding, peerId: newPeerId });
+    const nextController = this.makeController(nextBinding);
+    const actor = this.match.actors.find((candidate) => candidate.id === runtime.binding.actorId);
+    let settled = false;
+    return Object.freeze({
+      accepted: true,
+      get alive(): boolean {
+        return actor?.alive === true;
+      },
+      commit: () => {
+        if (settled) return;
+        settled = true;
+        // Fixed simulation continues while the signed admission response is
+        // in flight. Re-read lifecycle state at the commit point so a grace
+        // notice or elimination that occurred during that interval is not
+        // lost from the reconnect result.
+        const presenceWasAnnounced = runtime.noticeSent;
+        this.peersByPeerId.delete(oldPeerId);
+        runtime.binding = nextBinding;
+        runtime.controller = nextController;
+        this.match.controllers.set(runtime.binding.actorId, runtime.controller);
+        runtime.disconnectedAtMs = null;
+        runtime.reconnectDeadlineMs = null;
+        runtime.noticeSent = false;
+        this.peersByPeerId.set(newPeerId, runtime);
+        const retiredBytes = oldBytes ?? 0;
+        this.bytesSentByPeer.delete(oldPeerId);
+        this.bytesSentByPeer.delete(newPeerId);
+        if (retiredBytes + (newBytes ?? 0) > 0) {
+          this.bytesSentByPeer.set(newPeerId, retiredBytes + (newBytes ?? 0));
+        }
+        this.pingRate.delete(oldPeerId);
+        roster.ownership = roster.ownership.kind === 'bot'
+          ? { kind: 'bot' }
+          : { kind: roster.ownership.kind, peerId: newPeerId };
+        if (!this.match.restorePeerControl(newPeerId)) {
+          throw new Error('Reconnect Actor remained disconnected after commit');
+        }
+        if (presenceWasAnnounced) {
+          this.publishPresence('playerRejoin', runtime.binding.actorId, oldPeerId, newPeerId);
+          this.notifyPresenceNotice('rejoined', actor?.name ?? participantId);
+        }
+      },
+      rollback: () => {
+        if (settled) return;
+        settled = true;
+        // Preparation is side-effect free. Only the newly allocated controller
+        // needs to be neutralized when the admission is rejected.
+        nextController.neutralize();
+      },
+    });
   }
 
   /** Read-only preflight used before the lobby rotates a reconnect token. */
@@ -558,6 +611,15 @@ function percentiles(values: readonly number[]): NetworkPercentiles {
   const sorted = [...values].sort((a, b) => a - b);
   const at = (p: number): number => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]!;
   return Object.freeze({ p50: at(0.5), p95: at(0.95), p99: at(0.99) });
+}
+
+function rejectedReconnectTransaction(): HostReconnectTransaction {
+  return Object.freeze({
+    accepted: false,
+    alive: false,
+    commit: () => undefined,
+    rollback: () => undefined,
+  });
 }
 
 export function neutralInputForNetwork(): InputCommand {

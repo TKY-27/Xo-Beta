@@ -4,9 +4,16 @@
 
 Play: https://xo-beta.pages.dev/
 
-**A browser-native single-player 3D battle royale. Ten combatants drop onto a dense arena — one human, nine autonomous bots — and the last one standing wins.**
+**A browser-native private direct-P2P 3D battle royale. Invite up to four humans into a ten-combatant room, fill remaining places with Bots, and fight to be the last one standing.**
 
-Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, no gameplay servers. Presentation combines original code-generated systems with redistributed CC0 (public-domain) art and audio packs — see [docs/ASSET_MANIFEST.md](docs/ASSET_MANIFEST.md) for full provenance.
+Xo Beta runs entirely client-side in desktop browsers. Rooms are friends-only:
+there is no public matchmaking, dedicated game server, multiplayer database,
+TURN, or paid fallback. Signaling uses public no-payment Nostr relays and
+gameplay uses direct WebRTC with public STUN; direct connection can fail. The
+host decides match state and can theoretically cheat, which is accepted for
+private friends-only rooms. Presentation combines original code-generated
+systems with redistributed CC0 (public-domain) art and audio packs — see
+[docs/ASSET_MANIFEST.md](docs/ASSET_MANIFEST.md) for full provenance.
 
 ---
 
@@ -18,6 +25,7 @@ Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, 
 - **Five weapon classes** — pistol (semi), SMG (auto), AR (auto), shotgun (pump), sniper (bolt) — each across five rarity tiers, with real projectile simulation: travel time, gravity drop, falloff, ricochets and per-pellet shotgun spread.
 - **Fair AI opponents** — nine named bots with distinct personalities (VEX, RAZOR, ORBIT form the elite benchmark trio). Perception through vision cones + line of sight + gameplay sound events only — no wallhacks, no omniscience. They loot, heal, rotate, third-party fights and use advanced traversal.
 - **Full loot economy** — floor loot, three chest tiers (standard / elite / vault), med kits and shield cells, five universal inventory slots, ammo pools.
+- **Private online rooms** — two-to-four human Bot-off rooms, four-human capacity, Bot-filled ten-player matches, team battle, humans-versus-Bots, no friendly fire, tactical pings, and a 60-second guest reconnect window. A disconnected guest keeps neutral input; there is no Bot takeover.
 - **Polished presentation** — PBR materials, dynamic lighting per map preset, bloom post-processing, tracers/muzzle flashes/impacts/debris, stylized no-gore elimination effects, spatialized CC0 sound effects, ambience beds and original menu/result stings.
 
 ## Controls (default, remappable)
@@ -28,7 +36,7 @@ Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, 
 | Look / Fire / ADS | Mouse / LMB / RMB |
 | Jump / Double jump | `Space` |
 | Sprint | `L-Shift` |
-| Crouch / Slide | `L-Ctrl` |
+| Crouch toggle / Slide | `L-Ctrl` |
 | Melee | `Q` |
 | Dash | `R-Shift` |
 | Grapple | `F` |
@@ -45,10 +53,11 @@ Xo Beta runs entirely client-side in desktop browsers. No plugins, no installs, 
 
 ## Browser baseline
 
-Current desktop Chrome and Edge are the release-test baseline. Other modern
-WebGL2 browsers may work, but are not claimed as release-verified. A desktop
-browser with keyboard and mouse is required; touch devices receive a clear
-unsupported-input notice.
+Desktop Chrome, Edge, Firefox, and Safari are the supported browser targets;
+release evidence is browser- and network-specific. The deterministic automated
+online harness uses isolated Chromium contexts, with Firefox and Safari
+requiring separate browser QA. A desktop browser with keyboard and mouse is
+required; touch devices receive a clear unsupported-input notice.
 
 ## Development
 
@@ -65,6 +74,7 @@ npm run sim -- map=neocity difficulty=hard count=3   # headless bot matches
 npm run audit:assets                 # production asset set + SHA-256
 npm run audit:secrets                # tracked/unignored source scan
 npm run audit:licenses               # dependency license policy check
+npm run audit:zero-cost              # STUN-only production/cost invariant + receipt
 npm run cloudflare:dry-run           # build + Wrangler validation; no upload
 npx tsx tests/browser/qa-maps.ts     # optional local browser QA (Playwright)
 ```
@@ -74,7 +84,8 @@ See [development](docs/DEVELOPMENT.md) for architecture orientation and
 
 ## Deploying to Cloudflare
 
-The production build is a static bundle served by a Cloudflare Worker using
+The production build is a static bundle served by the project's existing
+Cloudflare Workers Static Assets configuration using
 [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/):
 
 ```bash
@@ -82,7 +93,8 @@ npm run build
 npx wrangler deploy      # uses wrangler.jsonc
 ```
 
-Details in [deployment](docs/DEPLOYMENT.md).
+This deployment serves files only; it is not a multiplayer authority or
+multiplayer Worker route. Details in [deployment](docs/DEPLOYMENT.md).
 
 ## Architecture summary
 
@@ -92,8 +104,8 @@ input (`src/player`). Controllers — human or bot (`src/ai`) — both produce a
 `InputCommand`, so bots play by exactly the same rules as the player. Physics is Rapier
 (WASM); navigation is a generated multi-level nav graph with jump/mantle/drop/swim
 links; all content is data-driven from map definitions. See
-[architecture](docs/ARCHITECTURE.md), [bot AI](docs/BOT_AI.md) and
-[game design](docs/GAME_DESIGN.md).
+[architecture](docs/ARCHITECTURE.md), [host authority](docs/HOST_AUTHORITY.md),
+[networking](docs/NETWORKING.md), [bot AI](docs/BOT_AI.md) and [game design](docs/GAME_DESIGN.md).
 
 ## Repository layout
 

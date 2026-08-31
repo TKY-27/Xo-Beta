@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { type Browser, type BrowserContext, type Page } from 'playwright';
 import { createServer, type ViteDevServer } from 'vite';
 import type { LobbyViewModel } from '../../src/ui/onlineLobby';
+import { selectedBrowserType } from './browser-engine';
 
 const PORT = 5198;
 const FIXTURE = `http://127.0.0.1:${PORT}/tests/browser/fixtures/online-lobby.html`;
@@ -220,7 +221,7 @@ async function main(): Promise<void> {
   try {
     server = await createServer({ server: { host: '127.0.0.1', port: PORT, strictPort: true }, logLevel: 'silent' });
     await server.listen();
-    browser = await chromium.launch({ headless: true });
+    browser = await selectedBrowserType().launch({ headless: true });
     await validateProductionShell(browser);
     const hub = new DeterministicSignalingHub();
     const host = await openPeer(browser, hub);

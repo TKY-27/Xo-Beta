@@ -14,8 +14,9 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { type Browser, type BrowserContext, type Page } from 'playwright';
 import { createServer, type ViteDevServer } from 'vite';
+import { selectedBrowserType } from './browser-engine';
 
 const PORT = 5202;
 const APP_URL = `http://127.0.0.1:${PORT}/`;
@@ -590,8 +591,8 @@ async function main(): Promise<void> {
     });
     await server.listen();
     const headless = process.env.HEADLESS === '1';
-    if (headless) console.warn('HEADLESS=1 is diagnostic only; headed Chrome is required for visual acceptance.');
-    browser = await chromium.launch({ channel: 'chrome', headless });
+    if (headless) console.warn('HEADLESS=1 is diagnostic only; headed browser execution is required for visual acceptance.');
+    browser = await selectedBrowserType().launch({ headless });
     const hub = new DeterministicSignalingHub();
     const host = await openPeer(browser, hub);
     peers.push(host);
@@ -729,7 +730,7 @@ async function main(): Promise<void> {
     ]);
     const report = {
       capturedAt: new Date().toISOString(),
-      browser: 'Google Chrome (Playwright channel)',
+      browser: `${process.env.XO_BROWSER ?? 'chromium'} (Playwright-managed engine)`,
       headed: !process.env.HEADLESS,
       viewport: { width: 1440, height: 900 },
       signaling: 'deterministic in-memory hub; no server relay',

@@ -1,7 +1,7 @@
 {
   "name": "xo-beta",
-  "version": "0.2.0",
-  "description": "Xo Beta — a browser-native single-player 3D battle royale FPS/TPS. 10 combatants, last one standing wins.",
+  "version": "0.3.0",
+  "description": "Xo Beta — a browser-native private direct-P2P 3D battle royale FPS/TPS for up to four humans and Bots.",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -18,7 +18,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && sh scripts/check-dist.sh",
+    "build": "tsc --noEmit && vite build && sh scripts/check-dist.sh && npm run audit:zero-cost",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -31,6 +31,7 @@
     "lint": "eslint .",
     "audit:assets": "sh scripts/check-assets.sh",
     "audit:dist": "sh scripts/check-dist.sh",
+    "audit:zero-cost": "node scripts/audit-zero-cost-networking.mjs",
     "audit:water": "sh scripts/check-water-provenance.sh",
     "audit:secrets": "sh scripts/check-secrets.sh",
     "audit:licenses": "license-checker-rseidelsohn --excludePrivatePackages --onlyAllow 'MIT;BSD-2-Clause;BSD-3-Clause;Apache-2.0;ISC;0BSD;Zlib;CC0-1.0;BlueOak-1.0.0' --production --summary",

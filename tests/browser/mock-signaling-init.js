@@ -9,6 +9,8 @@
   const handshakeQueues = new Map();
   const actionHandlers = new Map();
   const peerConnections = {};
+  const completedPeerJoins = new Set();
+  let earlyGameOfferCount = 0;
   let room;
   let disposed = false;
 
@@ -50,12 +52,20 @@
   window.__xoMockReceiveAction = async (namespace, data, from) => {
     await actionHandlers.get(namespace)?.onMessage?.(data, { peerId: from });
   };
+  window.__xoMockIsPeerJoinComplete = (remote) => completedPeerJoins.has(remote);
+  window.__xoMockRecordEarlyGameOffer = () => { earlyGameOfferCount += 1; };
+  window.__xoMockGetDiagnostics = () => ({ earlyGameOffers: earlyGameOfferCount });
   window.__xoMockPeerJoin = (remote) => {
     peerConnections[remote] = {};
     room.onPeerJoin?.(remote);
+    // Trystero installs the active peer before invoking onPeerJoin, but the
+    // application callback itself must return before its first offer may be
+    // considered activated by this regression harness.
+    completedPeerJoins.add(remote);
   };
   window.__xoMockPeerLeave = (remote) => {
     delete peerConnections[remote];
+    completedPeerJoins.delete(remote);
     room.onPeerLeave?.(remote);
   };
 

@@ -22,6 +22,7 @@ import {
   MAX_SNAPSHOT_PAYLOAD_BYTES,
   SnapshotReassembler,
   decodeInputPacket,
+  decodeSnapshotChunk,
   encodeInputPacket,
   encodeSnapshotChunk,
   mapClientShotTickToHost,
@@ -110,6 +111,7 @@ export type ReliablePacketKind =
   | 'keyframe-request'
   | 'reconnect-request'
   | 'reconnect-result'
+  | 'host-visibility'
   | 'host-disconnected';
 
 const RELIABLE_KIND_CODES: Readonly<Record<ReliablePacketKind, number>> = Object.freeze({
@@ -122,6 +124,7 @@ const RELIABLE_KIND_CODES: Readonly<Record<ReliablePacketKind, number>> = Object
   'keyframe-request': 21,
   'reconnect-request': 22,
   'reconnect-result': 23,
+  'host-visibility': 26,
   'host-disconnected': 24,
 });
 
@@ -488,11 +491,15 @@ export class MatchStateDecoder {
   }
 
   add(data: ArrayBuffer | ArrayBufferView): DecodedStateSnapshot | null {
-    const snapshot = this.reassembler.add(data);
-    if (!snapshot) return null;
-    if (snapshot.sessionId !== this.expectedSessionId) {
+    // Bind the session before SnapshotReassembler allocates a pending
+    // multi-chunk entry. A wrong-session flood must not consume the bounded
+    // reassembly table even temporarily.
+    const chunk = decodeSnapshotChunk(data);
+    if (chunk.sessionId !== this.expectedSessionId) {
       throw new MatchStateCodecError('session-mismatch', 'Snapshot session binding mismatch');
     }
+    const snapshot = this.reassembler.add(chunk);
+    if (!snapshot) return null;
     if (snapshot.revision <= this.latestRevision) return null;
     let records: Map<number, SnapshotEntityInput>;
     if (snapshot.full) {
@@ -1490,6 +1497,7 @@ function writeCanonical(writer: BinaryWriter, value: CanonicalBinaryValue, depth
   if (keys.length > 256) invalid('Reliable object has too many keys');
   writer.u8(8); writer.u16(keys.length);
   for (const key of keys) {
+    if (isUnsafeWireKey(key)) invalid('Reliable object contains a reserved key');
     writer.string8(key, 96);
     const item = source[key];
     if (item === undefined) invalid('Reliable payload contains undefined');
@@ -1515,10 +1523,11 @@ function readCanonical(reader: BinaryReader, depth: number): CanonicalBinaryValu
   if (tag === 8) {
     const count = reader.u16();
     if (count > 256) invalid('Reliable object has too many keys');
-    const value: Record<string, CanonicalBinaryValue> = {};
+    const value = Object.create(null) as Record<string, CanonicalBinaryValue>;
     let previous = '';
     for (let index = 0; index < count; index++) {
       const key = reader.string8(96);
+      if (isUnsafeWireKey(key)) invalid('Reliable object contains a reserved key');
       if (index > 0 && key <= previous || Object.hasOwn(value, key)) invalid('Reliable object keys are not canonical');
       previous = key;
       value[key] = readCanonical(reader, depth + 1);
@@ -1539,9 +1548,16 @@ function canonicalEvent(event: AuthoritativeMatchEvent): CanonicalBinaryValue {
 }
 
 function toCanonicalObject(value: Readonly<Record<string, unknown>>): { readonly [key: string]: CanonicalBinaryValue } {
-  const output: Record<string, CanonicalBinaryValue> = {};
-  for (const [key, item] of Object.entries(value)) output[key] = toCanonicalValue(item);
+  const output = Object.create(null) as Record<string, CanonicalBinaryValue>;
+  for (const [key, item] of Object.entries(value)) {
+    if (isUnsafeWireKey(key)) invalid('Authoritative event contains a reserved key');
+    output[key] = toCanonicalValue(item);
+  }
   return output;
+}
+
+function isUnsafeWireKey(value: string): boolean {
+  return value === '__proto__' || value === 'constructor' || value === 'prototype';
 }
 
 function toCanonicalValue(value: unknown): CanonicalBinaryValue {

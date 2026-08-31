@@ -517,6 +517,56 @@ export class LobbyState {
     return this.reclaimParticipant(participantId, previousPeerId, nextPeerId, nextProtocolSession);
   }
 
+  /**
+   * Undo a fresh admission whose signed acceptance could not be delivered.
+   * This is deliberately narrower than a general participant delete: the
+   * caller must identify the exact participant and transport generation it
+   * just staged.
+   */
+  rollbackParticipantAdmission(participantId: string, peerId: string): void {
+    const checkedParticipantId = validateIdentifier(participantId, 'participantId');
+    const checkedPeerId = validateIdentifier(peerId, 'peerId');
+    const participant = this.participantById.get(checkedParticipantId);
+    if (!participant || participant.isHost || participant.peerId !== checkedPeerId) {
+      throw new LobbyError('stale-session', 'Fresh admission rollback does not match the staged participant');
+    }
+    this.participantsValue.delete(checkedPeerId);
+    this.participantById.delete(checkedParticipantId);
+    this.sessionGuard.nonceGuard.reset(checkedPeerId);
+    this.sessionGuard.rateLimiter.reset(checkedPeerId);
+    this.bumpRevision();
+  }
+
+  /** Undo a staged reconnect while preserving the original disconnected slot. */
+  rollbackParticipantReclaim(
+    participantId: string,
+    previousPeerId: string,
+    currentPeerId: string,
+    previousProtocolSession: string,
+  ): void {
+    const checkedParticipantId = validateIdentifier(participantId, 'participantId');
+    const checkedPreviousPeerId = validateIdentifier(previousPeerId, 'previousPeerId');
+    const checkedCurrentPeerId = validateIdentifier(currentPeerId, 'currentPeerId');
+    const checkedPreviousSession = validateIdentifier(previousProtocolSession, 'previousProtocolSession');
+    const participant = this.participantById.get(checkedParticipantId);
+    if (!participant || participant.isHost || participant.peerId !== checkedCurrentPeerId
+      || this.participantsValue.has(checkedPreviousPeerId)) {
+      throw new LobbyError('stale-session', 'Reconnect rollback does not match the staged participant');
+    }
+    this.participantsValue.delete(checkedCurrentPeerId);
+    participant.peerId = checkedPreviousPeerId;
+    participant.protocolSession = checkedPreviousSession;
+    participant.connected = false;
+    participant.channelsOpen = false;
+    participant.ready = false;
+    this.participantsValue.set(checkedPreviousPeerId, participant);
+    this.sessionGuard.nonceGuard.reset(checkedCurrentPeerId);
+    this.sessionGuard.nonceGuard.reset(checkedPreviousPeerId);
+    this.sessionGuard.rateLimiter.reset(checkedCurrentPeerId);
+    this.sessionGuard.rateLimiter.reset(checkedPreviousPeerId);
+    this.bumpRevision();
+  }
+
   /** Participant-owned fields. Names are frozen once that participant is ready. */
   setDisplayName(peerId: string, displayName: string): void {
     this.requireUnlocked();

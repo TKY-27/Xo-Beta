@@ -125,4 +125,32 @@ describe('Phase 3 lobby protocol', () => {
     expect(session.accept('peer-1', message)).toEqual(message);
     expect(() => session.accept('peer-1', { ...message, nonce: 'nonce-6' })).toThrowError(/rate limited/i);
   });
+
+  it('bounds attacker-keyed rate and replay state and expires idle peers', () => {
+    let now = 0;
+    const limiter = new PeerRateLimiter({
+      capacity: 1,
+      refillPerSecond: 1,
+      maxPeers: 2,
+      peerTtlMs: 100,
+      now: () => now,
+    });
+    expect(limiter.allow('attacker-a')).toBe(true);
+    expect(limiter.allow('attacker-b')).toBe(true);
+    expect(limiter.allow('attacker-c')).toBe(false);
+    expect(limiter.trackedPeers).toBe(2);
+    now = 100;
+    expect(limiter.allow('attacker-c')).toBe(true);
+    expect(limiter.trackedPeers).toBe(1);
+
+    now = 0;
+    const guard = new ReplayNonceGuard(8, { maxPeers: 2, peerTtlMs: 100, now: () => now });
+    expect(guard.accept('peer-a', 'session-a', 'nonce-a')).toBe(true);
+    expect(guard.accept('peer-b', 'session-b', 'nonce-b')).toBe(true);
+    expect(guard.accept('peer-c', 'session-c', 'nonce-c')).toBe(false);
+    expect(guard.trackedPeers).toBe(2);
+    now = 100;
+    expect(guard.accept('peer-c', 'session-c', 'nonce-c')).toBe(true);
+    expect(guard.trackedPeers).toBe(1);
+  });
 });

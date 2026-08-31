@@ -105,3 +105,34 @@ bounded input, tactical-ping requests, acknowledgements, and reconnect
 control. Reliable authoritative events and keyframes use monotonic IDs and
 revisions so duplicate delivery is idempotent. No packet accepts guest claims
 for position, health, inventory, damage, ownership, glass, storm, or results.
+
+## Binary validation contract
+
+Every binary decoder rejects before allocation or state mutation when its
+header, type, session, reserved bytes, payload length, enum, count, or sequence
+is invalid. The current bounds are:
+
+| Boundary | Rule |
+| --- | --- |
+| Input packet | Exact header/payload length; 128-byte payload maximum; three redundant frames maximum |
+| Snapshot packet | 8 KiB payload maximum; 64 chunks and 64 entities maximum; entity records have bounded lengths |
+| Reliable packet | 48 KiB payload maximum; canonical values reject non-finite numbers and dangerous object keys |
+| Match-start JSON | 48 KiB maximum; fatal UTF-8; exact keys and closed map/mode/difficulty/skin/roster enums |
+| Reassembly | Session is checked before a chunk enters the reassembly table; duplicate, stale, and mismatched chunks are rejected |
+| Stateful gates | Sequence, tick, rewind, rate, replay nonce, peer count, and idle state all have finite bounds |
+
+Lengths are checked against the actual buffer, not only a declared field.
+Negative values, integer overflow, NaN, Infinity, malformed UTF-8, duplicate
+IDs, future ticks, excessive rewind, and unsupported enum values are rejected.
+Decoder errors are converted to bounded protocol failures; they do not crash or
+partially apply a match. The deterministic fuzz corpus is run with:
+
+```bash
+npx vitest run tests/unit/net-fuzz.test.ts
+```
+
+Acceptance response delivery is a commit point. Fresh admission and reconnect
+stage their lobby, Actor, token, and peer bindings, send the signed response,
+then commit. A failed send rolls back the staged state. Reconnect tokens are
+never logged, and SDP, ICE candidates, peer addresses, or room secrets are not
+rendered in the ordinary UI.

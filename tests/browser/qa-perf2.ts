@@ -150,7 +150,7 @@ async function main(): Promise<void> {
   for (const map of maps) {
     for (const [name, patch] of CONFIGS) {
       if (only && name !== only) continue;
-      const cfg = { ...BASE, ...patch };
+      const cfg = { onboarded: true, ...BASE, ...patch };
       await page.addInitScript((c) => {
         localStorage.setItem('xo-beta-settings-v1', JSON.stringify(c));
       }, cfg);
