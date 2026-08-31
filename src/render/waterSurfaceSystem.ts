@@ -748,7 +748,7 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
     depthTexture: THREE.DataTexture,
     config: QualityConfig,
   ): THREE.ShaderMaterial {
-    const wind = water.visual?.windDirection ?? [0.82, 0.32];
+    const wind = water.visual?.windDirection ?? profile.windDirection;
     const direction = new THREE.Vector2(wind[0], wind[1]);
     if (direction.lengthSq() < 1e-4) direction.set(0.82, 0.32);
     direction.normalize();

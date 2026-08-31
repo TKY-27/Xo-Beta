@@ -5,6 +5,7 @@ import {
   traceWaterline,
   WaterSurfaceSystem,
 } from '../../src/render/waterSurfaceSystem';
+import { createWaterVisualProfile } from '../../src/render/waterWaveField';
 import { loadMap } from '../../src/world';
 import type { MapDef, WaterVisualKind, WaterVolume } from '../../src/world/types';
 
@@ -119,6 +120,41 @@ describe('water surface handles', () => {
         halfFloatWaveData: false,
         waveResolution: 32,
       });
+    } finally {
+      system.dispose();
+    }
+  });
+
+  it('passes profile-specific and explicit wind directions to every water material', () => {
+    const explicitLake: WaterVolume = {
+      ...volume('lake', 3),
+      visual: { kind: 'lake', seed: 703, windDirection: [0, 2] },
+    };
+    const kinds: WaterVisualKind[] = ['lake', 'river', 'pond'];
+    const system = new WaterSurfaceSystem(testMap([
+      ...kinds.map((kind, index) => volume(kind, index)),
+      explicitLake,
+    ]), { quality: 'low' });
+
+    try {
+      const directions = system.group.children.map((root) => {
+        const mesh = root.children.find((child) => child.name.startsWith('water-surface:'));
+        if (!(mesh instanceof THREE.Mesh) || !(mesh.material instanceof THREE.ShaderMaterial)) {
+          throw new Error('Water surface material is missing');
+        }
+        const direction = mesh.material.uniforms['uWind']?.value;
+        if (!(direction instanceof THREE.Vector2)) throw new Error('Water wind uniform is missing');
+        return direction;
+      });
+      const expected = [
+        ...kinds.map((kind) => createWaterVisualProfile(kind).windDirection),
+        createWaterVisualProfile('lake', { windDirection: [0, 2] }).windDirection,
+      ];
+      for (const [index, direction] of directions.entries()) {
+        expect(direction.x).toBeCloseTo(expected[index]![0]);
+        expect(direction.y).toBeCloseTo(expected[index]![1]);
+      }
+      expect(new Set(directions.map((direction) => `${direction.x},${direction.y}`)).size).toBe(4);
     } finally {
       system.dispose();
     }
