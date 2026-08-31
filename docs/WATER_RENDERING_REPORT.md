@@ -7,6 +7,8 @@ and online invariants for the post-Phase-4 Eden water upgrade.
 
 - Phase 4 base: `9662eb679349a206ac8c33a8f811fb60c2382f3f`
 - Phase 3 merge: `828bec0`
+- Latest master integration: `c877d581070b8fee0438ba1204a14053f0da5973`
+  keeps the canonical locked lobby hidden over active host and guest matches.
 - Reference repository checked: `https://github.com/tompng/gpuocean`
 - Reference HEAD checked: `379c11f8977d0a609431ca864075d5384974c934`
 - License status at that commit: repository metadata reported no license and the
@@ -204,6 +206,7 @@ not real-network compatibility evidence.
 - Both peers loaded Eden with the exact same canonical seed.
 - Host rendered the authoritative Match; guest rendered `ClientReplica`.
 - Host and guest reported the same three water volumes and High resources.
+- The locked lobby remained hidden on both peers after the active runtime began.
 - Each peer created one WebGL canvas and reported no console or WebGL error.
 - No external WebSocket, relay candidate, water channel, water packet, or
   water-related production request was observed.
@@ -211,11 +214,11 @@ not real-network compatibility evidence.
   Phase 4 sent 21 observed snapshots (4,116 bytes); the final new build sent 24
   (4,704 bytes) because the one-second observation crossed three more 20 Hz
   ticks. Per-snapshot size was unchanged.
-- The one reliable control send was 4,599 bytes before and 4,596 bytes after;
+- The one reliable control send was 4,599 bytes before and 4,595 bytes after;
   the difference is payload data such as the random canonical match seed, not
   a water field.
 - RTC host upload over the observation windows was 20,185 bytes before and
-  21,826 bytes after. Channel labels and packet layouts were unchanged, and
+  21,111 bytes after. Channel labels and packet layouts were unchanged, and
   the extra three snapshots account for 588 bytes of the timing-dependent RTC
   delta. No water channel, packet, or high-frequency field exists.
 
@@ -255,9 +258,9 @@ Observed on 2026-08-31:
 - `npm test`: passed; 60 files and 614 tests.
 - `npm run build`: passed; 119 modules and 233 audited production files. The
   existing large-chunk warning for Rapier/application bundles remains.
-- `npm run sim`: passed; deterministic hard NeoCity simulation, seed `75798`,
-  RAZOR winner, 9.3 simulated minutes, 9 eliminations, 1 storm death, 11
-  chests, and 105 pickups.
+- `npm run sim`: passed; hard NeoCity simulation, seed `83512`, RAZOR winner,
+  8.6 simulated minutes, 9 eliminations, 2 storm deaths, 9 chests, and 102
+  pickups.
 - `npm run cloudflare:dry-run`: passed; 280 static files and no bindings or
   server-side multiplayer path.
 - Focused water and physical-map-hash tests passed; 3 files and 29 tests. The
@@ -265,12 +268,12 @@ Observed on 2026-08-31:
   authority, and multi-roster cases.
 - `npm run test:browser:online:gameplay`: passed the full two-context path from
   room creation through menu return. The 60 Hz host / 20 Hz snapshot run
-  produced 17 snapshot packets (p50 488 bytes, p95/p99 520 bytes), zero dropped
+  produced 19 snapshot packets (p50 488 bytes, p95/p99 520 bytes), zero dropped
   snapshots, and zero hard movement corrections. Prediction p95 error was
-  0.00000456 world units.
+  0.00000374 world units.
 - `npm run test:browser:online`: passed all 2-, 3-, and 4-participant lobby,
   reconnect, wrong-build, wrong-secret, host/guest-leave, relay-failure, and
-  direct-failure cases across 10 isolated contexts.
+  direct-failure and locked-lobby cases across 12 isolated contexts.
 - Headed Low/Medium/High/Ultra/Cinematic solo water captures passed without a
   console, WebGL, shader, or additional-canvas error.
 - The headed low-sun temporal QA captured ten deterministic 30 Hz presentation
@@ -280,7 +283,8 @@ Observed on 2026-08-31:
   direction bin to less than 16% of total field magnitude; the final Eden High
   field measured 13.5%, and fixed-camera review found no dominant parallel band.
 - Headed two-context direct-P2P online water capture passed with a succeeded,
-  nominated, non-relay ICE pair and no external WebSocket.
+  nominated, non-relay ICE pair, no external WebSocket, and no host or guest
+  lobby overlay over the active match.
 - Repeated create, quality-change, partial-construction failure, and
   idempotent-dispose coverage passed.
 

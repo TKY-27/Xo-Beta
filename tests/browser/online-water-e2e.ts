@@ -626,6 +626,12 @@ async function main(): Promise<void> {
       return hostValue.source === 'host-match' && guestValue.source === 'guest-replica'
         && hostValue.onlineState === 'active' && guestValue.onlineState === 'active';
     }, 'host Match and guest ClientReplica active runtime', 120_000);
+    const lobbyHidden = {
+      host: await host.page.locator('#online-lobby-menu').evaluate((element) => element.classList.contains('hidden')),
+      guest: await guest.page.locator('#online-lobby-menu').evaluate((element) => element.classList.contains('hidden')),
+    };
+    assert.equal(lobbyHidden.host, true, 'locked host lobby stays hidden over the active match');
+    assert.equal(lobbyHidden.guest, true, 'locked guest lobby stays hidden over the active replica');
 
     const before = {
       host: await rtc(host.page),
@@ -733,6 +739,7 @@ async function main(): Promise<void> {
       map: { host: hostRuntime.map, guest: guestRuntime.map },
       seed: { host: hostRuntime.seed, guest: guestRuntime.seed },
       roles: { host: hostRuntime.role, guest: guestRuntime.role },
+      lobbyHidden,
       expectsWaterQaStats: EXPECT_WATER_STATS,
       water: { host: hostRuntime.water, guest: guestRuntime.water, view: WATER_VIEW },
       rtc: {
