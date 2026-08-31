@@ -37,9 +37,10 @@ function movementFor(
   onSplash: (actor: Actor, heavy: boolean) => void = () => undefined,
   onJump: (actor: Actor, kind: string) => void = () => undefined,
   onLand: (actor: Actor, impactSpeed: number, fallDamage: number) => void = () => undefined,
+  onFootstep: (actor: Actor, running: boolean) => void = () => undefined,
 ): MovementSystem {
   return new MovementSystem(phys, {
-    onFootstep: () => undefined,
+    onFootstep,
     onLand,
     onJump,
     onSlide: () => undefined,
@@ -649,6 +650,34 @@ describe('rendered terrain and physics ground alignment', () => {
       body.position.z,
       body.body,
     )).toEqual([]);
+    body.dispose();
+    phys.dispose();
+  });
+
+  it('keeps crouched movement silent and resets the gait accumulator', () => {
+    const phys = new PhysicsWorld();
+    phys.addStaticBox(0, -0.25, 0, 20, 0.25, 20, 0, 'stone');
+    phys.flush();
+    const body = new CharBody(phys, 997, 0, CAPSULE_CENTER_OFFSET + 0.05, 0);
+    const actor = new Actor('Quiet crouch regression', body, 0xffffff);
+    let footsteps = 0;
+    const movement = movementFor(phys, undefined, undefined, undefined, () => { footsteps++; });
+
+    body.move(0, -0.1, 0);
+    phys.fixedStep(1 / 60);
+    actor.footstepAccum = 1.4;
+    const crouched = emptyCommand();
+    crouched.crouchHeld = true;
+    crouched.moveZ = 1;
+    for (let frame = 0; frame < 120; frame++) {
+      movement.update(actor, crouched, 1 / 60);
+      phys.fixedStep(1 / 60);
+    }
+
+    expect(actor.crouched).toBe(true);
+    expect(actor.footstepAccum).toBe(0);
+    expect(footsteps).toBe(0);
+
     body.dispose();
     phys.dispose();
   });

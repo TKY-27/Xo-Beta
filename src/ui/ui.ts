@@ -6,6 +6,11 @@
 import {
   HEAL_ITEMS, RARITY_CSS, WEAPONS, type AmmoType, type Difficulty, type WeaponId,
 } from '../core/balance';
+import {
+  PREFERRED_ITEM_CATEGORIES,
+  type PreferredItemCategory,
+  type PreferredItemSlots,
+} from '../core/preferredSlots';
 import { getSettings, onSettingsChanged, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
 import { SKIN_IDS } from '../render/characters';
 import { SkinSelector, skinTextKey } from './skinSelector';
@@ -54,6 +59,10 @@ function hydrateStatic(): void {
     const key = el.dataset.i18n;
     if (key && isTextKey(key)) el.textContent = t(key, vars);
   });
+  document.querySelectorAll<HTMLElement>('[data-i18n-aria-label]').forEach((el) => {
+    const key = el.dataset.i18nAriaLabel;
+    if (key && isTextKey(key)) el.setAttribute('aria-label', t(key, vars));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +70,8 @@ function hydrateStatic(): void {
 // ---------------------------------------------------------------------------
 
 export class Menus {
-  selectedMap: MapId = 'neocity';
+  /** An arena is intentionally unselected until the player chooses one. */
+  selectedMap: MapId | null = null;
   selectedDifficulty: DifficultyChoice = 'hard';
   onPlayRequested: (sel: PlaySelection) => void = () => undefined;
   onCreateRoomRequested: () => void = () => undefined;
@@ -72,8 +82,9 @@ export class Menus {
   private onOpenSettingsFromPause = false;
   private unsubs: Array<() => void> = [];
   private controlId = 0;
-  private skinSelector: SkinSelector | null = null;
+  private customizationSkinSelector: SkinSelector | null = null;
   private settingsSkinSelect: HTMLSelectElement | null = null;
+  private playActionsEnabled = true;
   private menuGamepadFrame = 0;
   private menuGamepadButtons = new Array<boolean>(16).fill(false);
 
@@ -81,6 +92,7 @@ export class Menus {
     this.bindButtons();
     this.bindOnboarding();
     this.buildPlayMenu();
+    this.buildSkinCustomization();
     this.buildSettings();
     hydrateStatic();
     if (!getSettings().onboarded) this.showOnboarding();
@@ -88,17 +100,20 @@ export class Menus {
     this.menuGamepadFrame = requestAnimationFrame(() => this.pollMenuGamepad());
     this.unsubs.push(onSettingsChanged((settings) => {
       if (this.settingsSkinSelect) this.settingsSkinSelect.value = settings.playerSkin;
+      const launchName = document.getElementById('skin-launch-name');
+      if (launchName) launchName.textContent = t(skinTextKey(settings.playerSkin));
     }));
     this.unsubs.push(onLangChanged(() => {
       hydrateStatic();
       this.buildPlayMenu();
+      this.customizationSkinSelector?.refresh();
       this.buildSettings();
     }));
   }
 
   dispose(): void {
     cancelAnimationFrame(this.menuGamepadFrame);
-    this.skinSelector?.dispose();
+    this.customizationSkinSelector?.dispose();
     for (const u of this.unsubs) u();
   }
 
@@ -108,15 +123,20 @@ export class Menus {
   private show(id: string): void {
     const ids = [
       'main-menu', 'play-menu', 'create-room-menu', 'join-room-menu', 'online-lobby-menu',
-      'settings-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
+      'settings-menu', 'skin-customization-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
     ];
     for (const other of ids) $(other).classList.add('hidden');
     if (id) $(id).classList.remove('hidden');
     this.onScreenChanged(id);
     if (id === 'play-menu') {
       requestAnimationFrame(() => {
-        document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+        const selected = this.selectedMap === null ? null
+          : document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`);
+        (selected ?? document.querySelector<HTMLButtonElement>('.map-card'))?.focus();
       });
+    }
+    if (id === 'skin-customization-menu') {
+      requestAnimationFrame(() => this.customizationSkinSelector?.focusSelected());
     }
   }
 
@@ -124,7 +144,9 @@ export class Menus {
   private pollMenuGamepad(): void {
     this.menuGamepadFrame = requestAnimationFrame(() => this.pollMenuGamepad());
     const playMenu = $('play-menu');
-    if (playMenu.classList.contains('hidden') || !getSettings().gamepadEnabled || !navigator.getGamepads) {
+    const skinMenu = $('skin-customization-menu');
+    if ((playMenu.classList.contains('hidden') && skinMenu.classList.contains('hidden'))
+      || !getSettings().gamepadEnabled || !navigator.getGamepads) {
       this.menuGamepadButtons.fill(false);
       return;
     }
@@ -140,7 +162,8 @@ export class Menus {
       return rising;
     };
     const active = document.activeElement as HTMLElement | null;
-    const skinFocused = active?.closest('#skin-selector') != null;
+    const skinFocused = !skinMenu.classList.contains('hidden')
+      && active?.closest('#skin-customization-selector') != null;
     const previousHorizontal = edge(14);
     const previousVertical = edge(12);
     const nextHorizontal = edge(15);
@@ -148,24 +171,24 @@ export class Menus {
     const previous = previousHorizontal || previousVertical;
     const next = nextHorizontal || nextVertical;
     if (previous) {
-      if (skinFocused) this.skinSelector?.selectByOffset(-1);
+      if (skinFocused) this.customizationSkinSelector?.selectByOffset(-1);
       else {
         this.selectMapByOffset(-1);
-        document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+        if (this.selectedMap) document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
       }
     }
     if (next) {
-      if (skinFocused) this.skinSelector?.selectByOffset(1);
+      if (skinFocused) this.customizationSkinSelector?.selectByOffset(1);
       else {
         this.selectMapByOffset(1);
-        document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
+        if (this.selectedMap) document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.focus();
       }
     }
     if (edge(0)) {
       if (active instanceof HTMLButtonElement) active.click();
-      else document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.click();
+      else if (this.selectedMap) document.querySelector<HTMLButtonElement>(`.map-card[data-map-id="${this.selectedMap}"]`)?.click();
     }
-    if (edge(1)) $('btn-play-back').click();
+    if (edge(1)) $(skinFocused ? 'btn-skin-customization-back' : 'btn-play-back').click();
   }
 
   showMainMenu(): void { this.show('main-menu'); }
@@ -175,9 +198,12 @@ export class Menus {
   hideAll(): void { this.show(''); }
 
   setPlayEnabled(enabled: boolean): void {
+    this.playActionsEnabled = enabled;
     for (const id of ['btn-play-start', 'btn-practice-start', 'btn-results-again']) {
       const button = document.getElementById(id) as HTMLButtonElement | null;
-      if (button) button.disabled = !enabled;
+      if (!button) continue;
+      button.disabled = !enabled;
+      this.updatePlayActionState(button);
     }
   }
 
@@ -251,6 +277,7 @@ export class Menus {
       !document.getElementById('join-room-menu')!.classList.contains('hidden') ||
       !document.getElementById('online-lobby-menu')!.classList.contains('hidden') ||
       !document.getElementById('settings-menu')!.classList.contains('hidden') ||
+      !document.getElementById('skin-customization-menu')!.classList.contains('hidden') ||
       !document.getElementById('credits-menu')!.classList.contains('hidden') ||
       !document.getElementById('pause-menu')!.classList.contains('hidden');
   }
@@ -262,18 +289,24 @@ export class Menus {
         fn();
       });
     };
-    click('btn-play', () => this.show('play-menu'));
+    click('btn-play', () => {
+      this.selectedMap = null;
+      this.renderMapSelection();
+      this.show('play-menu');
+    });
+    click('btn-skin-customization', () => this.show('skin-customization-menu'));
     click('btn-create-room', () => this.onCreateRoomRequested());
     click('btn-join-room', () => this.onJoinRoomRequested());
     click('btn-settings', () => { this.onOpenSettingsFromPause = false; this.show('settings-menu'); });
     click('btn-credits', () => this.show('credits-menu'));
     click('btn-credits-back', () => this.show('main-menu'), 'back');
     click('btn-play-back', () => this.show('main-menu'), 'back');
+    click('btn-skin-customization-back', () => this.show('main-menu'), 'back');
     click('btn-play-start', () => {
-      this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty });
+      this.requestSelectedPlay();
     }, 'confirm');
     click('btn-practice-start', () => {
-      this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty, practice: true });
+      this.requestSelectedPlay(true);
     }, 'confirm');
     click('btn-settings-back', () => this.show(this.onOpenSettingsFromPause ? 'pause-menu' : 'main-menu'), 'back');
     click('btn-resume', () => this.onResumeRequested(), 'confirm');
@@ -282,7 +315,7 @@ export class Menus {
     click('btn-results-menu', () => { $('results-screen').classList.add('hidden'); this.onQuitRequested(); }, 'back');
     click('btn-results-again', () => {
       $('results-screen').classList.add('hidden');
-      this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty });
+      this.requestSelectedPlay();
     }, 'confirm');
   }
 
@@ -293,7 +326,13 @@ export class Menus {
   }
 
   selectMapByOffset(offset: number): void {
-    const index = Math.max(0, this.maps.findIndex((map) => map.id === this.selectedMap));
+    if (this.maps.length === 0) return;
+    if (this.selectedMap === null) {
+      this.selectMap((offset < 0 ? this.maps.at(-1) : this.maps[0])!.id);
+      return;
+    }
+    const current = this.maps.findIndex((map) => map.id === this.selectedMap);
+    const index = current < 0 ? 0 : current;
     const next = (index + offset) % this.maps.length;
     this.selectMap(this.maps[(next + this.maps.length) % this.maps.length]!.id);
   }
@@ -303,8 +342,6 @@ export class Menus {
     list.setAttribute('role', 'listbox');
     list.setAttribute('aria-label', t('menu.selectArena'));
     list.innerHTML = '';
-    this.skinSelector?.dispose();
-    this.skinSelector = null;
     const accents: Record<string, string> = {
       neocity: 'var(--map-neocity)',
       oldfront: 'var(--map-oldfront)',
@@ -333,9 +370,11 @@ export class Menus {
       const check = document.createElement('span');
       check.className = 'mc-check';
       check.textContent = '✓';
+      check.setAttribute('aria-hidden', 'true');
       const badge = document.createElement('span');
       badge.className = 'mc-badge';
       badge.textContent = t('menu.selectedBadge');
+      badge.setAttribute('aria-hidden', 'true');
       const render = () => {
         nameEl.textContent = m.nameKey ? t(m.nameKey as TextKey) : m.name;
         descEl.textContent = m.descKey ? t(m.descKey as TextKey) : m.description;
@@ -370,10 +409,6 @@ export class Menus {
     }
 
     this.renderMapSelection();
-    this.skinSelector = new SkinSelector($('skin-selector'), (id) => {
-      void id;
-      this.onUiSound?.('click');
-    });
 
     const diffs: Array<[DifficultyChoice, TextKey]> = [
       ['normal', 'diff.normal'], ['hard', 'diff.hard'], ['elite', 'diff.elite'], ['nightmare', 'diff.nightmare'],
@@ -400,12 +435,12 @@ export class Menus {
   }
 
   private renderMapSelection(): void {
-    const selected = this.maps.find((map) => map.id === this.selectedMap) ?? this.maps[0];
-    if (!selected) return;
-    this.selectedMap = selected.id;
+    const selected = this.selectedMap === null
+      ? null
+      : this.maps.find((map) => map.id === this.selectedMap) ?? null;
     const list = $('map-list');
     list.querySelectorAll<HTMLButtonElement>('.map-card').forEach((card) => {
-      const isSelected = card.dataset.mapId === selected.id;
+      const isSelected = selected !== null && card.dataset.mapId === selected.id;
       card.classList.toggle('selected', isSelected);
       card.setAttribute('aria-pressed', String(isSelected));
       card.setAttribute('aria-selected', String(isSelected));
@@ -414,6 +449,18 @@ export class Menus {
 
     const panel = $('selected-arena');
     panel.replaceChildren();
+    panel.classList.toggle('hidden', selected === null);
+    panel.setAttribute('aria-hidden', String(selected === null));
+    $('play-menu').querySelector('.play-body')?.classList.toggle('empty-selection', selected === null);
+    if (!selected) {
+      const empty = document.createElement('p');
+      empty.className = 'selected-arena-empty';
+      empty.textContent = t('menu.selectArenaFirst');
+      panel.appendChild(empty);
+      this.updatePlayActionState($('btn-play-start'));
+      this.updatePlayActionState($('btn-practice-start'));
+      return;
+    }
     const label = document.createElement('span');
     label.className = 'selected-arena-label';
     label.textContent = t('menu.selectedArena');
@@ -448,6 +495,50 @@ export class Menus {
 
     const start = $('btn-play-start') as HTMLButtonElement;
     start.textContent = t('menu.startMatchMap', { name: title.textContent ?? selected.name });
+    $('btn-practice-start').textContent = t('menu.practice');
+    $('play-selection-error').textContent = '';
+    $('play-selection-error').classList.add('hidden');
+    this.updatePlayActionState(start);
+    this.updatePlayActionState($('btn-practice-start'));
+  }
+
+  private updatePlayActionState(button: HTMLButtonElement): void {
+    const requiresMap = button.id === 'btn-play-start' || button.id === 'btn-practice-start' || button.id === 'btn-results-again';
+    const needsSelection = requiresMap && this.selectedMap === null;
+    button.classList.toggle('needs-selection', needsSelection);
+    // A missing arena is a validation state, not a disabled control: the
+    // action remains keyboard/pointer activatable so it can explain exactly
+    // what the player must choose. Native disabled state is reserved for
+    // lifecycle gates such as an active match or asset loading.
+    button.setAttribute('aria-disabled', String(!this.playActionsEnabled));
+    button.dataset.needsSelection = String(needsSelection);
+    if (button.id === 'btn-results-again') return;
+    button.title = needsSelection ? t('menu.selectArenaFirst') : '';
+  }
+
+  private requestSelectedPlay(practice = false): void {
+    if (!this.playActionsEnabled) return;
+    if (this.selectedMap === null) {
+      const error = $('play-selection-error');
+      error.textContent = t('menu.selectArenaFirst');
+      error.classList.remove('hidden');
+      error.setAttribute('role', 'alert');
+      this.onUiSound?.('error');
+      document.querySelector<HTMLButtonElement>('.map-card')?.focus();
+      return;
+    }
+    this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty, practice });
+  }
+
+  private buildSkinCustomization(): void {
+    this.customizationSkinSelector?.dispose();
+    this.customizationSkinSelector = new SkinSelector(
+      $('skin-customization-selector'),
+      () => this.onUiSound?.('click'),
+      'skin-customization-selector-title',
+    );
+    const launchName = $('skin-launch-name');
+    launchName.textContent = t(skinTextKey(getSettings().playerSkin));
   }
 
   // -------------------------------------------------------------------------
@@ -459,19 +550,88 @@ export class Menus {
     div.className = 'setting-row';
     const label = document.createElement('label');
     label.textContent = labelText;
-    if (!inner.id) inner.id = `setting-control-${++this.controlId}`;
-    label.htmlFor = inner.id;
+    const labelledControl = inner.matches('input,select,button,textarea')
+      ? inner
+      : inner.querySelector<HTMLElement>('input,select,button,textarea');
+    const target = labelledControl ?? inner;
+    if (!target.id) target.id = `setting-control-${++this.controlId}`;
+    label.htmlFor = target.id;
     div.appendChild(label);
     div.appendChild(inner);
     return div;
   }
 
-  private slider(min: number, max: number, step: number, value: number, onInput: (v: number) => void): HTMLInputElement {
-    const inp = document.createElement('input');
-    inp.type = 'range';
-    inp.min = String(min); inp.max = String(max); inp.step = String(step); inp.value = String(value);
-    inp.addEventListener('input', () => onInput(parseFloat(inp.value)));
-    return inp;
+  private slider(
+    min: number,
+    max: number,
+    step: number,
+    value: number,
+    onInput: (v: number) => void,
+    format: (v: number) => string = (v) => String(v),
+  ): HTMLElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'range-number-control';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = String(min); range.max = String(max); range.step = String(step); range.value = String(value);
+    const number = document.createElement('input');
+    number.type = 'number';
+    number.min = String(min); number.max = String(max); number.step = String(step); number.value = String(value);
+    number.inputMode = 'decimal';
+    number.setAttribute('aria-label', settingCopy('Numeric value', '数値入力'));
+    const output = document.createElement('output');
+    output.textContent = format(value);
+    output.setAttribute('aria-live', 'off');
+    const precision = Math.max(0, (String(step).split('.')[1] ?? '').length);
+    let committed = value;
+    let editStart = value;
+    const clamp = (raw: number): number => {
+      if (!Number.isFinite(raw)) return committed;
+      const stepped = min + Math.round((raw - min) / step) * step;
+      return Number(Math.max(min, Math.min(max, stepped)).toFixed(precision + 2));
+    };
+    const setValue = (raw: number, notify: boolean): void => {
+      const next = clamp(raw);
+      range.value = String(next);
+      number.value = String(next);
+      output.textContent = format(next);
+      range.setAttribute('aria-valuetext', format(next));
+      committed = next;
+      if (notify) onInput(next);
+    };
+    const readNumber = (fallback: number): number => {
+      const text = number.value.trim();
+      if (text === '') return fallback;
+      const raw = Number(text);
+      return Number.isFinite(raw) ? raw : fallback;
+    };
+    number.addEventListener('focus', () => { editStart = committed; });
+    range.addEventListener('input', () => setValue(Number(range.value), true));
+    number.addEventListener('input', () => {
+      const raw = Number(number.value);
+      if (Number.isFinite(raw)) {
+        const next = clamp(raw);
+        range.value = String(next);
+        output.textContent = format(next);
+        range.setAttribute('aria-valuetext', format(next));
+        onInput(next);
+      }
+    });
+    number.addEventListener('change', () => setValue(readNumber(editStart), true));
+    number.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setValue(editStart, false);
+        number.blur();
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        setValue(readNumber(editStart), true);
+        number.blur();
+      }
+    });
+    setValue(value, false);
+    wrap.append(range, number, output);
+    return wrap;
   }
 
   private select(options: Array<[string, string]>, value: string, onChange: (v: string) => void): HTMLSelectElement {
@@ -510,10 +670,10 @@ export class Menus {
       [['en', 'English'], ['ja', '日本語']], getLang(),
       (v) => setLang(v as 'en' | 'ja'),
     )));
-    controls.appendChild(this.row(t('set.mouseSens'), this.slider(0.2, 3, 0.05, s.sensitivity, (v) => updateSettings({ sensitivity: v }))));
-    controls.appendChild(this.row(t('set.adsSens'), this.slider(0.2, 2, 0.05, s.adsSensitivity, (v) => updateSettings({ adsSensitivity: v }))));
+    controls.appendChild(this.row(t('set.mouseSens'), this.slider(0.2, 3, 0.05, s.sensitivity, (v) => updateSettings({ sensitivity: v }), (v) => v.toFixed(2))));
+    controls.appendChild(this.row(t('set.adsSens'), this.slider(0.2, 2, 0.05, s.adsSensitivity, (v) => updateSettings({ adsSensitivity: v }), (v) => v.toFixed(2))));
     controls.appendChild(this.row(t('set.invertY'), this.checkbox(s.invertY, (v) => updateSettings({ invertY: v }))));
-    controls.appendChild(this.row(t('set.fov'), this.slider(60, 110, 1, s.fov, (v) => updateSettings({ fov: v }))));
+    controls.appendChild(this.row(t('set.fov'), this.slider(60, 110, 1, s.fov, (v) => updateSettings({ fov: v }), (v) => `${Math.round(v)}°`)));
 
     const resetBtn = document.createElement('button');
     resetBtn.className = 'keybind';
@@ -529,8 +689,8 @@ export class Menus {
     // Gamepad
     controls.appendChild(this.sectionTitle(t('set.gamepad')));
     controls.appendChild(this.row(t('set.gamepadEnabled'), this.checkbox(s.gamepadEnabled, (v) => updateSettings({ gamepadEnabled: v }))));
-    controls.appendChild(this.row(t('set.padLookSens'), this.slider(0.3, 3, 0.05, s.padLookSens, (v) => updateSettings({ padLookSens: v }))));
-    controls.appendChild(this.row(t('set.padDeadzone'), this.slider(0.05, 0.45, 0.01, s.padDeadzone, (v) => updateSettings({ padDeadzone: v }))));
+    controls.appendChild(this.row(t('set.padLookSens'), this.slider(0.3, 3, 0.05, s.padLookSens, (v) => updateSettings({ padLookSens: v }), (v) => v.toFixed(2))));
+    controls.appendChild(this.row(t('set.padDeadzone'), this.slider(0.05, 0.45, 0.01, s.padDeadzone, (v) => updateSettings({ padDeadzone: v }), (v) => `${Math.round(v * 100)}%`)));
     controls.appendChild(this.row(t('set.vibration'), this.checkbox(s.vibration, (v) => updateSettings({ vibration: v }))));
 
     // Graphics
@@ -539,7 +699,7 @@ export class Menus {
       [['low', t('q.low')], ['medium', t('q.medium')], ['high', t('q.high')], ['ultra', t('q.ultra')], ['cinematic', t('q.cinematic')]],
       s.quality, (v) => { updateSettings({ quality: v as never }); },
     )));
-    graphics.appendChild(this.row(t('set.resScale'), this.slider(0.5, 1.5, 0.05, s.resolutionScale, (v) => updateSettings({ resolutionScale: v }))));
+    graphics.appendChild(this.row(t('set.resScale'), this.slider(0.5, 1.5, 0.05, s.resolutionScale, (v) => updateSettings({ resolutionScale: v }), (v) => `${Math.round(v * 100)}%`)));
     graphics.appendChild(this.row(t('set.shadows'), this.checkbox(s.shadows, (v) => updateSettings({ shadows: v }))));
     graphics.appendChild(this.row(t('set.shadowQuality'), this.select(
       [['low', t('q.low')], ['medium', t('q.medium')], ['high', t('q.high')], ['cinematic', t('q.cinematic')]],
@@ -554,11 +714,11 @@ export class Menus {
 
     // Audio
     const audioSec = $('settings-audio');
-    audioSec.appendChild(this.row(t('set.masterVol'), this.slider(0, 1, 0.05, s.masterVolume, (v) => updateSettings({ masterVolume: v }))));
-    audioSec.appendChild(this.row(t('set.musicVol'), this.slider(0, 1, 0.05, s.musicVolume, (v) => updateSettings({ musicVolume: v }))));
-    audioSec.appendChild(this.row(t('set.sfxVol'), this.slider(0, 1, 0.05, s.sfxVolume, (v) => updateSettings({ sfxVolume: v }))));
-    audioSec.appendChild(this.row(t('set.ambVol'), this.slider(0, 1, 0.05, s.ambienceVolume, (v) => updateSettings({ ambienceVolume: v }))));
-    audioSec.appendChild(this.row(t('set.uiVol'), this.slider(0, 1, 0.05, s.uiVolume, (v) => updateSettings({ uiVolume: v }))));
+    audioSec.appendChild(this.row(t('set.masterVol'), this.slider(0, 1, 0.05, s.masterVolume, (v) => updateSettings({ masterVolume: v }), (v) => `${Math.round(v * 100)}%`)));
+    audioSec.appendChild(this.row(t('set.musicVol'), this.slider(0, 1, 0.05, s.musicVolume, (v) => updateSettings({ musicVolume: v }), (v) => `${Math.round(v * 100)}%`)));
+    audioSec.appendChild(this.row(t('set.sfxVol'), this.slider(0, 1, 0.05, s.sfxVolume, (v) => updateSettings({ sfxVolume: v }), (v) => `${Math.round(v * 100)}%`)));
+    audioSec.appendChild(this.row(t('set.ambVol'), this.slider(0, 1, 0.05, s.ambienceVolume, (v) => updateSettings({ ambienceVolume: v }), (v) => `${Math.round(v * 100)}%`)));
+    audioSec.appendChild(this.row(t('set.uiVol'), this.slider(0, 1, 0.05, s.uiVolume, (v) => updateSettings({ uiVolume: v }), (v) => `${Math.round(v * 100)}%`)));
     audioSec.appendChild(this.row(t('set.captions'), this.checkbox(s.captions, (v) => updateSettings({ captions: v }))));
 
     // Gameplay & accessibility
@@ -581,6 +741,41 @@ export class Menus {
     );
     this.settingsSkinSelect = settingsSkinSelect;
     gameplay.appendChild(this.row(settingCopy('Player skin', 'プレイヤースキン'), settingsSkinSelect));
+    gameplay.appendChild(this.sectionTitle(t('set.preferredSlots')));
+    const preferred = s.preferredItemSlots;
+    const preferredUpdate = (patch: Partial<PreferredItemSlots>): void => {
+      const current = getSettings().preferredItemSlots;
+      const slots = patch.slots ?? current.slots;
+      updateSettings({
+        preferredItemSlots: {
+          enabled: patch.enabled ?? current.enabled,
+          slots: [slots[0]!, slots[1]!, slots[2]!, slots[3]!, slots[4]!],
+        },
+      });
+    };
+    gameplay.appendChild(this.row(
+      t('set.preferredSlotsEnabled'),
+      this.checkbox(preferred.enabled, (enabled) => preferredUpdate({ enabled })),
+    ));
+    const preferredHint = document.createElement('p');
+    preferredHint.className = 'setting-note';
+    preferredHint.textContent = t('set.preferredSlotHint');
+    gameplay.appendChild(preferredHint);
+    const categoryOptions: Array<[string, string]> = PREFERRED_ITEM_CATEGORIES.map((category) => [
+      category,
+      t(`itemCategory.${category}` as TextKey),
+    ]);
+    for (let i = 0; i < 5; i++) {
+      const slotIndex = i as 0 | 1 | 2 | 3 | 4;
+      gameplay.appendChild(this.row(
+        t(`set.slot${i + 1}` as TextKey),
+        this.select(categoryOptions, preferred.slots[slotIndex], (value) => {
+          const slots = [...getSettings().preferredItemSlots.slots] as PreferredItemCategory[];
+          slots[slotIndex] = value as PreferredItemCategory;
+          preferredUpdate({ slots: [slots[0]!, slots[1]!, slots[2]!, slots[3]!, slots[4]!] });
+        }),
+      ));
+    }
     const rerun = document.createElement('button');
     rerun.id = 'btn-rerun-onboarding';
     rerun.className = 'btn-quiet small';
@@ -598,13 +793,13 @@ export class Menus {
       s.colorVision, (v) => updateSettings({ colorVision: v as never }),
     )));
     gameplay.appendChild(this.row(t('set.reducedMotion'), this.checkbox(s.reducedMotion, (v) => updateSettings({ reducedMotion: v }))));
-    gameplay.appendChild(this.row(t('set.camShake'), this.slider(0, 1.5, 0.1, s.cameraShake, (v) => updateSettings({ cameraShake: v }))));
+    gameplay.appendChild(this.row(t('set.camShake'), this.slider(0, 1.5, 0.1, s.cameraShake, (v) => updateSettings({ cameraShake: v }), (v) => `${Math.round(v * 100)}%`)));
     const crosshairColor = document.createElement('input');
     crosshairColor.type = 'color';
     crosshairColor.value = s.crosshairColor;
     crosshairColor.dataset.setting = 'crosshairColor';
     gameplay.appendChild(this.row(t('set.crosshairColor'), crosshairColor));
-    gameplay.appendChild(this.row(t('set.crosshairSize'), this.slider(4, 20, 1, s.crosshairSize, (v) => updateSettings({ crosshairSize: v }))));
+    gameplay.appendChild(this.row(t('set.crosshairSize'), this.slider(4, 20, 1, s.crosshairSize, (v) => updateSettings({ crosshairSize: v }), (v) => `${Math.round(v)} px`)));
     gameplay.appendChild(this.row(t('set.crosshairDot'), this.checkbox(s.crosshairDot, (v) => updateSettings({ crosshairDot: v }))));
     gameplay.appendChild(this.row(t('set.showFps'), this.checkbox(s.showFps, (v) => updateSettings({ showFps: v }))));
 
@@ -815,6 +1010,16 @@ interface DamageNumberEntry {
   life: number;
 }
 
+interface InventoryPointerSession {
+  readonly from: number;
+  readonly pointerId: number;
+  readonly rects: Array<{ index: number; left: number; right: number; top: number; bottom: number; cx: number; cy: number }>;
+  readonly dropRect: { left: number; right: number; top: number; bottom: number };
+  target: number | null;
+  drop: boolean;
+  graceUntil: number;
+}
+
 export interface TacMarker {
   x: number;
   z: number;
@@ -985,7 +1190,9 @@ export class Hud {
   onInventoryDrop: (slot: number) => void = () => undefined;
   onInventorySelect: (slot: number) => void = () => undefined;
   onInventoryClose: () => void = () => undefined;
-  private inventoryDragSlot: number | null = null;
+  private inventoryPointerSession: InventoryPointerSession | null = null;
+  private inventoryLastFocus: HTMLElement | null = null;
+  private inventorySuppressClickUntil = 0;
 
   constructor() {
     this.applyCrosshair();
@@ -1111,66 +1318,176 @@ export class Hud {
   }
 
   setInventoryOpen(open: boolean): void {
+    this.cancelInventoryPointer();
+    if (open) this.inventoryLastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     $('inventory-overlay').classList.toggle('hidden', !open);
     document.body.classList.toggle('inventory-open', open);
-    this.inventoryDragSlot = null;
-    if (open) hydrateStatic();
+    if (open) {
+      hydrateStatic();
+      requestAnimationFrame(() => ($('inventory-grid-slots').querySelector<HTMLButtonElement>('.inventory-grid-slot.active, .inventory-grid-slot:not(.empty)')
+        ?? $('btn-inventory-close')).focus());
+    } else if (this.inventoryLastFocus?.isConnected) {
+      this.inventoryLastFocus.focus();
+      this.inventoryLastFocus = null;
+    }
   }
 
   private buildInventoryOverlay(): void {
     const grid = $('inventory-grid-slots');
     grid.innerHTML = '';
+    grid.setAttribute('role', 'grid');
+    grid.setAttribute('aria-label', t('inventory.equipment'));
     for (let i = 0; i < 5; i++) {
       const slot = document.createElement('button');
       slot.type = 'button';
       slot.className = 'inventory-grid-slot empty';
       slot.dataset.slot = String(i);
+      slot.setAttribute('role', 'gridcell');
+      slot.setAttribute('aria-posinset', String(i + 1));
+      slot.setAttribute('aria-setsize', '5');
       slot.innerHTML = `<span class="inv-key">${i + 1}</span><span class="inv-icon"></span><span class="inv-name"></span><span class="inv-count"></span>`;
-      slot.addEventListener('click', () => this.onInventorySelect(i));
-      slot.addEventListener('dragstart', (event) => {
-        if (!slot.draggable) {
-          event.preventDefault();
+      slot.addEventListener('click', () => {
+        if (performance.now() < this.inventorySuppressClickUntil) {
+          this.inventorySuppressClickUntil = 0;
           return;
         }
-        this.inventoryDragSlot = i;
-        event.dataTransfer?.setData('text/x-xo-inventory-slot', String(i));
-        if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-        slot.classList.add('dragging');
+        this.onInventorySelect(i);
       });
-      slot.addEventListener('dragend', () => {
-        this.inventoryDragSlot = null;
-        slot.classList.remove('dragging');
+      slot.addEventListener('pointerdown', (event) => this.beginInventoryPointer(i, event));
+      slot.addEventListener('pointermove', (event) => this.updateInventoryPointer(event.clientX, event.clientY));
+      slot.addEventListener('pointerup', (event) => this.finishInventoryPointer(event));
+      slot.addEventListener('pointercancel', () => this.cancelInventoryPointer());
+      slot.addEventListener('lostpointercapture', (event) => {
+        if (this.inventoryPointerSession?.pointerId === (event as PointerEvent).pointerId) this.cancelInventoryPointer();
       });
-      slot.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-        slot.classList.add('drop-target');
-      });
-      slot.addEventListener('dragleave', () => slot.classList.remove('drop-target'));
-      slot.addEventListener('drop', (event) => {
-        event.preventDefault();
-        slot.classList.remove('drop-target');
-        const raw = event.dataTransfer?.getData('text/x-xo-inventory-slot');
-        const from = raw === undefined || raw === '' ? this.inventoryDragSlot : Number(raw);
-        if (from !== null && Number.isInteger(from) && from !== i) this.onInventoryMove(from, i);
-      });
+      slot.addEventListener('keydown', (event) => this.handleInventoryKey(i, event));
       grid.appendChild(slot);
     }
     $('btn-inventory-close').addEventListener('click', () => this.onInventoryClose());
     const drop = $('inventory-drop-zone');
-    drop.addEventListener('dragover', (event) => {
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-      drop.classList.add('active');
+    drop.addEventListener('pointermove', (event) => this.updateInventoryPointer(event.clientX, event.clientY));
+    drop.addEventListener('pointerup', (event) => this.finishInventoryPointer(event));
+    drop.addEventListener('pointercancel', () => this.cancelInventoryPointer());
+    $('inventory-overlay').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && this.inventoryPointerSession) {
+        event.preventDefault();
+        this.cancelInventoryPointer();
+      }
     });
-    drop.addEventListener('dragleave', () => drop.classList.remove('active'));
-    drop.addEventListener('drop', (event) => {
-      event.preventDefault();
-      drop.classList.remove('active');
-      const raw = event.dataTransfer?.getData('text/x-xo-inventory-slot');
-      const slot = raw === undefined || raw === '' ? this.inventoryDragSlot : Number(raw);
-      if (slot !== null && Number.isInteger(slot)) this.onInventoryDrop(slot);
+  }
+
+  private beginInventoryPointer(index: number, event: PointerEvent): void {
+    const slot = event.currentTarget as HTMLButtonElement;
+    if (!event.isPrimary || event.button !== 0 || slot.dataset.hasItem !== '1') return;
+    const grid = $('inventory-grid-slots');
+    const rects = [...grid.querySelectorAll<HTMLButtonElement>('.inventory-grid-slot')].map((element, slotIndex) => {
+      const rect = element.getBoundingClientRect();
+      return { index: slotIndex, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, cx: rect.left + rect.width / 2, cy: rect.top + rect.height / 2 };
     });
+    const drop = $('inventory-drop-zone').getBoundingClientRect();
+    this.inventoryPointerSession = {
+      from: index,
+      pointerId: event.pointerId,
+      rects,
+      dropRect: { left: drop.left, right: drop.right, top: drop.top, bottom: drop.bottom },
+      target: null,
+      drop: false,
+      graceUntil: performance.now() + 180,
+    };
+    try { slot.setPointerCapture(event.pointerId); } catch { /* browser may revoke capture during teardown */ }
+    event.preventDefault();
+    this.updateInventoryPointer(event.clientX, event.clientY);
+    this.setInventoryLive(t('inventory.dragging', { slot: index + 1 }));
+  }
+
+  private updateInventoryPointer(clientX: number, clientY: number): void {
+    const session = this.inventoryPointerSession;
+    if (!session) return;
+    const pad = 18;
+    const inDrop = clientX >= session.dropRect.left - pad && clientX <= session.dropRect.right + pad
+      && clientY >= session.dropRect.top - pad && clientY <= session.dropRect.bottom + pad;
+    const candidates = session.rects
+      .filter((rect) => rect.index !== session.from
+        && clientX >= rect.left - pad && clientX <= rect.right + pad
+        && clientY >= rect.top - pad && clientY <= rect.bottom + pad)
+      .sort((a, b) => Math.hypot(clientX - a.cx, clientY - a.cy) - Math.hypot(clientX - b.cx, clientY - b.cy));
+    if (inDrop) {
+      session.drop = true;
+      session.target = null;
+      session.graceUntil = performance.now() + 180;
+    } else if (candidates[0]) {
+      session.drop = false;
+      session.target = candidates[0].index;
+      session.graceUntil = performance.now() + 180;
+    } else if (performance.now() >= session.graceUntil) {
+      session.drop = false;
+      session.target = null;
+    }
+    this.syncInventoryPointerVisuals();
+  }
+
+  private finishInventoryPointer(event: PointerEvent): void {
+    const session = this.inventoryPointerSession;
+    if (!session || event.pointerId !== session.pointerId) return;
+    event.preventDefault();
+    if (session.drop) {
+      this.inventorySuppressClickUntil = performance.now() + 300;
+      this.onInventoryDrop(session.from);
+    } else if (session.target !== null && session.target !== session.from) {
+      this.inventorySuppressClickUntil = performance.now() + 300;
+      this.onInventoryMove(session.from, session.target);
+    } else this.setInventoryLive(t('inventory.dragCancelled'));
+    this.cancelInventoryPointer();
+  }
+
+  private cancelInventoryPointer(): void {
+    this.inventoryPointerSession = null;
+    this.syncInventoryPointerVisuals();
+  }
+
+  private syncInventoryPointerVisuals(): void {
+    const session = this.inventoryPointerSession;
+    const grid = document.getElementById('inventory-grid-slots');
+    if (!grid) return;
+    grid.querySelectorAll<HTMLElement>('.inventory-grid-slot').forEach((slot, index) => {
+      slot.classList.toggle('dragging', session?.from === index);
+      slot.classList.toggle('drop-target', session?.drop === false && session?.target === index);
+    });
+    document.getElementById('inventory-drop-zone')?.classList.toggle('active', session?.drop === true);
+  }
+
+  private setInventoryLive(message: string): void {
+    const live = document.getElementById('inventory-live-region');
+    if (live) live.textContent = message;
+  }
+
+  private handleInventoryKey(index: number, event: KeyboardEvent): void {
+    const slot = event.currentTarget as HTMLButtonElement;
+    if (event.key === 'Escape') {
+      if (this.inventoryPointerSession) {
+        event.preventDefault();
+        this.cancelInventoryPointer();
+      }
+      return;
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      if (slot.dataset.hasItem !== '1') return;
+      event.preventDefault();
+      this.onInventoryDrop(index);
+      this.setInventoryLive(t('inventory.keyboardDropped', { slot: index + 1 }));
+      return;
+    }
+    const delta = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1
+      : event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : 0;
+    if (delta !== 0 && slot.dataset.hasItem === '1') {
+      event.preventDefault();
+      const target = Math.max(0, Math.min(4, index + delta));
+      if (target !== index) {
+        this.onInventoryMove(index, target);
+        this.setInventoryLive(t('inventory.keyboardMoved', { from: index + 1, to: target + 1 }));
+        requestAnimationFrame(() => (document.querySelector(`[data-slot="${target}"]`) as HTMLElement | null)?.focus());
+      }
+    }
   }
 
   /** World→screen projection used by damage numbers. */
@@ -1497,7 +1814,11 @@ export class Hud {
       const name = slot.querySelector<HTMLElement>('.inv-name')!;
       const count = slot.querySelector<HTMLElement>('.inv-count')!;
       slot.className = 'inventory-grid-slot' + (item ? '' : ' empty') + (i === selectedIndex ? ' active' : '');
-      slot.draggable = Boolean(item);
+      slot.dataset.hasItem = item ? '1' : '0';
+      slot.setAttribute('aria-label', item
+        ? `${i + 1}: ${item.kind === 'weapon' ? t(`wpn.${item.weaponId}` as TextKey) : item.itemId === 'medkit' ? t('bind.useMedkit') : t('bind.useShield')}`
+        : `${i + 1}: ${t('inventory.empty')}`);
+      slot.setAttribute('aria-selected', String(i === selectedIndex));
       slot.style.removeProperty('--slot-rarity');
       if (!item) {
         icon.innerHTML = '';
@@ -1516,6 +1837,7 @@ export class Hud {
         count.textContent = `×${item.count}`;
       }
     }
+    this.syncInventoryPointerVisuals();
   }
 
   setFps(fps: number): void {
