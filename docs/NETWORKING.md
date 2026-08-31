@@ -1,10 +1,13 @@
 # Networking
 
-## Phase 3 scope
+## Online networking scope
 
-Phase 3 adds private-room discovery, a synchronized host-authoritative lobby,
-and direct game-connection establishment. It deliberately does **not** start or
-synchronize a live online match. Solo play remains the production match path.
+Phase 3 introduced private-room discovery, a synchronized host-authoritative
+lobby, and direct game-connection establishment. Phase 4 adds the production
+online match path: one host-owned authoritative `Match`, validated guest input,
+binary snapshots/events, client prediction and interpolation, and bounded
+disconnect/reconnect handling. Guests render `ClientReplica`; they never run a
+second authoritative full simulation.
 
 The network has two layers:
 
@@ -65,7 +68,7 @@ fixed timeout. Exhaustion is a visible discovery failure, not a server fallback.
 
 The host creates these channels for every guest:
 
-| Channel | Ordering | Retransmission | Intended Phase 4 use |
+| Channel | Ordering | Retransmission | Use |
 | --- | --- | --- | --- |
 | `control` | ordered | reliable | lifecycle, handshake, keyframes/recovery |
 | `event` | ordered | reliable | authoritative discrete events |
@@ -97,9 +100,19 @@ Ready state. Host setting changes invalidate every non-host Ready state.
 The roster preview reuses `src/sim/roster.ts`. A start request is eligible only
 when protocol/build identities match, all connected guests are Ready, the
 Phase 2 roster validates, and all four required dedicated channels are open.
-In normal production Phase 3, the Start control remains disabled and no online
-match transition exists. Tests may enable the experimental eligibility action,
-which still does not launch a match.
+The host then sends one canonical map/hash, seed, mode, difficulty, roster,
+team, skin, protocol/build, and start-tick payload. Every guest validates and
+loads it before replying `READY_TO_SIMULATE`; the countdown begins only after
+every connected participant reaches that barrier.
+
+During play the host advances the single fixed-step simulation at 60 Hz,
+receives bounded 60 Hz input commands, and initially emits 20 Hz delta
+snapshots plus periodic reliable keyframes. Missing or timed-out guest input is
+neutralized rather than repeated. Damage, inventory, projectiles, glass,
+storm, eliminations, and results are host decisions. A disconnected guest may
+reclaim the same Actor for 60 seconds with a rotated reconnect token; there is
+no Bot takeover. Host loss permits only bounded ICE recovery before the match
+ends for all guests. There is no host migration.
 
 ## Connectivity limits
 
