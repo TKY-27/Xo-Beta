@@ -23,6 +23,7 @@ import {
   type OnlineRoomMatchContext,
   type SignalingFactory,
 } from '../../../src/net/privateRoom';
+import { getSettings, type SkinId } from '../../../src/core/settings';
 import type { MatchStartPayload } from '../../../src/net/matchStart';
 import type { LobbyViewModel } from '../../../src/ui/onlineLobby';
 
@@ -42,7 +43,33 @@ interface GameplaySnapshot {
   readonly networkTick: number | null;
   readonly aliveCount: number | null;
   readonly localActorId: number | null;
-  readonly actors: readonly { id: number; name: string; alive: boolean; deployed: boolean; health: number; shots: number }[];
+  readonly actors: readonly {
+    id: number;
+    name: string;
+    alive: boolean;
+    deployed: boolean;
+    health: number;
+    shots: number;
+    teamId: number | null;
+    ownership: 'local-human' | 'remote-human' | 'bot';
+    crouched: boolean;
+    inventory: { selected: number; slots: readonly (unknown | null)[]; ammo: Readonly<Record<string, number>> } | null;
+  }[];
+  readonly destructibles: readonly { id: string; destroyed: boolean }[];
+  readonly lobbyPlayers: readonly {
+    participantId: string;
+    displayName: string;
+    skinId: SkinId;
+    teamId: number | null;
+    isHost: boolean;
+    isLocal: boolean;
+    connected: boolean;
+    ready: boolean;
+    directState: string;
+  }[];
+  readonly lobbyMap: LobbyViewModel['map'] | null;
+  readonly lobbyMode: LobbyViewModel['mode'] | null;
+  readonly winner: { readonly kind: 'actor'; readonly actorId: number; readonly displayName: string } | { readonly kind: 'team'; readonly teamId: number } | null;
   readonly events: readonly string[];
   readonly notices: readonly string[];
   readonly inviteLink: string;
@@ -63,13 +90,19 @@ interface GameplayTestApi {
   controller: PrivateRoomController;
   readonly actions: {
     setScreen(screen: GameplaySnapshot['screen']): void;
-    setMode(mode: 'ffa' | 'ffa-bot-fill' | 'teams'): Promise<void>;
+    setMode(mode: 'ffa' | 'ffa-bot-fill' | 'teams' | 'teams-bot-fill' | 'humans-vs-bots'): Promise<void>;
+    setTeam(participantId: string, teamId: number): Promise<void>;
+    setMap(mapId: 'neocity' | 'oldfront' | 'eden' | 'ashara'): Promise<void>;
+    setSkin(skinId: SkinId): Promise<void>;
     setInput(input: Partial<InputCommand> | null): void;
     resetPredictionTelemetry(): void;
     fastForwardTransport(): boolean;
     prepareCombat(): boolean;
     fire(): void;
     breakGlass(): boolean;
+    breakUpperGlass(): boolean;
+    pickupWeapons(): readonly { actorId: number; slot: number }[];
+    finishMatch(winnerActorId?: number): boolean;
     eliminateHost(): boolean;
     endHostMatch(): void;
     returnToMenu(): Promise<void>;
@@ -125,6 +158,15 @@ const state: GameplayTestApi = {
     async setMode(mode) {
       await controller.setMode(mode);
     },
+    async setTeam(participantId, teamId) {
+      await controller.setTeam(participantId, teamId as 0 | 1);
+    },
+    async setMap(mapId) {
+      await controller.setMap(mapId);
+    },
+    async setSkin(skinId) {
+      await controller.setOwnSkin(skinId);
+    },
     setInput(input) {
       currentInput = input ? { ...emptyCommand(), ...input } : emptyCommand();
       coordinator?.setLocalInput(currentInput);
@@ -178,9 +220,47 @@ const state: GameplayTestApi = {
       if (!destructible || !hostMatch) return false;
       return hostMatch.combat.damageDestructible(destructible.id, destructible.hp + 1);
     },
+    breakUpperGlass() {
+      const destructible = hostMatch?.combat.destructibleList().find((candidate) => (
+        candidate.type === 'glass' && candidate.alive && candidate.geo.y > 4.5
+      ));
+      if (!destructible || !hostMatch) return false;
+      return hostMatch.combat.damageDestructible(destructible.id, destructible.hp + 1);
+    },
+    pickupWeapons() {
+      if (!hostMatch) return [];
+      const picked: Array<{ actorId: number; slot: number }> = [];
+      for (const actor of hostMatch.actors.filter((candidate) => hostMatch!.isHumanActor(candidate))) {
+        const position = actor.body.position;
+        const item = hostMatch.loot.spawnWeapon(position.x, position.y, position.z, {
+          kind: 'weapon', weaponId: 'pistol', rarity: 'common', ammoInMag: 12,
+        }, hostMatch.rng);
+        const result = hostMatch.loot.pickup(item, actor, false, actor.preferredItemSlots);
+        if (result === false) continue;
+        const slot = actor.inv.slots.findIndex((candidate) => candidate?.kind === 'weapon' && candidate.weaponId === 'pistol');
+        if (slot >= 0) {
+          actor.inv.select(slot);
+          picked.push({ actorId: actor.id, slot });
+        }
+      }
+      return picked;
+    },
     eliminateHost() {
       const host = hostMatch?.actors.find((actor) => actor.id === 1);
       return hostMatch !== null && host !== undefined ? hostMatch.eliminateActor(host) : false;
+    },
+    finishMatch(winnerActorId = 1) {
+      if (!hostMatch) return false;
+      const winner = hostMatch.actors.find((actor) => actor.id === winnerActorId && actor.alive);
+      if (!winner) return false;
+      const winnerTeam = hostMatch.rosterEntryForActor(winner.id)?.teamId ?? null;
+      let eliminated = false;
+      for (const actor of hostMatch.actors) {
+        if (!actor.alive || actor.id === winner.id) continue;
+        if (winnerTeam !== null && hostMatch.rosterEntryForActor(actor.id)?.teamId === winnerTeam) continue;
+        eliminated = hostMatch.eliminateActor(actor) || eliminated;
+      }
+      return eliminated;
     },
     endHostMatch() {
       coordinator?.endHostMatch();
@@ -194,6 +274,16 @@ const state: GameplayTestApi = {
       predictionWorld = null;
       hostMatch = null;
       await controller.leaveRoom(true);
+      latestLobby = null;
+      latestError = null;
+      startPayload = null;
+      events.length = 0;
+      notices.length = 0;
+      inputPackets = 0;
+      hostDestructibleCount = null;
+      guestDestructibleCount = null;
+      lagTelemetry = null;
+      contextKey = '';
       screen = 'main';
       showScreen('main');
       publish();
@@ -271,11 +361,20 @@ document.getElementById('open-join')?.addEventListener('click', () => {
 });
 document.getElementById('create-room-form')?.addEventListener('submit', (event) => {
   event.preventDefault();
-  void controller.createRoom({ displayName: inputValue('create-display-name'), skinId: 'vanguard' }).catch(recordError);
+  void controller.createRoom({
+    displayName: inputValue('create-display-name'),
+    skinId: 'vanguard',
+    preferredItemSlots: getSettings().preferredItemSlots,
+  }).catch(recordError);
 });
 document.getElementById('join-room-form')?.addEventListener('submit', (event) => {
   event.preventDefault();
-  void controller.joinRoom({ invite: inputValue('join-room-invite'), displayName: inputValue('join-display-name'), skinId: 'vanguard' }).catch(recordError);
+  void controller.joinRoom({
+    invite: inputValue('join-room-invite'),
+    displayName: inputValue('join-display-name'),
+    skinId: 'vanguard',
+    preferredItemSlots: getSettings().preferredItemSlots,
+  }).catch(recordError);
 });
 document.getElementById('btn-lobby-ready')?.addEventListener('click', () => {
   const local = latestLobby?.players.find((player) => player.isLocal);
@@ -285,7 +384,7 @@ document.getElementById('btn-lobby-start')?.addEventListener('click', () => void
 document.getElementById('btn-lobby-leave')?.addEventListener('click', () => void state.actions.returnToMenu().catch(recordError));
 document.getElementById('lobby-mode')?.addEventListener('change', (event) => {
   const value = (event.target as HTMLSelectElement).value;
-  if (value === 'ffa' || value === 'ffa-bot-fill' || value === 'teams') void state.actions.setMode(value).catch(recordError);
+  if (value === 'ffa' || value === 'ffa-bot-fill' || value === 'teams' || value === 'teams-bot-fill' || value === 'humans-vs-bots') void state.actions.setMode(value).catch(recordError);
 });
 document.getElementById('btn-runtime-deploy')?.addEventListener('click', () => {
   state.actions.fastForwardTransport();
@@ -447,6 +546,19 @@ function publish(): void {
     deployed: actor.deployed,
     health: Math.round(actor.health),
     shots: Math.round(actor.stats.shotsFired),
+    teamId: actor.teamId,
+    ownership: actor.ownership.kind === 'bot' ? 'bot' as const : actor.ownership.kind === 'local-human' ? 'local-human' as const : 'remote-human' as const,
+    crouched: actor.crouched,
+    inventory: actor.inventory ? {
+      selected: actor.inventory.selected,
+      slots: actor.inventory.slots.map((item) => item ? { ...item } : null),
+      ammo: {
+        light: actor.inventory.ammo.light,
+        medium: actor.inventory.ammo.medium,
+        shells: actor.inventory.ammo.shells,
+        heavy: actor.inventory.ammo.heavy,
+      },
+    } : null,
   })) ?? [];
   const snapshot: GameplaySnapshot = Object.freeze({
     role: controller.active ? controller.matchContext?.role ?? 'idle' : 'idle',
@@ -458,6 +570,24 @@ function publish(): void {
     aliveCount: view ? view.actors.filter((actor) => actor.alive).length : hostMatch?.aliveCount ?? null,
     localActorId: view?.localActorId ?? hostMatch?.localActorId ?? null,
     actors,
+    destructibles: Object.freeze(view?.destructibles.map((destructible) => ({
+      id: destructible.id,
+      destroyed: destructible.destroyed,
+    })) ?? []),
+    lobbyPlayers: Object.freeze(latestLobby?.players.map((player) => ({
+      participantId: player.participantId,
+      displayName: player.displayName,
+      skinId: player.skinId,
+      teamId: player.teamId,
+      isHost: player.isHost,
+      isLocal: player.isLocal,
+      connected: player.connected,
+      ready: player.ready,
+      directState: player.directState,
+    })) ?? []),
+    lobbyMap: latestLobby?.map ?? null,
+    lobbyMode: latestLobby?.mode ?? null,
+    winner: view?.winner ?? null,
     events: Object.freeze([...events]),
     notices: Object.freeze([...notices]),
     inviteLink: latestLobby?.inviteLink ?? '',
@@ -487,7 +617,7 @@ function publish(): void {
 function makeSnapshot(): GameplaySnapshot {
   return Object.freeze({
     role: 'idle', screen: 'main', coordinatorState: 'none', phase: null, hostTick: 0, networkTick: null,
-    aliveCount: null, localActorId: null, actors: Object.freeze([]), events: Object.freeze([]),
+    aliveCount: null, localActorId: null, actors: Object.freeze([]), destructibles: Object.freeze([]), lobbyPlayers: Object.freeze([]), lobbyMap: null, lobbyMode: null, winner: null, events: Object.freeze([]),
     notices: Object.freeze([]), inviteLink: '', inviteCode: '', startPayload: null,
     error: null, inputPackets: 0, directStates: Object.freeze([]),
     hostDestructibleCount: null, guestDestructibleCount: null, lagTelemetry: null,

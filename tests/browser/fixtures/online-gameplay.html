@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Xo Beta online gameplay browser fixture</title>
+  <link rel="icon" href="data:,">
   <style>
     :root { color-scheme: dark; font: 16px/1.4 system-ui, sans-serif; }
     body { margin: 0; padding: 2rem; background: #111827; color: #e5e7eb; }
@@ -47,7 +48,7 @@
     <p>Invite code: <code id="online-room-code"></code></p>
     <p id="lobby-status" data-state="ok"></p>
     <label>Mode
-      <select id="lobby-mode"><option value="ffa-bot-fill">FFA with Bots</option><option value="ffa">FFA</option><option value="teams">Teams</option></select>
+      <select id="lobby-mode"><option value="ffa-bot-fill">FFA with Bots</option><option value="ffa">FFA</option><option value="teams">Teams</option><option value="teams-bot-fill">Teams with Bots</option><option value="humans-vs-bots">Humans vs Bots</option></select>
     </label>
     <div id="lobby-participants"></div>
     <div class="row"><button id="btn-lobby-ready" type="button">Ready</button><button id="btn-lobby-start" type="button">Start match</button><button id="btn-lobby-leave" type="button">Leave</button></div>

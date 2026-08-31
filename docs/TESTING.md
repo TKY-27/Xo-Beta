@@ -153,5 +153,38 @@ The release receipt must include the measured host and guest p50/p95/p99
 frame, simulation, presentation, encode/decode, snapshot, input, throughput,
 RTT/jitter/loss, prediction, queue, heap, resource, glass, light, and triangle
 values, plus the exact browser, map, mode, human count, and duration. A missing
-measurement is an unmet release gate. The repository does not claim a universal
-frame rate, latency, NAT compatibility, or memory ceiling from static analysis.
+measurement is an unmet full-qualification gate; a reduced public-beta pass
+must record the missing value as not tested. The repository does not claim a
+universal frame rate, latency, NAT compatibility, or memory ceiling from static
+analysis.
+
+## Reduced-scope v0.3.0 beta evidence (2026-08-31)
+
+The public-beta release decision records unavailable or intentionally reduced
+checks separately from passing checks. It does not turn an unavailable physical
+network, browser, or long-session measurement into a pass.
+
+The executed browser evidence is:
+
+| Engine | Result | Scope |
+| --- | --- | --- |
+| Chromium | Passed | Online lobby, two-peer gameplay, headed Phase 1 smoke, water, and the nine-case local online mode matrix |
+| Firefox (Playwright-managed) | Passed for core flow | Online lobby and two-peer gameplay; the water run was not accepted because the QA warning assertion reported 13 WebGL shader warnings |
+| WebKit (Playwright-managed) | Partial | Two-peer gameplay, headed Phase 1 smoke, and water passed; the four-participant lobby run timed out while opening direct data channels |
+| Microsoft Edge | Not tested | No Edge executable was available |
+| Desktop Safari | Not tested | Playwright WebKit is not desktop Safari and no directly automated Safari instance was available |
+
+The headed Chromium local mode matrix passed all nine configurations: two-,
+three-, and four-human FFA without Bots; four humans plus six Bots; 1v1; 2v1;
+2v2; 5v5 with Bot fill; and four humans versus six Bots. Each case exercised
+lobby configuration, skin and map assignment, ready/start, native WebRTC,
+deployment, local control, inventory and preferred pickup placement, crouch
+prediction, upper-floor glass replication, elimination, legal results, and
+return-to-menu disposal. The matrix used same-machine deterministic signaling;
+it is not evidence for external-network compatibility.
+
+The 30-minute CDP memory trace and 30-cycle lifecycle stress run were not
+executed in this reduced validation pass. No numeric long-session memory claim
+is made. Physical LAN, separate-home, hotspot, IPv6, and restrictive-NAT cases
+are also not tested. Direct P2P may fail on those networks because this release
+has no TURN or paid fallback; trying another network may help.

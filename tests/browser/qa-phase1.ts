@@ -5,8 +5,9 @@
  */
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
-import { chromium, type Page } from 'playwright';
+import { type Page } from 'playwright';
 import { createServer } from 'vite';
+import { selectedBrowserType } from './browser-engine';
 
 const MAPS = ['neocity', 'oldfront', 'eden', 'ashara'] as const;
 const SKINS = ['vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova'] as const;
@@ -249,7 +250,7 @@ async function main(): Promise<void> {
   mkdirSync(OUT, { recursive: true });
   const server = await createServer({ server: { port: PORT, strictPort: true }, logLevel: 'silent' });
   await server.listen();
-  const browser = await chromium.launch({ headless: false, args: ['--enable-unsafe-swiftshader'] });
+  const browser = await selectedBrowserType().launch({ headless: false });
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
   await context.addInitScript(() => {
     if (!localStorage.getItem('xo-beta-settings-v1')) {
