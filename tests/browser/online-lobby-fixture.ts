@@ -57,7 +57,6 @@ const state = { controller: null as unknown as PrivateRoomController, latest: nu
 const controller = new PrivateRoomController({
   buildId: params.get('build') ?? 'browser-test-build',
   baseUrl: `${location.origin}${location.pathname}`,
-  experimentalStartEnabled: true,
   signalingFactory: factory,
   gameConnectionFactory: params.has('direct-fail')
     ? (options) => new FailedGameConnection(options)

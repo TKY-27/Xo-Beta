@@ -23,6 +23,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:browser:online": "tsx tests/browser/online-lobby-e2e.ts",
+    "test:browser:online:gameplay": "tsx tests/browser/online-gameplay-e2e.ts",
     "test:watch": "vitest",
     "sim": "tsx tests/sim/run-sim.ts",
     "lint": "eslint .",
