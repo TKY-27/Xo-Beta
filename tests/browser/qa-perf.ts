@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   });
   await page.addInitScript(() => {
     localStorage.setItem('xo-beta-settings-v1', JSON.stringify({
-      quality: 'ultra', shadows: true, shadowQuality: 'high',
+      onboarded: true, quality: 'ultra', shadows: true, shadowQuality: 'high',
       postProcessing: true, bloom: true, aa: 'smaa', resolutionScale: 1,
     }));
   });

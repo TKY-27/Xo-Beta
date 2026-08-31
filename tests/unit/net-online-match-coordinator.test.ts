@@ -83,6 +83,7 @@ function harness(options: {
   readonly hostEventSendFailures?: { value: number };
   readonly throwOnDisconnectPeerId?: string;
   readonly throwGuestEventObserver?: boolean;
+  readonly hostInactivityGraceMs?: number;
 } = {}) {
   const queue: Delivery[] = [];
   const disconnected: string[] = [];
@@ -143,6 +144,7 @@ function harness(options: {
   const events: Array<{ role: 'host' | 'guest'; type: string; predicted: boolean }> = [];
   const ends: string[] = [];
   const notices: Array<{ kind: 'left' | 'rejoined'; displayName: string }> = [];
+  const visibility: boolean[] = [];
   const protocolErrors: Array<{ role: 'host' | 'guest'; message: string }> = [];
   const resolveHostMap = () => loadMap('oldfront').def;
   const resolveGuestMap = () => loadMap(options.mismatchedGuestMap ? 'eden' : 'oldfront').def;
@@ -154,6 +156,7 @@ function harness(options: {
     createHostSession(input) { factoryInput = input; return fakeSession; },
     onAuthoritativeEvent(event, predicted) { events.push({ role: 'host', type: event.type, predicted }); },
     onPresenceNotice(kind, displayName) { notices.push({ kind, displayName }); },
+    hostInactivityGraceMs: options.hostInactivityGraceMs,
     onProtocolError(_peerId, error) { protocolErrors.push({ role: 'host', message: error.message }); },
   });
   const guestCoordinator = new OnlineMatchCoordinator({
@@ -169,6 +172,7 @@ function harness(options: {
       events.push({ role: 'guest', type: event.type, predicted });
     },
     onProtocolError(_peerId, error) { protocolErrors.push({ role: 'guest', message: error.message }); },
+    onHostVisibilityChange(hidden) { visibility.push(hidden); },
     onEnd(reason) { ends.push(reason); },
   });
   const flush = async () => {
@@ -181,7 +185,7 @@ function harness(options: {
   return {
     hostCoordinator, guestCoordinator, flush, queue, disconnected,
     receivedInputs, tacticalPings, events, ends, notices,
-    protocolErrors,
+    protocolErrors, visibility,
     get fixedTicks() { return fixedTicks; },
     get disposed() { return disposed; },
     get keyframeRequests() { return keyframeRequests; },
@@ -700,6 +704,35 @@ describe('OnlineMatchCoordinator', () => {
     expect(value.ends).toEqual(['host-ended']);
   });
 
+  it('warns guests when the host is hidden and terminates after the bounded grace period', async () => {
+    const now = { value: 0 };
+    const value = harness({ now, hostInactivityGraceMs: 1_000 });
+    await startBoth(value);
+    value.queue.length = 0;
+
+    value.hostCoordinator.setHostVisibility(true);
+    await value.flush();
+    expect(value.visibility).toEqual([true]);
+    expect(value.guestCoordinator.state).toBe('active');
+
+    now.value = 999;
+    expect(value.hostCoordinator.enforceHostVisibilityDeadline()).toBe(false);
+    expect(value.hostCoordinator.state).toBe('active');
+    value.hostCoordinator.setHostVisibility(false);
+    await value.flush();
+    expect(value.visibility).toEqual([true, false]);
+
+    value.hostCoordinator.setHostVisibility(true);
+    now.value = 1_998;
+    expect(value.hostCoordinator.enforceHostVisibilityDeadline()).toBe(false);
+    now.value = 1_999;
+    expect(value.hostCoordinator.enforceHostVisibilityDeadline()).toBe(true);
+    await value.flush();
+    expect(value.hostCoordinator.state).toBe('ended');
+    expect(value.guestCoordinator.state).toBe('ended');
+    expect(value.ends).toEqual(['host-inactive']);
+  });
+
   it('defers the authenticated reconnect result until the replacement DataChannel is connected', async () => {
     const value = harness();
     await startBoth(value);
@@ -736,6 +769,34 @@ describe('OnlineMatchCoordinator', () => {
     expect(value.queue).toHaveLength(0);
     value.hostCoordinator.handleConnectionState('guest-peer-2', 'connected');
     expect(value.queue).toHaveLength(0);
+  });
+
+  it('keeps coordinator peer ownership on the disconnected generation until commit', async () => {
+    const value = harness();
+    await startBoth(value);
+    value.hostCoordinator.handleConnectionState('guest-peer', 'failed');
+
+    const transaction = value.hostCoordinator.prepareAcceptedReconnectedParticipant(
+      'guest-participant',
+      'guest-peer-2',
+    );
+    expect(transaction.accepted).toBe(true);
+    const privateState = value.hostCoordinator as unknown as {
+      knownPeerIds: Set<string>;
+      activeGuestPeerIds: Set<string>;
+      connectedGuestPeerIds: Set<string>;
+      guestPeerByParticipant: Map<string, string>;
+      pendingReconnectResults: Map<string, unknown>;
+    };
+    expect([...privateState.knownPeerIds]).toEqual(['guest-peer']);
+    expect(privateState.activeGuestPeerIds).toEqual(new Set());
+    expect(privateState.connectedGuestPeerIds).toEqual(new Set());
+    expect(privateState.guestPeerByParticipant.get('guest-participant')).toBe('guest-peer');
+    expect(privateState.pendingReconnectResults.has('guest-peer-2')).toBe(false);
+
+    transaction.rollback();
+    expect([...privateState.knownPeerIds]).toEqual(['guest-peer']);
+    expect(privateState.guestPeerByParticipant.get('guest-participant')).toBe('guest-peer');
   });
 
   it('keeps a committed reconnect authoritative when stale transport close throws', async () => {

@@ -427,6 +427,10 @@ export interface PeerRateLimiterOptions {
   /** Alternative fixed-window vocabulary for callers/tests. */
   readonly maxMessages?: number;
   readonly windowMs?: number;
+  /** Maximum number of peer identities retained at once. */
+  readonly maxPeers?: number;
+  /** Idle peer state is discarded after this interval. */
+  readonly peerTtlMs?: number;
   readonly now?: () => number;
 }
 
@@ -440,6 +444,8 @@ export class PeerRateLimiter {
   private readonly capacity: number;
   private readonly refillPerMs: number;
   private readonly now: () => number;
+  private readonly maxPeers: number;
+  private readonly peerTtlMs: number;
   private readonly buckets = new Map<string, Bucket>();
 
   constructor(options: PeerRateLimiterOptions = {}) {
@@ -452,6 +458,12 @@ export class PeerRateLimiter {
       || !Number.isFinite(refillPerSecond) || refillPerSecond <= 0) {
       throw new RangeError('Rate limiter capacity and refill must be positive finite numbers');
     }
+    this.maxPeers = options.maxPeers ?? 64;
+    this.peerTtlMs = options.peerTtlMs ?? 5 * 60 * 1000;
+    if (!Number.isSafeInteger(this.maxPeers) || this.maxPeers < 1
+      || !Number.isFinite(this.peerTtlMs) || this.peerTtlMs <= 0) {
+      throw new RangeError('Rate limiter peer bounds must be positive finite values');
+    }
     this.capacity = capacity;
     this.refillPerMs = refillPerSecond / 1000;
     this.now = options.now ?? (() => Date.now());
@@ -459,9 +471,16 @@ export class PeerRateLimiter {
 
   allow(peerId: string, cost = 1): boolean {
     if (typeof peerId !== 'string' || peerId.length === 0
+      || peerId.length > 128
       || !Number.isFinite(cost) || cost <= 0 || cost > this.capacity) return false;
     const now = this.now();
-    const previous = this.buckets.get(peerId) ?? { tokens: this.capacity, at: now };
+    if (!Number.isFinite(now)) return false;
+    this.prune(now);
+    let previous = this.buckets.get(peerId);
+    if (!previous) {
+      if (this.buckets.size >= this.maxPeers) return false;
+      previous = { tokens: this.capacity, at: now };
+    }
     const elapsed = Math.max(0, now - previous.at);
     const tokens = Math.min(this.capacity, previous.tokens + elapsed * this.refillPerMs);
     if (tokens < cost) {
@@ -486,6 +505,14 @@ export class PeerRateLimiter {
     if (peerId === undefined) this.buckets.clear();
     else this.buckets.delete(peerId);
   }
+
+  get trackedPeers(): number { return this.buckets.size; }
+
+  private prune(now: number): void {
+    for (const [peerId, bucket] of this.buckets) {
+      if (now - bucket.at >= this.peerTtlMs) this.buckets.delete(peerId);
+    }
+  }
 }
 
 export const RateLimiter = PeerRateLimiter;
@@ -493,27 +520,52 @@ export const RateLimiter = PeerRateLimiter;
 interface NonceSession {
   readonly protocolSession: string;
   readonly nonces: Set<string>;
+  lastSeenAt: number;
+}
+
+export interface ReplayNonceGuardOptions {
+  readonly maxPeers?: number;
+  readonly peerTtlMs?: number;
+  readonly now?: () => number;
 }
 
 /** Reject duplicate nonces and messages from a superseded protocol session. */
 export class ReplayNonceGuard {
   private readonly sessions = new Map<string, NonceSession>();
   private readonly maxNonces: number;
+  private readonly maxPeers: number;
+  private readonly peerTtlMs: number;
+  private readonly now: () => number;
 
-  constructor(maxNonces = 2048) {
+  constructor(maxNonces = 2048, options: ReplayNonceGuardOptions = {}) {
     if (!Number.isSafeInteger(maxNonces) || maxNonces < 1) {
       throw new RangeError('maxNonces must be a positive safe integer');
     }
     this.maxNonces = maxNonces;
+    this.maxPeers = options.maxPeers ?? 64;
+    this.peerTtlMs = options.peerTtlMs ?? 5 * 60 * 1000;
+    this.now = options.now ?? (() => Date.now());
+    if (!Number.isSafeInteger(this.maxPeers) || this.maxPeers < 1
+      || !Number.isFinite(this.peerTtlMs) || this.peerTtlMs <= 0) {
+      throw new RangeError('Replay peer bounds must be positive finite values');
+    }
   }
 
   accept(peerId: string, protocolSession: string, nonce: string): boolean {
+    if (typeof peerId !== 'string' || peerId.length === 0 || peerId.length > 128
+      || typeof protocolSession !== 'string' || protocolSession.length === 0 || protocolSession.length > 128
+      || typeof nonce !== 'string' || nonce.length === 0 || nonce.length > 256) return false;
+    const now = this.now();
+    if (!Number.isFinite(now)) return false;
+    this.prune(now);
     const current = this.sessions.get(peerId);
     if (current && current.protocolSession !== protocolSession) return false;
-    const session = current ?? { protocolSession, nonces: new Set<string>() };
+    if (!current && this.sessions.size >= this.maxPeers) return false;
+    const session = current ?? { protocolSession, nonces: new Set<string>(), lastSeenAt: now };
     if (session.nonces.has(nonce)) return false;
     if (session.nonces.size >= this.maxNonces) return false;
     session.nonces.add(nonce);
+    session.lastSeenAt = now;
     this.sessions.set(peerId, session);
     return true;
   }
@@ -535,6 +587,14 @@ export class ReplayNonceGuard {
   reset(peerId?: string): void {
     if (peerId === undefined) this.sessions.clear();
     else this.sessions.delete(peerId);
+  }
+
+  get trackedPeers(): number { return this.sessions.size; }
+
+  private prune(now: number): void {
+    for (const [peerId, session] of this.sessions) {
+      if (now - session.lastSeenAt >= this.peerTtlMs) this.sessions.delete(peerId);
+    }
   }
 }
 

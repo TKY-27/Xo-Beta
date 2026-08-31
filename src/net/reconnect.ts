@@ -223,6 +223,17 @@ export interface ReclaimGrant {
 }
 
 /**
+ * A host admission can disclose the replacement token only after every other
+ * authoritative state transition is ready. The transaction keeps the old
+ * credential restorable until the signed acceptance has been delivered.
+ */
+export interface ReclaimTransaction {
+  readonly grant: ReclaimGrant;
+  commit(): void;
+  rollback(): void;
+}
+
+/**
  * Issues random, short-lived, single-use reconnect tokens. Reclaim always
  * rotates the credential and (by default) the protocol session, making an old
  * token and an old session stale even if a peer replays them later.
@@ -301,6 +312,28 @@ export class ReconnectTokenManager {
     return this.reclaim(token, expected, options);
   }
 
+  /** Rotate a credential with an explicit rollback point for admission. */
+  prepareReclaim(
+    token: string,
+    expected: ReconnectBinding,
+    options: ReclaimOptions = {},
+  ): ReclaimTransaction {
+    const checkedToken = validateToken(token);
+    const old = this.getRecord(checkedToken);
+    if (!old) throw new ReconnectError('unknown-reconnect', 'Reconnect token is unknown');
+    const grant = this.reclaimGrant(checkedToken, expected, options);
+    let settled = false;
+    return Object.freeze({
+      grant,
+      commit: () => { settled = true; },
+      rollback: () => {
+        if (settled) return;
+        settled = true;
+        this.restoreReclaim(old, grant);
+      },
+    });
+  }
+
   reclaimGrant(token: string, expected: ReconnectBinding, options: ReclaimOptions = {}): ReclaimGrant {
     const checkedToken = validateToken(token);
     const checkedExpected = validateBinding(expected);
@@ -359,6 +392,25 @@ export class ReconnectTokenManager {
   clear(): void {
     for (const token of this.issuedTokens) this.storage.delete(this.keyFor(token));
     this.issuedTokens.clear();
+  }
+
+  private restoreReclaim(old: ReconnectRecord, replacement: ReclaimGrant): void {
+    try {
+      const currentReplacement = this.storage.get(this.keyFor(replacement.token));
+      if (currentReplacement !== undefined && currentReplacement !== null) {
+        this.storage.delete(this.keyFor(replacement.token));
+      }
+      this.issuedTokens.delete(replacement.token);
+      const currentOld = this.storage.get(this.keyFor(old.token));
+      if (currentOld !== undefined && currentOld !== null) {
+        throw new ReconnectError('storage-unavailable', 'Original reconnect credential was replaced concurrently');
+      }
+      this.writeRecord(old);
+      this.issuedTokens.add(old.token);
+    } catch (error) {
+      if (error instanceof ReconnectError) throw error;
+      throw new ReconnectError('storage-unavailable', 'Could not restore reconnect credential');
+    }
   }
 
   private currentTime(): number {

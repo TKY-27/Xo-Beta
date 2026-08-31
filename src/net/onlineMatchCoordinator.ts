@@ -13,6 +13,7 @@ import type {
 } from './gameConnection';
 import {
   HostAuthoritativeMatchSession,
+  type HostReconnectTransaction,
   type AuthoritativeMatchEvent,
   type HostMatchTransport,
   type MatchPeerBinding,
@@ -53,6 +54,8 @@ export const ONLINE_FIXED_HZ = 60;
 export const ONLINE_FIXED_DT = 1 / ONLINE_FIXED_HZ;
 export const ONLINE_START_COUNTDOWN_TICKS = ONLINE_FIXED_HZ * 3;
 export const HOST_DISCONNECT_GRACE_MS = 5_000;
+/** A hidden host tab is unsafe for an authoritative match after this bound. */
+export const HOST_INACTIVITY_GRACE_MS = 10_000;
 export const MAX_COORDINATOR_VIOLATIONS = 8;
 export const MAX_PENDING_RECONNECT_EVENTS = 64;
 export const MAX_PENDING_CONTROL_PACKETS = 64;
@@ -72,12 +75,24 @@ export type OnlineMatchCoordinatorState =
   | 'failed'
   | 'disposed';
 
-export type OnlineMatchEndReason = 'cancelled' | 'host-disconnected' | 'host-ended' | 'protocol-error';
+export type OnlineMatchEndReason =
+  | 'cancelled'
+  | 'host-disconnected'
+  | 'host-ended'
+  | 'host-inactive'
+  | 'protocol-error';
 
 export interface OnlineMatchRoomPort {
   sendGameMessage(peerId: string, channel: GameChannelLabel, data: GamePayload, snapshotSequence?: number): boolean;
   sendGameInput(data: GamePayload): boolean;
   disconnectGamePeer(peerId: string): boolean;
+}
+
+export interface PreparedParticipantReconnect {
+  readonly accepted: boolean;
+  readonly alive: boolean;
+  commit(): void;
+  rollback(): void;
 }
 
 export interface HostSessionFactoryInput {
@@ -113,12 +128,14 @@ export interface OnlineMatchCoordinatorOptions<S extends PredictionState = Predi
   readonly onLocalInputSubmitted?: (inputSeq: number, command: Readonly<InputCommand>) => boolean;
   readonly nowMs?: () => number;
   readonly hostDisconnectGraceMs?: number;
+  readonly hostInactivityGraceMs?: number;
   readonly onStateChange?: (state: OnlineMatchCoordinatorState) => void;
   readonly onBarrierStatus?: (status: StartBarrierStatus) => void;
   readonly onRuntimeReady?: (role: 'host' | 'guest', payload: MatchStartPayload) => void | Promise<void>;
   readonly onActivated?: (role: 'host' | 'guest', payload: MatchStartPayload) => void | Promise<void>;
   readonly onAuthoritativeEvent?: (event: AuthoritativeMatchEvent, matchedLocalPrediction: boolean) => void;
   readonly onPresenceNotice?: (kind: 'left' | 'rejoined', displayName: string) => void;
+  readonly onHostVisibilityChange?: (hidden: boolean) => void;
   readonly onReconnectResult?: (accepted: boolean, alive: boolean) => void;
   readonly onEnd?: (reason: OnlineMatchEndReason) => void | Promise<void>;
   readonly onProtocolError?: (peerId: string, error: Error) => void;
@@ -160,6 +177,7 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
   private readonly room: OnlineMatchRoomPort;
   private readonly options: OnlineMatchCoordinatorOptions<S>;
   private readonly nowMs: () => number;
+  private readonly hostInactivityGraceMs: number;
   private readonly activeGuestPeerIds = new Set<string>();
   private readonly connectedGuestPeerIds = new Set<string>();
   private readonly guestPeerByParticipant = new Map<string, string>();
@@ -207,6 +225,7 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
   private guestRttMs = 0;
   private currentGuestInput: InputCommand = emptyCommand();
   private hostDisconnectDeadline: number | null = null;
+  private hostHiddenSinceMs: number | null = null;
   private keyframeRequested = false;
   private awaitingRecoveryKeyframe = false;
 
@@ -217,6 +236,10 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
     this.role = options.context.role;
     this.sessionId = sessionBindingId(options.context.matchSessionBinding);
     this.nowMs = options.nowMs ?? (() => performance.now());
+    this.hostInactivityGraceMs = options.hostInactivityGraceMs ?? HOST_INACTIVITY_GRACE_MS;
+    if (!Number.isFinite(this.hostInactivityGraceMs) || this.hostInactivityGraceMs < 500 || this.hostInactivityGraceMs > 60_000) {
+      throw new Error('Invalid host inactivity grace period');
+    }
     for (const participant of options.context.snapshot.participants) {
       if (participant.participantId !== options.context.localParticipantId) {
         this.knownPeerIds.add(participant.peerId);
@@ -394,6 +417,7 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
       this.fixedUpdate();
     }
     this.checkHostDisconnectDeadline();
+    this.enforceHostVisibilityDeadline();
   }
 
   /** One exact online clock/simulation tick; useful for deterministic harnesses. */
@@ -419,6 +443,7 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
       } else this.sendGuestInputTick();
     }
     this.checkHostDisconnectDeadline();
+    this.enforceHostVisibilityDeadline();
   }
 
   /** Main samples local controls; the coordinator sends them at exactly 60 Hz. */
@@ -468,44 +493,97 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
 
   /** Commit the Actor rebind after token rotation and before lobby admission. */
   acceptReconnectedParticipant(participantId: string, newPeerId: string): { accepted: boolean; alive: boolean } {
+    const transaction = this.prepareAcceptedReconnectedParticipant(participantId, newPeerId);
+    if (transaction.accepted) transaction.commit();
+    return Object.freeze({ accepted: transaction.accepted, alive: transaction.alive });
+  }
+
+  /**
+   * Prepare the host runtime rebind without mutating coordinator state. The
+   * room commits this transaction only after the signed admission response has
+   * been handed to the transport; otherwise a fixed update could serialize a
+   * replacement peer or Actor into a snapshot that is already in flight.
+   */
+  prepareAcceptedReconnectedParticipant(
+    participantId: string,
+    newPeerId: string,
+  ): PreparedParticipantReconnect {
     // A participant that reloads before the canonical start barrier completes
     // must not be promoted into a partially-started runtime. The host keeps
     // waiting and may cancel explicitly; live matches use the full reclaim
     // path below for the complete 60-second window.
     if (!this.canAcceptReconnectedParticipant(participantId, newPeerId)) {
-      return Object.freeze({ accepted: false as const, alive: false as const });
+      return rejectedParticipantReconnect();
     }
     const oldPeerId = this.guestPeerByParticipant.get(participantId);
     const actorId = this.actorIdByParticipant.get(participantId);
     if (!oldPeerId || actorId === undefined || !this.payloadValue) {
-      return Object.freeze({ accepted: false as const, alive: false as const });
+      return rejectedParticipantReconnect();
     }
     const hostSession = this.hostSessionValue;
-    if (!hostSession) return Object.freeze({ accepted: false, alive: false });
-    const result = hostSession.reconnectParticipant(participantId, newPeerId);
-    if (result.accepted) {
-      this.migratePeerRetryState(oldPeerId, newPeerId);
-      this.knownPeerIds.delete(oldPeerId);
-      this.knownPeerIds.add(newPeerId);
-      this.activeGuestPeerIds.delete(oldPeerId);
-      this.connectedGuestPeerIds.delete(oldPeerId);
-      this.guestPeerByParticipant.set(participantId, newPeerId);
-      this.inputValidators.delete(oldPeerId);
-      this.inputValidators.delete(newPeerId);
-      this.reliableInboundSequences.delete(`${oldPeerId}:control`);
-      this.reliableInboundSequences.delete(`${oldPeerId}:event`);
-      this.violations.delete(oldPeerId);
-      this.pendingReconnectResults.set(newPeerId, Object.freeze({
-        participantId, actorId, accepted: true, alive: result.alive,
-      }));
-      try {
-        this.room.disconnectGamePeer(oldPeerId);
-      } catch {
-        // The authoritative rebind is already committed. A stale transport
-        // close adapter cannot unwind Actor/lobby admission state.
-      }
+    if (!hostSession) return rejectedParticipantReconnect();
+    // Keep the coordinator compatible with narrow host-session doubles used by
+    // older integrations. Production HostAuthoritativeMatchSession exposes a
+    // side-effect-free preparation method; a legacy implementation has already
+    // committed its rebind and therefore cannot participate in rollback.
+    let hostTransaction: HostReconnectTransaction;
+    if (typeof hostSession.prepareReconnectParticipant !== 'function') {
+      const legacy = hostSession.reconnectParticipant(participantId, newPeerId);
+      if (!legacy.accepted) return rejectedParticipantReconnect();
+      hostTransaction = {
+        accepted: true,
+        alive: legacy.alive,
+        commit: () => undefined,
+        rollback: () => undefined,
+      };
+    } else {
+      hostTransaction = hostSession.prepareReconnectParticipant(participantId, newPeerId);
     }
-    return result;
+    if (!hostTransaction.accepted) return rejectedParticipantReconnect();
+
+    let settled = false;
+    return Object.freeze({
+      accepted: true,
+      get alive(): boolean {
+        return hostTransaction.alive;
+      },
+      commit: () => {
+        if (settled) return;
+        settled = true;
+        // Commit the authoritative session first. Its live Actor/presence
+        // state may have changed during the asynchronous admission send.
+        hostTransaction.commit();
+        this.migratePeerRetryState(oldPeerId, newPeerId);
+        this.knownPeerIds.delete(oldPeerId);
+        this.knownPeerIds.add(newPeerId);
+        this.activeGuestPeerIds.delete(oldPeerId);
+        this.connectedGuestPeerIds.delete(oldPeerId);
+        this.guestPeerByParticipant.set(participantId, newPeerId);
+        this.inputValidators.delete(oldPeerId);
+        this.inputValidators.delete(newPeerId);
+        this.reliableInboundSequences.delete(`${oldPeerId}:control`);
+        this.reliableInboundSequences.delete(`${oldPeerId}:event`);
+        this.violations.delete(oldPeerId);
+        this.pendingReconnectResults.set(newPeerId, Object.freeze({
+          participantId, actorId, accepted: true, alive: hostTransaction.alive,
+        }));
+        try {
+          this.room.disconnectGamePeer(oldPeerId);
+        } catch {
+          // The authoritative rebind is already committed. A stale transport
+          // close adapter cannot unwind Actor/lobby admission state.
+        }
+      },
+      rollback: () => {
+        if (settled) return;
+        settled = true;
+        // Preparation does not touch coordinator maps or transport state. The
+        // host transaction only owns a newly allocated controller until the
+        // admission is committed, so rollback is intentionally side-effect
+        // free apart from releasing that staged controller.
+        hostTransaction.rollback();
+      },
+    });
   }
 
   cancelStart(): void {
@@ -515,10 +593,52 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
     this.terminate('cancelled');
   }
 
-  endHostMatch(): void {
+  /** Broadcast the host-tab safety state over authenticated control. */
+  setHostVisibility(hidden: boolean): void {
+    if (this.role !== 'host' || this.stateValue === 'disposed' || this.stateValue === 'ended' || this.stateValue === 'failed') return;
+    if (hidden) {
+      if (this.hostHiddenSinceMs !== null) return;
+      const now = this.nowMs();
+      if (!Number.isFinite(now)) {
+        this.terminate('protocol-error');
+        return;
+      }
+      this.hostHiddenSinceMs = now;
+      this.options.onHostVisibilityChange?.(true);
+      for (const peerId of this.activeGuestPeerIds) {
+        this.sendControl(peerId, 'host-visibility', { hidden: true }, this.networkTick);
+      }
+      return;
+    }
+    if (this.hostHiddenSinceMs === null) return;
+    this.hostHiddenSinceMs = null;
+    this.options.onHostVisibilityChange?.(false);
+    for (const peerId of this.activeGuestPeerIds) {
+      this.sendControl(peerId, 'host-visibility', { hidden: false }, this.networkTick);
+    }
+  }
+
+  /** Enforce the bounded hidden-host policy even if the render loop is sparse. */
+  enforceHostVisibilityDeadline(): boolean {
+    if (this.role !== 'host' || this.hostHiddenSinceMs === null) return false;
+    const now = this.nowMs();
+    if (!Number.isFinite(now)) {
+      this.terminate('protocol-error');
+      return true;
+    }
+    const elapsed = now - this.hostHiddenSinceMs;
+    if (elapsed < this.hostInactivityGraceMs) return false;
+    for (const peerId of this.activeGuestPeerIds) {
+      this.sendControl(peerId, 'host-disconnected', { reason: 'host-inactive' }, this.networkTick);
+    }
+    this.terminate('host-inactive');
+    return true;
+  }
+
+  endHostMatch(reason: 'host-ended' | 'host-inactive' = 'host-ended'): void {
     if (this.role !== 'host') return;
-    for (const peerId of this.activeGuestPeerIds) this.sendControl(peerId, 'host-disconnected', { reason: 'host-ended' }, this.networkTick);
-    this.terminate('host-ended');
+    for (const peerId of this.activeGuestPeerIds) this.sendControl(peerId, 'host-disconnected', { reason }, this.networkTick);
+    this.terminate(reason);
   }
 
   dispose(): void {
@@ -769,11 +889,23 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
       }
       return true;
     }
+    if (kind === 'host-visibility') {
+      const value = record(payload);
+      exactControlKeys(value, ['hidden']);
+      const hidden = booleanValue(value.hidden, 'host visibility');
+      try {
+        this.options.onHostVisibilityChange?.(hidden);
+      } catch {
+        // Presentation warnings cannot turn authenticated host state into a
+        // protocol failure.
+      }
+      return true;
+    }
     if (kind === 'host-disconnected') {
       const value = record(payload);
       exactControlKeys(value, ['reason']);
       const reason = value.reason;
-      if (reason !== 'cancelled' && reason !== 'host-ended') {
+      if (reason !== 'cancelled' && reason !== 'host-ended' && reason !== 'host-inactive') {
         throw new Error('Invalid host-disconnected reason');
       }
       this.terminate(reason);
@@ -1262,6 +1394,7 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
     this.guestRttMs = 0;
     this.currentGuestInput = emptyCommand();
     this.hostDisconnectDeadline = null;
+    this.hostHiddenSinceMs = null;
     this.keyframeRequested = false;
     this.awaitingRecoveryKeyframe = false;
     this.options.onDisposeRuntime?.();
@@ -1303,6 +1436,15 @@ function buildPeerBindings(payload: MatchStartPayload, context: OnlineRoomMatchC
     }));
   }
   return Object.freeze(bindings);
+}
+
+function rejectedParticipantReconnect(): PreparedParticipantReconnect {
+  return Object.freeze({
+    accepted: false,
+    alive: false,
+    commit: () => undefined,
+    rollback: () => undefined,
+  });
 }
 
 function localActorIdForPayload(payload: MatchStartPayload, context: OnlineRoomMatchContext): number {

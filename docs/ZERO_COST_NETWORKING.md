@@ -28,6 +28,11 @@ Production must not contain or construct:
 - provider API/billing keys
 - automatic fallback from direct P2P to a billable service
 
+Public Nostr relays and STUN services are untrusted third-party infrastructure,
+not an Xo Beta server authority. The static Cloudflare Workers Static Assets
+deployment serves files only; it has no multiplayer Worker route, Pages
+Function, database, or game authority.
+
 `iceTransportPolicy` remains `"all"` because `"relay"` would require TURN.
 The configured `iceServers` array contains STUN entries only. Candidate parsing
 also rejects `typ relay`, so a future dependency/default change cannot silently
@@ -68,3 +73,22 @@ restart. Exhaustion shows a localized direct-P2P limitation message and ends
 the attempt. There is no endless retry and no paid recovery path.
 Nostr relay socket reconnection is separately set to manual and capped at three
 attempts; it cannot silently fall back to another transport or service.
+
+## Machine-readable receipt
+
+After a production build, run:
+
+```bash
+npm run audit:zero-cost
+```
+
+The audit scans source, production configuration, lockfile metadata, `dist/`,
+and any generated `.wrangler/dry-run/` output. It writes
+`dist/zero-cost-networking-audit.json` with the pass/fail result, UTC audit
+timestamp, tested commit SHA, direct-WebRTC-only architecture, public Nostr
+signaling, credential-free STUN configuration, and explicit false values for
+TURN, SFU, dedicated server, multiplayer database/Worker/Pages Function, and
+billable fallback. It contains no secrets, room tokens, peer addresses, or
+SDP. The build and CI audit fail closed on a TURN URI, relay credential,
+billable provider credential, hidden multiplayer endpoint, or non-static
+deployment binding.

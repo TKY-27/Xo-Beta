@@ -20,7 +20,8 @@ The network has two layers:
 
 The topology is therefore host↔guest 1, host↔guest 2, and host↔guest 3. There
 is no dedicated game server, server-side room database, public matchmaking
-list, TURN service, SFU, Worker, or Pages Function.
+list, TURN service, SFU, multiplayer Worker, or multiplayer Pages Function.
+The existing static-assets deployment serves the application bundle only.
 
 ## Signaling dependency
 
@@ -81,6 +82,13 @@ unbounded application queue. Congested snapshots are dropped rather than
 delivered after they are obsolete. The input path is also lossy by design;
 reliable control/event sends fail closed when their buffer ceiling is reached.
 
+Admission and reconnect are transactional. A new participant or replacement
+peer is not committed to the lobby, Actor binding, reconnect-token generation,
+or transport retirement until the authenticated acceptance response has been
+handed to the transport. If that delivery fails, all staged state is rolled
+back and the prior reconnect credential remains usable. A guest never treats a
+partially received acceptance response as an active match.
+
 Offer, answer, and non-relay ICE candidates travel through a bounded Trystero
 action. A relay ICE candidate is rejected at receipt and a selected relay
 candidate pair is treated as a connection failure. Connection establishment has
@@ -113,6 +121,14 @@ storm, eliminations, and results are host decisions. A disconnected guest may
 reclaim the same Actor for 60 seconds with a rotated reconnect token; there is
 no Bot takeover. Host loss permits only bounded ICE recovery before the match
 ends for all guests. There is no host migration.
+
+When the host tab becomes hidden, the host broadcasts an authenticated control
+warning to guests. If the tab remains hidden for 10 seconds, the host ends the
+match with a host-inactive reason and disposes all match and transport
+resources. This is a browser safety bound, not a claim that JavaScript timers
+run on schedule while a browser is suspended. No DedicatedWorker is used: the
+release gate does not introduce a worker rewrite without matched measurements
+showing that it is required.
 
 ## Connectivity limits
 

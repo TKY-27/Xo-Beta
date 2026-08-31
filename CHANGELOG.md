@@ -4,6 +4,24 @@ All notable changes to Xo Beta are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com); versioning is
 [SemVer](https://semver.org) — until 1.0.0, minor versions may break behavior.
 
+## [Unreleased] — next version 0.3.0 private P2P release candidate
+
+### Added
+- Friends-only private direct-P2P rooms for up to four humans, with Bot-filled
+  ten-combatant matches, team battle, humans-versus-Bots, no friendly fire,
+  tactical ping, and bounded guest reconnect.
+- Host-authority documentation, fail-closed protocol fuzz coverage, bounded
+  admission/reconnect transactions, per-peer replay/rate-state expiry, and the
+  machine-readable zero-cost networking audit receipt.
+- A localized hidden-host warning and bounded host-inactivity match shutdown.
+
+### Known limitations
+- There is no TURN or paid fallback; direct WebRTC connection can fail.
+- Rooms exist only while the host is present. A host disconnect ends the match,
+  and an untrusted host can theoretically cheat in the friends-only model.
+- Browser, NAT, IPv6, long-session, and production deployment evidence remains
+  environment-specific and must be recorded by the release gate.
+
 ## [0.2.0] — 2026-08 · AAA finalization & immersion pass
 
 ### Added

@@ -290,6 +290,68 @@ describe('HostAuthoritativeMatchSession', () => {
     expect(notices).toEqual(['left', 'rejoined']);
   });
 
+  it('does not expose a prepared reconnect to the fixed simulation before commit', () => {
+    const now = { value: 0 };
+    const { match, session } = setup(now);
+    expect(session.markDisconnected('guest-peer')).toBe(true);
+    now.value = 59_000;
+    const transaction = session.prepareReconnectParticipant('guest-participant', 'guest-peer-2');
+
+    expect(transaction.accepted).toBe(true);
+    expect(match.rosterEntryForActor(2)).toMatchObject({
+      connectionState: 'disconnected',
+      ownership: { kind: 'remote-human', peerId: 'guest-peer' },
+    });
+    expect(session.receiveInput('guest-peer-2', {
+      receivedHostTick: 1,
+      frames: [],
+    }).accepted).toBe(false);
+
+    session.fixedUpdate(1 / 60);
+    expect(match.rosterEntryForActor(2)?.ownership).toEqual({ kind: 'remote-human', peerId: 'guest-peer' });
+    transaction.rollback();
+    expect(match.rosterEntryForActor(2)).toMatchObject({
+      connectionState: 'disconnected',
+      ownership: { kind: 'remote-human', peerId: 'guest-peer' },
+    });
+  });
+
+  it('re-reads the presence grace state when reconnect commits after a fixed update', () => {
+    const now = { value: 0 };
+    const { match, session, notices, authoritativeEvents } = setup(now);
+    expect(session.markDisconnected('guest-peer')).toBe(true);
+    const transaction = session.prepareReconnectParticipant('guest-participant', 'guest-peer-2');
+
+    now.value = 150;
+    session.fixedUpdate(1 / 60);
+    expect(authoritativeEvents.map((event) => event.type)).toContain('playerLeave');
+
+    transaction.commit();
+
+    expect(transaction.alive).toBe(true);
+    expect(match.rosterEntryForActor(2)?.connectionState).toBe('connected');
+    expect(authoritativeEvents.map((event) => event.type)).toEqual(['playerLeave', 'playerRejoin']);
+    expect(notices).toEqual(['left', 'rejoined']);
+  });
+
+  it('reports an Actor eliminated during the reconnect admission as not alive', () => {
+    const now = { value: 0 };
+    const { match, session, notices, authoritativeEvents } = setup(now);
+    expect(session.markDisconnected('guest-peer')).toBe(true);
+    const transaction = session.prepareReconnectParticipant('guest-participant', 'guest-peer-2');
+    const guest = match.actors.find((actor) => actor.id === 2)!;
+    expect(match.eliminateActor(guest)).toBe(true);
+    session.fixedUpdate(1 / 60);
+
+    transaction.commit();
+
+    expect(transaction.alive).toBe(false);
+    expect(guest.alive).toBe(false);
+    expect(match.rosterEntryForActor(2)?.connectionState).toBe('connected');
+    expect(authoritativeEvents.map((event) => event.type)).not.toContain('playerRejoin');
+    expect(notices).toEqual([]);
+  });
+
   it('does not emit an unpaired rejoin notice inside the leave grace period', () => {
     const now = { value: 0 };
     const { session, notices, authoritativeEvents } = setup(now);

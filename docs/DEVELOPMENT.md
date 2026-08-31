@@ -107,6 +107,7 @@ npm run test
 npm run audit:assets
 npm run audit:secrets
 npm run audit:licenses
+npm run audit:zero-cost
 npm audit --audit-level=high
 npm run build
 npm run cloudflare:dry-run  # deployment/configuration changes only
