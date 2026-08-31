@@ -155,7 +155,6 @@ const QUALITY_CONFIGS: Readonly<Record<WaterQuality, WaterQualityConfig>> = {
   },
 };
 
-const TWO_PI = Math.PI * 2;
 const MAX_RESOLUTION = 512;
 const MAX_SEED = 0x7fffffff;
 
@@ -281,81 +280,56 @@ function hash(seed: number, x: number, z: number, band: number): number {
   return (value >>> 0) / 0x100000000;
 }
 
-interface WaveBasis {
-  readonly kx: number;
-  readonly kz: number;
-  readonly phase: number;
-  readonly weight: number;
-  readonly direction: number;
+function fade(value: number): number {
+  return value * value * value * (value * (value * 6 - 15) + 10);
 }
 
-function buildBases(seed: number, bands: number): WaveBasis[] {
-  // Integer lattice directions keep every basis exactly periodic on both
-  // texture axes. Continuous random angles leave a phase discontinuity at
-  // the RepeatWrapping seam even when the texture sampler itself wraps.
-  const directions = [
-    [1, 0], [1, 1], [0, 1], [-1, 1],
-    [-1, 0], [-1, -1], [0, -1], [1, -1],
-    [2, 1], [1, 2], [-1, 2], [-2, 1],
-    [-2, -1], [-1, -2], [1, -2], [2, -1],
-  ] as const;
-  const basis: WaveBasis[] = [];
-  for (let band = 0; band < bands; band += 1) {
-    const frequency = 1 << band;
-    // Several independently phased lattice directions per spatial band turn
-    // the generated texture into a wave field instead of exposing one obvious
-    // sinusoid per octave. Broad/medium scales receive one extra low-weight
-    // component because repetition is most visible at grazing distance.
-    const componentCount = band < 2 ? 3 : 2;
-    let previousDirectionIndex = -1;
-    for (let component = 0; component < componentCount; component += 1) {
-      let directionIndex = Math.floor(
-        hash(seed, band * 17 + component, 3 + component * 11, band + component) * directions.length,
-      ) % directions.length;
-      if (directionIndex === previousDirectionIndex) {
-        directionIndex = (directionIndex + 5 + band) % directions.length;
-      }
-      previousDirectionIndex = directionIndex;
-      const [directionX, directionZ] = directions[directionIndex]!;
-      const phase = hash(seed, band * 29 + component, 11 + component * 7, component + 1) * TWO_PI;
-      const direction = Math.atan2(directionZ, directionX);
-      const componentWeight = component === 0 ? 1 : component === 1 ? 0.58 : 0.34;
-      basis.push({
-        kx: directionX * frequency,
-        kz: directionZ * frequency,
-        phase,
-        weight: componentWeight / (1 + band * 0.72),
-        direction,
-      });
-    }
-  }
-  return basis;
+function lerp(a: number, b: number, amount: number): number {
+  return a + (b - a) * amount;
 }
 
-function basisSample(u: number, v: number, bases: readonly WaveBasis[]): WaveSample {
+function wrapLattice(value: number, period: number): number {
+  const wrapped = value % period;
+  return wrapped < 0 ? wrapped + period : wrapped;
+}
+
+/** Smooth, seeded value noise whose value and slope wrap on both axes. */
+function periodicValueNoise(seed: number, u: number, v: number, cells: number, band: number): number {
+  const x = u * cells;
+  const z = v * cells;
+  const x0 = Math.floor(x);
+  const z0 = Math.floor(z);
+  const x1 = x0 + 1;
+  const z1 = z0 + 1;
+  const tx = fade(x - x0);
+  const tz = fade(z - z0);
+  const sample = (sampleX: number, sampleZ: number): number => (
+    hash(seed, wrapLattice(sampleX, cells), wrapLattice(sampleZ, cells), band) * 2 - 1
+  );
+  const top = lerp(sample(x0, z0), sample(x1, z0), tx);
+  const bottom = lerp(sample(x0, z1), sample(x1, z1), tx);
+  return lerp(top, bottom, tz);
+}
+
+function noiseHeight(seed: number, u: number, v: number, bands: number): number {
   let height = 0;
-  let gradientX = 0;
-  let gradientZ = 0;
-  let horizontalDisplacement = 0;
   let totalWeight = 0;
-  for (const basis of bases) {
-    const argument = basis.kx * u + basis.kz * v + basis.phase;
-    const wave = Math.sin(argument);
-    const weight = basis.weight;
-    height += wave * weight;
-    gradientX += Math.cos(argument) * basis.kx * weight;
-    gradientZ += Math.cos(argument) * basis.kz * weight;
-    horizontalDisplacement += wave * Math.cos(basis.direction) * weight;
+  for (let band = 0; band < bands; band += 1) {
+    const cells = 2 << band;
+    const weight = 1 / (1 + band * 0.82);
+    const offsetU = hash(seed, band * 13 + 5, 31, band + 7);
+    const offsetV = hash(seed, 47, band * 19 + 3, band + 11);
+    const swapped = (band & 1) === 1;
+    const sampleU = (swapped ? v : u) + offsetU;
+    const sampleV = (swapped ? 1 - u : v) + offsetV;
+    const noise = periodicValueNoise(seed, sampleU, sampleV, cells, band);
+    // A small ridged contribution sharpens local crests without restoring the
+    // long parallel bands produced by a dominant analytic sinusoid.
+    const ridged = 1 - Math.abs(noise) * 2;
+    height += (noise * 0.84 + ridged * 0.16) * weight;
     totalWeight += weight;
   }
-  const heightScale = totalWeight > 0 ? 1 / totalWeight : 0;
-  const gradientScale = heightScale * 0.24;
-  return {
-    height: clamp(height * heightScale, -1, 1),
-    gradientX: clamp(gradientX * gradientScale, -1, 1),
-    gradientZ: clamp(gradientZ * gradientScale, -1, 1),
-    horizontalDisplacement: clamp(horizontalDisplacement * heightScale, -1, 1),
-  };
+  return clamp(totalWeight > 0 ? height / totalWeight : 0, -1, 1);
 }
 
 /**
@@ -371,17 +345,31 @@ export function generateWaveField(seed: number, resolution = 128, bands = 5): Wa
   }
   const safeSeed = normalizedSeed(seed);
   const data = new Uint8Array(resolution * resolution * 4);
-  const bases = buildBases(safeSeed, bands);
+  const heights = new Float32Array(resolution * resolution);
   for (let z = 0; z < resolution; z += 1) {
     for (let x = 0; x < resolution; x += 1) {
-      // u and v are exact periodic coordinates: the right/top edge samples
-      // the same phase as the left/bottom edge without duplicating texels.
-      const sample = basisSample(x / resolution * TWO_PI, z / resolution * TWO_PI, bases);
+      heights[z * resolution + x] = noiseHeight(safeSeed, x / resolution, z / resolution, bands);
+    }
+  }
+  for (let z = 0; z < resolution; z += 1) {
+    for (let x = 0; x < resolution; x += 1) {
+      const left = heights[z * resolution + (x + resolution - 1) % resolution]!;
+      const right = heights[z * resolution + (x + 1) % resolution]!;
+      const down = heights[((z + resolution - 1) % resolution) * resolution + x]!;
+      const up = heights[((z + 1) % resolution) * resolution + x]!;
+      const height = heights[z * resolution + x]!;
+      // Normalize the central difference by texel spacing. The coefficient is
+      // art-directed, but resolution scaling prevents Low from becoming
+      // rougher than the higher-fidelity presets merely because its texels
+      // cover more of the periodic field.
+      const gradientScale = resolution * 0.01875;
+      const gradientX = clamp((right - left) * gradientScale, -1, 1);
+      const gradientZ = clamp((up - down) * gradientScale, -1, 1);
       const offset = (z * resolution + x) * 4;
-      data[offset] = encode(sample.height);
-      data[offset + 1] = encode(sample.gradientX);
-      data[offset + 2] = encode(sample.gradientZ);
-      data[offset + 3] = encode(sample.horizontalDisplacement);
+      data[offset] = encode(height);
+      data[offset + 1] = encode(gradientX);
+      data[offset + 2] = encode(gradientZ);
+      data[offset + 3] = encode(clamp(height - (gradientX + gradientZ) * 0.18, -1, 1));
     }
   }
   return { seed: safeSeed, resolution, data };

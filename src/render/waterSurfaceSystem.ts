@@ -269,8 +269,13 @@ const WATER_VERTEX = /* glsl */ `
 `;
 
 const WATER_FRAGMENT = /* glsl */ `
+  uniform sampler2D uWaveTexture;
   uniform sampler2D uDepthTexture;
   uniform sampler2D uSkyTexture;
+  uniform float uTime;
+  uniform float uPeriod;
+  uniform float uBands;
+  uniform vec2 uWind;
   uniform float uHasSkyTexture;
   uniform vec2 uMin;
   uniform vec2 uExtent;
@@ -286,6 +291,20 @@ const WATER_FRAGMENT = /* glsl */ `
   varying vec3 vWorldPosition;
   varying vec3 vWorldNormal;
   varying float vCrest;
+
+  vec2 waterDetailGradient(
+    vec2 world,
+    float scale,
+    float speed,
+    vec2 localXAxis,
+    vec2 offset
+  ) {
+    vec2 localYAxis = vec2(-localXAxis.y, localXAxis.x);
+    vec2 p = vec2(dot(world, localXAxis), dot(world, localYAxis));
+    vec2 uv = p * scale / uPeriod + uWind * speed * uTime + offset;
+    vec2 localGradient = texture2D(uWaveTexture, uv).gb * 2.0 - 1.0;
+    return localXAxis * localGradient.x + localYAxis * localGradient.y;
+  }
 
   vec3 skyReflection(vec3 direction) {
     if (uHasSkyTexture < 0.5) return uSkyColor;
@@ -312,7 +331,29 @@ const WATER_FRAGMENT = /* glsl */ `
     vec2 uv = clamp(localPosition / max(uExtent, vec2(0.001)), 0.0, 1.0);
     float depth = texture2D(uDepthTexture, uv).r;
     if (depth < 0.003) discard;
-    vec3 n = normalize(vWorldNormal);
+    // Sub-triangle capillary normals come from the same deterministic field
+    // as vertex displacement. Two decorrelated samples break up broad grazing
+    // reflections without adding meshes, textures, or camera-relative noise.
+    vec2 detailGradient = vec2(0.0);
+    if (uBands > 2.5) {
+      detailGradient += waterDetailGradient(
+        vWorldPosition.xz,
+        6.70,
+        1.85,
+        vec2(0.83205029, 0.55470020),
+        vec2(0.17, 0.61)
+      ) * 0.32;
+    }
+    if (uBands > 3.5) {
+      detailGradient += waterDetailGradient(
+        vWorldPosition.xz,
+        11.30,
+        2.65,
+        vec2(0.51449576, -0.85749293),
+        vec2(0.73, 0.23)
+      ) * 0.18;
+    }
+    vec3 n = normalize(vWorldNormal + vec3(-detailGradient.x, 0.0, -detailGradient.y));
     if (!gl_FrontFacing) n = -n;
     vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
     float nov = max(dot(n, viewDirection), 0.0);
@@ -589,6 +630,8 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
     const materials: THREE.ShaderMaterial[] = [];
     const meshes: THREE.Mesh[] = [];
     const triangleCounts: number[] = [];
+    const ownedGeometries = new Set<THREE.BufferGeometry>();
+    const ownedMaterials = new Set<THREE.Material>();
     let sediment: THREE.Mesh | null = null;
     let foam: THREE.Mesh | null = null;
     try {
@@ -610,9 +653,11 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
           segments,
           profile.kind === 'river' ? Math.max(12, Math.floor(segments * 0.58)) : segments,
         );
+        ownedGeometries.add(geometry);
         geometry.rotateX(-Math.PI / 2);
         geometry.translate(center.x, center.y, center.z);
         const material = this.makeMaterial(profile, water, waveTexture, depthTexture, config);
+        ownedMaterials.add(material);
         const mesh = new THREE.Mesh(geometry, material);
         mesh.name = `water-surface:${index}:lod${meshes.length}`;
         mesh.renderOrder = 3;
@@ -627,10 +672,21 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
         ? traceWaterline(this.map.terrainHeight, water, profile.kind === 'river' ? 2 : 3)
         : [];
       if (shoreline.length > 0) {
-        sediment = new THREE.Mesh(
-          makeRibbonGeometry(shoreline, profile.kind === 'river' ? 0.30 : 0.54, 0.012),
-          new THREE.MeshBasicMaterial({ color: 0x34463b, transparent: true, opacity: 0.16, depthWrite: false, toneMapped: true }),
+        const sedimentGeometry = makeRibbonGeometry(
+          shoreline,
+          profile.kind === 'river' ? 0.30 : 0.54,
+          0.012,
         );
+        ownedGeometries.add(sedimentGeometry);
+        const sedimentMaterial = new THREE.MeshBasicMaterial({
+          color: 0x34463b,
+          transparent: true,
+          opacity: 0.16,
+          depthWrite: false,
+          toneMapped: true,
+        });
+        ownedMaterials.add(sedimentMaterial);
+        sediment = new THREE.Mesh(sedimentGeometry, sedimentMaterial);
         sediment.name = `water-sediment:${index}`;
         sediment.renderOrder = 3.5;
         markOwned(sediment);
@@ -643,10 +699,14 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
           side: THREE.DoubleSide,
           uniforms: { uTime: { value: this.time }, uColor: { value: profile.foam }, uStrength: { value: config.foam } },
         });
-        foam = new THREE.Mesh(
-          makeRibbonGeometry(shoreline, profile.kind === 'river' ? 0.12 : 0.18, 0.030),
-          foamMaterial,
+        ownedMaterials.add(foamMaterial);
+        const foamGeometry = makeRibbonGeometry(
+          shoreline,
+          profile.kind === 'river' ? 0.12 : 0.18,
+          0.030,
         );
+        ownedGeometries.add(foamGeometry);
+        foam = new THREE.Mesh(foamGeometry, foamMaterial);
         foam.name = `water-foam:${index}`;
         foam.renderOrder = 4;
         foam.visible = config.foam > 0;
@@ -672,18 +732,8 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
       this.entries.push(entry);
     } catch (error) {
       this.group.remove(root);
-      for (const mesh of meshes) {
-        mesh.geometry.dispose();
-        (mesh.material as THREE.Material).dispose();
-      }
-      if (foam) {
-        foam.geometry.dispose();
-        (foam.material as THREE.Material).dispose();
-      }
-      if (sediment) {
-        sediment.geometry.dispose();
-        (sediment.material as THREE.Material).dispose();
-      }
+      for (const geometry of ownedGeometries) geometry.dispose();
+      for (const material of ownedMaterials) material.dispose();
       waveTexture.dispose();
       depthTexture.dispose();
       root.clear();

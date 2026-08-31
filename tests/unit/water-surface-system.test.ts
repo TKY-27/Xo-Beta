@@ -285,4 +285,24 @@ describe('water surface handles', () => {
     expect(dispose).toHaveBeenCalledTimes(1);
     dispose.mockRestore();
   });
+
+  it('releases geometry and textures when material construction fails before mesh registration', () => {
+    const prototype = WaterSurfaceSystem.prototype as unknown as {
+      makeMaterial: (...args: unknown[]) => THREE.ShaderMaterial;
+    };
+    const material = vi.spyOn(prototype, 'makeMaterial').mockImplementationOnce(() => {
+      throw new Error('material fixture failure');
+    });
+    const geometryDispose = vi.spyOn(THREE.BufferGeometry.prototype, 'dispose');
+    const textureDispose = vi.spyOn(THREE.DataTexture.prototype, 'dispose');
+
+    expect(() => new WaterSurfaceSystem(testMap([volume('lake')]), { quality: 'low' }))
+      .toThrow('material fixture failure');
+    expect(geometryDispose).toHaveBeenCalledTimes(1);
+    expect(textureDispose).toHaveBeenCalledTimes(2);
+
+    material.mockRestore();
+    geometryDispose.mockRestore();
+    textureDispose.mockRestore();
+  });
 });

@@ -72,6 +72,49 @@ describe('deterministic periodic water wave field', () => {
     expect(first.data).not.toEqual(second.data);
   });
 
+  it('distributes low-frequency gradients without one dominant stripe direction', () => {
+    const field = generateWaveField(4005, 128, 4);
+    const bins = Array.from({ length: 12 }, () => 0);
+    let total = 0;
+    for (let index = 0; index < field.data.length; index += 4) {
+      const gradientX = (field.data[index + 1]! / 255) * 2 - 1;
+      const gradientZ = (field.data[index + 2]! / 255) * 2 - 1;
+      const magnitude = Math.hypot(gradientX, gradientZ);
+      if (magnitude < 0.02) continue;
+      let direction = Math.atan2(gradientZ, gradientX);
+      if (direction < 0) direction += Math.PI;
+      if (direction >= Math.PI) direction -= Math.PI;
+      const bin = Math.min(bins.length - 1, Math.floor(direction / Math.PI * bins.length));
+      bins[bin]! += magnitude;
+      total += magnitude;
+    }
+
+    expect(total).toBeGreaterThan(0);
+    expect(Math.max(...bins) / total).toBeLessThan(0.16);
+  });
+
+  it('normalizes gradients by texture resolution so Low stays the calmest preset', () => {
+    const gradientEnergy = (resolution: number, bands: number): number => {
+      const field = generateWaveField(4005, resolution, bands);
+      let total = 0;
+      for (let index = 0; index < field.data.length; index += 4) {
+        const gradientX = (field.data[index + 1]! / 255) * 2 - 1;
+        const gradientZ = (field.data[index + 2]! / 255) * 2 - 1;
+        total += Math.hypot(gradientX, gradientZ);
+      }
+      return total / (resolution * resolution);
+    };
+
+    const low = gradientEnergy(32, 2);
+    const high = gradientEnergy(128, 4);
+    const ultra = gradientEnergy(256, 5);
+    const cinematic = gradientEnergy(384, 6);
+    expect(low).toBeLessThan(high);
+    expect(high).toBeLessThan(ultra);
+    expect(ultra).toBeLessThan(cinematic);
+    expect(cinematic).toBeLessThan(0.25);
+  });
+
   it('wraps seamlessly at the periodic boundary', () => {
     const field = generateWaveField(42, 32, 5);
     const origin = sampleWaveField(field, 0, 0);
