@@ -274,4 +274,15 @@ describe('water surface handles', () => {
       expect(disposeSpies.every((dispose) => dispose.mock.calls.length === 1)).toBe(true);
     }
   });
+
+  it('releases the wave texture when depth generation fails before entry registration', () => {
+    const dispose = vi.spyOn(THREE.DataTexture.prototype, 'dispose');
+    const map = testMap([volume('lake')], () => {
+      throw new Error('terrain fixture failure');
+    });
+
+    expect(() => new WaterSurfaceSystem(map, { quality: 'low' })).toThrow('terrain fixture failure');
+    expect(dispose).toHaveBeenCalledTimes(1);
+    dispose.mockRestore();
+  });
 });

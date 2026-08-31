@@ -61,9 +61,11 @@ cosmetic clock packet exists.
 
 The system prebuilds three bounded LOD geometries per volume, switches only
 visibility at runtime, derives a small depth texture from the canonical terrain
-function during loading, and disposes all owned geometry, material, wave, and
-depth resources. The renderer-owned environment texture is borrowed and is
-never disposed by the water system.
+function during loading, prevalidates every authored profile, and disposes all
+owned geometry, material, wave, and depth resources. A construction failure
+also releases both completed entries and the current partially built volume.
+The renderer-owned environment texture is borrowed and is never disposed by
+the water system.
 
 ## Previous-water root cause
 
@@ -235,7 +237,7 @@ Observed on 2026-08-31:
   packages, with no new dependency.
 - `npm audit --audit-level=high`: passed; zero vulnerabilities.
 - `npm run audit:water`: passed against source and the production bundle.
-- `npm test`: passed; 60 files and 610 tests.
+- `npm test`: passed; 60 files and 611 tests.
 - `npm run build`: passed; 119 modules and 233 audited production files. The
   existing large-chunk warning for Rapier/application bundles remains.
 - `npm run sim`: passed; deterministic hard NeoCity simulation, seed `75798`,
@@ -261,7 +263,8 @@ Observed on 2026-08-31:
   pop, seam, or detached highlight.
 - Headed two-context direct-P2P online water capture passed with a succeeded,
   nominated, non-relay ICE pair and no external WebSocket.
-- Repeated create, quality-change, and idempotent-dispose coverage passed.
+- Repeated create, quality-change, partial-construction failure, and
+  idempotent-dispose coverage passed.
 
 ## Known limitations
 

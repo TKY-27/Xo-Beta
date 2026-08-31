@@ -579,69 +579,116 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
     markOwned(root);
     const seed = water.visual?.seed ?? (this.map.id.length * 997 + index * 131 + 17);
     const waveTexture = makeWaveTexture(seed, config.resolution, config.bands, this.halfFloat);
-    const depthTexture = makeDepthTexture(this.map, water, profile.kind === 'river' ? 72 : 64);
+    let depthTexture: THREE.DataTexture;
+    try {
+      depthTexture = makeDepthTexture(this.map, water, profile.kind === 'river' ? 72 : 64);
+    } catch (error) {
+      waveTexture.dispose();
+      throw error;
+    }
     const materials: THREE.ShaderMaterial[] = [];
     const meshes: THREE.Mesh[] = [];
     const triangleCounts: number[] = [];
-    const center = new THREE.Vector3((water.minX + water.maxX) / 2, water.surfaceY, (water.minZ + water.maxZ) / 2);
-    const width = water.maxX - water.minX;
-    const height = water.maxZ - water.minZ;
-    // Prebuild three bounded meshes. Runtime changes only visibility, so LOD
-    // changes do not allocate or rebuild geometry in the render loop.
-    const meshConfig = qualityConfig('cinematic', profile);
-    const segmentCounts = [
-      Math.max(12, Math.floor(meshConfig.meshSegments * 0.42)),
-      Math.max(18, Math.floor(meshConfig.meshSegments * 0.70)),
-      meshConfig.meshSegments,
-    ];
-    for (const segments of segmentCounts) {
-      const geometry = new THREE.PlaneGeometry(width, height, segments, profile.kind === 'river' ? Math.max(12, Math.floor(segments * 0.58)) : segments);
-      geometry.rotateX(-Math.PI / 2);
-      geometry.translate(center.x, center.y, center.z);
-      const material = this.makeMaterial(profile, water, waveTexture, depthTexture, config);
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.name = `water-surface:${index}:lod${meshes.length}`;
-      mesh.renderOrder = 3;
-      mesh.frustumCulled = true;
-      markOwned(mesh);
-      root.add(mesh);
-      materials.push(material);
-      meshes.push(mesh);
-      triangleCounts.push(geometry.index ? geometry.index.count / 3 : geometry.attributes.position!.count / 3);
-    }
-    const segments = this.map.terrainHeight ? traceWaterline(this.map.terrainHeight, water, profile.kind === 'river' ? 2 : 3) : [];
     let sediment: THREE.Mesh | null = null;
     let foam: THREE.Mesh | null = null;
-    if (segments.length > 0) {
-      sediment = new THREE.Mesh(
-        makeRibbonGeometry(segments, profile.kind === 'river' ? 0.30 : 0.54, 0.012),
-        new THREE.MeshBasicMaterial({ color: 0x34463b, transparent: true, opacity: 0.16, depthWrite: false, toneMapped: true }),
-      );
-      sediment.name = `water-sediment:${index}`;
-      sediment.renderOrder = 3.5;
-      markOwned(sediment);
-      root.add(sediment);
-      const foamMaterial = new THREE.ShaderMaterial({
-        vertexShader: FOAM_VERTEX,
-        fragmentShader: FOAM_FRAGMENT,
-        transparent: true,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        uniforms: { uTime: { value: this.time }, uColor: { value: profile.foam }, uStrength: { value: config.foam } },
-      });
-      foam = new THREE.Mesh(makeRibbonGeometry(segments, profile.kind === 'river' ? 0.12 : 0.18, 0.030), foamMaterial);
-      foam.name = `water-foam:${index}`;
-      foam.renderOrder = 4;
-      foam.visible = config.foam > 0;
-      markOwned(foam);
-      root.add(foam);
+    try {
+      const center = new THREE.Vector3((water.minX + water.maxX) / 2, water.surfaceY, (water.minZ + water.maxZ) / 2);
+      const width = water.maxX - water.minX;
+      const height = water.maxZ - water.minZ;
+      // Prebuild three bounded meshes. Runtime changes only visibility, so LOD
+      // changes do not allocate or rebuild geometry in the render loop.
+      const meshConfig = qualityConfig('cinematic', profile);
+      const segmentCounts = [
+        Math.max(12, Math.floor(meshConfig.meshSegments * 0.42)),
+        Math.max(18, Math.floor(meshConfig.meshSegments * 0.70)),
+        meshConfig.meshSegments,
+      ];
+      for (const segments of segmentCounts) {
+        const geometry = new THREE.PlaneGeometry(
+          width,
+          height,
+          segments,
+          profile.kind === 'river' ? Math.max(12, Math.floor(segments * 0.58)) : segments,
+        );
+        geometry.rotateX(-Math.PI / 2);
+        geometry.translate(center.x, center.y, center.z);
+        const material = this.makeMaterial(profile, water, waveTexture, depthTexture, config);
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.name = `water-surface:${index}:lod${meshes.length}`;
+        mesh.renderOrder = 3;
+        mesh.frustumCulled = true;
+        markOwned(mesh);
+        root.add(mesh);
+        materials.push(material);
+        meshes.push(mesh);
+        triangleCounts.push(geometry.index ? geometry.index.count / 3 : geometry.attributes.position!.count / 3);
+      }
+      const shoreline = this.map.terrainHeight
+        ? traceWaterline(this.map.terrainHeight, water, profile.kind === 'river' ? 2 : 3)
+        : [];
+      if (shoreline.length > 0) {
+        sediment = new THREE.Mesh(
+          makeRibbonGeometry(shoreline, profile.kind === 'river' ? 0.30 : 0.54, 0.012),
+          new THREE.MeshBasicMaterial({ color: 0x34463b, transparent: true, opacity: 0.16, depthWrite: false, toneMapped: true }),
+        );
+        sediment.name = `water-sediment:${index}`;
+        sediment.renderOrder = 3.5;
+        markOwned(sediment);
+        root.add(sediment);
+        const foamMaterial = new THREE.ShaderMaterial({
+          vertexShader: FOAM_VERTEX,
+          fragmentShader: FOAM_FRAGMENT,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          uniforms: { uTime: { value: this.time }, uColor: { value: profile.foam }, uStrength: { value: config.foam } },
+        });
+        foam = new THREE.Mesh(
+          makeRibbonGeometry(shoreline, profile.kind === 'river' ? 0.12 : 0.18, 0.030),
+          foamMaterial,
+        );
+        foam.name = `water-foam:${index}`;
+        foam.renderOrder = 4;
+        foam.visible = config.foam > 0;
+        markOwned(foam);
+        root.add(foam);
+      }
+      const entry: SurfaceEntry = {
+        root,
+        meshes,
+        foam,
+        sediment,
+        materials,
+        waveTexture,
+        depthTexture,
+        ownedTextures: [waveTexture, depthTexture],
+        volume: water,
+        profile,
+        triangleCounts,
+        currentLod: 0,
+      };
+      this.selectLod(entry);
+      this.group.add(root);
+      this.entries.push(entry);
+    } catch (error) {
+      this.group.remove(root);
+      for (const mesh of meshes) {
+        mesh.geometry.dispose();
+        (mesh.material as THREE.Material).dispose();
+      }
+      if (foam) {
+        foam.geometry.dispose();
+        (foam.material as THREE.Material).dispose();
+      }
+      if (sediment) {
+        sediment.geometry.dispose();
+        (sediment.material as THREE.Material).dispose();
+      }
+      waveTexture.dispose();
+      depthTexture.dispose();
+      root.clear();
+      throw error;
     }
-    this.entries.push({
-      root, meshes, foam, sediment, materials, waveTexture, depthTexture,
-      ownedTextures: [waveTexture, depthTexture], volume: water, profile, triangleCounts, currentLod: 0,
-    });
-    this.group.add(root);
-    this.selectLod(this.entries[this.entries.length - 1]!);
   }
 
   private makeMaterial(
