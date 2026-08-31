@@ -98,6 +98,7 @@ function addUpperFloorGlass(fixture: Fixture): void {
   fixture.combat.registerDestructibles([{
     id: 1,
     stableId: 'fixture:building:glass:upper:0001',
+    revision: 0,
     hp: 5,
     collider,
     geo: {

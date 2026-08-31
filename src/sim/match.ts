@@ -46,6 +46,8 @@ import {
 } from './roster';
 import type { GameStateView, MatchWinnerView, TeamResult, TeamView } from './gameStateView';
 
+const UINT32_MAX = 0xffff_ffff;
+
 export type MatchPhase = 'transport' | 'drop' | 'live' | 'results';
 
 export interface KillFeedEntry {
@@ -104,9 +106,10 @@ export interface MatchEventsMap {
   impact: { x: number; y: number; z: number; nx: number; ny: number; nz: number; material: string };
   tracer: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; color: number };
   ricochet: { x: number; y: number; z: number };
-  glassBreak: { destructibleId: string; actorId: number; x: number; y: number; z: number };
-  destructibleDestroyed: { id: number; destructibleId: string; x: number; y: number; z: number };
+  glassBreak: { destructibleId: string; revision: number; destroyed: true; actorId: number; x: number; y: number; z: number };
+  destructibleDestroyed: { id: number; destructibleId: string; revision: number; destroyed: true; x: number; y: number; z: number };
   actorHit: { targetId: number; attackerId: number; damage: number; region: string; killed: boolean; headshot: boolean; weaponId: WeaponId | 'melee'; shieldDamage: number };
+  shieldHit: { actorId: number; attackerId: number; damage: number };
   shieldBroken: { actorId: number };
   headshotFeedback: { attackerId: number };
   eliminated: { victimId: number; killerId: number; weaponId: WeaponId | null; headshot: boolean; storm: boolean; placement: number };
@@ -152,12 +155,18 @@ export interface MatchConfig {
 
 export interface ActorController {
   readonly kind?: 'human' | 'bot';
+  /** False only when the host has timed out remote input. This gates implicit
+   * actions such as ammo auto-pickup without changing roster presence. */
+  readonly allowsAutomaticActions?: boolean;
   updateCommand(actor: Actor, dt: number): InputCommand;
+  /** Optional host-only firearm resolver invoked at the canonical fire point. */
+  tryAuthoritativeShot?(actor: Actor, command: Readonly<InputCommand>, dt: number): boolean;
 }
 
 interface DestructibleInstance {
   id: number;
   stableId: string;
+  revision: number;
   hp: number;
   collider: import('@dimforge/rapier3d-compat').Collider;
   geo: MapDef['destructibles'][number]['geo'];
@@ -190,6 +199,8 @@ export class Match {
   controllers = new Map<number, ActorController>();
 
   phase: MatchPhase = 'transport';
+  hostTick = 0;
+  stateRevision = 0;
   time = 0;
   phaseTime = 0;
 
@@ -293,7 +304,7 @@ export class Match {
         d.geo.kind === 'box'
           ? this.phys.addDestructibleBox(id, d.geo.x, d.geo.y, d.geo.z, d.geo.sx / 2, d.geo.sy / 2, d.geo.sz / 2, hint)
           : this.phys.addDestructibleBox(id, d.geo.x, d.geo.y, d.geo.z, (d.geo.r ?? 0.5) * 0.85, (('h' in d.geo ? d.geo.h : undefined) ?? 1) / 2, (d.geo.r ?? 0.5) * 0.85, hint);
-      drefs.push({ id, stableId: d.stableId, hp: d.hp, collider, geo: d.geo, type: d.type, alive: true });
+      drefs.push({ id, stableId: d.stableId, revision: 0, hp: d.hp, collider, geo: d.geo, type: d.type, alive: true });
     }
     this.combat.registerDestructibles(drefs as never);
     this.phys.flush();
@@ -399,6 +410,11 @@ export class Match {
       : this.actors.find((actor) => actor.id === this.localActorId) ?? null;
   }
 
+  /** Read-only host transport gate used by the owner-scoped replica view. */
+  get transportJumpAllowed(): boolean {
+    return this.transportGateOpen;
+  }
+
   rosterEntryForActor(actorId: number): RosterEntry | null {
     return this.roster.find((entry) => entry.actorId === actorId) ?? null;
   }
@@ -460,19 +476,26 @@ export class Match {
     const entry = this.rosterEntryForPeer(peerId);
     if (!entry || entry.connectionState !== 'connected') return false;
     entry.connectionState = 'disconnected';
-    const actor = this.actors.find((candidate) => candidate.id === entry.actorId);
-    if (actor) {
-      if (actor.healing) {
-        actor.healing = null;
-        this.events.emit('healCancelled', { actorId: actor.id });
-      }
-      actor.interactTimer = 0;
-      actor.adsHeld = false;
-      actor.jumpBuffered = 0;
-      actor.dashTimer = 0;
-      if (actor.grappleActive) this.movement.releaseGrapple(actor);
-      this.commands.delete(actor.id);
+    this.neutralizeActorActions(entry.actorId);
+    return true;
+  }
+
+  /** Cancel transient actions after an input timeout without changing roster
+   * presence. Physics, storm damage, incoming damage, and elimination keep
+   * running under the authoritative Match. */
+  neutralizeActorActions(actorId: number): boolean {
+    const actor = this.actors.find((candidate) => candidate.id === actorId);
+    if (!actor) return false;
+    if (actor.healing) {
+      actor.healing = null;
+      this.events.emit('healCancelled', { actorId: actor.id });
     }
+    actor.interactTimer = 0;
+    actor.adsHeld = false;
+    actor.jumpBuffered = 0;
+    actor.dashTimer = 0;
+    if (actor.grappleActive) this.movement.releaseGrapple(actor);
+    this.commands.delete(actor.id);
     return true;
   }
 
@@ -516,7 +539,19 @@ export class Match {
     return this.teams.map((team) => team.teamId).filter((teamId) => teamId !== localTeamId);
   }
 
-  toGameStateView(): GameStateView {
+  /**
+   * Produce the immutable presentation projection for one viewer. The host
+   * may request a guest-specific projection without changing Match ownership:
+   * only that viewer's inventory is present and localActorId is rebound for
+   * presentation/prediction on that peer.
+   */
+  toGameStateView(viewerActorId: number | null = this.localActorId): GameStateView {
+    if (viewerActorId !== null) {
+      const viewer = this.rosterEntryForActor(viewerActorId);
+      if (!viewer || viewer.ownership.kind === 'bot') {
+        throw new Error('GameStateView viewer must be a human Actor');
+      }
+    }
     const actors = this.actors.map((actor) => {
       const entry = this.rosterEntryForActor(actor.id)!;
       return Object.freeze({
@@ -533,8 +568,20 @@ export class Match {
         health: actor.health,
         shield: actor.shield,
         position: Object.freeze({ ...actor.body.position }),
+        velocity: Object.freeze({ ...actor.body.velocity }),
         yaw: actor.yaw,
         pitch: actor.pitch,
+        grounded: actor.body.grounded,
+        moveState: actor.state,
+        crouched: actor.crouched,
+        deployed: actor.deployed,
+        equippedWeapon: actor.inv.selectedWeapon?.weaponId ?? null,
+        inventory: actor.id === viewerActorId ? Object.freeze({
+          selected: actor.inv.selected,
+          slots: Object.freeze(actor.inv.slots.map((item) => item ? Object.freeze({ ...item }) : null)),
+          ammo: Object.freeze({ ...actor.inv.ammo }),
+          healing: actor.healing ? Object.freeze({ ...actor.healing }) : null,
+        }) : null,
         placement: actor.placement,
         stats: Object.freeze({ ...actor.stats }),
       });
@@ -547,19 +594,103 @@ export class Match {
       z: chest.z,
       opened: chest.opened,
     }));
-    const loot = this.loot.items.map((item) => Object.freeze({
-      id: item.id,
-      kind: item.kind,
-      x: item.x,
-      y: item.y,
-      z: item.z,
-      rarity: item.rarity,
-    }));
+    const loot = this.loot.items.map((item) => {
+      const base = {
+        id: item.id,
+        x: item.x,
+        y: item.y,
+        z: item.z,
+        yaw: item.yaw,
+        rarity: item.rarity,
+      };
+      if (item.kind === 'weapon' && item.weapon) {
+        return Object.freeze({
+          ...base,
+          kind: 'weapon' as const,
+          weaponId: item.weapon.weaponId,
+          ammoInMag: item.weapon.ammoInMag,
+        });
+      }
+      if (item.kind === 'ammo' && item.ammo) {
+        return Object.freeze({
+          ...base,
+          kind: 'ammo' as const,
+          ammoType: item.ammo.type,
+          amount: item.ammo.amount,
+        });
+      }
+      if (item.kind === 'heal' && item.heal) {
+        return Object.freeze({
+          ...base,
+          kind: 'heal' as const,
+          itemId: item.heal.itemId,
+          count: item.heal.count,
+        });
+      }
+      throw new Error(`Invalid authoritative loot item ${item.id}`);
+    });
+    const localMovementActor = viewerActorId === null
+      ? null
+      : this.actors.find((actor) => actor.id === viewerActorId) ?? null;
+    const localMovement = localMovementActor ? Object.freeze({
+      actorId: localMovementActor.id,
+      groundNormalY: localMovementActor.body.groundNormalY,
+      hitCeiling: localMovementActor.body.hitCeiling,
+      slidAlongWall: localMovementActor.body.slidAlongWall,
+      slideTimer: localMovementActor.slideTimer,
+      slideDirX: localMovementActor.slideDirX,
+      slideDirZ: localMovementActor.slideDirZ,
+      slideCooldown: localMovementActor.slideCooldown,
+      wallrunTimer: localMovementActor.wallrunTimer,
+      wallSide: localMovementActor.wallSide,
+      wallNormalX: localMovementActor.wallNormalX,
+      wallNormalZ: localMovementActor.wallNormalZ,
+      mantleTimer: localMovementActor.mantleTimer,
+      mantleCooldown: localMovementActor.mantleCooldown,
+      mantleFrom: Object.freeze({ ...localMovementActor.mantleFrom }),
+      mantleTo: Object.freeze({ ...localMovementActor.mantleTo }),
+      grappleActive: localMovementActor.grappleActive,
+      grapplePoint: Object.freeze({ ...localMovementActor.grapplePoint }),
+      grappleCooldown: localMovementActor.grappleCooldown,
+      dashCharges: localMovementActor.dashCharges,
+      dashRegen: localMovementActor.dashRegen,
+      dashTimer: localMovementActor.dashTimer,
+      dashDirX: localMovementActor.dashDirX,
+      dashDirZ: localMovementActor.dashDirZ,
+      jumpsUsed: localMovementActor.jumpsUsed,
+      coyote: localMovementActor.coyote,
+      jumpBuffered: localMovementActor.jumpBuffered,
+      bhopWindow: localMovementActor.bhopWindow,
+      wallrunCooldown: localMovementActor.wallrunCooldown,
+      wallrunLanded: localMovementActor.wallrunLanded,
+      wallrunChains: localMovementActor.wallrunChains,
+      lastWallNx: localMovementActor.lastWallNx,
+      lastWallNz: localMovementActor.lastWallNz,
+      peakFallSpeed: localMovementActor.peakFallSpeed,
+      airborneGroundTime: localMovementActor.airborneGroundTime,
+      poundTimer: localMovementActor.poundTimer,
+      footstepAccum: localMovementActor.footstepAccum,
+      inWater: localMovementActor.inWater,
+      submerged: localMovementActor.submerged,
+      waterSurfaceY: Number.isFinite(localMovementActor.waterSurfaceY)
+        ? localMovementActor.waterSurfaceY : null,
+      adsAmount: localMovementActor.wpn.adsAmount,
+      healingMovementPenalty: localMovementActor.healing !== null,
+    }) : null;
     const teams = Object.freeze([...this.teams]);
+    const destructibles = this.combat.destructibleList().map((destructible) => Object.freeze({
+      id: destructible.stableId,
+      revision: destructible.revision,
+      destroyed: !destructible.alive,
+    }));
     return Object.freeze({
+      hostTick: this.hostTick,
+      stateRevision: this.stateRevision,
+      time: this.time,
+      phaseTime: this.phaseTime,
       phase: this.phase,
       actors: Object.freeze(actors),
-      localActorId: this.localActorId,
+      localActorId: viewerActorId,
       teams,
       mode: this.mode,
       chests: Object.freeze(chests),
@@ -572,6 +703,9 @@ export class Match {
         centerZ: this.storm.centerZ,
         radius: this.storm.radius,
       }),
+      transport: Object.freeze({ ...this.transportPos, jumpAllowed: this.transportJumpAllowed }),
+      localMovement,
+      destructibles: Object.freeze(destructibles),
       winner: this.winnerView ? Object.freeze({ ...this.winnerView }) : null,
       teamResults: Object.freeze(this.teamResults.map((result) => Object.freeze({
         ...result,
@@ -681,6 +815,13 @@ export class Match {
         this.events.emit('impact', { x, y, z, nx, ny, nz, material });
       },
       onActorHit: (target, attacker, damage, region, weaponId, killed, headshot) => {
+        if (target.lastShieldDamage > 0) {
+          this.events.emit('shieldHit', {
+            actorId: target.id,
+            attackerId: attacker?.id ?? -1,
+            damage: target.lastShieldDamage,
+          });
+        }
         this.events.emit('actorHit', {
           targetId: target.id, attackerId: attacker?.id ?? -1, damage, region, killed, headshot, weaponId,
           shieldDamage: target.lastShieldDamage,
@@ -705,9 +846,21 @@ export class Match {
         this.events.emit('tracer', { x1, y1, z1, x2, y2, z2, color });
       },
       onRicochet: (x, y, z) => this.events.emit('ricochet', { x, y, z }),
-      onGlassBreak: (destructibleId, x, y, z, actorId) => this.events.emit('glassBreak', { destructibleId, actorId, x, y, z }),
+      onGlassBreak: (destructibleId, x, y, z, actorId) => {
+        const revision = this.combat.destructibleList()
+          .find((destructible) => destructible.stableId === destructibleId)?.revision ?? 0;
+        this.events.emit('glassBreak', {
+          destructibleId, revision, destroyed: true, actorId, x, y, z,
+        });
+      },
       onDestructibleDamaged: (id, destructibleId, x, y, z, destroyed) => {
-        if (destroyed) this.events.emit('destructibleDestroyed', { id, destructibleId, x, y, z });
+        if (destroyed) {
+          const revision = this.combat.destructibleList()
+            .find((destructible) => destructible.id === id)?.revision ?? 0;
+          this.events.emit('destructibleDestroyed', {
+            id, destructibleId, revision, destroyed: true, x, y, z,
+          });
+        }
       },
       onMeleeSwing: (a, x, y, z) => {
         this.events.emit('meleeSwing', { actorId: a.id, x, y, z, yaw: a.yaw });
@@ -751,6 +904,10 @@ export class Match {
   // -------------------------------------------------------------------------
 
   fixedUpdate(dt: number): void {
+    this.advanceAuthoritativeClock();
+    // The authoritative network clock continues after the winner is decided
+    // so final snapshots, keyframes, reconnect results, and results UI remain
+    // deliverable at their normal cadence. Gameplay state itself stays frozen.
     if (this.finished && this.phase === 'results') return;
     this.time += dt;
     this.phaseTime += dt;
@@ -802,6 +959,18 @@ export class Match {
     }
 
     this.checkWin();
+  }
+
+  /**
+   * Network clocks are deliberately fail-closed. Wrapping either value would
+   * make an old packet appear newer (and a newer snapshot appear obsolete),
+   * so stop the authoritative match before uint32 exhaustion instead.
+   */
+  private advanceAuthoritativeClock(): void {
+    if (this.hostTick >= UINT32_MAX) throw new Error('Authoritative host tick exhausted');
+    if (this.stateRevision >= UINT32_MAX) throw new Error('Authoritative state revision exhausted');
+    this.hostTick += 1;
+    this.stateRevision += 1;
   }
 
   private updateTransport(dt: number, commands: Map<number, InputCommand>): void {
@@ -903,6 +1072,7 @@ export class Match {
       this.updateHealing(a, cmd, dt);
 
       this.combat.updateWeaponTimers(a, dt);
+      const controller = this.controllers.get(a.id);
       const selected = a.inv.selectedItem;
       const w = a.inv.selectedWeapon;
       if (w) {
@@ -911,7 +1081,9 @@ export class Match {
         // consume one press edge per shot. A click is valid even when mouseup
         // happened before this fixed step sampled it.
         const wantsFire = def.fireMode === 'auto' ? cmd.fireHeld : cmd.firePressed;
-        if (wantsFire) this.combat.tryFire(a, dt, undefined, cmd.firePressed);
+        const resolvedHistorically = wantsFire
+          && controller?.tryAuthoritativeShot?.(a, cmd, dt) === true;
+        if (wantsFire && !resolvedHistorically) this.combat.tryFire(a, dt, undefined, cmd.firePressed);
       } else if (!selected && !(selectedBeforeHealing?.kind === 'heal' && cmd.firePressed)
         && (cmd.fireHeld || cmd.firePressed)) {
         this.combat.tryMelee(a, dt, this.actors);
@@ -928,7 +1100,8 @@ export class Match {
 
       if (cmd.interactPressed) this.tryInteract(a);
 
-      if (this.connectionStateForActor(a) !== 'disconnected') this.autoPickupAmmo(a);
+      if (this.connectionStateForActor(a) !== 'disconnected'
+        && controller?.allowsAutomaticActions !== false) this.autoPickupAmmo(a);
     }
 
     this.combat.update(dt, this.actors);

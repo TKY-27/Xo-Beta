@@ -101,6 +101,8 @@ export interface CombatEvents {
 export interface DestructibleRef {
   id: number;
   stableId: string;
+  /** Monotonic authoritative state revision; increments on a state edge. */
+  revision: number;
   hp: number;
   collider: unknown;
   geo: MapDef['destructibles'][number]['geo'];
@@ -593,6 +595,7 @@ export class CombatSystem {
           if (gone) {
             removed = true;
             d.alive = false;
+            d.revision = (d.revision + 1) >>> 0;
             this.phys.removeCollider(d.collider as never);
             if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z, p.ownerId);
             else this.events.onDestructibleDamaged(hit.destructibleId, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
@@ -721,6 +724,7 @@ export class CombatSystem {
     d.hp -= amount;
     if (d.hp <= 0) {
       d.alive = false;
+      d.revision = (d.revision + 1) >>> 0;
       this.phys.removeCollider(d.collider as never);
       if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z, -1);
       else this.events.onDestructibleDamaged(id, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);

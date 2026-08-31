@@ -27,6 +27,7 @@ export const INPUT_YAW_MAX = Math.PI;
 export const INPUT_PITCH_LIMIT = Math.PI / 2 - 0.02;
 
 const UINT32_MAX = 0xffff_ffff;
+const UINT32_HALF_RANGE = 0x8000_0000;
 const UINT16_MAX = 0xffff;
 const QUANTIZED_UNIT = 32_767;
 const SELECTED_SLOT_NONE = -2;
@@ -955,6 +956,8 @@ export class SnapshotReassembler {
     readonly chunks: Map<number, SnapshotChunk>;
   }>();
   private readonly maxPending: number;
+  private latestDeltaRevision: number | null = null;
+  private latestCompletedFullRevision: number | null = null;
 
   constructor(maxPending = MAX_SNAPSHOT_CHUNKS) {
     if (!Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > MAX_SNAPSHOT_CHUNKS) {
@@ -965,7 +968,23 @@ export class SnapshotReassembler {
 
   add(value: BinaryLike | SnapshotChunk): ReassembledSnapshot | null {
     const chunk = isSnapshotChunk(value) ? value : decodeSnapshotChunk(value);
-    if (chunk.chunkCount === 1) return toReassembled(chunk);
+    if (this.latestCompletedFullRevision !== null && chunk.revision <= this.latestCompletedFullRevision) return null;
+    if (chunk.full) {
+      // A delta can overtake a full keyframe on separate DataChannels. Keep
+      // pending full snapshots admissible until a newer full actually lands.
+      this.evictOlderPendingDeltas(chunk.revision);
+    } else {
+      if (this.latestDeltaRevision !== null && chunk.revision < this.latestDeltaRevision) return null;
+      if (this.latestDeltaRevision === null || chunk.revision > this.latestDeltaRevision) {
+        this.latestDeltaRevision = chunk.revision;
+        this.evictOlderPendingDeltas(chunk.revision);
+      }
+    }
+    if (chunk.chunkCount === 1) {
+      const result = toReassembled(chunk);
+      if (chunk.full) this.markFullCompleted(chunk.revision);
+      return result;
+    }
     let state = this.pending.get(chunk.snapshotId);
     if (!state) {
       if (this.pending.size >= this.maxPending) throw fail('Too many snapshots awaiting reassembly', 'payload-too-large');
@@ -995,7 +1014,7 @@ export class SnapshotReassembler {
     const entities = chunks.flatMap((part) => part.entities);
     this.pending.delete(chunk.snapshotId);
     if (entities.length !== chunk.totalEntities) throw fail('Snapshot reassembly entity count mismatch', 'chunk-invalid');
-    return Object.freeze({
+    const result = Object.freeze({
       sessionId: state.first.sessionId,
       session: state.first.session,
       sequence: state.first.sequence,
@@ -1008,10 +1027,30 @@ export class SnapshotReassembler {
       snapshotId: state.first.snapshotId,
       entities: Object.freeze(entities),
     });
+    if (state.first.full) this.markFullCompleted(state.first.revision);
+    return result;
   }
 
   push(value: BinaryLike | SnapshotChunk): ReassembledSnapshot | null { return this.add(value); }
-  clear(): void { this.pending.clear(); }
+  clear(): void {
+    this.pending.clear();
+    this.latestDeltaRevision = null;
+    this.latestCompletedFullRevision = null;
+  }
+
+  private evictOlderPendingDeltas(revision: number): void {
+    for (const [snapshotId, state] of this.pending) {
+      if (!state.first.full && state.first.revision < revision) this.pending.delete(snapshotId);
+    }
+  }
+
+  private markFullCompleted(revision: number): void {
+    if (this.latestCompletedFullRevision !== null && revision <= this.latestCompletedFullRevision) return;
+    this.latestCompletedFullRevision = revision;
+    for (const [snapshotId, state] of this.pending) {
+      if (state.first.revision <= revision) this.pending.delete(snapshotId);
+    }
+  }
 }
 
 function isSnapshotChunk(value: BinaryLike | SnapshotChunk): value is SnapshotChunk {
@@ -1052,16 +1091,19 @@ export class SequenceWindow {
 
   get latest(): number | null { return this.highest; }
 
-  accept(value: number): void {
+  check(value: number): void {
     const sequence = uint32(value, 'sequence');
     if (this.seen.has(sequence)) throw fail(`Duplicate sequence ${sequence}`, 'sequence-duplicate');
     if (this.highest !== null) {
       if (sequence > this.highest && sequence - this.highest > this.maxFuture) throw fail('Future sequence', 'sequence-future');
       if (sequence < this.highest && this.highest - sequence > this.window) throw fail('Stale sequence', 'sequence-stale');
-      if (sequence > this.highest) this.highest = sequence;
-    } else {
-      this.highest = sequence;
     }
+  }
+
+  accept(value: number): void {
+    const sequence = uint32(value, 'sequence');
+    this.check(sequence);
+    if (this.highest === null || sequence > this.highest) this.highest = sequence;
     this.seen.add(sequence);
     if (this.highest !== null) {
       for (const old of this.seen) if (this.highest - old > this.window) this.seen.delete(old);
@@ -1103,6 +1145,7 @@ export interface InputPacketValidatorOptions {
   readonly currentHostTick?: number;
   readonly maxFutureTicks?: number;
   readonly maxPastTicks?: number;
+  readonly maxShotRewindTicks?: number;
   readonly maxInputsPerSecond?: number;
   readonly inputBurst?: number;
   readonly now?: () => number;
@@ -1113,13 +1156,53 @@ export interface InputPacketValidationContext {
   readonly nowMs?: number;
 }
 
+/**
+ * Map a client-local shot timestamp onto the host's bounded history.
+ *
+ * The last acknowledged host snapshot travelled host -> guest, while this
+ * input travelled guest -> host. Assuming a symmetric direct route, half of
+ * that round-trip span is the closest safe estimate of the shot's host tick.
+ * Older redundant input frames subtract their client-local age as well.
+ */
+export function mapClientShotTickToHost(
+  currentHostTick: number,
+  lastAcknowledgedHostTick: number,
+  packetClientTick: number,
+  shotClientTick: number,
+  maxRewindTicks = 15,
+): number {
+  const current = uint32(currentHostTick, 'currentHostTick');
+  const acknowledged = uint32(lastAcknowledgedHostTick, 'lastAckHostTick');
+  const clientTick = uint32(packetClientTick, 'clientTick');
+  const shotTick = uint32(shotClientTick, 'shotTick');
+  if (!Number.isSafeInteger(maxRewindTicks) || maxRewindTicks < 0) {
+    throw new RangeError('maxRewindTicks must be a non-negative safe integer');
+  }
+
+  const acknowledgedAge = (current - acknowledged) >>> 0;
+  if (acknowledgedAge >= UINT32_HALF_RANGE) {
+    throw fail('Input ack tick is in the future', 'tick-future');
+  }
+  const localShotAge = (clientTick - shotTick) >>> 0;
+  if (localShotAge >= UINT32_HALF_RANGE) {
+    throw fail('Shot tick is in the future', 'tick-future');
+  }
+  const rewindTicks = Math.ceil(acknowledgedAge / 2) + localShotAge;
+  if (rewindTicks > maxRewindTicks) {
+    throw fail('Shot tick exceeds the rewind window', 'tick-stale');
+  }
+  return (current - rewindTicks) >>> 0;
+}
+
 /** Stateful inbound input gate: structural codec + session + replay + tick + rate. */
 export class InputPacketValidator {
   private readonly expectedSession: number | undefined;
   private readonly currentHostTick: number | undefined;
   private readonly maxFutureTicks: number;
   private readonly maxPastTicks: number;
+  private readonly maxShotRewindTicks: number;
   private readonly sequence: SequenceWindow;
+  private readonly clientTicks: SequenceWindow;
   private readonly rate: TokenBucket;
   private readonly now: () => number;
 
@@ -1132,9 +1215,14 @@ export class InputPacketValidator {
     if (this.currentHostTick !== undefined) uint32(this.currentHostTick, 'currentHostTick');
     this.maxFutureTicks = options.maxFutureTicks ?? 6;
     this.maxPastTicks = options.maxPastTicks ?? 120;
+    this.maxShotRewindTicks = options.maxShotRewindTicks ?? 15;
     if (!Number.isSafeInteger(this.maxFutureTicks) || this.maxFutureTicks < 0
-      || !Number.isSafeInteger(this.maxPastTicks) || this.maxPastTicks < 0) throw new RangeError('Tick windows are invalid');
+      || !Number.isSafeInteger(this.maxPastTicks) || this.maxPastTicks < 0
+      || !Number.isSafeInteger(this.maxShotRewindTicks) || this.maxShotRewindTicks < 0) {
+      throw new RangeError('Tick windows are invalid');
+    }
     this.sequence = new SequenceWindow(options.sequenceWindow ?? 128, options.maxFutureSequence ?? 64);
+    this.clientTicks = new SequenceWindow(this.maxPastTicks, this.maxFutureTicks);
     const rate = options.maxInputsPerSecond ?? 120;
     this.rate = new TokenBucket(rate, options.inputBurst ?? rate);
     this.now = options.now ?? (() => Date.now());
@@ -1144,18 +1232,35 @@ export class InputPacketValidator {
     const packet = decodeInputPacket(value);
     if (this.expectedSession !== undefined && packet.sessionId !== this.expectedSession) throw fail('Session binding mismatch', 'session-mismatch');
     const current = context.currentHostTick ?? this.currentHostTick;
+    this.sequence.check(packet.inputSeq);
+    this.clientTicks.check(packet.clientTick);
+    for (const frame of [packet, ...packet.recentFrames]) {
+      const frameAge = (packet.clientTick - frame.clientTick) >>> 0;
+      if (frameAge >= UINT32_HALF_RANGE) throw fail('Input frame tick is in the future', 'tick-future');
+      if (frameAge > this.maxPastTicks) throw fail('Input frame tick is stale', 'tick-stale');
+    }
     if (current !== undefined) {
       uint32(current, 'currentHostTick');
-      if (packet.clientTick > current + this.maxFutureTicks) throw fail('Input tick is in the future', 'tick-future');
-      if (current > packet.clientTick && current - packet.clientTick > this.maxPastTicks) throw fail('Input tick is stale', 'tick-stale');
-      if (packet.lastAckHostTick > current + this.maxFutureTicks) throw fail('Input ack tick is in the future', 'tick-future');
+      const acknowledgedAge = (current - packet.lastAckHostTick) >>> 0;
+      if (acknowledgedAge >= UINT32_HALF_RANGE) throw fail('Input ack tick is in the future', 'tick-future');
+      for (const frame of [packet, ...packet.recentFrames]) {
+        if (frame.shotTick === null) continue;
+        mapClientShotTickToHost(
+          current,
+          packet.lastAckHostTick,
+          packet.clientTick,
+          frame.shotTick,
+          this.maxShotRewindTicks,
+        );
+      }
     }
     if (!this.rate.allow(context.nowMs ?? this.now())) throw fail('Input packet rate limit exceeded', 'rate-limited');
     this.sequence.accept(packet.inputSeq);
+    this.clientTicks.accept(packet.clientTick);
     return packet;
   }
 
-  reset(): void { this.sequence.reset(); this.rate.reset(); }
+  reset(): void { this.sequence.reset(); this.clientTicks.reset(); this.rate.reset(); }
 }
 
 export const MatchProtocolValidator = InputPacketValidator;
