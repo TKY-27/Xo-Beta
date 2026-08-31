@@ -74,8 +74,11 @@ the opaque token selects the host's in-memory binding. A changed browser peer
 ID may reclaim that disconnected slot. Successful reclaim rotates the token,
 invalidating the previous value. An unknown token is removed from the guest's
 session and permits one fresh-admission attempt when capacity remains; it never
-reclaims an existing identity. Phase 3 restores only lobby membership; Phase 4
-will define in-match restoration.
+reclaims an existing identity. Before match lock this restores lobby
+membership. During a match, a valid claim within 60 seconds rebinds the same
+roster slot and Actor, rotates the token, and receives a full authoritative
+keyframe. An eliminated participant returns as a spectator. Expired claims do
+not create a new player or Bot takeover.
 
 ## Dedicated WebRTC signaling
 
@@ -90,6 +93,15 @@ browser peer ID, role, and admission session. A mismatch closes the dedicated
 connection. All inbound channel messages are bounded independently from the
 Trystero control layer.
 
-The start-eligibility event is advisory in Phase 3. It proves that the lobby
-and required channels are ready but cannot transition the simulation into an
-online match.
+Start eligibility proves that the lobby and all required channels are ready.
+The host then sends the canonical match-start payload; each guest validates the
+map/build/protocol/roster binding, loads presentation resources, and returns
+`READY_TO_SIMULATE`. Only the host may begin the countdown, and only after every
+connected participant acknowledges that barrier.
+
+High-frequency input and snapshot packets are binary, versioned,
+session-bound, sequenced, ticked, and exact-length validated. Guests send only
+bounded input, tactical-ping requests, acknowledgements, and reconnect
+control. Reliable authoritative events and keyframes use monotonic IDs and
+revisions so duplicate delivery is idempotent. No packet accepts guest claims
+for position, health, inventory, damage, ownership, glass, storm, or results.

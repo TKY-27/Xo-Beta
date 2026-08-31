@@ -87,14 +87,21 @@ See `docs/adr/`:
 Phase 2 introduced explicit one-to-four-human rosters, team assignments, actor
 ownership, and deterministic Bot fill in `src/sim/roster.ts`. Phase 3 adds a
 private host-authoritative lobby and direct connection setup in `src/net`
-without changing the simulation authority boundary.
+without changing the simulation authority boundary. Phase 4 connects that
+lobby to one host-owned fixed-step `Match`; guests submit validated
+`InputCommand` packets and present a read-only `ClientReplica` with local
+movement prediction, reconciliation, and remote interpolation.
 
 Encrypted Nostr/Trystero discovery carries admission, lobby control, and WebRTC
 signaling. A separate host-to-each-guest `RTCPeerConnection` owns four bounded
-DataChannels for future control, events, inputs, and snapshots. There is no
-TURN, SFU, game server, public matchmaking database, or server-side room state.
+DataChannels for control, authoritative events, inputs, and snapshots. There
+is no TURN, SFU, game server, public matchmaking database, or server-side room
+state.
 
-The `InputCommand`/controller seam remains the future Phase 4 integration point.
-Phase 3 does not launch an online match; its production Start control is gated
-until authoritative match synchronization and recovery are complete. See
-`NETWORKING.md`, `PROTOCOL.md`, and `NETWORK_THREAT_MODEL.md`.
+`RemoteInputController` binds each admitted peer to exactly one human Actor and
+neutralizes missing input. `ClientReplica` never decides damage, ownership,
+Bot actions, glass state, or victory. Reliable event IDs/revisions and full
+keyframes make reconnect idempotent; a 60-second reconnect claim restores the
+same roster slot and Actor. Host loss ends the match after bounded direct ICE
+recovery because no host migration or paid relay exists. See `NETWORKING.md`,
+`PROTOCOL.md`, and `NETWORK_THREAT_MODEL.md`.
