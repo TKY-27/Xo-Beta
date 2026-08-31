@@ -9,7 +9,7 @@ import {
 } from '../core/balance';
 import type { Actor } from './actor';
 import { MovementSystem } from './movement';
-import type { PhysicsWorld } from '../physics/physics';
+import { eyeYFromBodyCenter, type PhysicsWorld } from '../physics/physics';
 import type { MapDef, WaterVolume } from '../world/types';
 import { gameNext } from '../core/rng';
 
@@ -34,6 +34,48 @@ export interface Projectile {
   inWater: boolean;
 }
 
+/**
+ * Server-owned historical firing pose. Network messages never populate this
+ * structure: lag compensation reconstructs it from completed simulation
+ * ticks, while `tryFireFromAuthoritativePose` still owns weapon/ammo/RPM
+ * validation and projectile attributes.
+ */
+export interface AuthoritativeShotPose {
+  bodyPosition: Readonly<{ x: number; y: number; z: number }>;
+  crouched: boolean;
+  aimDirection: Readonly<{ x: number; y: number; z: number }>;
+  spread: number;
+}
+
+interface ProjectileCollisionHitBase {
+  point: { x: number; y: number; z: number };
+  normal: { x: number; y: number; z: number };
+  dist: number;
+}
+
+export type ProjectileCollisionHit = ProjectileCollisionHitBase & (
+  | { kind: 'actor'; actorId: number; region: string }
+  | {
+    kind: 'destructible';
+    destructibleId: number;
+    stableId: string;
+    destructibleType: string;
+    material: string;
+  }
+  | { kind: 'world'; material: string }
+);
+
+/** Pure collision seam used only while catching a late projectile up. */
+export interface ProjectileCollisionQuery {
+  raycast(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    maxDist: number,
+  ): ProjectileCollisionHit | null;
+  /** Lets a historical query stop returning glass removed by this catch-up. */
+  onDestructibleResolved?(hit: Extract<ProjectileCollisionHit, { kind: 'destructible' }>, removed: boolean): void;
+}
+
 export interface CombatEvents {
   onMuzzleFlash(
     actor: Actor,
@@ -56,9 +98,11 @@ export interface CombatEvents {
   onMeleeHit(target: Actor, attacker: Actor, damage: number, killed: boolean, headshot: boolean): void;
 }
 
-interface DestructibleRef {
+export interface DestructibleRef {
   id: number;
   stableId: string;
+  /** Monotonic authoritative state revision; increments on a state edge. */
+  revision: number;
   hp: number;
   collider: unknown;
   geo: MapDef['destructibles'][number]['geo'];
@@ -109,8 +153,42 @@ export class CombatSystem {
     aimDirOverride?: { x: number; y: number; z: number },
     triggerPressed = true,
   ): boolean {
+    return this.tryFireInternal(a, aimDirOverride, triggerPressed, null).fired;
+  }
+
+  /**
+   * Fire from a pose previously captured by the authoritative host. The
+   * caller receives exactly the projectiles created by this trigger so it can
+   * catch only those rounds up through historical geometry.
+   */
+  tryFireFromAuthoritativePose(
+    a: Actor,
+    _dt: number,
+    pose: AuthoritativeShotPose,
+    triggerPressed = true,
+  ): readonly Projectile[] | null {
+    const aim = normalizeDirection(pose.aimDirection);
+    if (!aim || !finitePoint(pose.bodyPosition) || !Number.isFinite(pose.spread)) return null;
+    const result = this.tryFireInternal(a, aim, triggerPressed, {
+      bodyPosition: pose.bodyPosition,
+      crouched: pose.crouched,
+      spread: Math.max(0, Math.min(Math.PI / 2, pose.spread)),
+    });
+    return result.fired ? result.projectiles : null;
+  }
+
+  private tryFireInternal(
+    a: Actor,
+    aimDirOverride: { x: number; y: number; z: number } | undefined,
+    triggerPressed: boolean,
+    historicalPose: {
+      bodyPosition: Readonly<{ x: number; y: number; z: number }>;
+      crouched: boolean;
+      spread: number;
+    } | null,
+  ): { fired: boolean; projectiles: Projectile[] } {
     const w = a.inv.selectedWeapon;
-    if (!w || !a.alive) return false;
+    if (!w || !a.alive) return { fired: false, projectiles: [] };
     const def = WEAPONS[w.weaponId];
     const rt = a.wpn;
 
@@ -119,24 +197,26 @@ export class CombatSystem {
     // an empty magazine keeps reloading because there is no physical round to
     // fire yet.
     if (rt.reloadTimer > 0) {
-      if (!triggerPressed) return false;
-      if (w.ammoInMag <= 0) return false;
+      if (!triggerPressed) return { fired: false, projectiles: [] };
+      if (w.ammoInMag <= 0) return { fired: false, projectiles: [] };
       // Do not throw away a partial reload for a click that arrives before
       // the weapon's normal cycle/bolt delay has elapsed. The next click can
       // still interrupt once a shot is actually legal.
-      if (rt.fireCooldown > 0 || rt.boltTimer > 0 || rt.swapTimer > 0 || a.healing) return false;
+      if (rt.fireCooldown > 0 || rt.boltTimer > 0 || rt.swapTimer > 0 || a.healing) {
+        return { fired: false, projectiles: [] };
+      }
       this.cancelReload(a);
     }
-    if (rt.swapTimer > 0 || a.healing) return false;
-    if (rt.boltTimer > 0) return false;
-    if (rt.fireCooldown > 0) return false;
+    if (rt.swapTimer > 0 || a.healing) return { fired: false, projectiles: [] };
+    if (rt.boltTimer > 0) return { fired: false, projectiles: [] };
+    if (rt.fireCooldown > 0) return { fired: false, projectiles: [] };
 
     if (w.ammoInMag <= 0) {
       // Keep dry fire separate from a real shot. In particular, the last
       // round decrements the magazine to zero but is still a live shot.
       rt.fireCooldown = 0.25;
       this.events.onShotFired(a, w.weaponId, a.body.position.x, a.eyeY, a.body.position.z, true);
-      return false;
+      return { fired: false, projectiles: [] };
     }
 
     rt.fireCooldown = 60 / def.rpm;
@@ -149,11 +229,14 @@ export class CombatSystem {
 
     // Direction with recoil + spread
     const baseDir = aimDirOverride ?? this.movement.lookDir(a);
-    const spread = this.currentSpread(a);
+    const spread = historicalPose?.spread ?? this.currentSpread(a);
 
-    const eyeY = a.eyeY;
-    const px = a.body.position.x;
-    const pz = a.body.position.z;
+    const bodyPosition = historicalPose?.bodyPosition ?? a.body.position;
+    const eyeY = historicalPose
+      ? eyeYFromBodyCenter(bodyPosition.y, historicalPose.crouched)
+      : a.eyeY;
+    const px = bodyPosition.x;
+    const pz = bodyPosition.z;
     // Canonical logical muzzle shared by projectile, flash fallback and audio.
     // Rendered rigs may refine the visual flash to the authored weapon marker,
     // but simulation consumers must never fall back to the actor's chest.
@@ -161,6 +244,7 @@ export class CombatSystem {
     const muzzleY = eyeY + baseDir.y * 0.7 - 0.12;
     const muzzleZ = pz + baseDir.z * 0.7;
 
+    const firedProjectiles: Projectile[] = [];
     for (let p = 0; p < def.pellets; p++) {
       const dir = coneSample(baseDir, spread);
       const proj = this.alloc();
@@ -187,6 +271,7 @@ export class CombatSystem {
       proj.isPellet = def.pellets > 1;
       proj.ricochets = 0;
       proj.inWater = false;
+      firedProjectiles.push(proj);
     }
 
     // Recoil & bloom
@@ -198,7 +283,7 @@ export class CombatSystem {
     this.events.onMuzzleFlash(a, w.weaponId, muzzleX, muzzleY, muzzleZ, baseDir.x, baseDir.y, baseDir.z);
     this.events.onShotFired(a, w.weaponId, muzzleX, muzzleY, muzzleZ, false);
     if (w.ammoInMag === 0) this.tryReload(a);
-    return true;
+    return { fired: true, projectiles: firedProjectiles };
   }
 
   /** Attempt a punch with the permanent fists pseudo-weapon. */
@@ -395,12 +480,28 @@ export class CombatSystem {
     for (let s = 0; s < substeps; s++) {
       for (const p of this.projectiles) {
         if (!p.active) continue;
-        this.stepProjectile(p, sdt, actors);
+        this.stepProjectile(p, sdt, actors, null);
       }
     }
   }
 
-  private stepProjectile(p: Projectile, dt: number, actors: Actor[]): void {
+  /** Advance one projectile substep against a server-owned historical query. */
+  stepProjectileWithQuery(
+    p: Projectile,
+    dt: number,
+    actors: Actor[],
+    query: ProjectileCollisionQuery,
+  ): void {
+    if (!p.active || !Number.isFinite(dt) || dt <= 0) return;
+    this.stepProjectile(p, dt, actors, query);
+  }
+
+  private stepProjectile(
+    p: Projectile,
+    dt: number,
+    actors: Actor[],
+    query: ProjectileCollisionQuery | null,
+  ): void {
     p.life -= dt;
     if (p.life <= 0) {
       p.active = false;
@@ -443,7 +544,9 @@ export class CombatSystem {
     // the old one-ray path advanced past an actor behind the pane and made the
     // first upper-floor hit look like a solid stop.
     while (remaining > 1e-5 && collisionPasses++ < 12) {
-      const hit = this.phys.raycast(cursorX, cursorY, cursorZ, dx, dy, dz, remaining + 0.05);
+      const hit = query
+        ? query.raycast(cursorX, cursorY, cursorZ, dx, dy, dz, remaining + 0.05)
+        : this.liveProjectileRaycast(cursorX, cursorY, cursorZ, dx, dy, dz, remaining + 0.05);
       if (!hit || hit.dist > remaining + 1e-4) {
         cursorX += dx * remaining;
         cursorY += dy * remaining;
@@ -455,9 +558,8 @@ export class CombatSystem {
 
       const consumed = Math.min(remaining, Math.max(hit.dist, 0.01));
       p.dist += consumed;
-      const meta = this.phys.metaOf(hit.collider);
-      if (meta?.kind === 'actor') {
-        const target = actors.find((ac) => ac.id === meta.actorId);
+      if (hit.kind === 'actor') {
+        const target = actors.find((ac) => ac.id === hit.actorId);
         if (target && target.alive && target.id !== p.ownerId) {
           const attacker = this.attackerLookup?.(p.ownerId) ?? null;
           if (attacker && !this.canAffectActor(attacker, target)) {
@@ -471,7 +573,7 @@ export class CombatSystem {
             continue;
           }
           emitTracer(hit.point.x, hit.point.y, hit.point.z);
-          this.resolveActorHit(p, target, hit.point.x, hit.point.y, hit.point.z, meta.region);
+          this.resolveActorHit(p, target, hit.point.x, hit.point.y, hit.point.z, hit.region);
           p.active = false;
           return;
         }
@@ -483,29 +585,36 @@ export class CombatSystem {
         continue;
       }
 
-      if (meta?.kind === 'destructible') {
-        const d = this.destructibles.get(meta.id);
+      if (hit.kind === 'destructible') {
+        const d = this.destructibles.get(hit.destructibleId);
+        let removed = false;
         if (d && d.alive) {
           emitTracer(hit.point.x, hit.point.y, hit.point.z);
           d.hp -= p.damage;
           const gone = d.type === 'glass' || d.hp <= 0;
           if (gone) {
+            removed = true;
             d.alive = false;
+            d.revision = (d.revision + 1) >>> 0;
             this.phys.removeCollider(d.collider as never);
             if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z, p.ownerId);
-            else this.events.onDestructibleDamaged(meta.id, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
+            else this.events.onDestructibleDamaged(hit.destructibleId, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
           } else {
-            this.events.onDestructibleDamaged(meta.id, d.stableId, hit.point.x, hit.point.y, hit.point.z, false);
+            this.events.onDestructibleDamaged(hit.destructibleId, d.stableId, hit.point.x, hit.point.y, hit.point.z, false);
           }
-          if (d.type !== 'glass') {
-            // Non-glass destructibles stop the round.
-            this.events.onImpact(hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, meta.material, true);
-            p.active = false;
-            return;
-          }
-          // Glass has now been removed. Continue the same swept segment so a
-          // target immediately behind the opening remains hittable.
         }
+        const destructibleType = d?.type ?? hit.destructibleType;
+        query?.onDestructibleResolved?.(hit, removed || destructibleType === 'glass');
+        if (destructibleType !== 'glass') {
+          // Historical non-glass remains an obstruction even if a later live
+          // revision has already removed it. Applying damage is still guarded
+          // by the current authoritative `alive` state above.
+          this.events.onImpact(hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.material, true);
+          p.active = false;
+          return;
+        }
+        // Glass is transparent after the one authoritative break edge. Keep
+        // the remainder so an actor immediately behind the pane remains hit.
         cursorX = hit.point.x + dx * 0.05;
         cursorY = hit.point.y + dy * 0.05;
         cursorZ = hit.point.z + dz * 0.05;
@@ -546,6 +655,32 @@ export class CombatSystem {
     // Publish the segment that was actually simulated. This keeps the tracer
     // event path alive even though renderers do not poll projectile state.
     emitTracer(p.x, p.y, p.z);
+  }
+
+  private liveProjectileRaycast(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    maxDist: number,
+  ): ProjectileCollisionHit | null {
+    const hit = this.phys.raycast(ox, oy, oz, dx, dy, dz, maxDist);
+    if (!hit) return null;
+    const meta = this.phys.metaOf(hit.collider);
+    const base = { point: hit.point, normal: hit.normal, dist: hit.dist };
+    if (meta?.kind === 'actor') {
+      return { ...base, kind: 'actor', actorId: meta.actorId, region: meta.region };
+    }
+    if (meta?.kind === 'destructible') {
+      const d = this.destructibles.get(meta.id);
+      return {
+        ...base,
+        kind: 'destructible',
+        destructibleId: meta.id,
+        stableId: d?.stableId ?? `destructible:${meta.id}`,
+        destructibleType: d?.type ?? 'unknown',
+        material: meta.material,
+      };
+    }
+    return { ...base, kind: 'world', material: 'stone' };
   }
 
   private resolveActorHit(p: Projectile, target: Actor, hx: number, hy: number, hz: number, region: string): void {
@@ -589,6 +724,7 @@ export class CombatSystem {
     d.hp -= amount;
     if (d.hp <= 0) {
       d.alive = false;
+      d.revision = (d.revision + 1) >>> 0;
       this.phys.removeCollider(d.collider as never);
       if (d.type === 'glass') this.events.onGlassBreak(d.stableId, d.geo.x, d.geo.y, d.geo.z, -1);
       else this.events.onDestructibleDamaged(id, d.stableId, d.geo.x, d.geo.y, d.geo.z, true);
@@ -640,6 +776,23 @@ function rarityIndex(r: Rarity): number {
     case 'epic': return 3;
     case 'legendary': return 4;
   }
+}
+
+function finitePoint(point: Readonly<{ x: number; y: number; z: number }>): boolean {
+  return Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z);
+}
+
+function normalizeDirection(
+  direction: Readonly<{ x: number; y: number; z: number }>,
+): { x: number; y: number; z: number } | null {
+  if (!finitePoint(direction)) return null;
+  const length = Math.hypot(direction.x, direction.y, direction.z);
+  if (!Number.isFinite(length) || length < 1e-6) return null;
+  return {
+    x: direction.x / length,
+    y: direction.y / length,
+    z: direction.z / length,
+  };
 }
 
 /** Random direction within a cone around `dir` (half-angle `angle` radians). */

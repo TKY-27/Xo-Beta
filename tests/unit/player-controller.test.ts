@@ -81,6 +81,31 @@ describe('QA input timing', () => {
     controller.dispose();
   });
 
+  it('samples replica input without constructing a mutable Actor', () => {
+    vi.stubGlobal('location', { search: '' });
+    const controller = makeController();
+    window.dispatchEvent(keyEvent('keydown', 'KeyW'));
+    const command = controller.sampleCommand(0, 1 / 60);
+    expect(command.moveZ).toBe(1);
+    expect(command.yaw).toBe(controller.yaw);
+    controller.dispose();
+  });
+
+  it('queues owner inventory requests for exactly one authoritative input tick', () => {
+    vi.stubGlobal('location', { search: '' });
+    const controller = makeController();
+    expect(controller.requestInventorySlot(3)).toBe(true);
+    expect(controller.requestDropSelected()).toBe(true);
+    const first = controller.sampleCommand(0, 1 / 60);
+    expect(first.slotRequest).toBe(3);
+    expect(first.dropWeaponPressed).toBe(true);
+    const second = controller.sampleCommand(0, 1 / 60);
+    expect(second.slotRequest).toBeNull();
+    expect(second.dropWeaponPressed).toBe(false);
+    expect(controller.requestInventorySlot(5)).toBe(false);
+    controller.dispose();
+  });
+
   it('toggles the Tab inventory even while gameplay input is disabled', () => {
     const canvas = { requestPointerLock: () => undefined } as unknown as HTMLCanvasElement;
     const onInventory = vi.fn();

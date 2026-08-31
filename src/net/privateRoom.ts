@@ -24,6 +24,10 @@ import {
 import { base64UrlEncode, deriveInviteSecrets, randomBytes, type InviteKeyMaterial } from './crypto';
 import {
   GameConnection,
+  type GameChannelLabel,
+  type GameMessage,
+  type GameNetworkMetrics,
+  type GamePayload,
   type GameConnectionOptions,
   type GameConnectionState,
   type GameProtocolBinding,
@@ -61,6 +65,7 @@ import {
   MemoryReconnectStorage,
   ReconnectError,
   ReconnectTokenManager,
+  type ReconnectBinding,
 } from './reconnect';
 import {
   openNostrSignalingRoom,
@@ -80,6 +85,12 @@ export interface GameConnectionHandle {
   readonly state: GameConnectionState;
   start(): Promise<void>;
   handleSignal(signal: SignalMessage): Promise<void>;
+  send?(channel: GameChannelLabel, data: GamePayload): boolean;
+  sendControl?(data: GamePayload): boolean;
+  sendEvent?(data: GamePayload): boolean;
+  sendInput?(data: GamePayload): boolean;
+  sendSnapshot?(data: GamePayload, sequence?: number): boolean;
+  getNetworkMetrics?(): Promise<GameNetworkMetrics>;
   dispose(): void;
 }
 export type GameConnectionFactory = (options: GameConnectionOptions) => GameConnectionHandle;
@@ -96,8 +107,58 @@ export interface PrivateRoomControllerOptions {
   readonly gameConnectionFactory?: GameConnectionFactory;
   readonly buildId?: string;
   readonly baseUrl?: string;
-  readonly experimentalStartEnabled?: boolean;
   readonly sessionStorage?: Storage;
+  readonly onGameMessage?: (peerId: string, message: GameMessage) => void;
+  readonly onGameStateChange?: (peerId: string, state: GameConnectionState) => void;
+  readonly onGameNetworkMetrics?: (peerId: string, metrics: GameNetworkMetrics) => void;
+  readonly onGameDisconnected?: (event: GamePeerDisconnectedEvent) => void;
+  /** Guest-only hook; the coordinator owns the disconnect grace timer. */
+  readonly onHostDisconnected?: (event: GamePeerDisconnectedEvent) => void;
+  /** Fail-closed gameplay-window check performed before rotating a locked-room token. */
+  readonly authorizeParticipantReconnect?: (attempt: ParticipantReconnectAttempt) => boolean;
+  /**
+   * Commits the authoritative Actor rebind before the lobby marks a locked
+   * participant connected. Returning false rejects the admission.
+   */
+  readonly onParticipantReconnected?: (event: ParticipantReconnectedEvent) => boolean;
+  readonly onMatchStartAccepted?: (context: OnlineRoomMatchContext) => void | Promise<void>;
+}
+
+export interface OnlineRoomMatchContext {
+  readonly role: 'host' | 'guest';
+  readonly localParticipantId: string;
+  readonly localProtocolSession: string;
+  readonly matchSessionBinding: string;
+  readonly hostPeerId: string;
+  readonly snapshot: LobbySnapshot;
+}
+
+/** Safe reconnect metadata; credentials and invite-derived secrets stay private. */
+export interface ReconnectBindingView {
+  readonly roomId: string;
+  readonly slotId: number;
+  readonly participantId: string;
+  readonly protocolSession: string;
+  readonly generation: number;
+  readonly expiresAt: number;
+}
+
+export interface GamePeerDisconnectedEvent {
+  readonly peerId: string;
+  readonly participantId: string | null;
+  readonly isHost: boolean;
+  readonly state: 'failed' | 'closed';
+}
+
+export interface ParticipantReconnectedEvent {
+  readonly peerId: string;
+  readonly binding: ReconnectBindingView;
+}
+
+export interface ParticipantReconnectAttempt {
+  readonly participantId: string;
+  readonly previousPeerId: string;
+  readonly peerId: string;
 }
 
 interface GuestProfile {
@@ -114,12 +175,7 @@ interface AdmissionDeferred {
   reject(error: unknown): void;
 }
 
-class FreshAdmissionRequired extends Error {}
-
-/**
- * Coordinates the Phase 3 room only. It never constructs a Match: the start
- * request is an eligibility check guarded behind a development-only flag.
- */
+/** Coordinates the private room and hands a locked roster to the match runtime. */
 export class PrivateRoomController implements OnlineLobbyActions {
   private readonly onView: (view: LobbyViewModel) => void;
   private readonly onError?: (code: RoomUiErrorCode) => void;
@@ -127,14 +183,23 @@ export class PrivateRoomController implements OnlineLobbyActions {
   private readonly gameConnectionFactory: GameConnectionFactory;
   private readonly build: BuildIdentity;
   private readonly baseUrl: string;
-  private readonly experimentalStartEnabled: boolean;
   private readonly injectedSessionStorage?: Storage;
+  private readonly onGameMessage?: (peerId: string, message: GameMessage) => void;
+  private readonly onGameStateChange?: (peerId: string, state: GameConnectionState) => void;
+  private readonly onGameNetworkMetrics?: (peerId: string, metrics: GameNetworkMetrics) => void;
+  private readonly onGameDisconnected?: (event: GamePeerDisconnectedEvent) => void;
+  private readonly onHostDisconnected?: (event: GamePeerDisconnectedEvent) => void;
+  private readonly authorizeParticipantReconnect?: (attempt: ParticipantReconnectAttempt) => boolean;
+  private readonly onParticipantReconnected?: (event: ParticipantReconnectedEvent) => boolean;
+  private readonly onMatchStartAccepted?: (context: OnlineRoomMatchContext) => void | Promise<void>;
   private readonly admissionRate = new PeerRateLimiter({ capacity: 6, refillPerSecond: 0.5 });
   private readonly admissionReplay = new ReplayNonceGuard(64);
   private readonly signalRate = new PeerRateLimiter({ capacity: 96, refillPerSecond: 24 });
   private readonly games = new Map<string, GameConnectionHandle>();
   private readonly pings = new Map<string, number>();
   private readonly disconnectedPeers = new Set<string>();
+  private readonly reportedGameDisconnects = new Set<string>();
+  private readonly reconnectBindings = new Map<string, ReconnectBindingView>();
   private readonly cleanups: Array<() => void> = [];
   private readonly roomCleanups: Array<() => void> = [];
 
@@ -168,9 +233,15 @@ export class PrivateRoomController implements OnlineLobbyActions {
       features: PROTOCOL_FEATURES,
     });
     this.baseUrl = options.baseUrl ?? applicationBaseUrl();
-    this.experimentalStartEnabled = options.experimentalStartEnabled
-      ?? (import.meta.env.DEV && new URLSearchParams(location.search).has('experimental-online-start'));
     this.injectedSessionStorage = options.sessionStorage;
+    this.onGameMessage = options.onGameMessage;
+    this.onGameStateChange = options.onGameStateChange;
+    this.onGameNetworkMetrics = options.onGameNetworkMetrics;
+    this.onGameDisconnected = options.onGameDisconnected;
+    this.onHostDisconnected = options.onHostDisconnected;
+    this.authorizeParticipantReconnect = options.authorizeParticipantReconnect;
+    this.onParticipantReconnected = options.onParticipantReconnected;
+    this.onMatchStartAccepted = options.onMatchStartAccepted;
     this.cleanups.push(onSettingsChanged((settings) => {
       const local = this.currentSnapshot()?.participants.find((participant) => participant.participantId === this.localParticipantId);
       if (local && local.skinId !== settings.playerSkin) void this.setOwnSkin(settings.playerSkin);
@@ -180,6 +251,85 @@ export class PrivateRoomController implements OnlineLobbyActions {
 
   get active(): boolean {
     return this.role !== 'idle';
+  }
+
+  get matchContext(): OnlineRoomMatchContext | null {
+    const snapshot = this.currentSnapshot();
+    if (!snapshot || this.role === 'idle') return null;
+    const derived = this.derived;
+    if (!derived) return null;
+    return Object.freeze({
+      role: this.role,
+      localParticipantId: this.localParticipantId,
+      localProtocolSession: this.localProtocolSession,
+      matchSessionBinding: base64UrlEncode(derived.protocolSessionBinding),
+      hostPeerId: snapshot.hostPeerId,
+      snapshot,
+    });
+  }
+
+  /** Send without creating an application queue or any fallback path. */
+  sendGameMessage(
+    peerId: string,
+    channel: GameChannelLabel,
+    data: GamePayload,
+    snapshotSequence?: number,
+  ): boolean {
+    const game = this.games.get(peerId);
+    if (!game || game.state !== 'connected') return false;
+    if (channel === 'snapshot' && game.sendSnapshot) return game.sendSnapshot(data, snapshotSequence);
+    return game.send?.(channel, data) ?? false;
+  }
+
+  /** One authoritative Match packet is fanned out once to each guest. */
+  broadcastGameMessage(
+    channel: Exclude<GameChannelLabel, 'input'>,
+    data: GamePayload,
+    snapshotSequence?: number,
+  ): Readonly<{ sent: number; dropped: number }> {
+    if (this.role !== 'host') return Object.freeze({ sent: 0, dropped: 0 });
+    let sent = 0;
+    let dropped = 0;
+    for (const peerId of this.games.keys()) {
+      if (this.sendGameMessage(peerId, channel, data, snapshotSequence)) sent++;
+      else dropped++;
+    }
+    return Object.freeze({ sent, dropped });
+  }
+
+  sendGameInput(data: GamePayload): boolean {
+    if (this.role !== 'guest' || !this.hostPeerId) return false;
+    return this.sendGameMessage(this.hostPeerId, 'input', data);
+  }
+
+  /** Sample one direct connection; no application-level polling queue is made. */
+  async getGameNetworkMetrics(peerId: string): Promise<GameNetworkMetrics | null> {
+    const game = this.games.get(peerId);
+    if (!game?.getNetworkMetrics) return null;
+    try {
+      const metrics = await game.getNetworkMetrics();
+      this.onGameNetworkMetrics?.(peerId, metrics);
+      return metrics;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Returns only non-secret reconnect binding metadata retained by the host. */
+  getReconnectBinding(participantId: string): ReconnectBindingView | null {
+    const binding = this.reconnectBindings.get(participantId);
+    return binding ? Object.freeze({ ...binding }) : null;
+  }
+
+  disconnectGamePeer(peerId: string): boolean {
+    const game = this.games.get(peerId);
+    if (!game) return false;
+    this.reportGameDisconnected(peerId, 'closed');
+    game.dispose();
+    this.games.delete(peerId);
+    this.disconnectedPeers.add(peerId);
+    this.render();
+    return true;
   }
 
   async createRoom(request: CreateRoomRequest): Promise<void> {
@@ -230,13 +380,12 @@ export class PrivateRoomController implements OnlineLobbyActions {
   }
 
   async joinRoom(request: JoinRoomRequest): Promise<void> {
-    await this.joinRoomAttempt(request, randomIdentifier(), true);
+    await this.joinRoomAttempt(request, randomIdentifier());
   }
 
   private async joinRoomAttempt(
     request: JoinRoomRequest,
     protocolSession: string,
-    allowFreshRetry: boolean,
   ): Promise<void> {
     this.assertUsable();
     await this.leaveRoom();
@@ -286,9 +435,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
       history.replaceState(null, '', createInviteUrl(invite.token, this.baseUrl));
       this.render();
     } catch (error) {
-      const retryFresh = allowFreshRetry && error instanceof FreshAdmissionRequired;
       await this.leaveRoom();
-      if (retryFresh) return this.joinRoomAttempt(request, protocolSession, false);
       throw normalizeRoomError(error, 'discovery-failed');
     } finally {
       this.admissionWait = null;
@@ -302,6 +449,8 @@ export class PrivateRoomController implements OnlineLobbyActions {
     this.games.clear();
     this.pings.clear();
     this.disconnectedPeers.clear();
+    this.reportedGameDisconnects.clear();
+    this.reconnectBindings.clear();
     this.admissionRate.reset();
     this.admissionReplay.reset();
     this.signalRate.reset();
@@ -371,11 +520,13 @@ export class PrivateRoomController implements OnlineLobbyActions {
   }
 
   async requestStart(): Promise<void> {
-    if (this.role !== 'host' || !this.experimentalStartEnabled) return;
+    if (this.role !== 'host') return;
     const result = await this.applyLocalCommand({ type: 'start-request' });
     if (result?.start?.accepted) {
-      this.statusMessage = t('lobby.startVerified');
+      this.statusMessage = t('lobby.startAccepted');
       this.render();
+      const context = this.matchContext;
+      if (context) await this.onMatchStartAccepted?.(context);
     }
   }
 
@@ -400,6 +551,8 @@ export class PrivateRoomController implements OnlineLobbyActions {
       const lobby = this.requireLobby();
       let participant: LobbyParticipant;
       let reconnectToken: string;
+      let reconnectBinding: ReconnectBindingView;
+      let retiredPeerId: string | null = null;
 
       if (request.reconnectToken) {
         const manager = this.requireReconnectManager();
@@ -412,16 +565,52 @@ export class PrivateRoomController implements OnlineLobbyActions {
         if (!existing || existing.connected || existing.isHost || existing.slotId !== record.slotId) {
           throw new ReconnectError('binding-mismatch', 'Reconnect participant is unavailable');
         }
+        if (!lobby.canReclaimParticipant(
+          record.participantId,
+          existing.peerId,
+          peerId,
+          request.protocolSession,
+        )) {
+          throw new ReconnectError('binding-mismatch', 'Reconnect peer or protocol session is unavailable');
+        }
+        if (lobby.matchLocked && this.authorizeParticipantReconnect?.({
+          participantId: record.participantId,
+          previousPeerId: existing.peerId,
+          peerId,
+        }) !== true) {
+          throw new ReconnectError('stale-reconnect', 'The active match reconnect window is unavailable');
+        }
         const grant = manager.reclaimGrant(request.reconnectToken, record, {
           nextProtocolSession: request.protocolSession,
         });
+        reconnectToken = grant.token;
+        reconnectBinding = reconnectBindingView(grant.binding, grant.generation, grant.expiresAt);
+        if (lobby.matchLocked) {
+          let committed = false;
+          try {
+            committed = this.onParticipantReconnected?.({ peerId, binding: reconnectBinding }) === true;
+          } catch {
+            committed = false;
+          }
+          if (!committed) {
+            // The replacement credential was never disclosed. Revoke it and
+            // leave both the lobby slot and Actor on their disconnected
+            // binding instead of acknowledging a partial reconnect.
+            manager.revoke(grant.token);
+            throw new ReconnectError('stale-reconnect', 'The authoritative match rejected the reconnect');
+          }
+        }
+        // All checks and the authoritative Actor rebind have completed in the
+        // same synchronous turn. This prevalidated LobbyState mutation is the
+        // final admission commit, so an accepted response can never describe
+        // a disconnected authoritative Actor.
         participant = lobby.reclaimParticipant(
           record.participantId,
           existing.peerId,
           peerId,
           grant.binding.protocolSession,
         );
-        reconnectToken = grant.token;
+        retiredPeerId = existing.peerId;
       } else {
         if (request.participantId === null) throw new Error('Fresh admission requires a participant identity');
         const handshake = buildHandshake({
@@ -439,12 +628,26 @@ export class PrivateRoomController implements OnlineLobbyActions {
           requestedSlot: request.requestedSlot,
           channelOpen: false,
         });
-        reconnectToken = this.requireReconnectManager().issue({
+        const grant = this.requireReconnectManager().issueGrant({
           roomId: lobby.roomId,
           slotId: participant.slotId,
           participantId: participant.participantId,
           protocolSession: participant.protocolSession,
         });
+        reconnectToken = grant.token;
+        reconnectBinding = reconnectBindingView(grant.binding, grant.generation, grant.expiresAt);
+      }
+
+      this.reconnectBindings.set(participant.participantId, reconnectBinding);
+      if (retiredPeerId !== null) {
+        // A participant has only one live gameplay generation. Retire every
+        // per-peer transport/accounting entry from the previous generation so
+        // repeated reconnects stay bounded for the match lifetime.
+        this.games.get(retiredPeerId)?.dispose();
+        this.games.delete(retiredPeerId);
+        this.pings.delete(retiredPeerId);
+        this.disconnectedPeers.delete(retiredPeerId);
+        this.reportedGameDisconnects.delete(retiredPeerId);
       }
 
       const payload: AdmissionResponsePayload = {
@@ -511,7 +714,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
       if (!response.accepted) {
         if (response.code === 'invalid-reconnect') {
           this.guestReconnect?.clear();
-          throw new FreshAdmissionRequired();
+          throw roomError('reconnect-expired');
         }
         throw roomError(rejectToUiCode(response.code));
       }
@@ -535,9 +738,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
       // the invite's host commitment. Ignore that candidate and keep waiting
       // for the real host; only a verified host response may settle admission.
       if (verifiedHostResponse) {
-        this.admissionWait?.reject(error instanceof FreshAdmissionRequired
-          ? error
-          : normalizeRoomError(error, 'wrong-secret'));
+        this.admissionWait?.reject(normalizeRoomError(error, 'wrong-secret'));
       }
       throw error;
     }
@@ -609,6 +810,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
 
     signaling.room.onPeerLeave = (peerId) => {
       this.disconnectedPeers.add(peerId);
+      this.reportGameDisconnected(peerId, 'closed');
       this.games.get(peerId)?.dispose();
       this.games.delete(peerId);
       this.pings.delete(peerId);
@@ -648,22 +850,27 @@ export class PrivateRoomController implements OnlineLobbyActions {
       this.markDirectFailed(peerId);
       return;
     }
-    const protocolBinding = this.gameProtocolBinding(snapshot, local, role);
-    const expectedRemoteProtocolBinding = this.gameProtocolBinding(
-      snapshot,
-      remote,
-      role === 'host' ? 'guest' : 'host',
-    );
-    const game = this.gameConnectionFactory({
-      role,
-      protocolBinding,
-      expectedRemoteProtocolBinding,
-      onSignal: (signal) => sendSignal(signal as unknown as DataPayload, { target: peerId }),
-      onStateChange: (state) => this.onGameState(peerId, state),
-      onError: () => this.markDirectFailed(peerId),
-    });
-    this.games.set(peerId, game);
-    void game.start().catch(() => this.markDirectFailed(peerId));
+    try {
+      const protocolBinding = this.gameProtocolBinding(snapshot, local, role);
+      const expectedRemoteProtocolBinding = this.gameProtocolBinding(
+        snapshot,
+        remote,
+        role === 'host' ? 'guest' : 'host',
+      );
+      const game = this.gameConnectionFactory({
+        role,
+        protocolBinding,
+        expectedRemoteProtocolBinding,
+        onSignal: (signal) => sendSignal(signal as unknown as DataPayload, { target: peerId }),
+        onMessage: (message) => this.onGameMessage?.(peerId, message),
+        onStateChange: (state) => this.onGameState(peerId, state),
+        onError: () => this.markDirectFailed(peerId),
+      });
+      this.games.set(peerId, game);
+      void game.start().catch(() => this.onGameState(peerId, 'failed'));
+    } catch {
+      this.onGameState(peerId, 'failed');
+    }
   }
 
   private gameProtocolBinding(
@@ -683,15 +890,44 @@ export class PrivateRoomController implements OnlineLobbyActions {
   }
 
   private onGameState(peerId: string, state: GameConnectionState): void {
+    this.onGameStateChange?.(peerId, state);
+    if (state === 'connected') this.reportedGameDisconnects.delete(peerId);
     if (this.role === 'host' && this.lobby?.getParticipantByPeer(peerId)) {
-      this.lobby.setChannelOpen(peerId, state === 'connected');
+      if (state === 'failed' || state === 'closed') {
+        // The signaling peer can outlive its direct gameplay connection. A
+        // terminal game failure must still open the authenticated reconnect
+        // path; otherwise LobbyState would retain connected=true and reject a
+        // valid token before the Match's 60-second preflight is consulted.
+        this.lobby.markDisconnected(peerId);
+      } else {
+        this.lobby.setChannelOpen(peerId, state === 'connected');
+      }
       void this.broadcastLobby();
     }
     if (state === 'failed' || state === 'closed') {
+      this.reportGameDisconnected(peerId, state);
       this.statusMessage = t('room.directFailed');
       this.reportError('direct-failed');
     }
     this.render();
+  }
+
+  private reportGameDisconnected(peerId: string, state: 'failed' | 'closed'): void {
+    if (this.reportedGameDisconnects.has(peerId)) return;
+    this.reportedGameDisconnects.add(peerId);
+    const participant = this.currentSnapshot()?.participants.find((item) => item.peerId === peerId);
+    const event: GamePeerDisconnectedEvent = Object.freeze({
+      peerId,
+      participantId: participant?.participantId ?? null,
+      isHost: participant?.isHost ?? peerId === this.hostPeerId,
+      state,
+    });
+    try {
+      this.onGameDisconnected?.(event);
+      if (event.isHost && this.role === 'guest') this.onHostDisconnected?.(event);
+    } catch {
+      // Lifecycle observers cannot change the room's authoritative state.
+    }
   }
 
   private markDirectFailed(peerId: string): void {
@@ -824,7 +1060,6 @@ export class PrivateRoomController implements OnlineLobbyActions {
       rosterLines: roster.map((entry) => `${entry.slotId + 1}. ${entry.displayName} — ${entry.skinId.toUpperCase()}${entry.teamId === null ? '' : ` — ${t(entry.teamId === 0 ? 'lobby.teamA' : 'lobby.teamB')}`}`),
       relays: this.relays,
       startEligible,
-      experimentalStartEnabled: this.experimentalStartEnabled && this.role === 'host',
       statusMessage: this.statusMessage || undefined,
     };
     this.onView(view);
@@ -902,6 +1137,21 @@ function randomIdentifier(): string {
   return base64UrlEncode(randomBytes(18));
 }
 
+function reconnectBindingView(
+  binding: ReconnectBinding,
+  generation: number,
+  expiresAt: number,
+): ReconnectBindingView {
+  return Object.freeze({
+    roomId: binding.roomId,
+    slotId: binding.slotId,
+    participantId: binding.participantId,
+    protocolSession: binding.protocolSession,
+    generation,
+    expiresAt,
+  });
+}
+
 function hasControlCharacter(value: string): boolean {
   return [...value].some((character) => {
     const code = character.codePointAt(0) ?? 0;
@@ -942,7 +1192,7 @@ function normalizeRoomError(error: unknown, fallback: RoomUiErrorCode): RoomUiEr
     const code = (error as { code?: unknown }).code;
     if (typeof code === 'string' && [
       'invalid-invite', 'invalid-name', 'incompatible', 'room-full',
-      'wrong-secret', 'discovery-failed', 'direct-failed',
+      'wrong-secret', 'discovery-failed', 'direct-failed', 'reconnect-expired',
     ].includes(code)) return roomError(code as RoomUiErrorCode);
   }
   return roomError(fallback);

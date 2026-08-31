@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import type { Actor } from '../sim/actor';
+import type { ActorView } from '../sim/gameStateView';
 import { getSettings } from '../core/settings';
 import { MOVE } from '../core/balance';
 import { feetYFromBodyCenter } from '../physics/physics';
@@ -203,6 +204,128 @@ export class CameraRig {
         this.blendFrom = null;
         this.blendFromQuat = null;
       }
+    }
+  }
+
+  /** Camera update for a replica actor. It intentionally consumes only the
+   * read-only ActorView surface; recoil, ADS and movement prediction remain
+   * local presentation concerns and are not reconstructed as authority. */
+  updateView(
+    actor: ActorView,
+    dt: number,
+    phys: PhysicsQuery,
+    opts: { spectating?: boolean; adsAmount?: number; recoilYaw?: number; recoilPitch?: number } = {},
+  ): void {
+    if (opts.spectating) {
+      this.updateSpectateView(actor, dt, phys);
+      return;
+    }
+    const settings = getSettings();
+    this.baseFov = settings.fov;
+    const adsTarget = THREE.MathUtils.clamp(opts.adsAmount ?? 0, 0, 1);
+    this.currentAds += (adsTarget - this.currentAds) * Math.min(1, dt * 10);
+    const horizontalSpeed = Math.hypot(actor.velocity.x, actor.velocity.z);
+    const sprinting = actor.grounded && !actor.crouched && horizontalSpeed > MOVE.walkSpeed + 0.8;
+    this.sprintKick += ((sprinting ? 1 : 0) - this.sprintKick) * Math.min(1, dt * 6);
+    const presentationFov = this.mode === 'tps'
+      ? THREE.MathUtils.clamp(this.baseFov * 0.55, 42, 60)
+      : this.baseFov;
+    const targetFov = presentationFov - this.currentAds * (this.mode === 'tps' ? 6 : 14)
+      + this.sprintKick * presentationFov * 0.085;
+    this.setScoped(actor.equippedWeapon === 'sniper' && this.currentAds > 0.97);
+    this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 12);
+    this.camera.updateProjectionMatrix();
+    this.shakeAmount *= Math.exp(-dt * 5.5);
+    const shakeX = Math.sin(this.shakeSeed + this.t2() * 47.3) * 0.012 * this.shakeAmount;
+    const shakeY = Math.sin(this.shakeSeed * 1.7 + this.t2() * 39.1) * 0.012 * this.shakeAmount;
+    const p = actor.position;
+    const feetY = feetYFromBodyCenter(p.y);
+    const eyeH = actor.crouched ? MOVE.crouchEyeHeight : MOVE.eyeHeight;
+    this.smoothEye += (eyeH - this.smoothEye) * Math.min(1, dt * 12);
+    const yaw = actor.yaw + (opts.recoilYaw ?? 0) * 0.6;
+    const pitch = actor.pitch + (opts.recoilPitch ?? 0) * 0.6;
+    if (this.mode === 'fps') {
+      this.camera.position.set(p.x + shakeX, feetY + this.smoothEye + shakeY, p.z);
+      this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shakeY * 0.5, yaw + shakeX * 0.5, 0, 'YXZ'));
+      return;
+    }
+    const direction = new THREE.Vector3(
+      -Math.sin(yaw) * Math.cos(pitch),
+      Math.sin(pitch),
+      -Math.cos(yaw) * Math.cos(pitch),
+    );
+    const pivot = new THREE.Vector3(p.x, feetY + this.smoothEye - 0.55, p.z);
+    const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    const shoulder = settings.tpsCharacterSide === 'right' ? -1 : 1;
+    const desired = direction.multiplyScalar(-(this.tpsDistance + this.currentAds * 1.1))
+      .addScaledVector(right, shoulder * 0.95);
+    const boomLength = desired.length();
+    desired.multiplyScalar(1 / Math.max(boomLength, 1e-6));
+    const hit = phys.cameraCast(
+      pivot.x, pivot.y, pivot.z,
+      desired.x, desired.y, desired.z,
+      boomLength,
+      0.2,
+    );
+    const distance = hit ? Math.max(this.camera.near + 0.02, hit.dist - 0.08) : boomLength;
+    this.camera.position.copy(pivot).addScaledVector(desired, distance);
+    this.camera.position.y += shakeY;
+    this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shakeY * 0.4, yaw + shakeX * 0.4, 0, 'YXZ'));
+  }
+
+  /** Stable spectator camera driven by interpolated replica state. */
+  updateSpectateView(target: ActorView, dt: number, phys: PhysicsQuery): void {
+    this.setScoped(false);
+    this.baseFov = getSettings().fov;
+    this.camera.fov += (this.baseFov - this.camera.fov) * Math.min(1, dt * 12);
+    this.camera.updateProjectionMatrix();
+    const targetChanged = this.spectateTargetId !== target.id;
+    if (targetChanged) {
+      this.spectateTargetId = target.id;
+      this.spectateYaw = target.yaw;
+      this.spectateDistance = SPECTATOR_CAMERA.rear;
+      this.spectateObstructed = false;
+      this.spectateInitialized = false;
+    }
+    const speed = Math.hypot(target.velocity.x, target.velocity.z);
+    const movementYaw = speed > 0.45
+      ? Math.atan2(-target.velocity.x, -target.velocity.z)
+      : target.yaw;
+    const yawDelta = Math.atan2(Math.sin(movementYaw - this.spectateYaw), Math.cos(movementYaw - this.spectateYaw));
+    this.spectateYaw += yawDelta * (1 - Math.exp(-dt * 7));
+    const feetY = feetYFromBodyCenter(target.position.y);
+    const pivot = new THREE.Vector3(target.position.x, feetY + SPECTATOR_CAMERA.torsoHeight, target.position.z);
+    const back = new THREE.Vector3(Math.sin(this.spectateYaw), 0, Math.cos(this.spectateYaw));
+    const right = new THREE.Vector3(Math.cos(this.spectateYaw), 0, -Math.sin(this.spectateYaw));
+    _cameraOffset.copy(back).multiplyScalar(SPECTATOR_CAMERA.rear)
+      .addScaledVector(right, SPECTATOR_CAMERA.lateral)
+      .y = SPECTATOR_CAMERA.height - SPECTATOR_CAMERA.torsoHeight;
+    const boomLength = _cameraOffset.length();
+    _cameraOffset.multiplyScalar(1 / Math.max(boomLength, 1e-6));
+    const hit = phys.cameraCast(pivot.x, pivot.y, pivot.z, _cameraOffset.x, _cameraOffset.y, _cameraOffset.z, boomLength, 0.2);
+    const hitDistance = hit ? Math.max(this.camera.near + 0.02, hit.dist - 0.08) : boomLength;
+    const blocked = hit !== null && hitDistance < boomLength - SPECTATOR_CAMERA.hysteresis;
+    if (blocked) {
+      this.spectateObstructed = true;
+      this.spectateDistance += (Math.min(this.spectateDistance, hitDistance) - this.spectateDistance)
+        * (1 - Math.exp(-dt * SPECTATOR_CAMERA.contractRate));
+    } else if (this.spectateObstructed && (!hit || hitDistance >= boomLength - SPECTATOR_CAMERA.hysteresis * 0.35)) {
+      this.spectateObstructed = false;
+      this.spectateDistance += (boomLength - this.spectateDistance) * (1 - Math.exp(-dt * SPECTATOR_CAMERA.recoverRate));
+    } else if (!this.spectateObstructed) {
+      this.spectateDistance = boomLength;
+    }
+    this.spectateDistance = THREE.MathUtils.clamp(this.spectateDistance, this.camera.near + 0.02, boomLength);
+    _tv.copy(pivot).addScaledVector(_cameraOffset, this.spectateDistance);
+    _cameraLook.copy(pivot);
+    _cameraQuat.setFromRotationMatrix(new THREE.Matrix4().lookAt(_tv, _cameraLook, _cameraUp));
+    if (!this.spectateInitialized || targetChanged) {
+      this.camera.position.copy(_tv);
+      this.camera.quaternion.copy(_cameraQuat);
+      this.spectateInitialized = true;
+    } else {
+      this.camera.position.lerp(_tv, 1 - Math.exp(-dt * 10));
+      this.camera.quaternion.slerp(_cameraQuat, 1 - Math.exp(-dt * 12));
     }
   }
   private smoothEye = MOVE.eyeHeight;

@@ -47,6 +47,7 @@
     <div class="loading-foot">
       <div class="loading-bar"><div id="loading-fill"></div></div>
       <div id="loading-status" data-i18n="notice.loading">Loading…</div>
+      <button id="btn-online-start-cancel" class="loading-cancel hidden" type="button" data-i18n="online.cancelStart">CANCEL MATCH START</button>
     </div>
   </div>
 
@@ -180,7 +181,7 @@
     </div>
   </div>
 
-  <!-- Host-authoritative online lobby. Phase 3 never launches a live match. -->
+  <!-- Host-authoritative online lobby and match-start barrier. -->
   <div id="online-lobby-menu" class="screen hidden">
     <div class="menu-shade full"></div>
     <header class="screen-head online-lobby-head">
@@ -219,8 +220,8 @@
         <dl id="lobby-direct-status" class="network-status" aria-live="polite"></dl>
         <p id="lobby-status-message" class="lobby-status-message" aria-live="polite"></p>
         <button id="btn-lobby-ready" class="btn-quiet lobby-ready" data-i18n="lobby.ready">READY</button>
-        <button id="btn-online-start" class="btn-play deploy" type="button" disabled data-i18n="lobby.startPhase3">START UNAVAILABLE — PHASE 4</button>
-        <p id="lobby-start-note" class="room-note" data-i18n="lobby.phase3Gate">Phase 3 verifies the lobby and direct channels only. A live online match is not launched.</p>
+        <button id="btn-online-start" class="btn-play deploy" type="button" disabled data-i18n="lobby.startOnline">START ONLINE MATCH</button>
+        <p id="lobby-start-note" class="room-note" data-i18n="lobby.startRequirement">Every connected participant must be ready and have a direct P2P channel.</p>
         <button id="btn-leave-room" class="btn-quiet danger" data-i18n="lobby.leave">LEAVE ROOM</button>
       </aside>
     </div>
@@ -320,6 +321,18 @@
       <div id="storm-timer"></div>
     </div>
 
+    <section id="online-hud-status" class="online-hud-status hidden" role="status" aria-live="polite" aria-atomic="true" aria-label="Online connection">
+      <span id="online-hud-status-dot" class="online-status-dot" aria-hidden="true"></span>
+      <span id="online-hud-connection">DIRECT P2P</span>
+      <span id="online-hud-metrics" class="online-hud-metrics"></span>
+      <span id="online-hud-diagnostics" class="online-hud-diagnostics" aria-hidden="true"></span>
+    </section>
+
+    <section id="online-team-status" class="online-team-status hidden" aria-labelledby="online-team-title">
+      <h2 id="online-team-title" data-i18n="hud.teammates">TEAMMATES</h2>
+      <ul id="online-team-list" aria-live="polite"></ul>
+    </section>
+
     <div id="killfeed"></div>
 
     <div id="interact-prompt" class="hidden"><kbd>E</kbd> <span id="interact-text"></span></div>
@@ -338,6 +351,7 @@
     <div id="captions"></div>
 
     <div id="center-banner" class="hidden"></div>
+    <div id="online-presence-notice" class="online-presence-notice hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <div id="elim-banner" class="hidden"></div>
     <div id="storm-warning" class="hidden"></div>
 

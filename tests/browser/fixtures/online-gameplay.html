@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Xo Beta online gameplay browser fixture</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.4 system-ui, sans-serif; }
+    body { margin: 0; padding: 2rem; background: #111827; color: #e5e7eb; }
+    section { max-width: 48rem; margin: 0 auto; padding: 1.5rem; border: 1px solid #374151; border-radius: .75rem; background: #1f2937; }
+    section.hidden { display: none; }
+    form, .controls { display: grid; gap: .75rem; }
+    label { display: grid; gap: .25rem; }
+    input, textarea, select, button { font: inherit; padding: .5rem .65rem; border-radius: .4rem; border: 1px solid #4b5563; background: #111827; color: inherit; }
+    button { cursor: pointer; }
+    .row { display: flex; flex-wrap: wrap; gap: .5rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 5rem; }
+    [data-state="error"] { color: #fca5a5; }
+    [data-state="ok"] { color: #86efac; }
+  </style>
+</head>
+<body>
+  <section id="main-menu">
+    <h1>Online gameplay test fixture</h1>
+    <div class="row"><button id="open-create" type="button">Create room</button><button id="open-join" type="button">Join room</button></div>
+  </section>
+
+  <section id="create-room-menu" class="hidden">
+    <h2>Create room</h2>
+    <form id="create-room-form">
+      <label>Display name <input id="create-display-name" maxlength="24" required></label>
+      <button id="btn-confirm-create-room" type="submit">Create</button>
+    </form>
+  </section>
+
+  <section id="join-room-menu" class="hidden">
+    <h2>Join room</h2>
+    <form id="join-room-form">
+      <label>Invite <textarea id="join-room-invite" maxlength="256" required></textarea></label>
+      <label>Display name <input id="join-display-name" maxlength="24" required></label>
+      <button id="btn-confirm-join-room" type="submit">Join</button>
+    </form>
+  </section>
+
+  <section id="online-lobby-menu" class="hidden">
+    <h2>Lobby</h2>
+    <p>Invite code: <code id="online-room-code"></code></p>
+    <p id="lobby-status" data-state="ok"></p>
+    <label>Mode
+      <select id="lobby-mode"><option value="ffa-bot-fill">FFA with Bots</option><option value="ffa">FFA</option><option value="teams">Teams</option></select>
+    </label>
+    <div id="lobby-participants"></div>
+    <div class="row"><button id="btn-lobby-ready" type="button">Ready</button><button id="btn-lobby-start" type="button">Start match</button><button id="btn-lobby-leave" type="button">Leave</button></div>
+    <pre id="lobby-state"></pre>
+  </section>
+
+  <section id="runtime-menu" class="hidden">
+    <h2>Runtime</h2>
+    <p id="runtime-status" data-state="ok"></p>
+    <div class="controls">
+      <div class="row"><button id="btn-runtime-deploy" type="button">Fast-forward transport</button><button id="btn-runtime-combat-setup" type="button">Prepare combat</button></div>
+      <div class="row"><button id="btn-runtime-fire" type="button">Guest fire</button><button id="btn-runtime-glass" type="button">Break glass</button><button id="btn-runtime-eliminate" type="button">Eliminate host</button></div>
+      <div class="row"><button id="btn-runtime-end" type="button">End host match</button><button id="btn-runtime-leave" type="button">Return to menu</button></div>
+    </div>
+    <pre id="runtime-state"></pre>
+  </section>
+
+  <script type="module" src="/tests/browser/fixtures/online-gameplay-fixture.ts"></script>
+</body>
+</html>

@@ -87,6 +87,26 @@ export interface CandidatePairDiagnostics {
   readonly remoteCandidateType: string | null;
 }
 
+/** Transport-only diagnostics exposed to the online coordinator and QA HUD.
+ *
+ * Candidate addresses are intentionally not included.  Values are nullable
+ * because browsers expose different subsets of the RTC stats schema.
+ */
+export interface GameNetworkMetrics {
+  readonly sampledAtMs: number;
+  readonly rttMs: number | null;
+  readonly packetLossPercent: number | null;
+  readonly bytesSent: number | null;
+  readonly bytesReceived: number | null;
+  readonly packetsSent: number | null;
+  readonly packetsReceived: number | null;
+  readonly packetsLost: number | null;
+  readonly candidatePair: CandidatePairDiagnostics | null;
+}
+
+/** Short alias for consumers that do not need to mention the transport. */
+export type NetworkMetrics = GameNetworkMetrics;
+
 /** Minimal channel surface, kept small so Node tests can inject a fake. */
 export interface GameDataChannel {
   readonly label: string;
@@ -147,6 +167,9 @@ export interface GameConnectionOptions {
   readonly onStateChange?: (state: GameConnectionState) => void;
   readonly onError?: (error: Error) => void;
   readonly onCandidatePair?: (diagnostics: CandidatePairDiagnostics) => void;
+  readonly onNetworkMetrics?: (metrics: GameNetworkMetrics) => void;
+  /** Fires once for a terminal direct-connection loss. */
+  readonly onDisconnected?: (state: 'failed' | 'closed') => void;
   readonly connectionTimeoutMs?: number;
   readonly timer?: GameConnectionTimer;
   /** Explicit admitted identity sent as the first reliable control message. */
@@ -347,6 +370,11 @@ function statBoolean(record: Record<string, unknown>, key: string): boolean {
   return record[key] === true;
 }
 
+function statNumber(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 function statRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null;
 }
@@ -367,6 +395,130 @@ function candidateTypeFromPair(
 ): string | null {
   return candidateTypeFromStat(candidate)
     ?? (typeof pair[key] === 'string' ? String(pair[key]).toLowerCase() : null);
+}
+
+function parseCandidatePair(records: readonly Record<string, unknown>[]): CandidatePairDiagnostics | null {
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const record of records) {
+    const id = statString(record, 'id');
+    if (id) byId.set(id, record);
+  }
+  const pairs = records.filter((record) => record.type === 'candidate-pair');
+  const pair = pairs.find((record) => statBoolean(record, 'selected'))
+    ?? pairs.find((record) => statBoolean(record, 'nominated'))
+    ?? pairs.find((record) => record.state === 'succeeded');
+  if (!pair) return null;
+
+  const localId = statString(pair, 'localCandidateId');
+  const remoteId = statString(pair, 'remoteCandidateId');
+  const local = localId ? byId.get(localId) ?? null : null;
+  const remote = remoteId ? byId.get(remoteId) ?? null : null;
+  return {
+    id: statString(pair, 'id') ?? 'selected-candidate-pair',
+    state: statString(pair, 'state'),
+    nominated: statBoolean(pair, 'nominated'),
+    selected: statBoolean(pair, 'selected'),
+    protocol: statString(pair, 'protocol'),
+    localCandidateId: localId,
+    remoteCandidateId: remoteId,
+    localCandidateType: candidateTypeFromPair(pair, local, 'localCandidateType'),
+    remoteCandidateType: candidateTypeFromPair(pair, remote, 'remoteCandidateType'),
+  };
+}
+
+function parseNetworkMetrics(records: readonly Record<string, unknown>[], sampledAtMs: number): GameNetworkMetrics {
+  const candidatePair = parseCandidatePair(records);
+  const selectedRecord = candidatePair
+    ? records.find((record) => statString(record, 'id') === candidatePair.id) ?? null
+    : null;
+  const rttSeconds = selectedRecord
+    ? statNumber(selectedRecord, 'currentRoundTripTime') ?? statNumber(selectedRecord, 'roundTripTime')
+    : null;
+
+  let bytesSent = selectedRecord ? statNumber(selectedRecord, 'bytesSent') : null;
+  let bytesReceived = selectedRecord ? statNumber(selectedRecord, 'bytesReceived') : null;
+  let outboundBytes = 0;
+  let inboundBytes = 0;
+  let hasOutboundBytes = false;
+  let hasInboundBytes = false;
+  let inboundPackets = 0;
+  let inboundLost = 0;
+  let hasInboundPackets = false;
+  let remoteSent = 0;
+  let remoteLost = 0;
+  let hasRemotePackets = false;
+  let outboundPackets = 0;
+  let hasOutboundPackets = false;
+
+  for (const record of records) {
+    const type = record.type;
+    const recordBytesSent = statNumber(record, 'bytesSent');
+    const recordBytesReceived = statNumber(record, 'bytesReceived');
+    if (type === 'outbound-rtp' || type === 'data-channel') {
+      if (recordBytesSent !== null) {
+        outboundBytes += recordBytesSent;
+        hasOutboundBytes = true;
+      }
+    }
+    if (type === 'inbound-rtp' || type === 'data-channel') {
+      if (recordBytesReceived !== null) {
+        inboundBytes += recordBytesReceived;
+        hasInboundBytes = true;
+      }
+    }
+    if (type === 'inbound-rtp') {
+      const received = statNumber(record, 'packetsReceived');
+      const lost = statNumber(record, 'packetsLost');
+      if (received !== null || lost !== null) {
+        inboundPackets += received ?? 0;
+        inboundLost += lost ?? 0;
+        hasInboundPackets = true;
+      }
+    }
+    if (type === 'outbound-rtp') {
+      const sent = statNumber(record, 'packetsSent');
+      if (sent !== null) {
+        outboundPackets += sent;
+        hasOutboundPackets = true;
+      }
+    }
+    if (type === 'remote-inbound-rtp') {
+      const sent = statNumber(record, 'packetsSent');
+      const lost = statNumber(record, 'packetsLost');
+      if (sent !== null || lost !== null) {
+        remoteSent += sent ?? 0;
+        remoteLost += lost ?? 0;
+        hasRemotePackets = true;
+      }
+    }
+  }
+
+  if (bytesSent === null && hasOutboundBytes) bytesSent = outboundBytes;
+  if (bytesReceived === null && hasInboundBytes) bytesReceived = inboundBytes;
+  const packetsSent = hasOutboundPackets ? outboundPackets : hasRemotePackets ? remoteSent : null;
+  const packetsReceived = hasInboundPackets ? inboundPackets : null;
+  const packetsLost = hasInboundPackets ? inboundLost : hasRemotePackets ? remoteLost : null;
+  const lossDenominator = hasInboundPackets
+    ? inboundPackets + inboundLost
+    : hasRemotePackets
+      ? remoteSent + remoteLost
+      : 0;
+  const lossNumerator = hasInboundPackets ? inboundLost : hasRemotePackets ? remoteLost : 0;
+  const packetLossPercent = lossDenominator > 0
+    ? Math.min(100, (lossNumerator / lossDenominator) * 100)
+    : null;
+
+  return Object.freeze({
+    sampledAtMs,
+    rttMs: rttSeconds === null ? null : Math.min(600_000, rttSeconds * 1000),
+    packetLossPercent,
+    bytesSent,
+    bytesReceived,
+    packetsSent,
+    packetsReceived,
+    packetsLost,
+    candidatePair,
+  });
 }
 
 function defaultPeerConnectionFactory(configuration: RTCConfiguration): PeerConnectionLike {
@@ -390,6 +542,8 @@ export class GameConnection {
   private readonly stateHandler?: (state: GameConnectionState) => void;
   private readonly errorHandler?: (error: Error) => void;
   private readonly candidatePairHandler?: (diagnostics: CandidatePairDiagnostics) => void;
+  private readonly networkMetricsHandler?: (metrics: GameNetworkMetrics) => void;
+  private readonly disconnectedHandler?: (state: 'failed' | 'closed') => void;
   private readonly connectionTimeoutMs: number;
   private readonly protocolBinding?: GameProtocolBinding;
   private readonly expectedRemoteProtocolBinding?: GameProtocolBinding;
@@ -411,6 +565,7 @@ export class GameConnection {
   private peerClosed = false;
   private protocolHandshakeSent = false;
   private protocolHandshakeReceived = false;
+  private disconnectedNotified = false;
 
   readonly iceConfiguration: RTCConfiguration;
 
@@ -443,6 +598,8 @@ export class GameConnection {
     this.stateHandler = options.onStateChange;
     this.errorHandler = options.onError;
     this.candidatePairHandler = options.onCandidatePair;
+    this.networkMetricsHandler = options.onNetworkMetrics;
+    this.disconnectedHandler = options.onDisconnected;
 
     if ((options.protocolBinding === undefined) !== (options.expectedRemoteProtocolBinding === undefined)) {
       throw new Error('Both local and remote protocol bindings are required');
@@ -582,34 +739,8 @@ export class GameConnection {
     const report = await this.peer.getStats();
     const values = statsValues(report);
     const records = values.map(statRecord).filter((value): value is Record<string, unknown> => value !== null);
-    const byId = new Map<string, Record<string, unknown>>();
-    for (const record of records) {
-      const id = statString(record, 'id');
-      if (id) byId.set(id, record);
-    }
-
-    const pairs = records.filter((record) => record.type === 'candidate-pair');
-    const pair = pairs.find((record) => statBoolean(record, 'selected'))
-      ?? pairs.find((record) => statBoolean(record, 'nominated'))
-      ?? pairs.find((record) => record.state === 'succeeded');
-    if (!pair) return null;
-
-    const localId = statString(pair, 'localCandidateId');
-    const remoteId = statString(pair, 'remoteCandidateId');
-    const local = localId ? byId.get(localId) ?? null : null;
-    const remote = remoteId ? byId.get(remoteId) ?? null : null;
-    const diagnostics: CandidatePairDiagnostics = {
-      id: statString(pair, 'id') ?? 'selected-candidate-pair',
-      state: statString(pair, 'state'),
-      nominated: statBoolean(pair, 'nominated'),
-      selected: statBoolean(pair, 'selected'),
-      protocol: statString(pair, 'protocol'),
-      localCandidateId: localId,
-      remoteCandidateId: remoteId,
-      localCandidateType: candidateTypeFromPair(pair, local, 'localCandidateType'),
-      remoteCandidateType: candidateTypeFromPair(pair, remote, 'remoteCandidateType'),
-    };
-
+    const diagnostics = parseCandidatePair(records);
+    if (!diagnostics) return null;
     this.candidatePair = diagnostics;
     if (diagnostics.localCandidateType === 'relay' || diagnostics.remoteCandidateType === 'relay') {
       const failure = new Error('Relay ICE candidate pair is not allowed');
@@ -618,6 +749,46 @@ export class GameConnection {
     }
     this.candidatePairHandler?.(diagnostics);
     return diagnostics;
+  }
+
+  /** Read browser transport counters without exposing candidate addresses. */
+  async getNetworkMetrics(): Promise<GameNetworkMetrics> {
+    const sampledAtMs = Date.now();
+    if (!this.peer.getStats) {
+      const empty = Object.freeze({
+        sampledAtMs,
+        rttMs: null,
+        packetLossPercent: null,
+        bytesSent: null,
+        bytesReceived: null,
+        packetsSent: null,
+        packetsReceived: null,
+        packetsLost: null,
+        candidatePair: this.candidatePair,
+      });
+      this.networkMetricsHandler?.(empty);
+      return empty;
+    }
+    const report = await this.peer.getStats();
+    const records = statsValues(report)
+      .map(statRecord)
+      .filter((value): value is Record<string, unknown> => value !== null);
+    const metrics = parseNetworkMetrics(records, sampledAtMs);
+    if (metrics.candidatePair) {
+      this.candidatePair = metrics.candidatePair;
+      if (metrics.candidatePair.localCandidateType === 'relay'
+        || metrics.candidatePair.remoteCandidateType === 'relay') {
+        const failure = new Error('Relay ICE candidate pair is not allowed');
+        this.fail(failure);
+        throw failure;
+      }
+    }
+    this.networkMetricsHandler?.(metrics);
+    return metrics;
+  }
+
+  async networkMetrics(): Promise<GameNetworkMetrics> {
+    return this.getNetworkMetrics();
   }
 
   async inspectCandidatePair(): Promise<CandidatePairDiagnostics | null> {
@@ -662,14 +833,18 @@ export class GameConnection {
   }
 
   /**
-   * Snapshots are lossy.  An optional monotonic sequence lets callers avoid
-   * sending an older state after a newer state has already been attempted.
+   * Snapshots are lossy. An optional monotonic logical snapshot ID lets
+   * callers avoid sending an older state after a newer one has been attempted.
+   * Equality is intentional: every entity-boundary chunk of one logical
+   * snapshot carries the same ID through this transport gate.
    */
   sendSnapshot(data: GamePayload, sequence?: number): boolean {
     if (sequence !== undefined) {
       if (!Number.isFinite(sequence)) return false;
-      if (this.latestSnapshotSequence !== null && sequence <= this.latestSnapshotSequence) return false;
-      this.latestSnapshotSequence = sequence;
+      if (this.latestSnapshotSequence !== null && sequence < this.latestSnapshotSequence) return false;
+      if (this.latestSnapshotSequence === null || sequence > this.latestSnapshotSequence) {
+        this.latestSnapshotSequence = sequence;
+      }
     }
     return this.send('snapshot', data);
   }
@@ -728,6 +903,14 @@ export class GameConnection {
     const iceState = this.peer.iceConnectionState;
     if (peerState === 'failed' || iceState === 'failed') {
       this.attemptIceRestart('WebRTC connection failed');
+      return;
+    }
+    if (peerState === 'disconnected' || iceState === 'disconnected') {
+      // Browsers may report the same transient outage through both state
+      // callbacks. Keep one direct ICE restart in flight and let its bounded
+      // timeout decide whether the connection recovered.
+      if (this._state === 'restarting') return;
+      this.attemptIceRestart('WebRTC connection disconnected');
       return;
     }
     if (peerState === 'closed' || iceState === 'closed') {
@@ -1021,10 +1204,13 @@ export class GameConnection {
       return;
     }
     this.restartAttempted = true;
+    // Transition synchronously so duplicate connection/ICE callbacks cannot
+    // enqueue a second offer before the negotiation promise begins.
+    this.setState('restarting');
+    this.armConnectionTimeout();
     void this.enqueueNegotiation(() => this.createAndPublishOffer(true)).catch((error) => {
       this.fail(asError(error, 'ICE restart failed'));
     });
-    this.armConnectionTimeout();
   }
 
   private ensureActive(): void {
@@ -1051,6 +1237,7 @@ export class GameConnection {
     this.closeChannels();
     this.closePeer();
     this.setState('failed');
+    this.notifyDisconnected('failed');
     try {
       this.errorHandler?.(error);
     } catch {
@@ -1066,6 +1253,17 @@ export class GameConnection {
     this.closeChannels();
     this.closePeer();
     this.setState('closed');
+    this.notifyDisconnected('closed');
+  }
+
+  private notifyDisconnected(state: 'failed' | 'closed'): void {
+    if (this.disconnectedNotified) return;
+    this.disconnectedNotified = true;
+    try {
+      this.disconnectedHandler?.(state);
+    } catch {
+      // Disconnect observers cannot change the terminal transport state.
+    }
   }
 
   private closePeer(): void {

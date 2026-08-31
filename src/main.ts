@@ -5,7 +5,10 @@
 
 import * as THREE from 'three';
 import { loadMap, MAP_LIST, ensureWorldReady } from './world';
+import { normalizeMapForMatch } from './world/builder';
+import type { MapDef } from './world/types';
 import { Match } from './sim/match';
+import type { ActorView, GameStateView } from './sim/gameStateView';
 import { GROUPS as PHYS_GROUPS } from './physics/physics';
 import { BotController } from './ai/bot';
 import { MATCH, MOVE, RARITY_CSS, SIM, WEAPONS } from './core/balance';
@@ -13,6 +16,7 @@ import type { WeaponId, Rarity } from './core/balance';
 import { feetYFromBodyCenter } from './sim/movement';
 import type { WeaponInstance } from './sim/inventory';
 import type { Actor } from './sim/actor';
+import { emptyCommand, type InputCommand } from './sim/input';
 import {
   buildRoster,
   localHumanRosterEntry,
@@ -35,10 +39,34 @@ import { CharacterFactory, updateEliminationFx, type CharacterRig } from './rend
 import { WeaponModelFactory } from './render/weaponModels';
 import { loadGltf } from './assets/assets';
 import { PlayerController } from './player/controller';
-import { Hud, Menus, type PlaySelection, type LootPanelInfo } from './ui/ui';
+import { Hud, Menus, type PlaySelection, type LootPanelInfo, type OnlineHudState } from './ui/ui';
 import { OnlineLobbyUi } from './ui/onlineLobby';
 import { PrivateRoomController } from './net/privateRoom';
+import type { OnlineRoomMatchContext, SignalingFactory } from './net/privateRoom';
+import type { GameNetworkMetrics } from './net/gameConnection';
+import {
+  OnlineMatchCoordinator,
+  HOST_DISCONNECT_GRACE_MS,
+  ONLINE_FIXED_DT,
+  type GuestReplicaFactoryInput,
+  type HostSessionFactoryInput,
+  type OnlineMatchCoordinatorState,
+  type OnlineMatchEndReason,
+} from './net/onlineMatchCoordinator';
+import {
+  HostAuthoritativeMatchSession,
+  type AuthoritativeMatchEvent,
+} from './net/hostMatchSession';
+import { HostLagCompensation } from './net/lagCompensation';
+import {
+  ClientMovementPredictionWorld,
+  createClientMovementPredictionState,
+  type ClientMovementPredictionState,
+} from './net/clientMovementPrediction';
+import { ClientReplica } from './net/clientReplica';
+import type { MatchStartPayload, StartBarrierStatus } from './net/matchStart';
 import { t, initLang } from './core/i18n';
+import { EventBus } from './core/events';
 import { GamepadInput } from './player/gamepad';
 import { AudioEngine, attachAudio } from './audio/audio';
 
@@ -49,9 +77,9 @@ const $canvas = (): HTMLCanvasElement => document.getElementById('game-canvas') 
 // Module state
 // ---------------------------------------------------------------------------
 
-interface LiveGame {
+interface LivePresentation {
   generation: number;
-  match: Match;
+  mapDef: MapDef;
   renderer: GameRenderer;
   world: WorldView;
   vfx: VfxSystem;
@@ -60,12 +88,43 @@ interface LiveGame {
   rigs: Map<number, CharacterRig>;
   characterFill: THREE.PointLight;
   player: PlayerController;
+  weaponFactory: WeaponModelFactory;
   mats: MaterialLibrary;
   qaSceneCensus: string;
   qaGlassSpecs: Array<{ id: number; stableId: string; x: number; y: number; z: number; sx: number; sy: number; sz: number }>;
   qaGlassBreakFrames: Array<{ time: number; presentMs: number }>;
   worldConstructionMs: number;
   cleanup: Array<() => void>;
+  onlineContext: OnlineRoomMatchContext | null;
+  onlineMetrics: Map<string, GameNetworkMetrics>;
+}
+
+interface MatchLiveGame extends LivePresentation {
+  kind: 'match';
+  match: Match;
+  coordinator: OnlineMatchCoordinator<ClientMovementPredictionState> | null;
+}
+
+interface ReplicaLiveGame extends LivePresentation {
+  kind: 'replica';
+  coordinator: OnlineMatchCoordinator<ClientMovementPredictionState>;
+  replica: ClientReplica<ClientMovementPredictionState>;
+  predictionWorld: ClientMovementPredictionWorld;
+  payload: MatchStartPayload;
+  localActorId: number;
+  view: GameStateView | null;
+  worldInitialized: boolean;
+  lastRigWeaponKeys: Map<number, string>;
+  nextPredictedShotAtMs: number;
+}
+
+type LiveGame = MatchLiveGame | ReplicaLiveGame;
+
+interface PreparedGuestRuntime {
+  readonly generation: number;
+  readonly input: GuestReplicaFactoryInput;
+  readonly presentation: LivePresentation;
+  readonly predictionWorld: ClientMovementPredictionWorld;
 }
 
 let live: LiveGame | null = null;
@@ -75,9 +134,23 @@ let menus: Menus;
 const disposers: Array<() => void> = [];
 let matchGeneration = 0;
 let pendingStart: { generation: number; cleanup: Array<() => void> } | null = null;
+let pendingGuestRuntime: PreparedGuestRuntime | null = null;
+let activeOnlineCoordinator: OnlineMatchCoordinator<ClientMovementPredictionState> | null = null;
 const presentationMuzzle = new THREE.Vector3();
 const presentationMuzzleDirection = new THREE.Vector3();
 const presentationFillDirection = new THREE.Vector3();
+
+function livePhase(game: LiveGame | null = live): GameStateView['phase'] | null {
+  if (!game) return null;
+  return game.kind === 'match' ? game.match.phase : game.view?.phase ?? null;
+}
+
+function liveLocalAlive(game: LiveGame | null = live): boolean {
+  if (!game) return false;
+  return game.kind === 'match'
+    ? game.match.localActor?.alive === true
+    : game.view?.actors.find((actor) => actor.id === game.localActorId)?.alive === true;
+}
 
 class MatchStartCancelled extends Error {}
 
@@ -228,6 +301,7 @@ const WEAPON_ICONS: Record<string, string> = {
 const QA_PARAMS = new URLSearchParams(location.search);
 const QA_MODE = import.meta.env.DEV && QA_PARAMS.has('qa');
 const QA_HERO_MODE = QA_MODE && QA_PARAMS.has('hero');
+if (QA_MODE) document.documentElement.dataset.xoQa = '1';
 if (QA_HERO_MODE) document.documentElement.dataset.xoQaHero = '1';
 
 function qaRosterFixture(seed: number): { mode: MatchMode; roster: RosterEntry[] } | null {
@@ -352,9 +426,172 @@ async function boot(): Promise<void> {
 
   menus = new Menus(MAP_LIST);
   let onlineUi: OnlineLobbyUi | null = null;
+  let activeOnlineContextKey = '';
+  const onlineMetrics = new Map<string, GameNetworkMetrics>();
+  const onlineContextKey = (context: OnlineRoomMatchContext): string => (
+    `${context.role}:${context.localParticipantId}:${context.matchSessionBinding}`
+  );
+  const showMainMenuAfterOnline = (reason: OnlineMatchEndReason | null): void => {
+    const coordinator = activeOnlineCoordinator;
+    activeOnlineCoordinator = null;
+    activeOnlineContextKey = '';
+    coordinator?.dispose();
+    teardownMatch(false);
+    void onlineRoom.leaveRoom();
+    menus.showMainMenu();
+    audio.setMusicState('lobby');
+    audio.startAmbience('night', true);
+    lobby.start($canvas(), characterFactory, weaponFactory);
+    const cancel = document.getElementById('btn-online-start-cancel');
+    cancel?.classList.add('hidden');
+    if (reason === 'host-disconnected') {
+      $('loading-fill').style.width = '100%';
+      $('loading-status').textContent = t('hud.hostDisconnected');
+      $('loading-screen').classList.remove('hidden');
+      window.setTimeout(() => $('loading-screen').classList.add('hidden'), 1800);
+    } else if (reason === 'protocol-error') {
+      $('loading-status').textContent = t('online.protocolError');
+      $('loading-screen').classList.add('hidden');
+    } else if (reason === 'cancelled') {
+      $('loading-status').textContent = t('online.startCancelled');
+      $('loading-screen').classList.add('hidden');
+    } else {
+      $('loading-screen').classList.add('hidden');
+    }
+  };
+  const ensureOnlineCoordinator = (provided?: OnlineRoomMatchContext): OnlineMatchCoordinator<ClientMovementPredictionState> => {
+    const context = provided ?? onlineRoom.matchContext;
+    if (!context) throw new Error('Online room match context is unavailable');
+    const key = onlineContextKey(context);
+    if (activeOnlineCoordinator && activeOnlineContextKey === key
+      && activeOnlineCoordinator.state !== 'disposed'
+      && activeOnlineCoordinator.state !== 'ended'
+      && activeOnlineCoordinator.state !== 'failed') {
+      return activeOnlineCoordinator;
+    }
+    activeOnlineCoordinator?.dispose();
+    activeOnlineCoordinator = null;
+    activeOnlineContextKey = key;
+    onlineMetrics.clear();
+    const coordinatorRef: { current: OnlineMatchCoordinator<ClientMovementPredictionState> | null } = { current: null };
+    const requireCoordinator = (): OnlineMatchCoordinator<ClientMovementPredictionState> => {
+      if (!coordinatorRef.current) throw new Error('Online coordinator is not initialized');
+      return coordinatorRef.current;
+    };
+    const coordinator = new OnlineMatchCoordinator<ClientMovementPredictionState>({
+      context,
+      room: onlineRoom,
+      resolveMap: (mapId) => normalizeMapForMatch(loadMap(mapId).def),
+      createHostSession: (input) => prepareOnlineHostSession(
+        input,
+        requireCoordinator(),
+        context,
+        onlineMetrics,
+        sharedMats,
+        sharedProps,
+        characterFactory,
+        weaponFactory,
+        lobby,
+      ),
+      loadGuest: (input) => prepareOnlineGuestRuntime(
+        input,
+        requireCoordinator(),
+        context,
+        onlineMetrics,
+        sharedMats,
+        sharedProps,
+        characterFactory,
+        weaponFactory,
+        lobby,
+      ),
+      createGuestReplica: (input) => activatePreparedGuestReplica(input, requireCoordinator()),
+      sampleLocalInput: () => {
+        const game = live;
+        if (!game || game.kind !== 'replica') return emptyCommand();
+        const adsAmount = game.view?.localMovement?.actorId === game.localActorId
+          ? game.view.localMovement.adsAmount
+          : 0;
+        return game.player.sampleCommand(adsAmount, ONLINE_FIXED_DT);
+      },
+      onLocalInputSubmitted: predictGuestFirePresentation,
+      onStateChange: (state) => {
+        if (import.meta.env.DEV) document.documentElement.dataset.xoOnlineState = state;
+        if (state === 'reconnecting') hud.syncOnlineState({ connection: 'reconnecting' });
+        if (state === 'waiting-ready' && context.role === 'guest') {
+          $('loading-status').textContent = t('online.loadingGuest');
+        }
+      },
+      onBarrierStatus: (status) => updateOnlineBarrierStatus(status),
+      onRuntimeReady: (role) => {
+        installOnlineMetricPolling(onlineRoom, context, onlineMetrics);
+        if (role === 'guest') $('loading-status').textContent = t('online.startCountdown');
+        startLoop();
+      },
+      onActivated: (role, payload) => activateOnlinePresentation(role, payload),
+      onAuthoritativeEvent: presentOnlineAuthoritativeEvent,
+      onPresenceNotice: (kind, displayName) => hud.showPresenceNotice(kind, displayName),
+      onReconnectResult: (accepted) => {
+        hud.banner(t(accepted ? 'online.reconnectAccepted' : 'online.reconnectRejected'), 3.2);
+      },
+      onEnd: (reason) => {
+        if (activeOnlineCoordinator !== coordinatorRef.current) return;
+        showMainMenuAfterOnline(reason);
+      },
+      onProtocolError: (peerId, error) => {
+        console.warn(`online protocol error from ${peerId.slice(0, 12)}`, error.message);
+      },
+    });
+    coordinatorRef.current = coordinator;
+    activeOnlineCoordinator = coordinator;
+    return coordinator;
+  };
   const onlineRoom = new PrivateRoomController({
+    // The deterministic headed harness injects signaling only in a dev/QA
+    // build. Production always uses the repository's public signaling path.
+    signalingFactory: QA_MODE
+      ? (window as unknown as { __xoPhase3TestSignalingFactory?: SignalingFactory })
+        .__xoPhase3TestSignalingFactory
+      : undefined,
     onView: (view) => onlineUi?.renderLobby(view),
     onError: (code) => onlineUi?.showError(code),
+    onGameMessage: (peerId, message) => {
+      try {
+        const coordinator = activeOnlineCoordinator
+          ?? (onlineRoom.matchContext?.role === 'guest' ? ensureOnlineCoordinator() : null);
+        if (coordinator) void coordinator.handleGameMessage(peerId, message);
+      } catch (error) {
+        console.error('online match message setup failed', error);
+      }
+    },
+    onGameStateChange: (peerId, state) => activeOnlineCoordinator?.handleConnectionState(peerId, state),
+    onGameDisconnected: ({ peerId, state }) => {
+      activeOnlineCoordinator?.handleConnectionState(peerId, state);
+    },
+    onHostDisconnected: ({ peerId, state }) => {
+      const coordinator = activeOnlineCoordinator;
+      coordinator?.handleConnectionState(peerId, state);
+      window.setTimeout(() => {
+        if (activeOnlineCoordinator === coordinator) coordinator?.update(0);
+      }, HOST_DISCONNECT_GRACE_MS + 50);
+    },
+    onGameNetworkMetrics: (peerId, metrics) => {
+      onlineMetrics.set(peerId, metrics);
+      activeOnlineCoordinator?.observeNetworkMetrics(peerId, metrics);
+    },
+    authorizeParticipantReconnect: ({ participantId, peerId }) => (
+      activeOnlineCoordinator?.canAcceptReconnectedParticipant(participantId, peerId) === true
+    ),
+    onParticipantReconnected: ({ peerId, binding }) => {
+      return activeOnlineCoordinator?.acceptReconnectedParticipant(binding.participantId, peerId).accepted === true;
+    },
+    onMatchStartAccepted: async (context) => {
+      try {
+        await ensureOnlineCoordinator(context).beginHost();
+      } catch (error) {
+        console.error('online host start failed', error);
+        showMainMenuAfterOnline('protocol-error');
+      }
+    },
   });
   onlineUi = new OnlineLobbyUi({
     maps: MAP_LIST,
@@ -363,13 +600,19 @@ async function boot(): Promise<void> {
   });
   menus.onUiSound = (kind) => audio.uiClick(kind);
   menus.onScreenChanged = (id) => lobby.compose(id === 'settings-menu' ? 'settings' : 'main');
-  menus.onPlayRequested = (sel) =>
+  menus.onPlayRequested = (sel) => {
+    if (activeOnlineCoordinator) {
+      showMainMenuAfterOnline('host-ended');
+      return;
+    }
     void startMatch(sel, sharedMats, sharedProps, characterFactory, weaponFactory, lobby);
+  };
   menus.onCreateRoomRequested = () => onlineUi?.showCreate();
   menus.onJoinRoomRequested = () => onlineUi?.showJoin();
   menus.onResumeRequested = resumeFromPause;
   menus.onQuitRequested = quitToMenu;
   $('btn-spectate-exit').addEventListener('click', () => menus.onQuitRequested());
+  $('btn-online-start-cancel').addEventListener('click', () => activeOnlineCoordinator?.cancelStart());
 
   await setLoad(1, t('load.ready'));
   window.setTimeout(() => $('loading-screen').classList.add('hidden'), 240);
@@ -389,9 +632,9 @@ async function boot(): Promise<void> {
     if (
       live
       && live.player.enabled
-      && live.match.localActor?.alive === true
+      && liveLocalAlive(live)
       && !paused
-      && live.match.phase !== 'results'
+      && livePhase(live) !== 'results'
       && !menus.isAnyMenuOpen()
       && !hud.isTacMapOpen()
       && document.pointerLockElement !== $canvas()
@@ -420,6 +663,11 @@ async function boot(): Promise<void> {
   });
   window.addEventListener('pagehide', () => {
     flushSettingsPersist();
+    const coordinator = activeOnlineCoordinator;
+    activeOnlineCoordinator = null;
+    activeOnlineContextKey = '';
+    coordinator?.dispose();
+    teardownMatch(false);
     // Keep a guest invite fragment across reload so its sessionStorage-only
     // reconnect token can reclaim the same slot with a new browser peer ID.
     void onlineRoom.leaveRoom(true);
@@ -433,13 +681,22 @@ async function boot(): Promise<void> {
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && live && !paused && live.match.phase !== 'results') openPause();
+    if (document.hidden && live && !paused && livePhase(live) !== 'results') openPause();
   });
   window.addEventListener('blur', () => {
-    if (live && !paused && live.match.phase !== 'results' && !menus.isAnyMenuOpen()) openPause();
+    if (live && !paused && livePhase(live) !== 'results' && !menus.isAnyMenuOpen()) openPause();
   });
 
   function quitToMenu(): void {
+    const coordinator = activeOnlineCoordinator;
+    if (coordinator) {
+      if (coordinator.role === 'host') coordinator.endHostMatch();
+      else {
+        coordinator.dispose();
+        showMainMenuAfterOnline(null);
+      }
+      return;
+    }
     teardownMatch();
     menus.showMainMenu();
     audio.setMusicState('lobby');
@@ -451,6 +708,531 @@ async function boot(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Match lifecycle
 // ---------------------------------------------------------------------------
+
+function updateOnlineBarrierStatus(status: StartBarrierStatus): void {
+  const cancel = document.getElementById('btn-online-start-cancel');
+  const ready = status.readyParticipantIds.length + (status.hostReady ? 1 : 0);
+  const total = ready + status.waitingParticipantIds.length + status.failedParticipantIds.length;
+  $('loading-status').textContent = status.failedParticipantIds.length > 0
+    ? t('online.loadFailed')
+    : status.timedOut
+      ? t('online.loadTimedOut')
+    : status.countdown
+    ? t('online.startCountdown')
+    : t('online.readyStatus', { ready, total });
+  cancel?.classList.toggle('hidden', status.cancelled || status.countdown !== null);
+}
+
+function installOnlineMetricPolling(
+  room: PrivateRoomController,
+  context: OnlineRoomMatchContext,
+  metrics: Map<string, GameNetworkMetrics>,
+): void {
+  const game = live;
+  if (!game || game.onlineContext?.matchSessionBinding !== context.matchSessionBinding) return;
+  const peerIds = context.role === 'host'
+    ? context.snapshot.participants
+      .filter((participant) => !participant.isHost)
+      .map((participant) => participant.peerId)
+    : [context.hostPeerId];
+  const sample = (): void => {
+    for (const peerId of peerIds) {
+      void room.getGameNetworkMetrics(peerId).then((value) => {
+        if (value) metrics.set(peerId, value);
+      });
+    }
+  };
+  sample();
+  const timer = window.setInterval(sample, 1_000);
+  game.cleanup.push(() => window.clearInterval(timer));
+}
+
+function activateOnlinePresentation(role: 'host' | 'guest', payload: MatchStartPayload): void {
+  const game = live;
+  if (!game || game.onlineContext?.matchSessionBinding !== payload.protocolSession) {
+    throw new Error('Prepared online presentation does not match the start payload');
+  }
+  $('btn-online-start-cancel').classList.add('hidden');
+  $('loading-fill').style.width = '100%';
+  $('loading-screen').classList.add('hidden');
+  menus.hideAll();
+  menus.setPlayEnabled(true);
+  hud.show(true);
+  hud.applyCrosshair();
+  game.player.enabled = true;
+  game.player.requestLock();
+  audio.init();
+  audio.resume();
+  audio.startAmbience(game.mapDef.sky.preset, false);
+  hud.banner(t('banner.drop', { jump: prettyBind(getSettings().bindings.jump) }), 5.5);
+  if (import.meta.env.DEV) document.documentElement.dataset.xoOnlineRole = role;
+  resetPerfStats();
+  startLoop();
+}
+
+async function prepareOnlineHostSession(
+  input: HostSessionFactoryInput,
+  coordinator: OnlineMatchCoordinator<ClientMovementPredictionState>,
+  context: OnlineRoomMatchContext,
+  metrics: Map<string, GameNetworkMetrics>,
+  sharedMats: MaterialLibrary,
+  sharedProps: PropLibrary,
+  charFactory: CharacterFactory,
+  weaponFactory: WeaponModelFactory,
+  lobby: LobbyScene,
+): Promise<HostAuthoritativeMatchSession> {
+  teardownMatch(false);
+  const generation = ++matchGeneration;
+  pendingStart = { generation, cleanup: [] };
+  menus.setPlayEnabled(false);
+  try {
+    const match = await startMatchImpl(
+      { map: input.payload.mapId, difficulty: input.payload.difficulty, practice: false },
+      sharedMats,
+      sharedProps,
+      charFactory,
+      weaponFactory,
+      lobby,
+      generation,
+      { input, coordinator, context, metrics },
+    );
+    return new HostAuthoritativeMatchSession(
+      match,
+      input.bindings,
+      input.transport,
+      input.encodeSnapshot,
+      {
+        lagCompensation: new HostLagCompensation(),
+        onEvent: input.onEvent,
+        onPresenceNotice: input.onPresenceNotice,
+      },
+    );
+  } catch (error) {
+    if (generation === matchGeneration) teardownMatch(false);
+    throw error;
+  }
+}
+
+function initialReplicaPresentationView(
+  input: GuestReplicaFactoryInput,
+  predictionWorld: ClientMovementPredictionWorld,
+): GameStateView {
+  const position = Object.freeze({
+    x: input.map.transportRoute.from[0],
+    y: MATCH.transportAltitude,
+    z: input.map.transportRoute.from[1],
+  });
+  const velocity = Object.freeze({ x: 0, y: 0, z: 0 });
+  const actors: ActorView[] = input.payload.roster.map((entry) => Object.freeze({
+    id: entry.actorId,
+    displayName: entry.displayName,
+    ownership: Object.freeze({ ...entry.ownership }),
+    connectionState: entry.connectionState,
+    teamId: entry.teamId,
+    skinId: entry.skinId,
+    accentColor: entry.accentColor,
+    alive: true,
+    health: 100,
+    shield: 50,
+    position,
+    velocity,
+    yaw: 0,
+    pitch: 0,
+    grounded: false,
+    moveState: 'ground',
+    crouched: false,
+    deployed: false,
+    equippedWeapon: null,
+    inventory: null,
+    placement: 0,
+    stats: Object.freeze({
+      kills: 0,
+      damageDealt: 0,
+      shotsFired: 0,
+      shotsHit: 0,
+      headshots: 0,
+      survivalTime: 0,
+    }),
+  }));
+  const teamIds = [...new Set(input.payload.roster.map((entry) => entry.teamId))]
+    .filter((teamId): teamId is number => teamId !== null)
+    .sort((a, b) => a - b);
+  return Object.freeze({
+    hostTick: 0,
+    stateRevision: 0,
+    time: 0,
+    phaseTime: 0,
+    phase: 'transport',
+    actors: Object.freeze(actors),
+    localActorId: input.localActorId,
+    teams: Object.freeze(teamIds.map((teamId) => Object.freeze({
+      teamId,
+      members: Object.freeze(input.payload.roster
+        .filter((entry) => entry.teamId === teamId)
+        .map((entry) => Object.freeze({
+          actorId: entry.actorId,
+          slotId: entry.slotId,
+          displayName: entry.displayName,
+          accentColor: entry.accentColor,
+          alive: true,
+          connectionState: entry.connectionState,
+        }))),
+      aliveCount: input.payload.roster.filter((entry) => entry.teamId === teamId).length,
+    }))),
+    mode: input.payload.mode,
+    chests: predictionWorld.supportedChests,
+    loot: Object.freeze([]),
+    storm: Object.freeze({
+      state: 'idle',
+      phaseIndex: -1,
+      timer: 0,
+      centerX: 0,
+      centerZ: 0,
+      radius: input.map.size,
+    }),
+    transport: Object.freeze({ ...position, jumpAllowed: false }),
+    localMovement: null,
+    destructibles: Object.freeze(input.map.destructibles.map((value) => Object.freeze({
+      id: value.stableId,
+      revision: 0,
+      destroyed: false,
+    }))),
+    winner: null,
+    teamResults: Object.freeze([]),
+  });
+}
+
+async function prepareOnlineGuestRuntime(
+  input: GuestReplicaFactoryInput,
+  coordinator: OnlineMatchCoordinator<ClientMovementPredictionState>,
+  context: OnlineRoomMatchContext,
+  metrics: Map<string, GameNetworkMetrics>,
+  sharedMats: MaterialLibrary,
+  sharedProps: PropLibrary,
+  charFactory: CharacterFactory,
+  weaponFactory: WeaponModelFactory,
+  lobby: LobbyScene,
+): Promise<void> {
+  teardownMatch(false);
+  const generation = ++matchGeneration;
+  pendingStart = { generation, cleanup: [] };
+  menus.setPlayEnabled(false);
+  lobby.stop();
+  menus.hideAll();
+  $('loading-screen').classList.remove('hidden');
+  $('btn-online-start-cancel').classList.add('hidden');
+  await setLoad(0.12, t('online.loadingGuest'));
+  try {
+    ensureCurrentStart(generation);
+    const predictionMap = input.map;
+    const initialState = createClientMovementPredictionState({
+      x: predictionMap.transportRoute.from[0],
+      y: MATCH.transportAltitude,
+      z: predictionMap.transportRoute.from[1],
+    }, { deployed: false, grounded: false, state: 'ground' });
+    const predictionWorld = await ClientMovementPredictionWorld.create({
+      mapDef: predictionMap,
+      actorId: input.localActorId,
+      initialState,
+      displayName: input.payload.roster.find((entry) => entry.actorId === input.localActorId)?.displayName,
+      accentColor: input.payload.roster.find((entry) => entry.actorId === input.localActorId)?.accentColor,
+    });
+    registerStartCleanup(generation, () => predictionWorld.dispose());
+    await setLoad(0.38, t('load.map', { name: t(`map.${input.payload.mapId}.name` as never) }));
+
+    const canvas = $canvas();
+    const renderer = new GameRenderer(canvas, QA_MODE);
+    registerStartCleanup(generation, () => renderer.dispose());
+    await renderer.setupSkyAndLights(input.map.sky);
+    ensureCurrentStart(generation);
+    if (input.map.sky.grade) renderer.setGrading(input.map.sky.grade);
+    const worldStart = performance.now();
+    const world = await WorldView.create(input.map, sharedMats, null, sharedProps);
+    const worldConstructionMs = performance.now() - worldStart;
+    ensureCurrentStart(generation);
+    renderer.scene.add(world.group);
+    registerStartCleanup(generation, () => {
+      renderer.scene.remove(world.group);
+      world.dispose();
+    });
+    const bootstrapView = initialReplicaPresentationView(input, predictionWorld);
+    world.initializeReplica(bootstrapView);
+
+    const vfx = new VfxSystem();
+    renderer.scene.add(vfx.group);
+    registerStartCleanup(generation, () => {
+      renderer.scene.remove(vfx.group);
+      vfx.dispose();
+    });
+    const rig = new CameraRig(window.innerWidth / window.innerHeight);
+    rig.onScopedChanged = (scoped) => {
+      hud.setScoped(scoped);
+      renderer.setScopeActive(scoped, rig.camera);
+    };
+    renderer.buildComposer(rig.camera);
+    renderer.applyQuality();
+    rig.mode = getSettings().cameraMode;
+
+    const viewmodel = new ViewModel(weaponFactory);
+    viewmodel.group.visible = rig.mode === 'fps';
+    renderer.scene.add(viewmodel.group);
+    registerStartCleanup(generation, () => {
+      renderer.scene.remove(viewmodel.group);
+      viewmodel.dispose();
+    });
+    viewmodel.setWeapon(null, 'common');
+
+    const characterFill = new THREE.PointLight(0xcfe0ff, 2, 4.8, 2);
+    characterFill.visible = false;
+    renderer.scene.add(characterFill);
+    registerStartCleanup(generation, () => renderer.scene.remove(characterFill));
+
+    const females = new Set(['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX']);
+    const rigs = new Map<number, CharacterRig>();
+    for (const entry of input.payload.roster) {
+      const character = charFactory.create(
+        entry.displayName,
+        entry.accentColor,
+        females.has(entry.displayName),
+        null,
+        entry.skinId,
+      );
+      character.prewarmDeath?.();
+      character.group.visible = false;
+      rigs.set(entry.actorId, character);
+      world.group.add(character.group);
+    }
+    registerStartCleanup(generation, () => {
+      for (const character of rigs.values()) character.dispose();
+      rigs.clear();
+    });
+
+    const toggleTacMap = (): void => {
+      if (!liveLocalAlive() || livePhase() === 'results') return;
+      if (hud.isInventoryOpen()) hud.setInventoryOpen(false);
+      hud.toggleTacMap();
+      if (hud.isTacMapOpen()) player.releaseLock();
+      else if (!paused) player.requestLock();
+    };
+    const toggleInventory = (force?: boolean): void => {
+      const currentlyOpen = hud.isInventoryOpen();
+      const open = force ?? !currentlyOpen;
+      if (open === currentlyOpen) return;
+      if (open && (!liveLocalAlive() || livePhase() === 'results' || paused)) return;
+      if (open && hud.isTacMapOpen()) hud.toggleTacMap(false);
+      hud.setInventoryOpen(open);
+      rig.resetAimState();
+      renderer.setScopeActive(false);
+      player.enabled = !open;
+      if (open) player.releaseLock();
+      else if (!paused) player.requestLock();
+    };
+    const requestAimPing = (): void => {
+      if (!coordinator.active || hud.isTacMapOpen()) return;
+      const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion).normalize();
+      const origin = rig.camera.position.clone().addScaledVector(direction, 0.45);
+      const hit = predictionWorld.cameraCast(
+        origin.x, origin.y, origin.z,
+        direction.x, direction.y, direction.z,
+        250,
+        0.04,
+      );
+      const distance = Math.max(1, Math.min(250, hit?.dist ?? 180));
+      const point = origin.addScaledVector(direction, distance);
+      coordinator.requestTacticalPing(point.x, point.z);
+    };
+    const inputBus = new EventBus<{ requestPointerLock: Record<string, never> }>();
+    registerStartCleanup(generation, () => inputBus.clear());
+    const player = new PlayerController(
+      canvas,
+      inputBus,
+      () => {
+        rig.toggleMode();
+        updateSettings({ cameraMode: rig.mode });
+        viewmodel.group.visible = rig.mode === 'fps';
+      },
+      () => handlePauseOrSpectateExit(),
+      () => cycleSpectate(-1),
+      () => cycleSpectate(1),
+      toggleTacMap,
+      () => updateSettings({
+        tpsCharacterSide: getSettings().tpsCharacterSide === 'left' ? 'right' : 'left',
+      }),
+      () => toggleInventory(),
+    );
+    registerStartCleanup(generation, () => player.dispose());
+    player.gamepad = new GamepadInput({
+      onJumpPress: () => undefined,
+      onReloadPress: () => undefined,
+      onInteractPress: () => undefined,
+      onDashPress: () => undefined,
+      onGrapplePress: () => undefined,
+      onPoundPress: () => undefined,
+      onMedkitPress: () => undefined,
+      onShieldPress: () => undefined,
+      onDropWeaponPress: () => undefined,
+      onCameraToggle: () => {
+        rig.toggleMode();
+        updateSettings({ cameraMode: rig.mode });
+        viewmodel.group.visible = rig.mode === 'fps';
+      },
+      onMapToggle: toggleTacMap,
+      onPauseRequest: () => handlePauseOrSpectateExit(),
+      onSlotRequest: (slot) => player.requestInventorySlot(slot),
+      onMeleePress: () => undefined,
+      onPingPress: requestAimPing,
+    });
+    const routeX = input.map.transportRoute.to[0] - input.map.transportRoute.from[0];
+    const routeZ = input.map.transportRoute.to[1] - input.map.transportRoute.from[1];
+    player.resetLook(Math.atan2(-routeX, -routeZ), -0.12);
+
+    hud.setProjector((x, y, z) => {
+      const projected = new THREE.Vector3(x, y, z).project(rig.camera);
+      return { x: projected.x * 0.5 + 0.5, y: -projected.y * 0.5 + 0.5, visible: projected.z < 1 };
+    });
+    const tacCanvas = document.getElementById('tac-map') as HTMLCanvasElement | null;
+    const onTacClick = (event: MouseEvent): void => {
+      if (!hud.isTacMapOpen() || !tacCanvas || !coordinator.active) return;
+      const rect = tacCanvas.getBoundingClientRect();
+      const half = input.map.size / 2;
+      const x = ((event.clientX - rect.left) / rect.width) * input.map.size - half;
+      const z = ((event.clientY - rect.top) / rect.height) * input.map.size - half;
+      if (coordinator.requestTacticalPing(x, z)) audio.uiClick('confirm');
+    };
+    tacCanvas?.addEventListener('click', onTacClick);
+    registerStartCleanup(generation, () => tacCanvas?.removeEventListener('click', onTacClick));
+
+    hud.onInventoryClose = () => toggleInventory(false);
+    hud.onInventorySelect = (slot) => {
+      toggleInventory(false);
+      if (player.requestInventorySlot(slot)) audio.uiClick('click');
+    };
+    hud.onInventoryMove = () => undefined;
+    hud.onInventoryDrop = (slot) => {
+      toggleInventory(false);
+      if (player.requestInventorySlot(slot) && player.requestDropSelected()) audio.uiClick('confirm');
+    };
+    registerStartCleanup(generation, () => {
+      hud.setInventoryOpen(false);
+      hud.onInventoryClose = () => undefined;
+      hud.onInventorySelect = () => undefined;
+      hud.onInventoryMove = () => undefined;
+      hud.onInventoryDrop = () => undefined;
+    });
+
+    weaponFactory.prewarmAll();
+    await setLoad(0.78, t('load.warming'));
+    try {
+      for (const character of rigs.values()) character.group.visible = true;
+      viewmodel.group.visible = true;
+      await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+      ensureCurrentStart(generation);
+      renderer.renderer.render(renderer.scene, rig.camera);
+      const aerial = renderer.captureAerial(input.map.size / 2, 1024, [
+        world.stormMesh,
+        world.transportGroup,
+        ...[...rigs.values()].map((character) => character.group),
+        viewmodel.group,
+      ]);
+      hud.setTacMapImage(aerial);
+    } catch (error) {
+      console.warn('guest presentation prewarm failed', error);
+    }
+    for (const character of rigs.values()) character.group.visible = false;
+    viewmodel.group.visible = rig.mode === 'fps';
+    ensureCurrentStart(generation);
+    const cleanup = pendingStart!.cleanup;
+    pendingStart = null;
+    const presentation: LivePresentation = {
+      generation,
+      mapDef: input.map,
+      renderer,
+      world,
+      vfx,
+      rig,
+      viewmodel,
+      rigs,
+      characterFill,
+      player,
+      weaponFactory,
+      mats: sharedMats,
+      qaSceneCensus: QA_MODE ? buildQaSceneCensus(world.group) : '',
+      qaGlassSpecs: QA_MODE ? input.map.destructibles.flatMap((value, id) => (
+        value.type === 'glass' && value.geo.kind === 'box'
+          ? [{ id, stableId: value.stableId, ...value.geo }]
+          : []
+      )) : [],
+      qaGlassBreakFrames: [],
+      worldConstructionMs,
+      cleanup,
+      onlineContext: context,
+      onlineMetrics: metrics,
+    };
+    pendingGuestRuntime = Object.freeze({ generation, input, presentation, predictionWorld });
+    await setLoad(0.92, t('online.waitingForPlayers'));
+  } catch (error) {
+    if (generation === matchGeneration) teardownMatch(false);
+    throw error;
+  }
+}
+
+function activatePreparedGuestReplica(
+  input: GuestReplicaFactoryInput,
+  coordinator: OnlineMatchCoordinator<ClientMovementPredictionState>,
+): ClientReplica<ClientMovementPredictionState> {
+  const prepared = pendingGuestRuntime;
+  if (!prepared
+    || prepared.generation !== matchGeneration
+    || prepared.input.payload.protocolSession !== input.payload.protocolSession
+    || prepared.input.localActorId !== input.localActorId
+    || prepared.input.payload.mapHash !== input.payload.mapHash) {
+    throw new Error('Guest runtime was not prepared for this canonical payload');
+  }
+  const initialState = prepared.predictionWorld.captureState();
+  const replica = new ClientReplica<ClientMovementPredictionState>({
+    localActorId: input.localActorId,
+    movementStep: prepared.predictionWorld.movementStep,
+    initialPredictionState: initialState,
+    prediction: { initialState },
+    interpolation: {
+      constrainExtrapolatedPosition: (from, candidate) => {
+        const dx = candidate.x - from.x;
+        const dy = candidate.y - from.y;
+        const dz = candidate.z - from.z;
+        const distance = Math.hypot(dx, dy, dz);
+        if (distance <= 1e-5) return candidate;
+        const hit = prepared.predictionWorld.cameraCast(
+          from.x, from.y, from.z,
+          dx / distance, dy / distance, dz / distance,
+          distance,
+          0.34,
+        );
+        if (!hit) return candidate;
+        const safeDistance = Math.max(0, hit.dist - 0.06);
+        return {
+          x: from.x + (dx / distance) * safeDistance,
+          y: from.y + (dy / distance) * safeDistance,
+          z: from.z + (dz / distance) * safeDistance,
+        };
+      },
+    },
+  });
+  pendingGuestRuntime = null;
+  live = {
+    ...prepared.presentation,
+    kind: 'replica',
+    coordinator,
+    replica,
+    predictionWorld: prepared.predictionWorld,
+    payload: input.payload,
+    localActorId: input.localActorId,
+    view: null,
+    worldInitialized: true,
+    lastRigWeaponKeys: new Map(),
+    nextPredictedShotAtMs: 0,
+  };
+  return replica;
+}
 
 async function startMatch(
   sel: PlaySelection,
@@ -492,20 +1274,27 @@ async function startMatchImpl(
   weaponFactory: WeaponModelFactory,
   lobby: LobbyScene,
   generation: number,
-): Promise<void> {
+  onlineHost: {
+    readonly input: HostSessionFactoryInput;
+    readonly coordinator: OnlineMatchCoordinator<ClientMovementPredictionState>;
+    readonly context: OnlineRoomMatchContext;
+    readonly metrics: Map<string, GameNetworkMetrics>;
+  } | null = null,
+): Promise<Match> {
   lobby.stop();
   menus.hideAll();
   $('loading-screen').classList.remove('hidden');
-  await setLoad(0.15, t('load.map', { name: t(`map.${sel.map}.name` as never) }));
+  const mapId = onlineHost?.input.payload.mapId ?? sel.map;
+  await setLoad(0.15, t('load.map', { name: t(`map.${mapId}.name` as never) }));
   ensureCurrentStart(generation);
 
-  const loaded = loadMap(sel.map);
+  const loaded = onlineHost ? { def: onlineHost.input.map } : loadMap(sel.map);
   qaGlassBreakTimes = [];
   qaGlassBreakFrames = [];
-  const matchSeed = Date.now() % 1000000;
-  const qaFixture = sel.practice ? null : qaRosterFixture(matchSeed);
-  const mode = qaFixture?.mode ?? 'solo';
-  const roster = qaFixture?.roster ?? buildRoster({
+  const matchSeed = onlineHost?.input.payload.seed ?? Date.now() % 1000000;
+  const qaFixture = onlineHost || sel.practice ? null : qaRosterFixture(matchSeed);
+  const mode = onlineHost?.input.payload.mode ?? qaFixture?.mode ?? 'solo';
+  const roster = onlineHost?.input.payload.roster ?? qaFixture?.roster ?? buildRoster({
       mode,
       humans: [localHumanRosterEntry({ skinId: getSettings().playerSkin })],
       practice: sel.practice === true,
@@ -514,10 +1303,10 @@ async function startMatchImpl(
   const match = new Match({
     mapDef: loaded.def,
     seed: matchSeed,
-    difficulty: sel.difficulty,
+    difficulty: onlineHost?.input.payload.difficulty ?? sel.difficulty,
     mode,
     roster,
-    practice: sel.practice === true,
+    practice: !onlineHost && sel.practice === true,
   });
   registerStartCleanup(generation, () => match.dispose());
   match.populateInitialLoot();
@@ -575,7 +1364,7 @@ async function startMatchImpl(
     onPauseRequest: () => handlePauseOrSpectateExit(),
     onSlotRequest: () => undefined,
     onMeleePress: () => {
-      const p = live?.match.localActor;
+      const p = match.localActor;
       if (p?.alive) {
         p.inv.selectMelee();
         lastWeaponKey = null;
@@ -615,11 +1404,14 @@ async function startMatchImpl(
     if (!hud.isTacMapOpen() || !tacCanvas) return;
     const rect = tacCanvas.getBoundingClientRect();
     const half = match.mapDef.size / 2;
-    hud.tacMarker = {
-      x: ((ev.clientX - rect.left) / rect.width) * match.mapDef.size - half,
-      z: ((ev.clientY - rect.top) / rect.height) * match.mapDef.size - half,
-    };
-    audio.uiClick('click');
+    const x = ((ev.clientX - rect.left) / rect.width) * match.mapDef.size - half;
+    const z = ((ev.clientY - rect.top) / rect.height) * match.mapDef.size - half;
+    if (onlineHost) {
+      if (onlineHost.coordinator.requestTacticalPing(x, z)) audio.uiClick('confirm');
+    } else {
+      hud.tacMarker = { x, z };
+      audio.uiClick('click');
+    }
   };
   tacCanvas?.addEventListener('click', onTacClick);
   registerStartCleanup(generation, () => tacCanvas?.removeEventListener('click', onTacClick));
@@ -683,8 +1475,12 @@ async function startMatchImpl(
     const dirZ = -Math.cos(match.localActor.yaw) * Math.cos(match.localActor.pitch);
     const hit = match.phys.raycast(p.x, match.localActor.eyeY, p.z, dirX, dirY, dirZ, 260, PHYS_GROUPS.rayWorldOnly);
     if (hit) {
-      hud.tacMarker = { x: hit.point.x, z: hit.point.z };
-      audio.uiClick('confirm');
+      if (onlineHost) {
+        if (onlineHost.coordinator.requestTacticalPing(hit.point.x, hit.point.z)) audio.uiClick('confirm');
+      } else {
+        hud.tacMarker = { x: hit.point.x, z: hit.point.z };
+        audio.uiClick('confirm');
+      }
     }
   }
   for (const actor of match.actors) {
@@ -700,7 +1496,7 @@ async function startMatchImpl(
     } else if (actor.personality) {
       match.controllers.set(
         actor.id,
-        new BotController(actor, match, new Rng(match.rng.next() * 0xffffffff), actor.personality, sel.difficulty),
+        new BotController(actor, match, new Rng(match.rng.next() * 0xffffffff), actor.personality, match.difficulty),
       );
     }
   }
@@ -893,8 +1689,11 @@ async function startMatchImpl(
   pendingStart = null;
 
   live = {
+    kind: 'match',
     generation,
+    mapDef: loaded.def,
     match,
+    coordinator: onlineHost?.coordinator ?? null,
     renderer,
     world,
     vfx,
@@ -903,6 +1702,7 @@ async function startMatchImpl(
     rigs,
     characterFill,
     player,
+    weaponFactory,
     mats: sharedMats,
     qaSceneCensus: QA_MODE ? buildQaSceneCensus(world.group) : '',
     qaGlassSpecs: QA_MODE
@@ -917,6 +1717,8 @@ async function startMatchImpl(
     qaGlassBreakFrames,
     worldConstructionMs,
     cleanup,
+    onlineContext: onlineHost?.context ?? null,
+    onlineMetrics: onlineHost?.metrics ?? new Map(),
   };
 
   if (QA_MODE) {
@@ -1077,6 +1879,10 @@ async function startMatchImpl(
 
   await setLoad(0.85, t('load.final'));
   if (generation !== matchGeneration || live?.generation !== generation) throw new MatchStartCancelled();
+  if (onlineHost) {
+    $('loading-status').textContent = t('online.waitingForPlayers');
+    return match;
+  }
   const startTimer = window.setTimeout(() => {
     if (live?.generation !== generation || generation !== matchGeneration) return;
     $('loading-screen').classList.add('hidden');
@@ -1097,10 +1903,19 @@ async function startMatchImpl(
     startLoop();
   }, 180);
   live.cleanup.push(() => window.clearTimeout(startTimer));
+  return match;
 }
 
-function teardownMatch(): void {
+function teardownMatch(disposeOnline = true): void {
+  if (disposeOnline) {
+    const coordinator = activeOnlineCoordinator;
+    activeOnlineCoordinator = null;
+    coordinator?.dispose();
+  }
   cancelPendingStart();
+  const preparedGuest = pendingGuestRuntime;
+  pendingGuestRuntime = null;
+  if (preparedGuest) runCleanups(preparedGuest.presentation.cleanup);
   loopRunning = false;
   menus?.setPlayEnabled(true);
   const ending = live;
@@ -1124,6 +1939,8 @@ function teardownMatch(): void {
     delete document.documentElement.dataset.xoQaCensus;
     delete document.documentElement.dataset.xoQaWorld;
     delete document.documentElement.dataset.xoQaRuntime;
+    delete document.documentElement.dataset.xoOnlineState;
+    delete document.documentElement.dataset.xoOnlineRole;
     document.getElementById('xo-qa-teleport-command')?.remove();
     document.getElementById('xo-qa-perf-command')?.remove();
     document.getElementById('xo-qa-gpu-sync-command')?.remove();
@@ -1140,10 +1957,13 @@ function teardownMatch(): void {
   lastWeaponKey = null;
   paused = false;
   hud?.show(false);
+  hud?.resetOnlineHud();
   hud?.setInventoryOpen(false);
   hud?.hideSpectate();
   hud?.interactPrompt(null);
   hud?.setTacMapImage(null);
+  document.getElementById('btn-online-start-cancel')?.classList.add('hidden');
+  audio?.cancelMatchEffects();
   audio?.stopAmbience();
   audio?.setMusicState('none');
 }
@@ -1153,7 +1973,7 @@ function teardownMatch(): void {
 // ---------------------------------------------------------------------------
 
 function openPause(): void {
-  if (!live || paused || live.match.phase === 'results') return;
+  if (!live || paused || livePhase(live) === 'results') return;
   hud.setInventoryOpen(false);
   paused = true;
   // World keeps simulating; only local input is suspended.
@@ -1179,7 +1999,7 @@ function handlePauseOrSpectateExit(): void {
     }
     return;
   }
-  if (live?.match.localActor?.alive === false && live.match.phase !== 'results') {
+  if (live && !liveLocalAlive(live) && livePhase(live) !== null && livePhase(live) !== 'results') {
     menus.onQuitRequested();
     return;
   }
@@ -1191,13 +2011,26 @@ function handlePauseOrSpectateExit(): void {
 }
 
 function cycleSpectate(dir: number): void {
-  const m = live?.match;
-  if (!m || m.localActor?.alive !== false) return;
-  const targets = m.spectatorTargets();
+  if (!live || liveLocalAlive(live)) return;
+  const targets = live.kind === 'match'
+    ? live.match.spectatorTargets().map((actor) => ({ id: actor.id }))
+    : replicaSpectatorTargets(live.view, live.localActorId).map((actor) => ({ id: actor.id }));
   if (!targets.length) return;
   const idx = targets.findIndex((t) => t.id === spectateTargetId);
   const next = targets[(((idx + dir + targets.length * 2) % targets.length) + targets.length) % targets.length]!;
   spectateTargetId = next.id;
+}
+
+function replicaSpectatorTargets(view: GameStateView | null, localActorId: number): readonly ActorView[] {
+  if (!view) return [];
+  const local = view.actors.find((actor) => actor.id === localActorId);
+  return view.actors
+    .filter((actor) => actor.alive && actor.id !== localActorId)
+    .sort((left, right) => {
+      const leftMate = local?.teamId !== null && left.teamId === local?.teamId ? 0 : 1;
+      const rightMate = local?.teamId !== null && right.teamId === local?.teamId ? 0 : 1;
+      return leftMate - rightMate || left.id - right.id;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,6 +2191,229 @@ function wirePresentation(
   on('matchWon' as never, (() => undefined) as never);
 }
 
+function presentOnlineAuthoritativeEvent(
+  event: AuthoritativeMatchEvent,
+  matchedLocalPrediction: boolean,
+): void {
+  const game = live;
+  if (!game) return;
+  const payload = event.payload;
+  const number = (key: string, fallback = 0): number => {
+    const value = payload[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  };
+  const integer = (key: string, fallback = -1): number => {
+    const value = payload[key];
+    return typeof value === 'number' && Number.isSafeInteger(value) ? value : fallback;
+  };
+  const actorView = (actorId: number): ActorView | null => {
+    if (game.kind === 'replica') return game.view?.actors.find((actor) => actor.id === actorId) ?? null;
+    const actor = game.match.actors.find((candidate) => candidate.id === actorId);
+    return actor ? game.match.toGameStateView(game.match.localActorId).actors.find((item) => item.id === actorId) ?? null : null;
+  };
+
+  if (event.type === 'tacticalPing') {
+    const x = number('x', Number.NaN);
+    const z = number('z', Number.NaN);
+    if (Number.isFinite(x) && Number.isFinite(z)) {
+      const expires = integer('expiresHostTick', event.hostTick + 300);
+      hud.showTacticalPing(x, z, Math.max(0.5, Math.min(6, (expires - event.hostTick) / 60)));
+    }
+    return;
+  }
+  if (event.type === 'playerLeave' || event.type === 'playerRejoin') {
+    const actor = actorView(integer('actorId'));
+    hud.showPresenceNotice(event.type === 'playerLeave' ? 'left' : 'rejoined', actor?.displayName ?? '');
+    return;
+  }
+
+  // The host already consumes the Match EventBus directly. Only non-Match
+  // coordinator events above need a second presentation path there.
+  if (game.kind !== 'replica') return;
+  const view = game.view;
+  const localActorId = game.localActorId;
+
+  if (event.type === 'shotFired') {
+    const actorId = integer('actorId');
+    const isLocal = actorId === localActorId;
+    if (isLocal && matchedLocalPrediction) return;
+    const weapon = payload.weaponId;
+    if (typeof weapon !== 'string' || !(weapon in WEAPONS)) return;
+    const weaponId = weapon as WeaponId;
+    const dry = payload.dry === true;
+    const x = number('x');
+    const y = number('y');
+    const z = number('z');
+    audio.gunshot(weaponId, x, y, z, dry, isLocal);
+    if (dry) return;
+    const actor = actorView(actorId);
+    if (isLocal && game.rig.mode === 'fps') {
+      game.viewmodel.kick(WEAPON_KICK[weaponId] ?? 1);
+      game.viewmodel.muzzlePulse(0.8);
+      return;
+    }
+    const hasMuzzle = game.rigs.get(actorId)?.muzzleWorld?.(
+      presentationMuzzle,
+      presentationMuzzleDirection,
+    ) === true;
+    const yaw = actor?.yaw ?? 0;
+    const pitch = actor?.pitch ?? 0;
+    const dx = -Math.sin(yaw) * Math.cos(pitch);
+    const dy = Math.sin(pitch);
+    const dz = -Math.cos(yaw) * Math.cos(pitch);
+    game.vfx.muzzleFlash(
+      hasMuzzle ? presentationMuzzle.x : x,
+      hasMuzzle ? presentationMuzzle.y : y,
+      hasMuzzle ? presentationMuzzle.z : z,
+      hasMuzzle ? presentationMuzzleDirection.x : dx,
+      hasMuzzle ? presentationMuzzleDirection.y : dy,
+      hasMuzzle ? presentationMuzzleDirection.z : dz,
+      isLocal ? 0.9 : 1.35,
+      weaponId === 'shotgun' || weaponId === 'sniper',
+    );
+    return;
+  }
+  if (event.type === 'impact') {
+    const material = typeof payload.material === 'string' ? payload.material : 'stone';
+    const x = number('x'); const y = number('y'); const z = number('z');
+    game.vfx.impactSparks(x, y, z, number('nx'), number('ny', 1), number('nz'), material === 'metal' ? 10 : 6);
+    audio.impact(x, y, z, material);
+    return;
+  }
+  if (event.type === 'glassBreak') {
+    const x = number('x'); const y = number('y'); const z = number('z');
+    game.vfx.glassShards(x, y, z);
+    audio.glassBreak(x, y, z);
+    return;
+  }
+  if (event.type === 'destructibleDestroyed') {
+    const x = number('x'); const y = number('y'); const z = number('z');
+    game.vfx.debrisBurst(x, y, z, 0xa07848);
+    audio.debrisCrack(x, y, z);
+    return;
+  }
+  if (event.type === 'actorHit') {
+    const targetId = integer('targetId');
+    const attackerId = integer('attackerId');
+    const damage = Math.max(0, number('damage'));
+    const target = actorView(targetId);
+    if (attackerId === localActorId && target) {
+      const headshot = payload.headshot === true;
+      hud.hitmarker(headshot);
+      hud.spawnDamageNumber(
+        target.position.x, target.position.y + 1.35, target.position.z,
+        damage,
+        payload.killed === true ? 'kill' : headshot ? 'headshot' : number('shieldDamage') > 0 ? 'shield' : 'normal',
+      );
+    }
+    if (targetId === localActorId) game.rig.addShake(Math.min(0.5, damage / 60));
+    return;
+  }
+  if (event.type === 'shieldHit' || event.type === 'shieldBroken') {
+    const actor = actorView(integer('actorId'));
+    if (!actor) return;
+    if (event.type === 'shieldHit') audio.shieldHit(actor.position.x, actor.position.y + 1, actor.position.z);
+    else {
+      game.vfx.shieldBreakBurst(actor.position.x, actor.position.y + 1.1, actor.position.z);
+      audio.shieldBreakFx(actor.position.x, actor.position.y + 1, actor.position.z);
+      if (actor.id === localActorId) hud.caption(t('cap.shieldBreak'), true);
+    }
+    return;
+  }
+  if (event.type === 'eliminated') {
+    const victim = actorView(integer('victimId'));
+    const killer = actorView(integer('killerId'));
+    if (victim) {
+      game.vfx.eliminationWisp(
+        victim.position.x, victim.position.y + 1, victim.position.z, victim.accentColor,
+      );
+      audio.eliminationFx(victim.position.x, victim.position.y, victim.position.z);
+    }
+    const weapon = typeof payload.weaponId === 'string' ? payload.weaponId : '';
+    hud.addKillfeed(
+      killer?.displayName ?? null,
+      victim?.displayName ?? '?',
+      WEAPON_ICONS[weapon] ?? '',
+      payload.headshot === true,
+      payload.storm === true,
+    );
+    if (killer?.id === localActorId && victim) hud.elimination(`✕ ${victim.displayName}`);
+    if (victim?.id === localActorId) hud.banner(t('banner.eliminatedYou'), 4);
+    return;
+  }
+  if (event.type === 'itemPickedUp') {
+    if (integer('actorId') === localActorId) audio.pickupUi(payload.rare === true);
+    return;
+  }
+  if (event.type === 'chestOpened') {
+    audio.chestOpen(number('x'), number('y'), number('z'), integer('tier', 0));
+    return;
+  }
+  if (event.type === 'reloadStarted') {
+    if (integer('actorId') === localActorId) audio.reloadClick(payload.empty === true);
+    return;
+  }
+  if (event.type === 'healDone') {
+    if (integer('actorId') === localActorId) audio.healComplete();
+    return;
+  }
+  if (event.type === 'stormWaiting') {
+    audio.stormWarningSting();
+    hud.stormWarning(t('storm.advancing', {
+      n: integer('index', 0) + 1,
+      s: Math.round(number('waitTime')),
+    }), 4);
+    return;
+  }
+  if (event.type === 'stormShrinking') {
+    hud.stormWarning(t('storm.closing'), 3);
+    game.rig.addShake(0.1);
+    return;
+  }
+  if (event.type === 'phaseChanged' && payload.phase === 'live') {
+    hud.banner(t('banner.lastStanding'), 3);
+  }
+  void view;
+}
+
+function predictGuestFirePresentation(inputSequence: number, command: Readonly<InputCommand>): boolean {
+  void inputSequence;
+  const game = live;
+  if (!game || game.kind !== 'replica' || !game.view) return false;
+  const actor = game.view.actors.find((candidate) => candidate.id === game.localActorId);
+  const weaponId = actor?.equippedWeapon;
+  if (!actor?.alive || !weaponId) return false;
+  const def = WEAPONS[weaponId];
+  const intendsShot = def.fireMode === 'auto' ? command.fireHeld || command.firePressed : command.firePressed;
+  if (!intendsShot) return false;
+  const selected = actor.inventory && actor.inventory.selected >= 0
+    ? actor.inventory.slots[actor.inventory.selected]
+    : null;
+  if (selected?.kind !== 'weapon' || selected.weaponId !== weaponId || selected.ammoInMag <= 0) return false;
+  const time = performance.now();
+  if (time + 0.5 < game.nextPredictedShotAtMs) return false;
+  game.nextPredictedShotAtMs = time + 60_000 / def.rpm;
+  audio.gunshot(weaponId, actor.position.x, actor.position.y, actor.position.z, false, true);
+  if (game.rig.mode === 'fps') {
+    game.viewmodel.kick(WEAPON_KICK[weaponId] ?? 1);
+    game.viewmodel.muzzlePulse(0.8);
+  } else {
+    const yaw = actor.yaw;
+    const pitch = actor.pitch;
+    game.vfx.muzzleFlash(
+      actor.position.x,
+      actor.position.y + 1.3,
+      actor.position.z,
+      -Math.sin(yaw) * Math.cos(pitch),
+      Math.sin(pitch),
+      -Math.cos(yaw) * Math.cos(pitch),
+      0.9,
+      weaponId === 'shotgun' || weaponId === 'sniper',
+    );
+  }
+  return true;
+}
+
 /** Keep each combatant's hand-held weapon model in sync with their inventory. */
 function live_weaponWatcher(rigs: Map<number, CharacterRig>, match: Match, weaponFactory: WeaponModelFactory): void {
   const lastKey = new Map<number, string>();
@@ -1418,15 +2474,20 @@ function frame(now: number): void {
   // The match simulation never freezes: ESC opens the in-game menu over the
   // still-running world (user requirement). Only the local player's input is
   // suspended while a menu is open.
-  const m = live.match;
+  const current = live;
   {
     accumulator += dtReal;
-    let steps = 0;
     const simT0 = performance.now();
-    while (accumulator >= SIM.fixedDt && steps < 8) {
-      m.fixedUpdate(SIM.fixedDt);
-      accumulator -= SIM.fixedDt;
-      steps++;
+    if (current.kind === 'match' && current.coordinator === null) {
+      let steps = 0;
+      while (accumulator >= SIM.fixedDt && steps < 8) {
+        current.match.fixedUpdate(SIM.fixedDt);
+        accumulator -= SIM.fixedDt;
+        steps++;
+      }
+    } else {
+      current.coordinator?.update(dtReal);
+      accumulator %= SIM.fixedDt;
     }
     const simDt = performance.now() - simT0;
     perfStats.simMs = perfStats.simMs * 0.9 + simDt * 0.1;
@@ -1434,7 +2495,7 @@ function frame(now: number): void {
     musicTimer -= dtReal;
     if (musicTimer <= 0) {
       musicTimer = 2;
-      updateMusicState(m);
+      updateMusicState(current);
     }
   }
 
@@ -1445,11 +2506,14 @@ function frame(now: number): void {
   perfStats.lastPresentMs = presDt;
 }
 
-function updateMusicState(m: Match): void {
+function updateMusicState(game: LiveGame): void {
   if (!audio) return;
   // Matches carry no continuous score — soundscape only. Stings at results.
-  if (m.phase === 'results') {
-    audio.setMusicState(didLocalActorWin(m) ? 'victory' : 'defeat');
+  if (livePhase(game) === 'results') {
+    const won = game.kind === 'match'
+      ? didLocalActorWin(game.match)
+      : didLocalActorWinView(game.view, game.localActorId);
+    audio.setMusicState(won ? 'victory' : 'defeat');
   }
 }
 
@@ -1459,7 +2523,15 @@ function updateMusicState(m: Match): void {
 
 function present(dtReal: number): void {
   if (!live) return;
-  const { match: m, renderer, world, vfx, rig, viewmodel, rigs, player, characterFill } = live;
+  if (live.kind === 'replica') {
+    presentReplica(live, dtReal);
+    return;
+  }
+  presentMatch(live, dtReal);
+}
+
+function presentMatch(game: MatchLiveGame, dtReal: number): void {
+  const { match: m, renderer, world, vfx, rig, viewmodel, rigs, player, characterFill } = game;
 
   // Debug/QA introspection hook. Development-only because the related helpers
   // below can mutate match state and must not ship as a production backdoor.
@@ -1549,11 +2621,11 @@ function present(dtReal: number): void {
       },
       playerSkin: getSettings().playerSkin,
       playerRigSkin: m.localActor ? rigs.get(m.localActor.id)?.group.userData.xoSkinId ?? null : null,
-      worldConstructionMs: +live.worldConstructionMs.toFixed(2),
+      worldConstructionMs: +game.worldConstructionMs.toFixed(2),
       destructibleCount: m.combat.destructibleCount(),
       aliveGlassCount: m.combat.aliveGlassCount(),
       destructibleRender: world.getDestructibleRenderStats(),
-      glassSpecs: live.qaGlassSpecs,
+      glassSpecs: game.qaGlassSpecs,
       glassBreakTimes: qaGlassBreakTimes.slice(),
       glassBreakFrames: qaGlassBreakFrames.slice(),
       actors: m.actors
@@ -1678,7 +2750,7 @@ function present(dtReal: number): void {
       data.xoQaPerfDetail = `frames=${framesTotal}|gt33=${spikes33}|gt50=${spikes50}`;
       data.xoQaPerfSpikes = JSON.stringify(recentSpikes.slice(-8));
       data.xoQaGpuDevice = renderer.gpuDeviceLabel();
-      data.xoQaCensus = live.qaSceneCensus;
+      data.xoQaCensus = game.qaSceneCensus;
       data.xoQaRuntime = qaRuntimeIssues.length === 0
         ? 'count=0'
         : `count=${qaRuntimeIssues.length}|last=${qaRuntimeIssues.at(-1)}`;
@@ -2106,6 +3178,7 @@ function present(dtReal: number): void {
   renderer.followViewer(rig.camera.position);
 
   hud.syncPlayerState(m, dtReal);
+  hud.syncOnlineState(game.coordinator ? matchOnlineHudState(game) : null);
   hud.drawMinimap(m, () => hud.minimapContext(), dtReal);
   if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
@@ -2124,6 +3197,258 @@ function present(dtReal: number): void {
   }
 
   renderer.render(dtReal);
+}
+
+function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
+  const { renderer, world, vfx, rig, viewmodel, rigs, player, characterFill } = game;
+  const view = game.replica.update(performance.now());
+  game.view = view;
+  if (!view) {
+    characterFill.visible = false;
+    viewmodel.group.visible = false;
+    for (const character of rigs.values()) character.group.visible = false;
+    hud.syncOnlineState(replicaOnlineHudState(game, null));
+    renderer.render(dtReal);
+    return;
+  }
+
+  if (!game.worldInitialized) {
+    world.initializeReplica(view);
+    game.worldInitialized = true;
+  }
+  game.predictionWorld.setTransportDeploymentAllowed(view.transport.jumpAllowed);
+  game.predictionWorld.syncDestructibles(view.destructibles);
+
+  const local = view.actors.find((actor) => actor.id === game.localActorId) ?? null;
+  const spectating = local?.alive === false && view.phase !== 'results';
+  if (spectating && !wasSpectating) {
+    paused = false;
+    menus.hidePause();
+    hud.setInventoryOpen(false);
+    if (hud.isTacMapOpen()) hud.toggleTacMap(false);
+    player.enabled = true;
+    player.setSpectatorMode(true);
+    player.releaseLock();
+    rig.resetAimState();
+  } else if (!spectating && wasSpectating) {
+    player.setSpectatorMode(false);
+    rig.endSpectate();
+  }
+  wasSpectating = spectating;
+
+  presentationTransportPos.set(view.transport.x, view.transport.y, view.transport.z);
+  const inTransport = view.phase === 'transport' && !spectating && local?.deployed === false;
+  const route = game.mapDef.transportRoute;
+  const routeX = route.to[0] - route.from[0];
+  const routeZ = route.to[1] - route.from[1];
+  const routeLength = Math.hypot(routeX, routeZ) || 1;
+  const dirX = routeX / routeLength;
+  const dirZ = routeZ / routeLength;
+  const slotOffset = (index: number): { x: number; z: number; y: number } => {
+    const k = (4.5 - index) * 1.32;
+    return { x: dirX * k, z: dirZ * k, y: (index % 2) * 0.24 };
+  };
+
+  if (spectating) {
+    const targets = replicaSpectatorTargets(view, game.localActorId);
+    const target = targets.find((actor) => actor.id === spectateTargetId) ?? targets[0];
+    if (target) {
+      spectateTargetId = target.id;
+      rig.updateSpectateView(target, dtReal, game.predictionWorld);
+      hud.showSpectate(target.displayName);
+    } else {
+      hud.showSpectate(t('hud.spectateNoTarget'));
+      rig.resetAimState();
+      const fallback = new THREE.Vector3(0, 65, 35);
+      rig.camera.position.lerp(fallback, 1 - Math.exp(-dtReal * 4));
+      rig.camera.lookAt(0, 0, 0);
+    }
+  } else if (inTransport && local) {
+    const slot = slotOffset(Math.max(0, view.actors.findIndex((actor) => actor.id === local.id)));
+    rig.updateTransport(presentationTransportPos, slot, local.yaw, local.pitch, now() / 1000, dtReal);
+    hud.hideSpectate();
+  } else if (local) {
+    if (wasInTransport) rig.beginGameplayBlend();
+    rig.updateView(local, dtReal, game.predictionWorld, {
+      adsAmount: view.localMovement?.actorId === local.id ? view.localMovement.adsAmount : 0,
+    });
+    hud.hideSpectate();
+  }
+  wasInTransport = inTransport;
+  rig.tick(dtReal);
+
+  for (const actor of view.actors) {
+    const character = rigs.get(actor.id);
+    if (!character) continue;
+    if (actor.id === game.localActorId && rig.mode === 'fps' && actor.alive && !spectating) {
+      character.group.visible = false;
+    } else {
+      character.group.visible = true;
+      character.updateView?.(actor, now() / 1000, dtReal);
+      if (inTransport && !actor.deployed) {
+        const slot = slotOffset(Math.max(0, view.actors.findIndex((candidate) => candidate.id === actor.id)));
+        character.group.position.set(
+          presentationTransportPos.x + slot.x,
+          presentationTransportPos.y - MATCH.transportHangOffset + slot.y,
+          presentationTransportPos.z + slot.z,
+        );
+      }
+      if (!actor.alive) updateEliminationFx(character, dtReal);
+    }
+
+    const selected = actor.inventory && actor.inventory.selected >= 0
+      ? actor.inventory.slots[actor.inventory.selected]
+      : null;
+    const rarity = selected?.kind === 'weapon' && selected.weaponId === actor.equippedWeapon
+      ? selected.rarity : 'common';
+    const weaponKey = actor.equippedWeapon ? `${actor.equippedWeapon}:${rarity}` : '';
+    if (game.lastRigWeaponKeys.get(actor.id) !== weaponKey) {
+      game.lastRigWeaponKeys.set(actor.id, weaponKey);
+      const model = actor.equippedWeapon
+        ? game.weaponFactory.build(actor.equippedWeapon, rarity)?.group ?? null
+        : null;
+      character.attachWeapon?.(model);
+    }
+  }
+
+  if (!spectating && rig.mode === 'tps' && local?.alive) {
+    const towardCamera = presentationFillDirection.set(
+      rig.camera.position.x - local.position.x,
+      0,
+      rig.camera.position.z - local.position.z,
+    ).normalize();
+    characterFill.position.set(
+      local.position.x + towardCamera.x * 1.5,
+      feetYFromBodyCenter(local.position.y) + 1.65,
+      local.position.z + towardCamera.z * 1.5,
+    );
+    characterFill.visible = true;
+  } else characterFill.visible = false;
+
+  if (local && view.localMovement?.actorId === local.id && view.localMovement.grappleActive) {
+    vfx.setGrappleRope(
+      local.id,
+      local.position.x,
+      feetYFromBodyCenter(local.position.y) + 1.6,
+      local.position.z,
+      view.localMovement.grapplePoint.x,
+      view.localMovement.grapplePoint.y,
+      view.localMovement.grapplePoint.z,
+    );
+  } else if (local) vfx.hideGrappleRope(local.id);
+
+  if (local?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
+    const speed = Math.hypot(local.velocity.x, local.velocity.z);
+    viewmodel.updateView(
+      local,
+      dtReal,
+      player.lookDxSmooth(),
+      player.lookDySmooth(),
+      speed,
+      { adsAmount: view.localMovement?.actorId === local.id ? view.localMovement.adsAmount : 0 },
+    );
+    viewmodel.group.visible = true;
+  } else {
+    viewmodel.updateView(null, dtReal, 0, 0, 0);
+    viewmodel.group.visible = false;
+  }
+  if (QA_HERO_MODE) viewmodel.group.visible = false;
+
+  world.setViewPos(rig.camera.position);
+  world.updateReplica(dtReal, view);
+  vfx.update(dtReal, rig.camera.position);
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
+  AudioEngine.setListener(
+    rig.camera.position.x, rig.camera.position.y, rig.camera.position.z,
+    forward.x, forward.z,
+  );
+  audio.setEnvironmentState(world.isEyeUnderwater(rig.camera.position) ? 'underwater' : 'open');
+  renderer.followSunTarget(new THREE.Vector3(rig.camera.position.x, 0, rig.camera.position.z));
+  renderer.followViewer(rig.camera.position);
+
+  hud.syncReplicaState(view, dtReal);
+  hud.syncOnlineState(replicaOnlineHudState(game, view));
+  hud.drawMinimapReplica(game.mapDef, view, () => hud.minimapContext(), dtReal);
+  if (hud.isTacMapOpen()) hud.drawTacMapReplica(game.mapDef, view);
+  const interaction = !spectating && local?.alive && !paused && !hud.isTacMapOpen() && !hud.isInventoryOpen()
+    ? findReplicaInteractInfo(view, local)
+    : null;
+  hud.interactPrompt(interaction?.prompt || null);
+  hud.showLootPanel(interaction?.loot ?? null);
+
+  if (view.phase === 'results' && !resultsShown) {
+    rig.resetAimState();
+    renderer.setScopeActive(false);
+    resultsShown = true;
+    showReplicaResults(view, game.localActorId);
+  }
+  renderer.render(dtReal);
+}
+
+function replicaOnlineHudState(game: ReplicaLiveGame, view: GameStateView | null): OnlineHudState {
+  const state = game.coordinator.state;
+  const metric = game.onlineMetrics.get(game.onlineContext?.hostPeerId ?? '');
+  const local = view?.actors.find((actor) => actor.id === game.localActorId) ?? null;
+  const teammates = !view || local?.teamId === null || local?.teamId === undefined
+    ? []
+    : view.actors
+      .filter((actor) => actor.id !== game.localActorId && actor.teamId === local.teamId)
+      .map((actor) => ({
+        participantId: `actor:${actor.id}`,
+        displayName: actor.displayName,
+        alive: actor.alive,
+      }));
+  return {
+    connection: coordinatorHudConnection(state),
+    rttMs: metric?.rttMs ?? null,
+    packetLossPercent: metric?.packetLossPercent ?? null,
+    teammates,
+    diagnostics: view ? {
+      hostTick: view.hostTick,
+      snapshotBytes: undefined,
+      inputRate: 60,
+    } : null,
+  };
+}
+
+function coordinatorHudConnection(state: OnlineMatchCoordinatorState): OnlineHudState['connection'] {
+  if (state === 'active') return 'connected';
+  if (state === 'reconnecting') return 'reconnecting';
+  if (state === 'failed') return 'failed';
+  if (state === 'ended' || state === 'disposed') return 'disconnected';
+  return 'connecting';
+}
+
+function matchOnlineHudState(game: MatchLiveGame): OnlineHudState {
+  const values = [...game.onlineMetrics.values()];
+  const finiteRtt = values.map((metric) => metric.rttMs).filter((value): value is number => value !== null);
+  const finiteLoss = values
+    .map((metric) => metric.packetLossPercent)
+    .filter((value): value is number => value !== null);
+  const local = game.match.localActor;
+  const view = local ? game.match.toGameStateView(local.id) : null;
+  const localTeamId = game.match.localTeamId;
+  const teammates = !local || localTeamId === null || !view
+    ? []
+    : view.actors
+      .filter((actor) => actor.id !== local.id && actor.teamId === localTeamId)
+      .map((actor) => ({
+        participantId: `actor:${actor.id}`,
+        displayName: actor.displayName,
+        alive: actor.alive,
+      }));
+  const network = game.coordinator?.hostSession?.metrics;
+  return {
+    connection: coordinatorHudConnection(game.coordinator?.state ?? 'idle'),
+    rttMs: finiteRtt.length > 0 ? Math.max(...finiteRtt) : null,
+    packetLossPercent: finiteLoss.length > 0 ? Math.max(...finiteLoss) : null,
+    teammates,
+    diagnostics: network ? {
+      hostTick: game.match.hostTick,
+      snapshotBytes: network.snapshotSizes.p50,
+      inputRate: 60,
+    } : null,
+  };
 }
 
 interface InteractInfo {
@@ -2186,6 +3511,71 @@ function findInteractInfo(m: Match): InteractInfo | null {
   return null;
 }
 
+/** Read-only proximity hint. The host remains the sole pickup/open resolver. */
+function findReplicaInteractInfo(view: GameStateView, actor: ActorView): InteractInfo | null {
+  const chest = view.chests
+    .filter((candidate) => !candidate.opened)
+    .map((candidate) => ({
+      candidate,
+      distance: Math.hypot(candidate.x - actor.position.x, candidate.z - actor.position.z),
+    }))
+    .filter(({ candidate, distance }) => distance <= 4 && Math.abs(candidate.y - actor.position.y) <= 3)
+    .sort((left, right) => left.distance - right.distance || left.candidate.id - right.candidate.id)[0]?.candidate;
+  if (chest) {
+    const prompt = chest.kind === 'vault'
+      ? t('interact.openVault')
+      : chest.kind === 'elite'
+        ? t('interact.openElite')
+        : t('interact.openChest');
+    return { prompt, loot: null };
+  }
+
+  const item = view.loot
+    .map((candidate) => ({
+      candidate,
+      distance: Math.hypot(candidate.x - actor.position.x, candidate.z - actor.position.z),
+    }))
+    .filter(({ candidate, distance }) => distance <= 4 && Math.abs(candidate.y - actor.position.y) <= 3)
+    .sort((left, right) => left.distance - right.distance || left.candidate.id - right.candidate.id)[0]?.candidate;
+  if (!item) return null;
+
+  const inventoryFull = item.kind === 'weapon'
+    && actor.inventory?.slots.every((slot) => slot !== null) === true;
+  if (item.kind === 'weapon') {
+    const def = WEAPONS[item.weaponId];
+    return {
+      prompt: '',
+      loot: {
+        iconId: item.weaponId,
+        name: t(`wpn.${item.weaponId}` as never),
+        typeText: t('loot.type.weapon'),
+        rarityText: t(`rarity.${item.rarity}` as never).toUpperCase(),
+        rarityColor: RARITY_CSS[item.rarity],
+        metaText: `${t(`ammo.${def.ammoType}` as never)} · ${item.ammoInMag}/${def.magSize}`,
+        keyLabel: prettyBind(getSettings().bindings.interact),
+        inventoryFull,
+      },
+    };
+  }
+  if (item.kind === 'heal') {
+    const medkit = item.itemId === 'medkit';
+    return {
+      prompt: '',
+      loot: {
+        iconId: item.itemId,
+        name: medkit ? t('bind.useMedkit') : t('bind.useShield'),
+        typeText: t('loot.type.heal'),
+        rarityText: t(medkit ? 'rarity.rare' : 'rarity.uncommon').toUpperCase(),
+        rarityColor: medkit ? '#ff7d89' : '#53d8ff',
+        metaText: `×${item.count}`,
+        keyLabel: prettyBind(getSettings().bindings.interact),
+        inventoryFull: false,
+      },
+    };
+  }
+  return { prompt: '', loot: null };
+}
+
 function prettyBind(code: string): string {
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);
@@ -2213,11 +3603,39 @@ function showResults(m: Match): void {
   });
 }
 
+function showReplicaResults(view: GameStateView, localActorId: number): void {
+  const actor = view.actors.find((candidate) => candidate.id === localActorId) ?? null;
+  const won = didLocalActorWinView(view, localActorId);
+  hud.show(false);
+  live?.player.releaseLock();
+  audio.setMusicState(won ? 'victory' : 'defeat');
+  audio.victoryFanfare(won);
+  menus.showResults({
+    won,
+    winnerName: view.winner?.kind === 'team'
+      ? t('results.teamName', { n: view.winner.teamId + 1 })
+      : view.winner?.displayName ?? '—',
+    placement: actor?.placement ?? view.actors.length,
+    kills: actor?.stats.kills ?? 0,
+    damage: actor?.stats.damageDealt ?? 0,
+    accuracy: actor && actor.stats.shotsFired > 0 ? actor.stats.shotsHit / actor.stats.shotsFired : 0,
+    headshots: actor?.stats.headshots ?? 0,
+    survivalTime: actor?.stats.survivalTime ?? 0,
+  });
+}
+
 function didLocalActorWin(match: Match): boolean {
   if (match.localActorId === null || match.winnerView === null) return false;
   return match.winnerView.kind === 'team'
     ? match.localTeamId === match.winnerView.teamId
     : match.localActorId === match.winnerView.actorId;
+}
+
+function didLocalActorWinView(view: GameStateView | null, localActorId: number): boolean {
+  if (!view?.winner) return false;
+  if (view.winner.kind === 'actor') return view.winner.actorId === localActorId;
+  const local = view.actors.find((actor) => actor.id === localActorId);
+  return local?.teamId !== null && local?.teamId === view.winner.teamId;
 }
 
 /** High-res time source shared by animation code. */

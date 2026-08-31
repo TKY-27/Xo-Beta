@@ -22,6 +22,7 @@ import { PropLibrary, scatterMatrix } from './props';
 import { WeaponModelFactory } from './weaponModels';
 import { buildVista, type VistaHandle } from './vista';
 import type { Match } from '../sim/match';
+import type { ChestView, GameStateView, LootView } from '../sim/gameStateView';
 import { RARITY_COLORS } from '../core/balance';
 import { buildTerrainRibbonIndices } from '../world/terrainMesh';
 import { getSettings } from '../core/settings';
@@ -528,6 +529,8 @@ export class WorldView {
   private weaponFactory: WeaponModelFactory;
   private lightPool: StaticLightPool;
   private viewPos = new THREE.Vector3();
+  private replicaInitialized = false;
+  private readonly mapDef: MapDef;
   /** Beyond-bounds landscape + boundary barrier (see vista.ts). */
   readonly vista: VistaHandle;
 
@@ -547,6 +550,7 @@ export class WorldView {
     match: Match | null,
     props: PropLibrary,
   ) {
+    this.mapDef = def;
     const quality = getSettings().quality;
     const lightCount = quality === 'cinematic' || quality === 'ultra'
       ? 22
@@ -1456,6 +1460,51 @@ export class WorldView {
     }
   }
 
+  /** Build the same presentation geometry directly from the canonical map.
+   * Guest replicas receive only stable IDs and state; they never construct a
+   * Match or a physics destructible table. Map order is the stable numeric
+   * slot used by the bounded glass instance pool. */
+  private trackReplicaDestructibles(): void {
+    const glassEntries: GlassInstanceEntry[] = [];
+    this.mapDef.destructibles.forEach((d, id) => {
+      const g = d.geo;
+      if (d.type === 'glass' && g.kind === 'box') {
+        glassEntries.push({ id, stableId: d.stableId, geo: g });
+        return;
+      }
+      const material = this.mats.get(g.mat);
+      const mesh = g.kind === 'box'
+        ? new THREE.Mesh(new THREE.BoxGeometry(g.sx, g.sy, g.sz), material)
+        : g.kind === 'cyl'
+          ? new THREE.Mesh(new THREE.CylinderGeometry(g.r, g.r, g.h, 10), material)
+          : new THREE.Mesh(new THREE.SphereGeometry(g.r, 10, 8), material);
+      mesh.position.set(g.x, g.y, g.z);
+      if (g.kind === 'box' || g.kind === 'cyl') {
+        mesh.rotation.set(g.pitch ?? 0, g.yaw ?? 0, g.roll ?? 0);
+      }
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      this.destructibleMeshes.set(id, mesh);
+      this.group.add(mesh);
+    });
+    if (glassEntries.length > 0) {
+      this.glassPool = new GlassInstancePool(glassEntries, this.mats.get('glass'));
+      this.group.add(this.glassPool.mesh);
+    }
+  }
+
+  /** Prepare dynamic render resources for a guest without a simulation. */
+  initializeReplica(view: GameStateView): void {
+    if (!this.replicaInitialized) {
+      this.trackReplicaDestructibles();
+      this.trackChests(view.chests);
+      this.buildStorm();
+      this.buildTransport();
+      this.replicaInitialized = true;
+    }
+    this.syncReplica(view);
+  }
+
   syncDestructibles(match: Match): void {
     match.combat.forEachDestructible((d) => {
       if (!d.alive) {
@@ -1467,6 +1516,24 @@ export class WorldView {
           rendered.geometry?.dispose();
           this.destructibleMeshes.delete(d.id);
         }
+      }
+    });
+  }
+
+  syncReplicaDestructibles(view: GameStateView): void {
+    const states = new Map(view.destructibles.map((d) => [d.id, d]));
+    this.mapDef.destructibles.forEach((d, id) => {
+      const state = states.get(d.stableId);
+      if (!state || !state.destroyed) return;
+      if (d.type === 'glass' && this.glassPool?.hideStableId(d.stableId)) return;
+      const mesh = this.destructibleMeshes.get(id);
+      if (mesh) {
+        this.group.remove(mesh);
+        mesh.traverse((o) => {
+          const renderable = o as THREE.Mesh;
+          if (renderable.isMesh) renderable.geometry.dispose();
+        });
+        this.destructibleMeshes.delete(id);
       }
     });
   }
@@ -1498,9 +1565,10 @@ export class WorldView {
     tier: number; idx: number; pos: THREE.Vector3; yaw: number; lidAngle: number; opened: boolean;
   }>();
 
-  private trackChests(match: Match): void {
+  private trackChests(source: Pick<Match, 'chests'> | readonly ChestView[]): void {
+    const chests = 'chests' in source ? source.chests : source;
     const counts = [0, 0, 0];
-    for (const c of match.chests) counts[c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0]!++;
+    for (const c of chests) counts[c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0]!++;
     for (let tier = 0; tier < 3; tier++) {
       if (this.chestInst[tier] || counts[tier] === 0) continue;
       const glowHex = tier === 2 ? 0xffb441 : tier === 1 ? 0xb88cff : 0xffc766;
@@ -1640,7 +1708,7 @@ export class WorldView {
       };
     }
     const nextIdx: number[] = [0, 0, 0];
-    for (const c of match.chests) {
+    for (const c of chests) {
       if (this.chestSlots.has(c.id)) continue;
       const tier = c.kind === 'vault' ? 2 : c.kind === 'elite' ? 1 : 0;
       const idx = nextIdx[tier]!;
@@ -1679,17 +1747,20 @@ export class WorldView {
     }
   }
 
-  syncChests(match: Match): void {
+  syncChests(source: Pick<Match, 'chests'> | GameStateView): void {
+    const chests = source.chests;
     const m4 = new THREE.Matrix4();
     const qy = new THREE.Quaternion();
     const qx = new THREE.Quaternion();
     const pivot = new THREE.Vector3(0, 0.54, 0.38);
     const one = new THREE.Vector3(1, 1, 1);
-    for (const c of match.chests) {
+    for (const c of chests) {
       const s = this.chestSlots.get(c.id);
       if (!s) continue;
       const inst = this.chestInst[s.tier]!;
-      const targetLid = Math.min(1, c.openT * 1.6) * 1.82;
+      const targetLid = 'openT' in c
+        ? Math.min(1, c.openT * 1.6) * 1.82
+        : (c.opened ? 1.82 : 0);
       s.lidAngle += (targetLid - s.lidAngle) * 0.14;
       s.opened = c.opened;
       qy.setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw);
@@ -1755,7 +1826,9 @@ export class WorldView {
     return mesh;
   }
 
-  private lootViewFor(item: import('../sim/loot').WorldItem): { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D } {
+  private lootViewFor(
+    item: Pick<import('../sim/loot').WorldItem, 'kind' | 'rarity' | 'weapon'>,
+  ): { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D } {
     const root = new THREE.Group();
     const rarityRank = ['common', 'uncommon', 'rare', 'epic', 'legendary'].indexOf(item.rarity);
     const glowHex = RARITY_COLORS[item.rarity];
@@ -1843,6 +1916,75 @@ export class WorldView {
     }
   }
 
+  /** Replica loot uses the host-advertised public world identity. Actor
+   * inventories remain owner-scoped elsewhere in GameStateView. */
+  syncReplicaLoot(items: readonly LootView[]): void {
+    const seen = new Set<number>();
+    const instBuckets: Record<'ammo' | 'med' | 'shield', Array<{ x: number; y: number; z: number; spin: number }>> = {
+      ammo: [], med: [], shield: [],
+    };
+    for (const item of items) {
+      seen.add(item.id);
+      if (item.kind !== 'weapon') {
+        const key = item.kind === 'ammo' ? 'ammo' : item.itemId === 'medkit' ? 'med' : 'shield';
+        instBuckets[key].push({
+          x: item.x,
+          y: lootRenderY(item.y, 'consumable'),
+          z: item.z,
+          spin: item.yaw,
+        });
+        continue;
+      }
+      let view = this.lootViews.get(item.id);
+      if (!view) {
+        view = this.lootViewFor({
+          kind: 'weapon',
+          rarity: item.rarity,
+          weapon: {
+            kind: 'weapon',
+            weaponId: item.weaponId,
+            rarity: item.rarity,
+            ammoInMag: item.ammoInMag,
+          },
+        });
+        this.lootViews.set(item.id, view);
+        this.group.add(view.root);
+      }
+      const dx = item.x - this.viewPos.x;
+      const dz = item.z - this.viewPos.z;
+      const nearby = dx * dx + dz * dz < 48 * 48;
+      if (view.inner) view.inner.visible = nearby;
+      if (view.hologram) view.hologram.visible = nearby;
+      view.root.position.set(item.x, lootRenderY(item.y, 'weapon'), item.z);
+      view.root.rotation.y = item.yaw;
+    }
+    const matrix = new THREE.Matrix4();
+    const rotation = new THREE.Quaternion();
+    const scale = new THREE.Vector3(1, 1, 1);
+    const position = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    for (const key of ['ammo', 'med', 'shield'] as const) {
+      const mesh = this.lootInst[key] ?? this.lootInstMesh(key);
+      const bucket = instBuckets[key];
+      const count = Math.min(bucket.length, mesh.instanceMatrix.count);
+      for (let index = 0; index < count; index++) {
+        const item = bucket[index]!;
+        rotation.setFromAxisAngle(up, item.spin);
+        matrix.compose(position.set(item.x, item.y, item.z), rotation, scale);
+        mesh.setMatrixAt(index, matrix);
+      }
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.visible = count > 0;
+    }
+    for (const [id, view] of this.lootViews) {
+      if (seen.has(id)) continue;
+      disposeWeaponHologram(view.hologram);
+      this.group.remove(view.root);
+      this.lootViews.delete(id);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Storm wall + transport
   // -------------------------------------------------------------------------
@@ -1889,6 +2031,21 @@ export class WorldView {
     this.stormMesh.position.x = match.storm.centerX;
     this.stormMesh.position.z = match.storm.centerZ;
     this.stormMesh.scale.set(match.storm.radius, 1, match.storm.radius);
+    mat.uniforms['uIntensity']!.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
+  }
+
+  syncStormView(storm: GameStateView['storm'], actorPosition?: Readonly<{ x: number; z: number }>): void {
+    if (storm.state === 'idle' || !actorPosition) {
+      this.stormMesh.visible = false;
+      return;
+    }
+    const mat = this.stormMesh.material as THREE.ShaderMaterial;
+    const distOutside = Math.hypot(actorPosition.x - storm.centerX, actorPosition.z - storm.centerZ) - storm.radius;
+    const closeness = distOutside >= 0 ? 1 : Math.max(0, Math.min(1, 1 + distOutside / 60));
+    this.stormMesh.visible = true;
+    this.stormMesh.position.x = storm.centerX;
+    this.stormMesh.position.z = storm.centerZ;
+    this.stormMesh.scale.set(storm.radius, 1, storm.radius);
     mat.uniforms['uIntensity']!.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
   }
 
@@ -2010,6 +2167,31 @@ export class WorldView {
     } else {
       this.transportGroup.visible = false;
     }
+  }
+
+  /** Apply a complete guest view. This path never reads or advances Match. */
+  syncReplica(view: GameStateView): void {
+    this.syncReplicaDestructibles(view);
+    this.syncChests(view);
+    this.syncReplicaLoot(view.loot);
+    const local = view.actors.find((actor) => actor.id === view.localActorId);
+    this.syncStormView(view.storm, local?.position);
+    this.transportGroup.visible = view.phase === 'transport';
+    if (this.transportGroup.visible) {
+      this.transportGroup.position.set(view.transport.x, view.transport.y, view.transport.z);
+      const route = this.mapDef.transportRoute;
+      this.transportGroup.rotation.y = Math.atan2(-(route.to[1] - route.from[1]), route.to[0] - route.from[0]);
+    }
+  }
+
+  updateReplica(dt: number, view: GameStateView): void {
+    this.time += dt;
+    this.vista.update(this.viewPos, this.time);
+    this.lightPool.update(dt, this.viewPos);
+    this.animateWater(this.time);
+    this.syncReplica(view);
+    const stormMat = this.stormMesh.material as THREE.ShaderMaterial;
+    stormMat.uniforms['uTime']!.value = this.time;
   }
 
   /** Release only resources owned by this match view. Shared libraries and

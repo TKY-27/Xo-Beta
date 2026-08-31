@@ -13,7 +13,9 @@ const _punchX = new THREE.Vector3(1, 0, 0);
 import { AnimationAction, AnimationMixer, LoopOnce } from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import type { Actor } from '../sim/actor';
+import type { ActorView } from '../sim/gameStateView';
 import type { SkinId } from '../core/settings';
+import { feetYFromBodyCenter } from '../physics/physics';
 
 export type { SkinId } from '../core/settings';
 
@@ -35,6 +37,8 @@ export interface CharacterRig {
   dissolving: number;
   /** Skinned-character extensions */
   update?(a: Actor, t: number, dt: number): void;
+  /** Replica-only presentation update; does not require an Actor or Match. */
+  updateView?(a: ActorView, t: number, dt: number): void;
   attachWeapon?(model: THREE.Object3D | null): void;
   /** Resolve the attached weapon's authored muzzle in world space. */
   muzzleWorld?(position: THREE.Vector3, direction: THREE.Vector3): boolean;
@@ -104,6 +108,8 @@ export const SKIN_SPECS: Readonly<Record<SkinId, SkinSpec>> = {
 export const SKIN_IDS: readonly SkinId[] = Object.freeze([
   'vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova',
 ]);
+
+const feetYFromView = feetYFromBodyCenter;
 
 /** Stable bot appearance assignment; never depends on frame order or Math.random. */
 export function skinForName(name: string): SkinId {
@@ -554,6 +560,41 @@ export class CharacterFactory {
           }
         }
       },
+      updateView(a: ActorView, _t: number, dt: number) {
+        rig.group.position.set(a.position.x, feetYFromView(a.position.y), a.position.z);
+        rig.group.rotation.y = a.yaw + Math.PI;
+        if (!a.alive) {
+          const death = actions['death'];
+          if (death && !death.isRunning() && rig.dissolving === 0) {
+            crossfade(currentBase, 'death', 0.12);
+            death.setLoop(LoopOnce, 1);
+            death.clampWhenFinished = true;
+          }
+          mixer.update(dt);
+          return;
+        }
+        const speedH = Math.hypot(a.velocity.x, a.velocity.z);
+        const want = a.moveState === 'swim'
+          ? (speedH > 1 ? 'swim' : 'swim_idle')
+          : a.moveState === 'slide' || a.moveState === 'mantle'
+            ? 'roll'
+            : !a.grounded
+              ? 'jump_loop'
+              : a.crouched
+                ? (speedH > 0.6 ? 'crouch_walk' : 'crouch_idle')
+                : speedH < 0.6 ? 'idle' : speedH < 3.2 ? 'walk' : speedH < 8.6 ? 'jog' : 'sprint';
+        if (want !== currentBase) {
+          crossfade(currentBase, want);
+          currentBase = want;
+        }
+        rig.animName = want;
+        const action = actions[want];
+        if (action && (want === 'walk' || want === 'jog' || want === 'sprint' || want === 'crouch_walk')) {
+          const base = want === 'walk' ? 2.35 : want === 'jog' ? 5.9 : want === 'sprint' ? 9.7 : 2;
+          action.timeScale = THREE.MathUtils.clamp(speedH / base, 0.72, 1.32);
+        }
+        mixer.update(dt);
+      },
       attachWeapon(model: THREE.Object3D | null) {
         if (!weaponHolder) return;
         for (const c of [...weaponHolder.children]) weaponHolder.remove(c);
@@ -690,6 +731,10 @@ function fallbackRig(
     baseMats: baseMats,
     dissolving: 0,
     update(a: Actor) {
+      group.rotation.y = a.yaw + Math.PI;
+    },
+    updateView(a: ActorView) {
+      group.position.set(a.position.x, feetYFromView(a.position.y), a.position.z);
       group.rotation.y = a.yaw + Math.PI;
     },
     dispose() {

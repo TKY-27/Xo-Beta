@@ -293,6 +293,21 @@ describe('dedicated WebRTC game connection', () => {
     connection.dispose();
   });
 
+  it('sends every chunk of one logical snapshot while dropping older snapshots', async () => {
+    const peer = new FakePeer();
+    const connection = new GameConnection({ role: 'host', peerConnection: peer });
+    await connection.start();
+    openAll(peer);
+    const snapshot = peer.channels.find((channel) => channel.label === 'snapshot')!;
+
+    expect(connection.sendSnapshot(new Uint8Array([1]).buffer, 7)).toBe(true);
+    expect(connection.sendSnapshot(new Uint8Array([2]).buffer, 7)).toBe(true);
+    expect(connection.sendSnapshot(new Uint8Array([3]).buffer, 7)).toBe(true);
+    expect(connection.sendSnapshot(new Uint8Array([0]).buffer, 6)).toBe(false);
+    expect(snapshot.sent.map((packet) => new Uint8Array(packet)[0])).toEqual([1, 2, 3]);
+    connection.dispose();
+  });
+
   it('performs at most one bounded ICE restart before clean failure', async () => {
     vi.useFakeTimers();
     const peer = new FakePeer();
@@ -309,6 +324,55 @@ describe('dedicated WebRTC game connection', () => {
     expect(connection.state).toBe('failed');
     expect(peer.restartIce).toHaveBeenCalledOnce();
     expect(peer.close).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  it('bounds recovery when an established connection becomes disconnected', async () => {
+    vi.useFakeTimers();
+    const peer = new FakePeer();
+    const connection = new GameConnection({ role: 'host', peerConnection: peer, connectionTimeoutMs: 20 });
+    await connection.start();
+    openAll(peer);
+    expect(connection.state).toBe('connected');
+
+    peer.connectionState = 'disconnected';
+    peer.onconnectionstatechange?.();
+    peer.oniceconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(connection.state).toBe('restarting');
+    expect(peer.restartIce).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(20);
+    expect(connection.state).toBe('failed');
+    expect(peer.restartIce).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  it('clears the bounded restart timeout after transient disconnect recovery', async () => {
+    vi.useFakeTimers();
+    const peer = new FakePeer();
+    const connection = new GameConnection({ role: 'host', peerConnection: peer, connectionTimeoutMs: 20 });
+    await connection.start();
+    openAll(peer);
+
+    peer.connectionState = 'disconnected';
+    peer.onconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(connection.state).toBe('restarting');
+
+    peer.connectionState = 'connected';
+    peer.iceConnectionState = 'connected';
+    peer.onconnectionstatechange?.();
+    expect(connection.state).toBe('connected');
+    await vi.advanceTimersByTimeAsync(40);
+    expect(connection.state).toBe('connected');
+
+    // The single lifetime restart budget is not reset by recovery.
+    peer.connectionState = 'disconnected';
+    peer.iceConnectionState = 'disconnected';
+    peer.onconnectionstatechange?.();
+    expect(connection.state).toBe('failed');
+    expect(peer.restartIce).toHaveBeenCalledOnce();
     vi.useRealTimers();
   });
 
@@ -335,5 +399,55 @@ describe('dedicated WebRTC game connection', () => {
     const relayConnection = new GameConnection({ role: 'guest', peerConnection: relayPeer });
     await expect(relayConnection.getSelectedCandidatePairDiagnostics()).rejects.toThrow(/relay/i);
     expect(relayConnection.state).toBe('failed');
+  });
+
+  it('parses bounded transport metrics without exposing candidate addresses', async () => {
+    const peer = new FakePeer();
+    peer.stats.set('pair', {
+      id: 'pair', type: 'candidate-pair', state: 'succeeded', selected: true,
+      currentRoundTripTime: 0.075, bytesSent: 12_000, bytesReceived: 9_000,
+      localCandidateId: 'local', remoteCandidateId: 'remote',
+    });
+    peer.stats.set('local', { id: 'local', type: 'local-candidate', candidateType: 'host', address: '192.0.2.1' });
+    peer.stats.set('remote', { id: 'remote', type: 'remote-candidate', candidateType: 'srflx', address: '198.51.100.2' });
+    peer.stats.set('inbound', { id: 'inbound', type: 'inbound-rtp', packetsReceived: 90, packetsLost: 10 });
+    peer.stats.set('outbound', { id: 'outbound', type: 'outbound-rtp', packetsSent: 120 });
+    const onMetrics = vi.fn();
+    const connection = new GameConnection({ role: 'guest', peerConnection: peer, onNetworkMetrics: onMetrics });
+
+    const metrics = await connection.getNetworkMetrics();
+
+    expect(metrics.rttMs).toBe(75);
+    expect(metrics.packetLossPercent).toBe(10);
+    expect(metrics.bytesSent).toBe(12_000);
+    expect(metrics.bytesReceived).toBe(9_000);
+    expect(metrics.packetsSent).toBe(120);
+    expect(metrics.packetsReceived).toBe(90);
+    expect(metrics.packetsLost).toBe(10);
+    expect(metrics.candidatePair).toMatchObject({ localCandidateType: 'host', remoteCandidateType: 'srflx' });
+    expect(JSON.stringify(metrics)).not.toContain('192.0.2.1');
+    expect(JSON.stringify(metrics)).not.toContain('198.51.100.2');
+    expect(onMetrics).toHaveBeenCalledWith(metrics);
+    connection.dispose();
+  });
+
+  it('reports a terminal peer close once and disposes idempotently', async () => {
+    const peer = new FakePeer();
+    const disconnected = vi.fn();
+    const connection = new GameConnection({ role: 'host', peerConnection: peer, onDisconnected: disconnected });
+    await connection.start();
+    openAll(peer);
+
+    peer.connectionState = 'closed';
+    peer.iceConnectionState = 'closed';
+    peer.onconnectionstatechange?.();
+    expect(connection.state).toBe('closed');
+    expect(disconnected).toHaveBeenCalledOnce();
+    expect(disconnected).toHaveBeenCalledWith('closed');
+    expect(peer.close).toHaveBeenCalledOnce();
+    expect(peer.onconnectionstatechange).toBeNull();
+    connection.dispose();
+    connection.dispose();
+    expect(peer.close).toHaveBeenCalledOnce();
   });
 });

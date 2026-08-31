@@ -14,6 +14,7 @@ export type RoomUiErrorCode =
   | 'incompatible'
   | 'room-full'
   | 'wrong-secret'
+  | 'reconnect-expired'
   | 'discovery-failed'
   | 'direct-failed';
 
@@ -56,7 +57,6 @@ export interface LobbyViewModel {
   rosterLines: readonly string[];
   relays: readonly RelayHealthView[];
   startEligible: boolean;
-  experimentalStartEnabled: boolean;
   statusMessage?: string;
 }
 
@@ -104,6 +104,7 @@ const errorKeys: Record<RoomUiErrorCode, TextKey> = {
   incompatible: 'room.incompatible',
   'room-full': 'room.full',
   'wrong-secret': 'room.wrongSecret',
+  'reconnect-expired': 'room.reconnectExpired',
   'discovery-failed': 'room.discoveryFailed',
   'direct-failed': 'room.directFailed',
 };
@@ -405,10 +406,10 @@ export class OnlineLobbyUi {
 
   private renderStart(view: LobbyViewModel): void {
     const start = $<HTMLButtonElement>('btn-online-start');
-    const enabled = view.isHost && view.experimentalStartEnabled && view.startEligible;
+    const enabled = view.isHost && view.startEligible;
     start.disabled = !enabled;
-    start.textContent = t(view.experimentalStartEnabled ? 'lobby.startExperimental' : 'lobby.startPhase3');
-    $('lobby-start-note').textContent = t('lobby.phase3Gate');
+    start.textContent = t('lobby.startOnline');
+    $('lobby-start-note').textContent = t('lobby.startRequirement');
   }
 }
 

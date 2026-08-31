@@ -238,6 +238,28 @@ export function filterInvalidCrates(def: MapDef): void {
   def.destructibles = accepted;
 }
 
+/**
+ * Apply the deterministic map mutations that Match performs before assigning
+ * destructible IDs. Online peers must run this before hashing the canonical
+ * start payload so the host encoder, guest decoder, renderer, and prediction
+ * world all share the same stable-ID dictionary.
+ *
+ * Match repeats these operations against its long-lived PhysicsWorld; both
+ * grounding and filtering are intentionally idempotent.
+ */
+export function normalizeMapForMatch(def: MapDef): MapDef {
+  const phys = new PhysicsWorld();
+  try {
+    buildColliders(def, phys);
+    phys.flush();
+    groundCrates(def, phys);
+    filterInvalidCrates(def);
+    return def;
+  } finally {
+    phys.dispose();
+  }
+}
+
 /** Keep authored/parked vehicle cover out of buildings and other solids. */
 export function isVehiclePlacementClear(
   def: MapDef,
