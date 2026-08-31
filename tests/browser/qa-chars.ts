@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   await page.waitForTimeout(1000);
   await page.click('#btn-play');
   await page.waitForTimeout(300);
-  if (map !== 'neocity') await page.click(`#map-list .map-card:nth-child(${['neocity','oldfront','eden','ashara'].indexOf(map)+1})`);
+  await page.click(`#map-list .map-card:nth-child(${['neocity','oldfront','eden','ashara'].indexOf(map)+1})`);
   await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
   await page.waitForSelector('#hud:not(.hidden)', { timeout: 60000 });
   for (let i = 0; i < 40; i++) {

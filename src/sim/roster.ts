@@ -1,4 +1,10 @@
 import { BOT_PERSONALITIES, MATCH, type BotPersonality } from '../core/balance';
+import {
+  clonePreferredItemSlots,
+  DEFAULT_PREFERRED_ITEM_SLOTS,
+  isPreferredItemSlots,
+  type PreferredItemSlots,
+} from '../core/preferredSlots';
 import type { SkinId } from '../core/settings';
 
 export type PeerId = string;
@@ -20,6 +26,8 @@ export interface RosterEntry {
   teamId: TeamId | null;
   skinId: SkinId;
   accentColor: number;
+  /** Optional for legacy in-process fixtures; authoritative boundaries normalize it. */
+  preferredItemSlots?: PreferredItemSlots;
 }
 
 export type MatchMode =
@@ -54,6 +62,7 @@ export function localHumanRosterEntry(opts: {
   skinId?: SkinId;
   accentColor?: number;
   connectionState?: Exclude<ConnectionState, 'bot'>;
+  preferredItemSlots?: PreferredItemSlots;
 } = {}): RosterEntry {
   return {
     slotId: opts.slotId ?? 0,
@@ -64,6 +73,7 @@ export function localHumanRosterEntry(opts: {
     teamId: opts.teamId ?? null,
     skinId: opts.skinId ?? 'vanguard',
     accentColor: opts.accentColor ?? 0x5fd0ff,
+    preferredItemSlots: clonePreferredItemSlots(opts.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS),
   };
 }
 
@@ -76,6 +86,7 @@ export function remoteHumanRosterEntry(opts: {
   skinId?: SkinId;
   accentColor?: number;
   connectionState?: Exclude<ConnectionState, 'bot'>;
+  preferredItemSlots?: PreferredItemSlots;
 }): RosterEntry {
   return {
     slotId: opts.slotId,
@@ -86,6 +97,7 @@ export function remoteHumanRosterEntry(opts: {
     teamId: opts.teamId ?? null,
     skinId: opts.skinId ?? VALID_SKIN_IDS[opts.slotId % VALID_SKIN_IDS.length]!,
     accentColor: opts.accentColor ?? (0x9b7dff + opts.slotId * 0x1100),
+    preferredItemSlots: clonePreferredItemSlots(opts.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS),
   };
 }
 
@@ -242,6 +254,9 @@ function validateEntry(entry: RosterEntry): void {
   if (!Number.isSafeInteger(entry.actorId) || entry.actorId <= 0) throw new Error(`Invalid actor ID: ${entry.actorId}`);
   if (!validDisplayName(entry.displayName)) throw new Error(`Invalid display name: ${JSON.stringify(entry.displayName)}`);
   if (!VALID_SKIN_IDS.includes(entry.skinId)) throw new Error(`Invalid skin ID: ${String(entry.skinId)}`);
+  if (entry.preferredItemSlots !== undefined && !isPreferredItemSlots(entry.preferredItemSlots)) {
+    throw new Error('Invalid preferred item slot settings');
+  }
   if (!Number.isInteger(entry.accentColor) || entry.accentColor < 0 || entry.accentColor > 0xffffff) {
     throw new Error(`Invalid accent color: ${entry.accentColor}`);
   }
@@ -307,6 +322,7 @@ function fillBots(mode: MatchMode, roster: RosterEntry[]): void {
       teamId,
       skinId: skinIdForName(`${personality.name}${nameSuffix}`),
       accentColor: personality.accentColor,
+      preferredItemSlots: clonePreferredItemSlots(DEFAULT_PREFERRED_ITEM_SLOTS),
     });
     botIndex++;
   }
@@ -343,6 +359,7 @@ function assertUnique<T>(values: readonly T[], label: string): void {
 function cloneEntry(entry: RosterEntry): RosterEntry {
   return {
     ...entry,
+    preferredItemSlots: clonePreferredItemSlots(entry.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS),
     ownership: entry.ownership.kind === 'bot'
       ? { kind: 'bot' }
       : { kind: entry.ownership.kind, peerId: entry.ownership.peerId },

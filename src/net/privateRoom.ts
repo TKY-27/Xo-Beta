@@ -2,6 +2,12 @@ import type { DataPayload, HandshakeReceiver, HandshakeSender } from 'trystero/n
 import type { Difficulty } from '../core/balance';
 import { onLangChanged, t } from '../core/i18n';
 import { getSettings, onSettingsChanged, updateSettings, type SkinId } from '../core/settings';
+import {
+  clonePreferredItemSlots,
+  DEFAULT_PREFERRED_ITEM_SLOTS,
+  validatePreferredItemSlots,
+  type PreferredItemSlots,
+} from '../core/preferredSlots';
 import type { MatchMode, TeamId } from '../sim/roster';
 import type { MapId } from '../world';
 import type {
@@ -164,6 +170,7 @@ export interface ParticipantReconnectAttempt {
 interface GuestProfile {
   readonly displayName: string;
   readonly skinId: SkinId;
+  readonly preferredItemSlots: PreferredItemSlots;
   readonly proposedParticipantId: string;
   readonly protocolSession: string;
   readonly reconnectToken: string | null;
@@ -365,6 +372,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
         hostParticipantId: this.localParticipantId,
         hostDisplayName: displayName,
         hostSkinId: request.skinId,
+        hostPreferredItemSlots: request.preferredItemSlots,
         protocolSession: this.localProtocolSession,
         build: this.build,
         channelOpen: true,
@@ -408,6 +416,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
     this.guestProfile = {
       displayName,
       skinId: request.skinId,
+      preferredItemSlots: clonePreferredItemSlots(request.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS),
       proposedParticipantId: randomIdentifier(),
       protocolSession,
       reconnectToken: guestReconnect.load(),
@@ -625,6 +634,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
           handshake,
           displayName: request.displayName,
           skinId: request.skinId,
+          preferredItemSlots: request.preferredItemSlots,
           requestedSlot: request.requestedSlot,
           channelOpen: false,
         });
@@ -697,6 +707,7 @@ export class PrivateRoomController implements OnlineLobbyActions {
       protocolSession: profile.protocolSession,
       displayName: profile.displayName,
       skinId: profile.skinId,
+      preferredItemSlots: profile.preferredItemSlots,
       reconnectToken: profile.reconnectToken,
       lobbyAuthenticationKey: this.requireDerived().lobbyAuthenticationKey,
     });
@@ -1307,15 +1318,23 @@ function validateLobbySnapshot(value: unknown, build: BuildIdentity, roomId: str
   let hostCount = 0;
   for (const participant of participants) {
     if (!participant || typeof participant !== 'object' || Array.isArray(participant)) throw new Error('Malformed participant');
-    assertExactObjectKeys(participant as unknown as Record<string, unknown>, [
+    const participantRecord = participant as unknown as Record<string, unknown>;
+    const participantBaseKeys = [
       'participantId', 'peerId', 'slotId', 'displayName', 'skinId', 'teamId',
       'ready', 'isHost', 'connected', 'channelsOpen', 'build', 'protocolSession',
-    ]);
+    ];
+    const participantPreference = Object.prototype.hasOwnProperty.call(participantRecord, 'preferredItemSlots')
+      ? validatePreferredProfile(participantRecord.preferredItemSlots)
+      : clonePreferredItemSlots(DEFAULT_PREFERRED_ITEM_SLOTS);
+    assertExactObjectKeys(participantRecord, Object.prototype.hasOwnProperty.call(participantRecord, 'preferredItemSlots')
+      ? [...participantBaseKeys, 'preferredItemSlots']
+      : participantBaseKeys);
     const participantBuild = validateBuildIdentity(participant.build);
     if (!sameBuildIdentity(participantBuild, build)
       || !Number.isInteger(participant.slotId) || participant.slotId < 0 || participant.slotId >= 4
       || !validIdentifier(participant.peerId) || !validIdentifier(participant.participantId)
       || !validDisplayName(participant.displayName)
+      || !isSamePreferredProfile(participantPreference, participant.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS)
       || typeof participant.skinId !== 'string' || !['vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova'].includes(participant.skinId)
       || (participant.teamId !== null && participant.teamId !== 0 && participant.teamId !== 1)
       || typeof participant.ready !== 'boolean' || typeof participant.isHost !== 'boolean'
@@ -1366,7 +1385,10 @@ function validateRosterPreview(
     const human = humanEntries.find((entry) => entry.slotId === participant.slotId);
     if (!human || human.ownership.kind === 'bot' || human.ownership.peerId !== participant.peerId
       || human.displayName !== participant.displayName || human.skinId !== participant.skinId
-      || human.teamId !== participant.teamId) throw new Error('Roster human does not match lobby participant');
+      || human.teamId !== participant.teamId
+      || !isSamePreferredProfile(human.preferredItemSlots, participant.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS)) {
+      throw new Error('Roster human does not match lobby participant');
+    }
     if (preview.valid) {
       const rosterHuman = rosterEntries.find((entry) => entry.slotId === participant.slotId);
       if (!rosterHuman || rosterHuman.ownership.kind === 'bot'
@@ -1389,13 +1411,20 @@ interface ValidatedRosterEntry {
   skinId: SkinId;
   teamId: TeamId | null;
   ownership: { kind: 'bot' } | { kind: 'local-human' | 'remote-human'; peerId: string };
+  preferredItemSlots: PreferredItemSlots;
 }
 
 function validateRosterEntry(value: unknown): ValidatedRosterEntry {
   const record = requirePlainRecord(value, 'roster entry');
-  assertExactObjectKeys(record, [
+  const baseKeys = [
     'slotId', 'actorId', 'displayName', 'ownership', 'connectionState', 'teamId', 'skinId', 'accentColor',
-  ]);
+  ];
+  const preferredItemSlots = Object.prototype.hasOwnProperty.call(record, 'preferredItemSlots')
+    ? validatePreferredProfile(record.preferredItemSlots)
+    : clonePreferredItemSlots(DEFAULT_PREFERRED_ITEM_SLOTS);
+  assertExactObjectKeys(record, Object.prototype.hasOwnProperty.call(record, 'preferredItemSlots')
+    ? [...baseKeys, 'preferredItemSlots']
+    : baseKeys);
   const ownership = requirePlainRecord(record.ownership, 'roster ownership');
   const kind = ownership.kind;
   if (kind === 'bot') assertExactObjectKeys(ownership, ['kind']);
@@ -1414,7 +1443,19 @@ function validateRosterEntry(value: unknown): ValidatedRosterEntry {
     || (kind === 'bot' ? record.connectionState !== 'bot' : record.connectionState !== 'connected' && record.connectionState !== 'disconnected')) {
     throw new Error('Malformed roster entry');
   }
-  return record as unknown as ValidatedRosterEntry;
+  return { ...(record as unknown as ValidatedRosterEntry), preferredItemSlots };
+}
+
+function validatePreferredProfile(value: unknown): PreferredItemSlots {
+  try {
+    return clonePreferredItemSlots(value === undefined ? DEFAULT_PREFERRED_ITEM_SLOTS : validatePreferredItemSlots(value));
+  } catch {
+    throw new Error('Malformed preferred item slot settings');
+  }
+}
+
+function isSamePreferredProfile(a: PreferredItemSlots, b: PreferredItemSlots): boolean {
+  return a.enabled === b.enabled && a.slots.every((value, index) => value === b.slots[index]);
 }
 
 function requirePlainRecord(value: unknown, label: string): Record<string, unknown> {

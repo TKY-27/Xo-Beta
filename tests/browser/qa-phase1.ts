@@ -113,6 +113,14 @@ async function openPlay(page: Page): Promise<void> {
   await sleep(150);
 }
 
+async function openSkinCustomization(page: Page): Promise<void> {
+  if (!(await page.locator('#skin-customization-menu').isVisible())) {
+    if (await page.locator('#play-menu').isVisible()) await page.locator('#btn-play-back').click();
+    await page.locator('#btn-skin-customization').click();
+  }
+  await page.locator('#skin-customization-selector .skin-card').first().waitFor({ state: 'visible', timeout: 10000 });
+}
+
 async function assertMapSelection(page: Page, map: string, viewport: string): Promise<void> {
   await page.locator(`.map-card[data-map-id="${map}"]`).click();
   await sleep(450);
@@ -150,9 +158,10 @@ async function localSkin(page: Page): Promise<{ setting: string | null; preview:
 }
 
 async function setSkin(page: Page, skin: string): Promise<void> {
-  await page.locator(`#skin-options .skin-card[data-skin="${skin}"]`).click();
+  await openSkinCustomization(page);
+  await page.locator(`#skin-customization-selector .skin-card[data-skin="${skin}"]`).click();
   await sleep(500);
-  const selected = page.locator('#skin-options .skin-card[aria-selected="true"]');
+  const selected = page.locator('#skin-customization-selector .skin-card[aria-selected="true"]');
   assert.equal(await selected.count(), 1);
   assert.equal(await selected.getAttribute('data-skin'), skin);
   const current = await localSkin(page);
@@ -162,6 +171,9 @@ async function setSkin(page: Page, skin: string): Promise<void> {
 
 async function practiceSkin(page: Page, skin: string): Promise<void> {
   await setSkin(page, skin);
+  await page.locator('#btn-skin-customization-back').click();
+  await openPlay(page);
+  await page.locator('#map-list .map-card').first().click();
   await page.locator('#btn-practice-start').click();
   await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 });
   const matchState = await waitForState(page, (s) => s.playerSkin === skin && s.playerRigSkin === skin, `practice rig ${skin}`, 30000);
@@ -271,15 +283,25 @@ async function main(): Promise<void> {
       await page.screenshot({ path: `${OUT}/play-${viewport.name}.png`, animations: 'disabled', timeout: 120000 });
     }
 
-    // Language changes rebuild the details panel and selector while preserving
-    // Menus.selectedMap as the single map-selection state.
+    // Entering the play flow starts with no arena selected. Start actions stay
+    // visually unavailable but return a localized validation message instead
+    // of silently choosing the first map.
+    await page.locator('#btn-play-back').click();
+    await openPlay(page);
+    assert.equal(await page.locator('#map-list .map-card[aria-selected="true"]').count(), 0);
+    await page.locator('#btn-play-start').click();
+    assert.notEqual((await page.locator('#play-selection-error').innerText()).trim(), '');
+
+    // Language changes rebuild the details panel while preserving the explicit
+    // selection state only until the player re-enters the play flow.
     await page.locator('#btn-play-back').click();
     await page.locator('#btn-settings').click();
     await page.locator('#settings-controls select').first().selectOption('ja');
     await sleep(600);
     await page.locator('#btn-settings-back').click();
     await openPlay(page);
-    assert.equal(await page.locator('#map-list .map-card[aria-selected="true"]').getAttribute('data-map-id'), 'ashara');
+    assert.equal(await page.locator('#map-list .map-card[aria-selected="true"]').count(), 0);
+    await page.locator('#map-list .map-card[data-map-id="ashara"]').click();
     assert.notEqual((await page.locator('#selected-arena-title').innerText()).trim(), 'ASHARA');
     await page.locator('#btn-play-back').click();
     await page.locator('#btn-settings').click();
@@ -288,16 +310,18 @@ async function main(): Promise<void> {
     await page.locator('#btn-settings-back').click();
     await openPlay(page);
 
-    // Exercise all direct skin controls, keyboard traversal, settings sync,
+    // Exercise the dedicated skin screen, keyboard traversal, settings sync,
     // reload persistence, and actual practice rig creation.
-    assert.equal(await page.locator('#skin-options .skin-card').count(), SKINS.length);
+    await page.locator('#btn-play-back').click();
+    await openSkinCustomization(page);
+    assert.equal(await page.locator('#skin-customization-selector .skin-card').count(), SKINS.length);
     await setSkin(page, 'vanguard');
-    await page.locator('#skin-options .skin-card[data-skin="vanguard"]').focus();
+    await page.locator('#skin-customization-selector .skin-card[data-skin="vanguard"]').focus();
     await page.keyboard.press('ArrowRight');
     await sleep(500);
     assert.equal((await localSkin(page)).setting, 'pathfinder');
     for (const skin of SKINS) await setSkin(page, skin);
-    await page.locator('#btn-play-back').click();
+    await page.locator('#btn-skin-customization-back').click();
     await page.locator('#btn-settings').click();
     await page.locator('#settings-tab-gameplay').click();
     const settingsSkin = page.locator('#settings-gameplay select').nth(2);
@@ -306,11 +330,11 @@ async function main(): Promise<void> {
     await sleep(500);
     assert.equal((await localSkin(page)).setting, 'nova');
     await page.locator('#btn-settings-back').click();
-    await openPlay(page);
-    assert.equal(await page.locator('#skin-options .skin-card[aria-selected="true"]').getAttribute('data-skin'), 'nova');
+    await openSkinCustomization(page);
+    assert.equal(await page.locator('#skin-customization-selector .skin-card[aria-selected="true"]').getAttribute('data-skin'), 'nova');
     await page.reload({ waitUntil: 'domcontentloaded' });
     await waitForMain(page);
-    await openPlay(page);
+    await openSkinCustomization(page);
     assert.equal((await localSkin(page)).setting, 'nova', 'skin survives reload');
     await page.screenshot({ path: `${OUT}/skin-selector.png`, animations: 'disabled', timeout: 120000 });
     for (const skin of SKINS) await practiceSkin(page, skin);

@@ -16,6 +16,7 @@ async function main(): Promise<void> {
   page.on('crash', () => errors.push('PAGE CRASHED'));
   await page.addInitScript(() => {
     localStorage.setItem('xo-beta-settings-v1', JSON.stringify({
+      onboarded: true,
       quality: 'low', shadows: false, shadowQuality: 'low',
       postProcessing: false, bloom: false, aa: 'off', resolutionScale: 0.6,
     }));
@@ -30,7 +31,7 @@ async function main(): Promise<void> {
   log('assets settled');
   await page.click('#btn-play');
   await page.waitForTimeout(400);
-  if (map !== 'neocity') await page.click(`#map-list .map-card:nth-child(${['neocity','oldfront','eden','ashara'].indexOf(map)+1})`);
+  await page.click(`#map-list .map-card:nth-child(${['neocity','oldfront','eden','ashara'].indexOf(map)+1})`);
   await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
   try {
     await page.waitForSelector('#hud:not(.hidden)', { timeout: 60000 });

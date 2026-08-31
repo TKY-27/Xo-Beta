@@ -235,8 +235,11 @@ export class LobbyScene {
    * Recompose the hero for the active screen: centered for the main menu,
    * panned toward the left edge when a wide panel (settings) owns the right.
    */
-  compose(screen: 'main' | 'settings'): void {
-    this.lookXTarget = screen === 'settings' ? 0.4 : -1.35;
+  compose(screen: 'main' | 'settings' | 'skin'): void {
+    // Keep the hero in the same long-lived scene while panels change. The
+    // dedicated skin screen gets a little more room than settings without
+    // rebuilding the renderer or sharing disposable rig resources.
+    this.lookXTarget = screen === 'settings' ? 0.4 : screen === 'skin' ? 0.15 : -1.35;
   }
 
   stop(): void {

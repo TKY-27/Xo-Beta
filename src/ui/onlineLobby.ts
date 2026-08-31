@@ -1,5 +1,6 @@
 import type { Difficulty } from '../core/balance';
 import { getSettings, type SkinId } from '../core/settings';
+import type { PreferredItemSlots } from '../core/preferredSlots';
 import { t, type TextKey } from '../core/i18n';
 import type { MatchMode, TeamId } from '../sim/roster';
 import type { MapId } from '../world';
@@ -64,6 +65,8 @@ export interface LobbyViewModel {
 export interface CreateRoomRequest {
   displayName: string;
   skinId: SkinId;
+  /** Captured at admission; never sent in match snapshots or high-frequency input. */
+  preferredItemSlots?: PreferredItemSlots;
 }
 
 export interface JoinRoomRequest extends CreateRoomRequest {
@@ -230,6 +233,7 @@ export class OnlineLobbyUi {
       await this.options.actions.createRoom({
         displayName: $<HTMLInputElement>('create-display-name').value,
         skinId: getSettings().playerSkin,
+        preferredItemSlots: getSettings().preferredItemSlots,
       });
     } catch (error) {
       this.showError(error instanceof RoomUiError ? error.code : 'discovery-failed', 'create');
@@ -247,6 +251,7 @@ export class OnlineLobbyUi {
         invite: $<HTMLTextAreaElement>('join-room-invite').value,
         displayName: $<HTMLInputElement>('join-display-name').value,
         skinId: getSettings().playerSkin,
+        preferredItemSlots: getSettings().preferredItemSlots,
       });
     } catch (error) {
       this.showError(error instanceof RoomUiError ? error.code : 'discovery-failed', 'join');

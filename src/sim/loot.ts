@@ -10,6 +10,8 @@ import {
 import { Rng } from '../core/rng';
 import type { Actor } from './actor';
 import type { InventoryItem, WeaponInstance } from './inventory';
+import { resolvePreferredPickupSlot } from './preferredSlots';
+import { DEFAULT_PREFERRED_ITEM_SLOTS, type PreferredItemSlots } from '../core/preferredSlots';
 import { feetYFromBodyCenter } from '../physics/physics';
 
 export type WorldItemKind = 'weapon' | 'ammo' | 'heal';
@@ -201,7 +203,12 @@ export class LootSystem {
   /** Attempt pickup; returns displaced item if inventory was full.
    *  swapIfBetterOnly: when inventory is full, only swap weapons for strictly
    *  higher rarity (prevents bot pick-up/drop churn). */
-  pickup(item: WorldItem, actor: Actor, swapIfBetterOnly = false): InventoryItem | null | false {
+  pickup(
+    item: WorldItem,
+    actor: Actor,
+    swapIfBetterOnly = false,
+    preferredItemSlots: PreferredItemSlots = actor.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS,
+  ): InventoryItem | null | false {
     if (!this.canActorPickup(item, actor)) return false;
     if (item.kind === 'weapon' && item.weapon) {
       let upgradeSlot: number | undefined;
@@ -218,7 +225,10 @@ export class LootSystem {
           upgradeSlot = 0;
         }
       }
-      const res = actor.inv.add({ ...item.weapon }, upgradeSlot);
+      const preferredSlot = swapIfBetterOnly
+        ? undefined
+        : resolvePreferredPickupSlot(actor.inv, item.weapon, preferredItemSlots);
+      const res = actor.inv.add({ ...item.weapon }, upgradeSlot ?? preferredSlot);
       if (!res.ok) return false;
       this.remove(item);
       this.events.onPickup(item, actor);
@@ -234,7 +244,10 @@ export class LootSystem {
     if (item.kind === 'heal' && item.heal) {
       const inventoryItem = { kind: 'heal' as const, itemId: item.heal.itemId, count: item.heal.count };
       if (swapIfBetterOnly && !actor.inv.canStore(inventoryItem)) return false;
-      const res = actor.inv.add(inventoryItem);
+      const preferredSlot = swapIfBetterOnly
+        ? undefined
+        : resolvePreferredPickupSlot(actor.inv, inventoryItem, preferredItemSlots);
+      const res = actor.inv.add(inventoryItem, preferredSlot);
       if (!res.ok) return false;
       this.remove(item);
       this.events.onPickup(item, actor);
