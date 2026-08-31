@@ -49,6 +49,7 @@ export interface LobbyViewModel {
   inviteLink: string;
   isHost: boolean;
   localParticipantId: string;
+  matchLocked: boolean;
   players: readonly LobbyPlayerView[];
   map: MapId;
   mode: MatchMode;
@@ -147,7 +148,8 @@ export class OnlineLobbyUi {
 
   renderLobby(view: LobbyViewModel): void {
     this.view = view;
-    this.options.showScreen('online-lobby-menu');
+    if (view.matchLocked) $('online-lobby-menu').classList.add('hidden');
+    else this.options.showScreen('online-lobby-menu');
     $('online-room-code').textContent = view.inviteCode;
     this.renderPlayers(view);
     this.renderHostControls(view);
