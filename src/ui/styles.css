@@ -669,6 +669,18 @@ html[lang='ja'] .settings-pane h3 { letter-spacing: 0.12em; }
 }
 #loading-status { font-size: 0.72rem; color: var(--dim); letter-spacing: 0.12em; min-height: 1.2em; margin-top: 0.6rem; font-weight: 600; }
 html[lang='ja'] #loading-status { letter-spacing: 0.06em; }
+.loading-cancel {
+  margin-top: 0.8rem;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid rgba(255,255,255,0.22);
+  background: rgba(8,13,20,0.72);
+  color: var(--dim);
+  font: inherit;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.loading-cancel:hover { border-color: rgba(255,255,255,0.45); color: var(--text); }
 
 /* ------------------------------------------------------------------ */
 /* HUD                                                                 */
@@ -876,6 +888,54 @@ html[lang='ja'] #alive-counter em, html[lang='ja'] #kill-counter em { letter-spa
 #storm-timer { font-size: 0.74rem; letter-spacing: 0.16em; color: #ffffff; margin-top: 4px; font-weight: 700; }
 #storm-timer.urgent { color: #ff7a6a; }
 html[lang='ja'] #storm-timer { letter-spacing: 0.06em; }
+
+/* Online match status stays quiet until a direct host/guest match is active. */
+.online-hud-status {
+  position: absolute; left: 26px; top: 270px; display: flex; align-items: center; gap: .45rem;
+  max-width: min(18rem, calc(100vw - 52px)); padding: .36rem .58rem;
+  color: #f3f8fb; background: rgba(8, 12, 18, .78); border: 1px solid rgba(150, 180, 215, .2);
+  font: 700 .65rem/1 var(--font-display); letter-spacing: .12em; text-shadow: var(--hud-shadow);
+  font-variant-numeric: tabular-nums;
+}
+.online-hud-status[data-state='connected'] { border-color: rgba(82, 217, 122, .42); }
+.online-hud-status[data-state='reconnecting'] { border-color: rgba(255, 180, 58, .62); color: #ffe2ae; }
+.online-hud-status[data-state='disconnected'], .online-hud-status[data-state='failed'] { border-color: rgba(255, 95, 109, .62); color: #ffb2b9; }
+.online-status-dot { width: .42rem; height: .42rem; flex: 0 0 auto; border-radius: 50%; background: var(--dim); box-shadow: 0 0 0 2px rgba(255,255,255,.08); }
+.online-hud-status[data-state='connected'] .online-status-dot { background: var(--health); }
+.online-hud-status[data-state='reconnecting'] .online-status-dot { background: var(--gold); }
+.online-hud-status[data-state='disconnected'] .online-status-dot, .online-hud-status[data-state='failed'] .online-status-dot { background: var(--danger); }
+.online-hud-metrics { color: #d3e4ee; letter-spacing: .06em; }
+.online-hud-diagnostics { display: none; color: #9eb5c4; letter-spacing: .04em; }
+html[data-xo-qa='1'] .online-hud-diagnostics { display: inline; }
+
+.online-team-status {
+  position: absolute; left: 26px; top: 316px; width: min(12rem, calc(100vw - 52px));
+  padding: .55rem .62rem; color: #fff; background: rgba(8, 12, 18, .72); border-left: 2px solid rgba(95, 208, 255, .5);
+}
+.online-team-status h2 { margin: 0 0 .38rem; color: #bcd5e4; font: 700 .62rem/1 var(--font-display); letter-spacing: .16em; }
+.online-team-status ul { display: flex; flex-direction: column; gap: .28rem; list-style: none; margin: 0; padding: 0; }
+.online-team-status li { display: flex; align-items: center; gap: .4rem; min-width: 0; font-size: .72rem; line-height: 1.2; }
+.online-team-status li::before { content: ''; width: .38rem; height: .38rem; flex: 0 0 auto; border-radius: 50%; background: var(--health); }
+.online-team-status li.eliminated { color: #a8b3bb; text-decoration: line-through; }
+.online-team-status li.eliminated::before { background: #76818a; }
+.online-team-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.online-team-state { margin-inline-start: auto; color: #bcd5e4; font: 700 .56rem/1 var(--font-display); letter-spacing: .08em; }
+.online-presence-notice {
+  position: absolute; left: 50%; top: 18%; transform: translateX(-50%); z-index: 36;
+  max-width: min(80vw, 34rem); padding: .52rem 1.1rem; text-align: center;
+  color: #fff; background: rgba(8, 12, 18, .88); border: 1px solid rgba(255,255,255,.16);
+  font: 700 .86rem/1.25 var(--font-display); letter-spacing: .12em; text-shadow: var(--hud-shadow);
+}
+.online-presence-notice.host-disconnected { border-color: rgba(255, 95, 109, .62); color: #ffccd0; }
+html[lang='ja'] .online-hud-status, html[lang='ja'] .online-team-status h2, html[lang='ja'] .online-presence-notice { letter-spacing: .06em; }
+@media (max-width: 800px) {
+  .online-hud-status { left: 16px; top: 250px; }
+  .online-team-status { left: 16px; top: 292px; }
+  .online-presence-notice { max-width: calc(100vw - 32px); font-size: .78rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .online-presence-notice { animation: none; }
+}
 
 /* Killfeed */
 #killfeed { position: absolute; right: 28px; top: 122px; display: flex; flex-direction: column; gap: 5px; align-items: flex-end; }
