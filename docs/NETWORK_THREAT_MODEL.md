@@ -3,16 +3,16 @@
 ## Assets and trust boundaries
 
 The invite secret, host signing private key, lobby authentication key,
-reconnect tokens, display names, lobby settings, and future authoritative match
-state are protected assets. The static Cloudflare host serves code only; it is
+reconnect tokens, display names, lobby settings, and authoritative match state
+are protected assets. The static Cloudflare host serves code only; it is
 not a multiplayer authority. Public Nostr relays and STUN services are
 untrusted discovery/connectivity aids. Invited browsers are mutually untrusted
 until the host admits them.
 
-The creator is the permanent authority for the room and future match. The host
+The creator is the permanent authority for the room and match. The host
 can therefore cheat, lie about lobby or match state, exclude a participant, or
-end the room. Phase 3 does not claim cheat prevention. Friends-only rooms and a
-visible host badge make this trust choice explicit.
+end the room. Xo Beta does not claim protection from a malicious host;
+friends-only rooms and a visible host badge make this trust choice explicit.
 
 ## Addressed threats
 
@@ -30,6 +30,17 @@ visible host badge make this trust choice explicit.
   binding, and token rotation reject repeats.
 - **Unauthorized lobby changes:** the host validates host-only controls;
   participants can mutate only their own permitted profile/Ready fields.
+- **Unauthorized gameplay control:** session-bound binary input is accepted
+  only for the peer's assigned human Actor. Exact lengths, sequence/tick
+  windows, finite bounds, rate limits, neutral timeouts, and bounded violation
+  handling reject stale, malformed, abusive, Bot, or other-player control.
+- **Client state claims:** guests never submit position, health, inventory,
+  hits, damage, ownership, glass, storm, elimination, or winner state. The host
+  owns those decisions and reliable events/keyframes are revisioned and
+  deduplicated.
+- **Excessive rewind:** a shot supplies only its input tick. The host clamps
+  projectile catch-up to a short authoritative history and never accepts a
+  client target, muzzle position, or damage claim.
 - **Capacity and resource abuse:** four-human capacity, payload caps, message
   allowlists, rate limits, bounded connection attempts, and explicit disposal.
 - **Paid relay activation:** no TURN URI, credential, provider key, or
