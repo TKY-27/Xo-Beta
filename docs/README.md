@@ -11,6 +11,7 @@
 - [Private-room protocol](PROTOCOL.md)
 - [Network threat model](NETWORK_THREAT_MODEL.md)
 - [Zero-cost networking invariant](ZERO_COST_NETWORKING.md)
+- [Bounded realistic water report](WATER_RENDERING_REPORT.md)
 - [Asset provenance](ASSET_MANIFEST.md)
 - [Asset checksums](ASSET_CHECKSUMS.txt)
 - [Architecture decisions](adr/)

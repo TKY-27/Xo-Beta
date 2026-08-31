@@ -16,6 +16,7 @@ import {
   type ChestSpawn,
   type LootSpawn,
   type TerrainCutout,
+  type WaterVisualProfile,
 } from './types';
 import { GROUPS, PhysicsWorld } from '../physics/physics';
 import { buildTerrainGridMesh, sampleTerrainHeightfield } from './terrainMesh';
@@ -756,8 +757,16 @@ export class WorldBuilder {
     this.def.lights.push({ x, y, z, color, intensity, range });
   }
 
-  water(minX: number, maxX: number, minZ: number, maxZ: number, surfaceY: number, depth: number): void {
-    this.def.water.push({ minX, maxX, minZ, maxZ, surfaceY, depth });
+  water(
+    minX: number,
+    maxX: number,
+    minZ: number,
+    maxZ: number,
+    surfaceY: number,
+    depth: number,
+    visual?: WaterVisualProfile,
+  ): void {
+    this.def.water.push({ minX, maxX, minZ, maxZ, surfaceY, depth, ...(visual ? { visual } : {}) });
     this.platform(minX, maxX, minZ, maxZ, surfaceY, true);
   }
 

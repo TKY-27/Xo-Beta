@@ -63,6 +63,27 @@ describe('Phase 4 match start barrier payloads', () => {
     expect(first).not.toBe(other);
   });
 
+  it('excludes cosmetic water metadata but includes physical water changes', async () => {
+    const base = loadMap('eden').def;
+    const cosmetic = {
+      ...base,
+      water: base.water.map((volume, index) => index === 0
+        ? {
+          ...volume,
+          visual: { kind: 'pond' as const, windDirection: [0.25, -0.75] as const, seed: 1234 },
+        }
+        : { ...volume }),
+    };
+    const physical = {
+      ...base,
+      water: base.water.map((volume, index) => index === 0
+        ? { ...volume, maxX: volume.maxX + 1 }
+        : { ...volume }),
+    };
+    expect(await computeGameplayMapHash(cosmetic)).toBe(await computeGameplayMapHash(base));
+    expect(await computeGameplayMapHash(physical)).not.toBe(await computeGameplayMapHash(base));
+  });
+
   it('waits for every loaded participant before starting the countdown', async () => {
     let now = 100;
     const start = payload();

@@ -53,6 +53,9 @@ jobs:
       - name: Production build
         run: npm run build
 
+      - name: Water renderer provenance audit
+        run: npm run audit:water
+
       - name: Cloudflare packaging dry-run
         run: npx wrangler deploy --dry-run --outdir .wrangler/dry-run
 

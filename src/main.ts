@@ -304,6 +304,44 @@ const QA_HERO_MODE = QA_MODE && QA_PARAMS.has('hero');
 if (QA_MODE) document.documentElement.dataset.xoQa = '1';
 if (QA_HERO_MODE) document.documentElement.dataset.xoQaHero = '1';
 
+interface QaWaterView {
+  position: [number, number, number];
+  target: [number, number, number];
+  fov?: number;
+  time?: number;
+}
+
+/**
+ * Freeze only presentation inputs for repeatable renderer evidence. This is
+ * development-only and deliberately leaves simulation, collision, and water
+ * physics untouched.
+ */
+function applyQaWaterView(rig: CameraRig, world: WorldView, applyTime: boolean): void {
+  if (!QA_MODE) return;
+  const view = (window as unknown as { __xoWaterQaView?: QaWaterView }).__xoWaterQaView;
+  if (!view) return;
+  const values = [...view.position, ...view.target];
+  if (values.length !== 6 || values.some((value) => !Number.isFinite(value))) return;
+  if (!applyTime) {
+    rig.camera.position.fromArray(view.position);
+    rig.camera.lookAt(...view.target);
+    if (view.fov !== undefined && Number.isFinite(view.fov)) {
+      rig.camera.fov = THREE.MathUtils.clamp(view.fov, 35, 110);
+      rig.camera.updateProjectionMatrix();
+    }
+  } else if (view.time !== undefined && Number.isFinite(view.time)) {
+    world.animateWater(Math.max(0, view.time));
+  }
+}
+
+function qaRequestedSeed(): number | null {
+  if (!QA_MODE) return null;
+  const raw = QA_PARAMS.get('seed');
+  if (raw === null || !/^\d{1,9}$/.test(raw)) return null;
+  const seed = Number(raw);
+  return Number.isSafeInteger(seed) ? seed : null;
+}
+
 function qaRosterFixture(seed: number): { mode: MatchMode; roster: RosterEntry[] } | null {
   if (!QA_MODE) return null;
   const fixture = QA_PARAMS.get('roster');
@@ -657,6 +695,7 @@ async function boot(): Promise<void> {
     if (key !== lastGfxKey) {
       lastGfxKey = key;
       live?.renderer.applyQuality();
+      live?.world.setWaterQuality(s.quality);
     }
     hud.applyCrosshair();
     audio.applyVolumes();
@@ -947,9 +986,23 @@ async function prepareOnlineGuestRuntime(
     ensureCurrentStart(generation);
     if (input.map.sky.grade) renderer.setGrading(input.map.sky.grade);
     const worldStart = performance.now();
-    const world = await WorldView.create(input.map, sharedMats, null, sharedProps);
+    const guestSkyTexture = (renderer.scene.background as THREE.Texture | null)?.isTexture
+      ? renderer.scene.background as THREE.Texture
+      : null;
+    const world = await WorldView.create(input.map, sharedMats, null, sharedProps, {
+      renderer: renderer.renderer,
+      quality: getSettings().quality,
+      skyTexture: guestSkyTexture,
+      skyRotationY: renderer.scene.backgroundRotation.y,
+      skyIntensity: input.map.sky.envIntensity,
+    });
     const worldConstructionMs = performance.now() - worldStart;
-    ensureCurrentStart(generation);
+    try {
+      ensureCurrentStart(generation);
+    } catch (error) {
+      world.dispose();
+      throw error;
+    }
     renderer.scene.add(world.group);
     registerStartCleanup(generation, () => {
       renderer.scene.remove(world.group);
@@ -1291,7 +1344,7 @@ async function startMatchImpl(
   const loaded = onlineHost ? { def: onlineHost.input.map } : loadMap(sel.map);
   qaGlassBreakTimes = [];
   qaGlassBreakFrames = [];
-  const matchSeed = onlineHost?.input.payload.seed ?? Date.now() % 1000000;
+  const matchSeed = onlineHost?.input.payload.seed ?? qaRequestedSeed() ?? Date.now() % 1000000;
   const qaFixture = onlineHost || sel.practice ? null : qaRosterFixture(matchSeed);
   const mode = onlineHost?.input.payload.mode ?? qaFixture?.mode ?? 'solo';
   const roster = onlineHost?.input.payload.roster ?? qaFixture?.roster ?? buildRoster({
@@ -1321,9 +1374,23 @@ async function startMatchImpl(
   ensureCurrentStart(generation);
   if (loaded.def.sky.grade) renderer.setGrading(loaded.def.sky.grade);
   const worldStart = performance.now();
-  const world = await WorldView.create(loaded.def, sharedMats, match, sharedProps);
+  const hostSkyTexture = (renderer.scene.background as THREE.Texture | null)?.isTexture
+    ? renderer.scene.background as THREE.Texture
+    : null;
+  const world = await WorldView.create(loaded.def, sharedMats, match, sharedProps, {
+    renderer: renderer.renderer,
+    quality: getSettings().quality,
+    skyTexture: hostSkyTexture,
+    skyRotationY: renderer.scene.backgroundRotation.y,
+    skyIntensity: loaded.def.sky.envIntensity,
+  });
   const worldConstructionMs = performance.now() - worldStart;
-  ensureCurrentStart(generation);
+  try {
+    ensureCurrentStart(generation);
+  } catch (error) {
+    world.dispose();
+    throw error;
+  }
   renderer.scene.add(world.group);
   registerStartCleanup(generation, () => {
     renderer.scene.remove(world.group);
@@ -1926,7 +1993,7 @@ function teardownMatch(disposeOnline = true): void {
     const qaWindow = window as unknown as Record<string, unknown>;
     for (const key of [
       '__xoRigs', '__xoAerial', '__xoState', '__xoTeleport', '__xoStress',
-      '__xoGive', '__xoQaInput', '__xoStorm',
+      '__xoGive', '__xoQaInput', '__xoStorm', '__xoWaterQaView', '__xoReplicaState',
     ]) delete qaWindow[key];
     delete document.documentElement.dataset.xoQaTeleportRequest;
     delete document.documentElement.dataset.xoQaTeleportResult;
@@ -2459,7 +2526,10 @@ function frame(now: number): void {
   }
   requestAnimationFrame(frame);
 
-  const dtReal = Math.min(SIM.maxFrameDt, (now - lastTime) / 1000);
+  // The first rAF timestamp can marginally predate the performance.now()
+  // sampled by startLoop. Never feed that impossible negative delta into the
+  // fixed-step online coordinator.
+  const dtReal = Math.max(0, Math.min(SIM.maxFrameDt, (now - lastTime) / 1000));
   lastTime = now;
   recordFrameMs(dtReal * 1000);
 
@@ -2471,23 +2541,31 @@ function frame(now: number): void {
     fpsCount = 0;
   }
 
-  // The match simulation never freezes: ESC opens the in-game menu over the
-  // still-running world (user requirement). Only the local player's input is
-  // suspended while a menu is open.
+  // Production match simulation never freezes: ESC opens the in-game menu over
+  // the still-running world. The development-only water benchmark freezes a
+  // settled scene so renderer measurements are not distorted by Bot decisions
+  // or match progression between otherwise identical captures.
   const current = live;
+  const freezeForWaterQa = QA_MODE
+    && (window as unknown as { __xoWaterQaFreezeSimulation?: boolean })
+      .__xoWaterQaFreezeSimulation === true;
   {
-    accumulator += dtReal;
     const simT0 = performance.now();
-    if (current.kind === 'match' && current.coordinator === null) {
-      let steps = 0;
-      while (accumulator >= SIM.fixedDt && steps < 8) {
-        current.match.fixedUpdate(SIM.fixedDt);
-        accumulator -= SIM.fixedDt;
-        steps++;
-      }
+    if (freezeForWaterQa) {
+      accumulator = 0;
     } else {
-      current.coordinator?.update(dtReal);
-      accumulator %= SIM.fixedDt;
+      accumulator += dtReal;
+      if (current.kind === 'match' && current.coordinator === null) {
+        let steps = 0;
+        while (accumulator >= SIM.fixedDt && steps < 8) {
+          current.match.fixedUpdate(SIM.fixedDt);
+          accumulator -= SIM.fixedDt;
+          steps++;
+        }
+      } else {
+        current.coordinator?.update(dtReal);
+        accumulator %= SIM.fixedDt;
+      }
     }
     const simDt = performance.now() - simT0;
     perfStats.simMs = perfStats.simMs * 0.9 + simDt * 0.1;
@@ -2622,6 +2700,8 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       playerSkin: getSettings().playerSkin,
       playerRigSkin: m.localActor ? rigs.get(m.localActor.id)?.group.userData.xoSkinId ?? null : null,
       worldConstructionMs: +game.worldConstructionMs.toFixed(2),
+      water: world.getWaterQaStats(),
+      onlineRole: game.onlineContext?.role ?? 'solo',
       destructibleCount: m.combat.destructibleCount(),
       aliveGlassCount: m.combat.aliveGlassCount(),
       destructibleRender: world.getDestructibleRenderStats(),
@@ -3075,6 +3155,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   }
   wasInTransport = inTransport && m.phase === 'transport';
   rig.tick(dtReal);
+  applyQaWaterView(rig, world, false);
 
   // Characters
   const freezeRigs = import.meta.env.DEV
@@ -3166,6 +3247,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
 
   world.setViewPos(rig.camera.position);
   world.update(dtReal, m, { position: presentationTransportPos });
+  applyQaWaterView(rig, world, true);
   vfx.update(dtReal, rig.camera.position);
 
   {
@@ -3210,6 +3292,24 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
     hud.syncOnlineState(replicaOnlineHudState(game, null));
     renderer.render(dtReal);
     return;
+  }
+  if (QA_MODE) {
+    document.documentElement.dataset.xoQaRuntime = qaRuntimeIssues.length === 0
+      ? 'count=0'
+      : `count=${qaRuntimeIssues.length}|last=${qaRuntimeIssues.at(-1)}`;
+    (window as unknown as Record<string, unknown>).__xoReplicaState = {
+      map: game.mapDef.id,
+      seed: game.payload.seed,
+      time: view.time,
+      phase: view.phase,
+      water: world.getWaterQaStats(),
+      worldGroup: world.group,
+      camera: rig.camera,
+      threeRenderer: renderer.renderer,
+      worldConstructionMs: +game.worldConstructionMs.toFixed(2),
+      localActorId: game.localActorId,
+      onlineRole: 'guest',
+    };
   }
 
   if (!game.worldInitialized) {
@@ -3276,6 +3376,7 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
   }
   wasInTransport = inTransport;
   rig.tick(dtReal);
+  applyQaWaterView(rig, world, false);
 
   for (const actor of view.actors) {
     const character = rigs.get(actor.id);
@@ -3356,6 +3457,7 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
 
   world.setViewPos(rig.camera.position);
   world.updateReplica(dtReal, view);
+  applyQaWaterView(rig, world, true);
   vfx.update(dtReal, rig.camera.position);
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
   AudioEngine.setListener(

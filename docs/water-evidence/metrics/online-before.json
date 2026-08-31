@@ -1,0 +1,259 @@
+{
+  "capturedAt": "2026-08-31T05:55:45.065Z",
+  "browser": "Google Chrome (Playwright channel)",
+  "headed": true,
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "signaling": "deterministic in-memory hub; no server relay",
+  "directTransport": "native RTCPeerConnection/DataChannels",
+  "isolatedContexts": 2,
+  "path": [
+    "create",
+    "join",
+    "direct-connect",
+    "ready",
+    "start-barrier",
+    "host-match",
+    "guest-replica",
+    "lake-camera"
+  ],
+  "map": {
+    "host": "eden",
+    "guest": "eden"
+  },
+  "seed": {
+    "host": 538228033,
+    "guest": 538228033
+  },
+  "roles": {
+    "host": "host",
+    "guest": "guest"
+  },
+  "expectsWaterQaStats": false,
+  "water": {
+    "host": null,
+    "guest": null,
+    "view": {
+      "name": "lake-shoreline",
+      "position": [
+        64,
+        0.4,
+        45
+      ],
+      "target": [
+        102,
+        -3.55,
+        58
+      ],
+      "fov": 66,
+      "time": 18
+    }
+  },
+  "rtc": {
+    "before": {
+      "host": {
+        "available": true,
+        "peerConnections": [
+          {
+            "connectionState": "connected",
+            "iceConnectionState": "connected",
+            "bytesSent": 15792,
+            "bytesReceived": 6607,
+            "packetsSent": null,
+            "packetsReceived": null,
+            "packetsLost": null,
+            "candidatePair": {
+              "state": "succeeded",
+              "nominated": true,
+              "selected": false,
+              "protocol": null,
+              "localCandidateType": "host",
+              "remoteCandidateType": "host"
+            }
+          }
+        ],
+        "channelLabels": [
+          "control",
+          "event",
+          "input",
+          "snapshot"
+        ],
+        "channelSends": {
+          "control": {
+            "sends": 4,
+            "bytes": 5893
+          },
+          "event": {
+            "sends": 0,
+            "bytes": 0
+          },
+          "input": {
+            "sends": 0,
+            "bytes": 0
+          },
+          "snapshot": {
+            "sends": 2,
+            "bytes": 392
+          }
+        },
+        "webSocketCount": 1,
+        "webSocketTargets": [
+          "ws://127.0.0.1:5202/"
+        ],
+        "externalWebSocketCount": 0
+      },
+      "guest": {
+        "available": true,
+        "peerConnections": [
+          {
+            "connectionState": "connected",
+            "iceConnectionState": "connected",
+            "bytesSent": 6607,
+            "bytesReceived": 15792,
+            "packetsSent": null,
+            "packetsReceived": null,
+            "packetsLost": null,
+            "candidatePair": {
+              "state": "succeeded",
+              "nominated": true,
+              "selected": false,
+              "protocol": null,
+              "localCandidateType": "host",
+              "remoteCandidateType": "host"
+            }
+          }
+        ],
+        "channelLabels": [],
+        "channelSends": {},
+        "webSocketCount": 1,
+        "webSocketTargets": [
+          "ws://127.0.0.1:5202/"
+        ],
+        "externalWebSocketCount": 0
+      }
+    },
+    "after": {
+      "host": {
+        "available": true,
+        "peerConnections": [
+          {
+            "connectionState": "connected",
+            "iceConnectionState": "connected",
+            "bytesSent": 35977,
+            "bytesReceived": 28939,
+            "packetsSent": null,
+            "packetsReceived": null,
+            "packetsLost": null,
+            "candidatePair": {
+              "state": "succeeded",
+              "nominated": true,
+              "selected": false,
+              "protocol": null,
+              "localCandidateType": "host",
+              "remoteCandidateType": "host"
+            }
+          }
+        ],
+        "channelLabels": [
+          "control",
+          "event",
+          "input",
+          "snapshot"
+        ],
+        "channelSends": {
+          "control": {
+            "sends": 5,
+            "bytes": 10492
+          },
+          "event": {
+            "sends": 0,
+            "bytes": 0
+          },
+          "input": {
+            "sends": 0,
+            "bytes": 0
+          },
+          "snapshot": {
+            "sends": 23,
+            "bytes": 4508
+          }
+        },
+        "webSocketCount": 1,
+        "webSocketTargets": [
+          "ws://127.0.0.1:5202/"
+        ],
+        "externalWebSocketCount": 0
+      },
+      "guest": {
+        "available": true,
+        "peerConnections": [
+          {
+            "connectionState": "connected",
+            "iceConnectionState": "connected",
+            "bytesSent": 28939,
+            "bytesReceived": 35977,
+            "packetsSent": null,
+            "packetsReceived": null,
+            "packetsLost": null,
+            "candidatePair": {
+              "state": "succeeded",
+              "nominated": true,
+              "selected": false,
+              "protocol": null,
+              "localCandidateType": "host",
+              "remoteCandidateType": "host"
+            }
+          }
+        ],
+        "channelLabels": [],
+        "channelSends": {},
+        "webSocketCount": 1,
+        "webSocketTargets": [
+          "ws://127.0.0.1:5202/"
+        ],
+        "externalWebSocketCount": 0
+      }
+    },
+    "delta": {
+      "host": {
+        "bytesSent": 20185,
+        "bytesReceived": 22332,
+        "packetsSent": null,
+        "packetsReceived": null,
+        "packetsLost": null
+      },
+      "guest": {
+        "bytesSent": 22332,
+        "bytesReceived": 20185,
+        "packetsSent": null,
+        "packetsReceived": null,
+        "packetsLost": null
+      }
+    },
+    "note": "Water view mutation is presentation-only; counters shown are ordinary online transport activity during the one-second observation window."
+  },
+  "webgl": {
+    "host": {
+      "canvasIds": [
+        "game-canvas"
+      ],
+      "errors": []
+    },
+    "guest": {
+      "canvasIds": [
+        "game-canvas"
+      ],
+      "errors": []
+    }
+  },
+  "browserErrors": {
+    "host": [],
+    "guest": []
+  },
+  "screenshots": [
+    "host.png",
+    "guest.png"
+  ]
+}
