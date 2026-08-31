@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { WEAPONS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
+import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
 
 const HIP_POS = new THREE.Vector3(0.185, -0.17, -0.06);
@@ -201,7 +202,7 @@ export class ViewModel {
     const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
 
     if (!this.currentId) {
-      this.updateFists(actor, dt, movingSpeed, swapDip);
+      this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
       return;
     }
 
@@ -281,12 +282,100 @@ export class ViewModel {
     );
   }
 
+  /**
+   * Per-frame presentation update for a read-only replica actor.
+   *
+   * ActorView deliberately does not expose reload, bolt, recoil, or combat
+   * timers. Those details must remain local presentation state, so this path
+   * only consumes the equipped weapon, owner-scoped inventory metadata, and
+   * movement pose. ADS is supplied by the local input/presentation layer.
+   */
+  updateView(
+    actor: ActorView | null,
+    dt: number,
+    lookDx: number,
+    lookDy: number,
+    movingSpeed: number,
+    opts: { adsAmount?: number } = {},
+  ): void {
+    this.t += dt;
+    this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
+    if (!actor || !actor.alive) {
+      this.group.visible = false;
+      return;
+    }
+
+    // The replica never receives a mutable Inventory. Resolve the render
+    // model from its immutable equipped-weapon identity and, when present,
+    // the owning participant's inventory rarity only.
+    const weaponId = actor.equippedWeapon;
+    const selected = actor.inventory && actor.inventory.selected >= 0
+      ? actor.inventory.slots[actor.inventory.selected]
+      : null;
+    const rarity: Rarity = weaponId && selected?.kind === 'weapon' && selected.weaponId === weaponId
+      ? selected.rarity : 'common';
+    this.setWeapon(weaponId, rarity);
+    this.group.visible = true;
+
+    // Sway from local look input (inertia: the viewmodel lags behind aim).
+    this.swayX += (-lookDx * 0.00095 - this.swayX) * Math.min(1, dt * 9);
+    this.swayY += (-lookDy * 0.00085 - this.swayY) * Math.min(1, dt * 9);
+    this.swayRoll += (-lookDx * 0.00045 - this.swayRoll) * Math.min(1, dt * 7);
+
+    // Recoil is a local presentation spring. Replica state does not invent
+    // or reconstruct authoritative fire/combat timing.
+    this.recoilZ *= Math.exp(-8.5 * dt);
+    this.recoilPitch *= Math.exp(-7 * dt);
+
+    // Swap-in dip is presentation-only and remains valid for replica views.
+    this.swapT = Math.max(0, this.swapT - dt);
+    const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
+
+    if (!weaponId) {
+      this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
+      return;
+    }
+
+    const adsTarget = THREE.MathUtils.clamp(opts.adsAmount ?? 0, 0, 1);
+    this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
+    const ads = this.adsSmooth;
+    const sprinting = movingSpeed > 8.6 && !adsTarget;
+    this.sprintBlend += ((sprinting ? 1 : 0) - this.sprintBlend) * Math.min(1, dt * 7);
+
+    const bobAmp = movingSpeed > 0.5 ? Math.min(1, movingSpeed / 9.5) : 0;
+    const bobFreq = Math.max(6, movingSpeed * 0.92);
+    const bobX = Math.sin(this.t * bobFreq) * 0.0105 * bobAmp * (1 - ads * 0.88);
+    const bobY = Math.abs(Math.cos(this.t * bobFreq)) * 0.0125 * bobAmp * (1 - ads * 0.88);
+
+    // Replica views intentionally do not animate reload/bolt state: those
+    // timers are private combat authority and are absent from ActorView.
+    const px =
+      HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
+      (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
+      bobX + this.swayX;
+    const py =
+      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
+      (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
+      bobY + this.swayY - swapDip;
+    const pz =
+      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
+      (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
+      this.recoilZ;
+
+    this.group.position.set(px, py, pz);
+    this.group.rotation.set(
+      -this.swayY * 2.1 + this.recoilPitch + this.sprintBlend * 0.32 * (1 - ads),
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads),
+      this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4,
+    );
+  }
+
   kick(strength: number): void {
     this.recoilZ += strength * 0.055;
     this.recoilPitch += strength * 0.03;
   }
 
-  private updateFists(actor: Actor, dt: number, movingSpeed: number, swapDip: number): void {
+  private updateFists(crouched: boolean, dt: number, movingSpeed: number, swapDip: number): void {
     this.adsSmooth = 0;
     const sprinting = movingSpeed > 8.6;
     this.sprintBlend += ((sprinting ? 1 : 0) - this.sprintBlend) * Math.min(1, dt * 7);
@@ -326,7 +415,7 @@ export class ViewModel {
       HIP_POS.y + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
       HIP_POS.z + this.recoilZ * 0.4,
     );
-    if (actor.crouched) this.group.position.y += 0.02;
+    if (crouched) this.group.position.y += 0.02;
     this.group.rotation.set(
       -this.swayY * 1.4 + this.sprintBlend * 0.26,
       this.swayX * 1.5 - this.sprintBlend * 0.34,

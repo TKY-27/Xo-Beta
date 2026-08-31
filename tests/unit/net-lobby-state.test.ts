@@ -153,6 +153,26 @@ describe('host-authoritative lobby state', () => {
     expect(() => lobby.setSkin('host-peer', 'nova')).toThrowError(/locked/i);
   });
 
+  it('reclaims the same disconnected slot after match lock without unlocking roster mutations', () => {
+    const lobby = makeLobby({ mode: 'ffa-bot-fill', botFill: true });
+    lobby.addParticipant({ handshake: guest(1), channelOpen: true });
+    lobby.setReady('peer-1', true);
+    expect(lobby.requestStart('host-peer').accepted).toBe(true);
+    lobby.markDisconnected('peer-1');
+    const reclaimed = lobby.reclaimParticipant(
+      'participant-1',
+      'peer-1',
+      'peer-1-reconnected',
+      'session-1-rotated',
+    );
+    expect(reclaimed.slotId).toBe(1);
+    expect(reclaimed.participantId).toBe('participant-1');
+    expect(reclaimed.peerId).toBe('peer-1-reconnected');
+    expect(lobby.matchLocked).toBe(true);
+    expect(() => lobby.setSkin('host-peer', 'nova')).toThrowError(/locked/i);
+    expect(() => lobby.addParticipant(guest(2))).toThrowError(/locked/i);
+  });
+
   it('keeps lobby connectivity separate from direct channel state', () => {
     const lobby = makeLobby();
     lobby.addParticipant(guest(1));

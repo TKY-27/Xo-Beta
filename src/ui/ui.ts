@@ -13,7 +13,9 @@ import {
   t, setLang, getLang, isTextKey, localizePoiName, onLangChanged, type TextKey,
 } from '../core/i18n';
 import type { Match } from '../sim/match';
+import type { GameStateView, InventoryView } from '../sim/gameStateView';
 import type { MapId } from '../world';
+import type { MapDef } from '../world/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const settingCopy = (en: string, ja: string): string => getLang() === 'ja' ? ja : en;
@@ -818,6 +820,154 @@ export interface TacMarker {
   z: number;
 }
 
+interface HudMapActorState {
+  readonly id: number;
+  readonly teamId: GameStateView['actors'][number]['teamId'];
+  readonly alive: boolean;
+  readonly x: number;
+  readonly z: number;
+  readonly yaw: number;
+  readonly accentColor: number;
+}
+
+interface HudMapStormState {
+  readonly state: GameStateView['storm']['state'];
+  readonly timer: number;
+  readonly centerX: number;
+  readonly centerZ: number;
+  readonly radius: number;
+  readonly nextCircle?: () => { x: number; z: number; r: number };
+}
+
+interface HudMapState {
+  readonly actors: readonly HudMapActorState[];
+  readonly aliveCount: number;
+  readonly localActorId: number | null;
+  readonly localKills: number;
+  readonly storm: HudMapStormState;
+}
+
+/**
+ * Return the actor IDs that a normal replica map is allowed to draw.
+ * Inventory and other owner-scoped fields are intentionally never read.
+ */
+export function replicaVisibleMapActorIds(
+  view: {
+    readonly actors: readonly Pick<GameStateView['actors'][number], 'id' | 'teamId' | 'alive'>[];
+    readonly localActorId: number | null;
+  },
+): readonly number[] {
+  const local = view.localActorId === null
+    ? null
+    : view.actors.find((actor) => actor.id === view.localActorId) ?? null;
+  if (!local) return [];
+  return view.actors
+    .filter((actor) => actor.id === local.id
+      || (actor.alive && local.teamId !== null && actor.teamId === local.teamId))
+    .map((actor) => actor.id);
+}
+
+function replicaMapState(view: GameStateView): HudMapState {
+  const visible = new Set(replicaVisibleMapActorIds(view));
+  const actors = view.actors
+    .filter((actor) => visible.has(actor.id))
+    .map((actor): HudMapActorState => ({
+      id: actor.id,
+      teamId: actor.teamId,
+      alive: actor.alive,
+      x: actor.position.x,
+      z: actor.position.z,
+      yaw: actor.yaw,
+      accentColor: actor.accentColor,
+    }));
+  const local = view.actors.find((actor) => actor.id === view.localActorId) ?? null;
+  return {
+    actors,
+    aliveCount: view.actors.filter((actor) => actor.alive).length,
+    localActorId: view.localActorId,
+    localKills: local?.stats.kills ?? 0,
+    storm: view.storm,
+  };
+}
+
+function matchMapState(match: Match): HudMapState {
+  const local = match.localActor;
+  return {
+    actors: local ? [{
+      id: local.id,
+      teamId: match.teamForActor(local),
+      alive: local.alive,
+      x: local.body.position.x,
+      z: local.body.position.z,
+      yaw: local.yaw,
+      accentColor: local.accentColor,
+    }] : [],
+    aliveCount: match.actors.filter((actor) => actor.alive).length,
+    localActorId: local?.id ?? null,
+    localKills: local?.stats.kills ?? 0,
+    storm: {
+      state: match.storm.state,
+      timer: match.storm.timer,
+      centerX: match.storm.centerX,
+      centerZ: match.storm.centerZ,
+      radius: match.storm.radius,
+      nextCircle: () => match.storm.nextCircle(),
+    },
+  };
+}
+
+function mapAccentColor(value: number): string {
+  if (!Number.isFinite(value)) return '#74e0a1';
+  return '#' + ((value >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+}
+
+export type OnlineConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'failed';
+
+/**
+ * Presentation-only online state. Network code owns these values; Hud never
+ * derives gameplay state from them and never displays peer addresses.
+ */
+export interface OnlineHudState {
+  connection: OnlineConnectionState;
+  rttMs?: number | null;
+  packetLossPercent?: number | null;
+  teammates?: readonly OnlineTeammateHudState[];
+  /** QA-only counters. They are never rendered in a normal production DOM. */
+  diagnostics?: {
+    hostTick?: number;
+    snapshotBytes?: number;
+    inputRate?: number;
+  } | null;
+}
+
+export interface OnlineTeammateHudState {
+  participantId: string;
+  displayName: string;
+  alive: boolean;
+}
+
+export type OnlinePresenceNotice = 'left' | 'rejoined' | 'hostDisconnected';
+
+export function onlineConnectionLabel(state: OnlineConnectionState): TextKey {
+  switch (state) {
+    case 'connected': return 'hud.onlineStatus';
+    case 'reconnecting': return 'hud.connectionReconnecting';
+    case 'disconnected': return 'hud.connectionDisconnected';
+    case 'failed': return 'hud.connectionFailed';
+    case 'connecting': return 'hud.connectionConnecting';
+  }
+}
+
+function finiteMetric(value: number | null | undefined, max: number): number | null {
+  return value !== null && value !== undefined && Number.isFinite(value)
+    ? Math.max(0, Math.min(max, value))
+    : null;
+}
+
+function boundedDuration(seconds: number, fallback: number): number {
+  return Number.isFinite(seconds) ? Math.max(0.5, Math.min(12, seconds)) : fallback;
+}
+
 export class Hud {
   private killfeedEntries: Array<{ el: HTMLElement; t: number }> = [];
   private bannerTimer = 0;
@@ -828,6 +978,8 @@ export class Hud {
   private dmgNumbers: DamageNumberEntry[] = [];
   private captionEls = new Map<TextKey | string, HTMLElement>();
   private projector: ((x: number, y: number, z: number) => { x: number; y: number; visible: boolean }) | null = null;
+  private onlineNoticeTimer: number | null = null;
+  private tacticalPingExpiresAt = 0;
   tacMarker: TacMarker | null = null;
   onInventoryMove: (from: number, to: number) => void = () => undefined;
   onInventoryDrop: (slot: number) => void = () => undefined;
@@ -846,6 +998,112 @@ export class Hud {
 
   show(visible: boolean): void {
     $('hud').classList.toggle('hidden', !visible);
+  }
+
+  /**
+   * Render host/guest transport health and the team roster. This is an
+   * intentionally small adapter so the coordinator can push its measured
+   * state without coupling networking to DOM details.
+   */
+  syncOnlineState(state: OnlineHudState | null): void {
+    const status = $('online-hud-status');
+    const team = $('online-team-status');
+    if (!state) {
+      status.classList.add('hidden');
+      team.classList.add('hidden');
+      return;
+    }
+
+    const connection = onlineConnectionLabel(state.connection);
+    status.dataset.state = state.connection;
+    $('online-hud-connection').textContent = t(connection);
+    const rtt = finiteMetric(state.rttMs, 9_999);
+    const loss = finiteMetric(state.packetLossPercent, 100);
+    const metrics: string[] = [];
+    if (rtt !== null) metrics.push(t('hud.networkRtt', { ms: Math.round(rtt) }));
+    if (loss !== null) metrics.push(t('hud.networkLoss', { pct: Math.round(loss) }));
+    const metricText = metrics.join(' · ');
+    $('online-hud-metrics').textContent = metricText;
+    status.setAttribute('aria-label', metricText ? `${t(connection)} ${metricText}` : t(connection));
+
+    const diagnostics = $('online-hud-diagnostics');
+    const qaDiagnosticsEnabled = import.meta.env.DEV
+      && document.documentElement.dataset.xoQa === '1';
+    if (qaDiagnosticsEnabled && state.diagnostics) {
+      const bits: string[] = [];
+      if (Number.isFinite(state.diagnostics.hostTick)) bits.push(`tick ${Math.max(0, Math.floor(state.diagnostics.hostTick!))}`);
+      if (Number.isFinite(state.diagnostics.snapshotBytes)) bits.push(`snap ${Math.max(0, Math.floor(state.diagnostics.snapshotBytes!))} B`);
+      if (Number.isFinite(state.diagnostics.inputRate)) bits.push(`in ${Math.max(0, Math.floor(state.diagnostics.inputRate!))}/s`);
+      diagnostics.textContent = bits.join(' · ');
+    } else {
+      diagnostics.textContent = '';
+    }
+    status.classList.remove('hidden');
+
+    const teammates = state.teammates ?? [];
+    team.classList.toggle('hidden', teammates.length === 0);
+    const list = $('online-team-list');
+    list.replaceChildren(...teammates.slice(0, 4).map((mate) => {
+      const item = document.createElement('li');
+      item.classList.toggle('eliminated', !mate.alive);
+      item.dataset.participantId = mate.participantId;
+      const name = document.createElement('span');
+      name.className = 'online-team-name';
+      name.textContent = mate.displayName;
+      const stateText = document.createElement('span');
+      stateText.className = 'online-team-state';
+      stateText.textContent = t(mate.alive ? 'hud.teammateAlive' : 'hud.teammateEliminated');
+      item.append(name, stateText);
+      return item;
+    }));
+  }
+
+  /** Show a bounded, localized presence notice at the top-center of the HUD. */
+  showPresenceNotice(kind: OnlinePresenceNotice, displayName = '', duration = 3.2): void {
+    const notice = $('online-presence-notice');
+    notice.classList.toggle('host-disconnected', kind === 'hostDisconnected');
+    const name = displayName.trim().slice(0, 24);
+    notice.textContent = kind === 'left'
+      ? t('hud.presenceLeft', { name: name || 'Player' })
+      : kind === 'rejoined'
+        ? t('hud.presenceRejoined', { name: name || 'Player' })
+        : t('hud.hostDisconnected');
+    notice.classList.remove('hidden');
+    if (this.onlineNoticeTimer !== null) window.clearTimeout(this.onlineNoticeTimer);
+    this.onlineNoticeTimer = window.setTimeout(() => {
+      notice.classList.add('hidden');
+      this.onlineNoticeTimer = null;
+    }, boundedDuration(duration, 3.2) * 1000);
+  }
+
+  /** Clear the current online notice and any cosmetic tactical ping. */
+  resetOnlineHud(): void {
+    if (this.onlineNoticeTimer !== null) window.clearTimeout(this.onlineNoticeTimer);
+    this.onlineNoticeTimer = null;
+    $('online-presence-notice').classList.add('hidden');
+    $('online-hud-status').classList.add('hidden');
+    $('online-team-status').classList.add('hidden');
+    this.clearTacticalPing();
+  }
+
+  /**
+   * Display one generic location ping. No label or arbitrary text crosses the
+   * network/UI boundary; the existing minimap and tactical map render it.
+   */
+  showTacticalPing(x: number, z: number, duration = 5): void {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+    this.tacMarker = { x, z };
+    this.tacticalPingExpiresAt = performance.now() + boundedDuration(duration, 5) * 1000;
+  }
+
+  clearTacticalPing(): void {
+    this.tacMarker = null;
+    this.tacticalPingExpiresAt = 0;
+  }
+
+  /** Call once per render/update tick to expire cosmetic online UI state. */
+  updateOnlineHud(): void {
+    if (this.tacticalPingExpiresAt > 0 && performance.now() >= this.tacticalPingExpiresAt) this.clearTacticalPing();
   }
 
   isInventoryOpen(): boolean {
@@ -936,6 +1194,7 @@ export class Hud {
   }
 
   syncPlayerState(match: Match, dt = 1 / 60): void {
+    this.updateOnlineHud();
     const p = match.localActor;
     if (!p) return;
 
@@ -1080,10 +1339,101 @@ export class Hud {
     this.updateDamageNumbers();
   }
 
+  /** Replica HUD path. Only the local actor's owner-scoped inventory is
+   * rendered; remote ActorView inventory is deliberately null by contract. */
+  syncReplicaState(view: GameStateView, dt = 1 / 60): void {
+    this.updateOnlineHud();
+    const p = view.actors.find((actor) => actor.id === view.localActorId) ?? null;
+    if (!p) return;
+    $('health-fill').style.width = `${p.health}%`;
+    $('shield-fill').style.width = `${p.shield}%`;
+    $('health-text').textContent = String(Math.ceil(p.health));
+    $('shield-text').textContent = String(Math.ceil(p.shield));
+    $('alive-count').textContent = String(view.actors.filter((actor) => actor.alive).length);
+    $('kills-count').textContent = String(p.stats.kills);
+    const hpBar = document.querySelector('.bar.health');
+    if (hpBar) hpBar.classList.toggle('critical', p.health <= 30 && p.health > 0);
+    const storm = view.storm;
+    const stormEl = $('storm-timer');
+    if (storm.state === 'idle') stormEl.textContent = '';
+    else if (storm.state === 'waiting') stormEl.textContent = `${t('hud.stormClosesIn')} ${formatTime(storm.timer)}`;
+    else if (storm.state === 'shrinking') stormEl.textContent = `${t('hud.stormShrinking')} — ${formatTime(storm.timer)}`;
+    else stormEl.textContent = t('hud.finalCircle');
+    stormEl.classList.toggle('urgent', storm.state === 'shrinking');
+    $('vignette').style.opacity = String(Math.max(0, 1 - p.health / 65));
+    const outside = storm.state !== 'idle'
+      && Math.hypot(p.position.x - storm.centerX, p.position.z - storm.centerZ) > storm.radius;
+    $('storm-vignette').style.opacity = outside ? '0.8' : '0';
+    this.syncReplicaInventory(p.inventory);
+    if (this.isInventoryOpen()) this.syncReplicaInventoryOverlay(p.inventory);
+    const uiDt = Math.min(0.1, Math.max(0, dt));
+    this.bannerTimer -= uiDt;
+    this.elimTimer -= uiDt;
+    this.hitmarkerTimer -= uiDt;
+    if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
+    if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
+    if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
+    if (getSettings().showFps) $('fps-counter').classList.remove('hidden');
+    else $('fps-counter').classList.add('hidden');
+    this.updateDamageNumbers();
+  }
+
+  private syncReplicaInventory(inventory: InventoryView | null): void {
+    const w = inventory?.slots[inventory.selected] ?? null;
+    if (w?.kind === 'weapon') {
+      $('weapon-name').textContent = t(`wpn.${w.weaponId}` as TextKey).toUpperCase();
+      $('ammo-mag').textContent = String(w.ammoInMag);
+      $('ammo-reserve').textContent = String(inventory?.ammo[WEAPONS[w.weaponId].ammoType] ?? 0);
+    } else {
+      $('weapon-name').textContent = t('hud.unarmed');
+      $('ammo-mag').textContent = '—';
+      $('ammo-reserve').textContent = '';
+    }
+    const slotsEl = $('inventory-slots');
+    if (slotsEl.childElementCount !== 6) {
+      slotsEl.innerHTML = '';
+      const fist = document.createElement('div');
+      fist.className = 'slot melee';
+      fist.innerHTML = `<span class="num key-q">Q</span><span class="icon">${FIST_SVG}</span>`;
+      slotsEl.appendChild(fist);
+      for (let i = 0; i < 5; i++) {
+        const slot = document.createElement('div');
+        slot.className = 'slot empty';
+        slot.innerHTML = `<span class="num">${i + 1}</span><span class="icon"></span>`;
+        slotsEl.appendChild(slot);
+      }
+    }
+    for (let i = 0; i < 5; i++) {
+      const slot = slotsEl.children[i + 1] as HTMLElement;
+      const item = inventory?.slots[i] ?? null;
+      slot.className = 'slot' + (item ? '' : ' empty') + (i === (inventory?.selected ?? -1) ? ' active' : '');
+      const icon = slot.querySelector<HTMLElement>('.icon');
+      if (!icon) continue;
+      icon.textContent = item?.kind === 'weapon' ? item.weaponId.toUpperCase() : item?.kind === 'heal' ? `×${item.count}` : '';
+    }
+  }
+
   private syncInventoryOverlay(match: Match): void {
     const p = match.localActor;
     if (!p) return;
-    const selected = p.inv.selectedItem;
+    this.syncInventoryOverlayData(p.inv.selectedItem, p.inv.slots, p.inv.selected, p.inv.ammo);
+  }
+
+  private syncReplicaInventoryOverlay(inventory: InventoryView | null): void {
+    this.syncInventoryOverlayData(
+      inventory ? inventory.slots[inventory.selected] ?? null : null,
+      inventory?.slots ?? [],
+      inventory?.selected ?? -1,
+      inventory?.ammo ?? { light: 0, medium: 0, shells: 0, heavy: 0 },
+    );
+  }
+
+  private syncInventoryOverlayData(
+    selected: InventoryView['slots'][number],
+    slots: InventoryView['slots'],
+    selectedIndex: number,
+    ammoPools: InventoryView['ammo'],
+  ): void {
     const detailIcon = $('inventory-detail-icon');
     const detailName = $('inventory-detail-name');
     const detailRarity = $('inventory-detail-rarity');
@@ -1136,17 +1486,17 @@ export class Hud {
       <div class="inventory-ammo-stack">
         <span class="ammo-icon">${AMMO_ICONS[type]}</span>
         <span>${t(`ammo.${type}` as TextKey)}</span>
-        <strong>${p.inv.ammo[type]}</strong>
+        <strong>${ammoPools[type]}</strong>
       </div>`).join('');
 
     const grid = $('inventory-grid-slots');
     for (let i = 0; i < 5; i++) {
       const slot = grid.children[i] as HTMLButtonElement;
-      const item = p.inv.slots[i];
+      const item = slots[i];
       const icon = slot.querySelector<HTMLElement>('.inv-icon')!;
       const name = slot.querySelector<HTMLElement>('.inv-name')!;
       const count = slot.querySelector<HTMLElement>('.inv-count')!;
-      slot.className = 'inventory-grid-slot' + (item ? '' : ' empty') + (i === p.inv.selected ? ' active' : '');
+      slot.className = 'inventory-grid-slot' + (item ? '' : ' empty') + (i === selectedIndex ? ' active' : '');
       slot.draggable = Boolean(item);
       slot.style.removeProperty('--slot-rarity');
       if (!item) {
@@ -1357,26 +1707,67 @@ export class Hud {
     overlay.classList.toggle('hidden', !open);
   }
 
-  /**
-   * Draw the fullscreen tactical map. Returns the canvas so main can attach
-   * click handlers once.
-   */
   private tacImage: HTMLCanvasElement | null = null;
 
   setTacMapImage(img: HTMLCanvasElement | null): void {
     this.tacImage = img;
   }
 
+  /**
+   * Draw the fullscreen tactical map. Returns the canvas so main can attach
+   * click handlers once.
+   */
   drawTacMap(match: Match): HTMLCanvasElement {
     const canvas = $<HTMLCanvasElement>('tac-map');
     const ctx = canvas.getContext('2d');
     if (!ctx) return canvas;
+    return this.drawMapCanvas(canvas, ctx, match.mapDef, matchMapState(match));
+  }
+
+  /** Minimap: player-centered crop of the real aerial render plus safe overlays. */
+  drawMinimap(match: Match, ctxProvider: () => CanvasRenderingContext2D | null, dt = 1 / 60): void {
+    this.minimapTimer += Math.max(0, Math.min(dt, 0.1));
+    if (this.minimapTimer < 1 / 12) return;
+    this.minimapTimer = 0;
+    const ctx = ctxProvider();
+    if (!ctx) return;
+    this.drawMinimapCanvas(ctx, match.mapDef, matchMapState(match));
+  }
+
+  /** Replica-safe fullscreen map; only the local actor and living allies are eligible for markers. */
+  drawTacMapReplica(mapDef: MapDef, view: GameStateView): HTMLCanvasElement {
+    const canvas = $<HTMLCanvasElement>('tac-map');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+    return this.drawMapCanvas(canvas, ctx, mapDef, replicaMapState(view));
+  }
+
+  /** Replica-safe player-centred minimap using the same map projection. */
+  drawMinimapReplica(
+    mapDef: MapDef,
+    view: GameStateView,
+    ctxProvider: () => CanvasRenderingContext2D | null,
+    dt = 1 / 60,
+  ): void {
+    this.minimapTimer += Math.max(0, Math.min(dt, 0.1));
+    if (this.minimapTimer < 1 / 12) return;
+    this.minimapTimer = 0;
+    const ctx = ctxProvider();
+    if (!ctx) return;
+    this.drawMinimapCanvas(ctx, mapDef, replicaMapState(view));
+  }
+
+  private drawMapCanvas(
+    canvas: HTMLCanvasElement,
+    ctx: CanvasRenderingContext2D,
+    mapDef: MapDef,
+    state: HudMapState,
+  ): HTMLCanvasElement {
     const size = canvas.width;
-    const half = match.mapDef.size / 2;
-    const toPx = (wx: number) => ((wx + half) / match.mapDef.size) * size;
+    const half = mapDef.size / 2;
+    const toPx = (value: number): number => ((value + half) / mapDef.size) * size;
     ctx.clearRect(0, 0, size, size);
 
-    // backdrop: real aerial render when available, dark fallback otherwise
     if (this.tacImage) {
       ctx.drawImage(this.tacImage, 0, 0, size, size);
     } else {
@@ -1384,17 +1775,20 @@ export class Hud {
       ctx.fillRect(0, 0, size, size);
     }
 
-    // water
     ctx.fillStyle = 'rgba(64,130,190,0.4)';
-    for (const w of match.mapDef.water) {
-      ctx.fillRect(toPx(w.minX), toPx(w.minZ), ((w.maxX - w.minX) / match.mapDef.size) * size, ((w.maxZ - w.minZ) / match.mapDef.size) * size);
+    for (const water of mapDef.water) {
+      ctx.fillRect(
+        toPx(water.minX),
+        toPx(water.minZ),
+        ((water.maxX - water.minX) / mapDef.size) * size,
+        ((water.maxZ - water.minZ) / mapDef.size) * size,
+      );
     }
 
-    // POIs
-    for (const poi of match.mapDef.pois) {
+    for (const poi of mapDef.pois) {
       ctx.fillStyle = 'rgba(140,165,195,0.16)';
       ctx.beginPath();
-      ctx.arc(toPx(poi.x), toPx(poi.z), (poi.radius / match.mapDef.size) * size, 0, Math.PI * 2);
+      ctx.arc(toPx(poi.x), toPx(poi.z), (poi.radius / mapDef.size) * size, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = '#ffffff';
       ctx.font = '700 13px system-ui, sans-serif';
@@ -1405,24 +1799,22 @@ export class Hud {
       ctx.shadowBlur = 0;
     }
 
-    // transport route
     ctx.strokeStyle = 'rgba(255,255,255,0.22)';
     ctx.setLineDash([7, 7]);
     ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.moveTo(toPx(match.mapDef.transportRoute.from[0]!), toPx(match.mapDef.transportRoute.from[1]!));
-    ctx.lineTo(toPx(match.mapDef.transportRoute.to[0]!), toPx(match.mapDef.transportRoute.to[1]!));
+    ctx.moveTo(toPx(mapDef.transportRoute.from[0]!), toPx(mapDef.transportRoute.from[1]!));
+    ctx.lineTo(toPx(mapDef.transportRoute.to[0]!), toPx(mapDef.transportRoute.to[1]!));
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // storm circles — translucent purple outside-area, white forecast line
-    const st = match.storm;
+    const storm = state.storm;
     let routeTarget: { x: number; z: number; r: number } | null = null;
-    if (st.state !== 'idle') {
+    if (storm.state !== 'idle') {
       ctx.save();
       ctx.beginPath();
       ctx.rect(0, 0, size, size);
-      ctx.arc(toPx(st.centerX), toPx(st.centerZ), (st.radius / match.mapDef.size) * size, 0, Math.PI * 2, true);
+      ctx.arc(toPx(storm.centerX), toPx(storm.centerZ), (storm.radius / mapDef.size) * size, 0, Math.PI * 2, true);
       ctx.fillStyle = 'rgba(118,52,196,0.34)';
       ctx.fill('evenodd');
       ctx.restore();
@@ -1431,59 +1823,55 @@ export class Hud {
       ctx.shadowColor = 'rgba(150,90,255,0.8)';
       ctx.shadowBlur = 6;
       ctx.beginPath();
-      ctx.arc(toPx(st.centerX), toPx(st.centerZ), (st.radius / match.mapDef.size) * size, 0, Math.PI * 2);
+      ctx.arc(toPx(storm.centerX), toPx(storm.centerZ), (storm.radius / mapDef.size) * size, 0, Math.PI * 2);
       ctx.stroke();
       ctx.shadowBlur = 0;
-      if (st.state !== 'done') {
-        const nc = st.nextCircle();
-        routeTarget = nc;
+      const next = storm.state === 'done' ? null : storm.nextCircle?.() ?? null;
+      if (next) {
+        routeTarget = next;
         ctx.fillStyle = 'rgba(255,255,255,0.06)';
         ctx.beginPath();
-        ctx.arc(toPx(nc.x), toPx(nc.z), (nc.r / match.mapDef.size) * size, 0, Math.PI * 2);
+        ctx.arc(toPx(next.x), toPx(next.z), (next.r / mapDef.size) * size, 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = 'rgba(255,255,255,0.9)';
         ctx.lineWidth = 2;
         ctx.setLineDash([9, 7]);
         ctx.beginPath();
-        ctx.arc(toPx(nc.x), toPx(nc.z), (nc.r / match.mapDef.size) * size, 0, Math.PI * 2);
+        ctx.arc(toPx(next.x), toPx(next.z), (next.r / mapDef.size) * size, 0, Math.PI * 2);
         ctx.stroke();
         ctx.setLineDash([]);
-      } else {
-        routeTarget = { x: st.centerX, z: st.centerZ, r: st.radius };
+      } else if (storm.state === 'done') {
+        routeTarget = { x: storm.centerX, z: storm.centerZ, r: storm.radius };
       }
     }
 
-    // route to safety: straight line + arrow from the player toward the safe
-    // zone (only when actually outside it)
-    const me = match.localActor;
+    const me = state.actors.find((actor) => actor.id === state.localActorId) ?? null;
     if (me?.alive && routeTarget) {
-      const pdx = me.body.position.x - routeTarget.x;
-      const pdz = me.body.position.z - routeTarget.z;
-      const pd = Math.hypot(pdx, pdz);
-      if (pd > routeTarget.r) {
-        const ang = Math.atan2(pdz, pdx);
-        const tx = routeTarget.x + Math.cos(ang) * (routeTarget.r - 6);
-        const tz = routeTarget.z + Math.sin(ang) * (routeTarget.r - 6);
+      const dx = me.x - routeTarget.x;
+      const dz = me.z - routeTarget.z;
+      if (Math.hypot(dx, dz) > routeTarget.r) {
+        const angle = Math.atan2(dz, dx);
+        const tx = routeTarget.x + Math.cos(angle) * (routeTarget.r - 6);
+        const tz = routeTarget.z + Math.sin(angle) * (routeTarget.r - 6);
         ctx.strokeStyle = 'rgba(255,255,255,0.92)';
         ctx.lineWidth = 2.4;
         ctx.setLineDash([10, 6]);
         ctx.beginPath();
-        ctx.moveTo(toPx(me.body.position.x), toPx(me.body.position.z));
+        ctx.moveTo(toPx(me.x), toPx(me.z));
         ctx.lineTo(toPx(tx), toPx(tz));
         ctx.stroke();
         ctx.setLineDash([]);
-        const aa = Math.atan2(tz - me.body.position.z, tx - me.body.position.x);
+        const arrowAngle = Math.atan2(tz - me.z, tx - me.x);
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.moveTo(toPx(tx) + Math.cos(aa) * 10, toPx(tz) + Math.sin(aa) * 10);
-        ctx.lineTo(toPx(tx) + Math.cos(aa + 2.5) * 9, toPx(tz) + Math.sin(aa + 2.5) * 9);
-        ctx.lineTo(toPx(tx) + Math.cos(aa - 2.5) * 9, toPx(tz) + Math.sin(aa - 2.5) * 9);
+        ctx.moveTo(toPx(tx) + Math.cos(arrowAngle) * 10, toPx(tz) + Math.sin(arrowAngle) * 10);
+        ctx.lineTo(toPx(tx) + Math.cos(arrowAngle + 2.5) * 9, toPx(tz) + Math.sin(arrowAngle + 2.5) * 9);
+        ctx.lineTo(toPx(tx) + Math.cos(arrowAngle - 2.5) * 9, toPx(tz) + Math.sin(arrowAngle - 2.5) * 9);
         ctx.closePath();
         ctx.fill();
       }
     }
 
-    // marker
     if (this.tacMarker) {
       ctx.strokeStyle = '#ffb43a';
       ctx.lineWidth = 2;
@@ -1496,74 +1884,78 @@ export class Hud {
       ctx.stroke();
     }
 
-    // me
-    if (me?.alive) {
+    for (const actor of state.actors) {
+      if (!actor.alive) continue;
       ctx.save();
-      ctx.translate(toPx(me.body.position.x), toPx(me.body.position.z));
-      ctx.rotate(-me.yaw - Math.PI / 2);
-      ctx.fillStyle = '#5fd0ff';
-      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(11, 0); ctx.lineTo(-7, 8); ctx.lineTo(-7, -8);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      ctx.translate(toPx(actor.x), toPx(actor.z));
+      if (actor.id === state.localActorId) {
+        ctx.rotate(-actor.yaw - Math.PI / 2);
+        ctx.fillStyle = '#5fd0ff';
+        ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(11, 0);
+        ctx.lineTo(-7, 8);
+        ctx.lineTo(-7, -8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = mapAccentColor(actor.accentColor);
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(0, 0, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
-    // header: storm countdown (left) + alive/elims (right)
     ctx.textAlign = 'left';
     ctx.font = '700 15px "Saira Condensed", "Noto Sans JP", system-ui, sans-serif';
     let header = '';
-    if (st.state === 'waiting') header = `${t('hud.stormClosesIn')} ${formatTime(st.timer)}`;
-    else if (st.state === 'shrinking') header = `${t('hud.stormShrinking')} — ${formatTime(st.timer)}`;
-    else if (st.state === 'done') header = t('hud.finalCircle');
+    if (storm.state === 'waiting') header = t('hud.stormClosesIn') + ' ' + formatTime(storm.timer);
+    else if (storm.state === 'shrinking') header = t('hud.stormShrinking') + ' — ' + formatTime(storm.timer);
+    else if (storm.state === 'done') header = t('hud.finalCircle');
     if (header) {
-      const w = ctx.measureText(header).width;
+      const width = ctx.measureText(header).width;
       ctx.fillStyle = 'rgba(10,14,22,0.72)';
-      ctx.fillRect(14, 12, w + 20, 26);
+      ctx.fillRect(14, 12, width + 20, 26);
       ctx.fillStyle = '#ffffff';
       ctx.fillText(header, 24, 30);
     }
-    const aliveCount = match.actors.filter((a) => a.alive).length;
-    const right = `${t('hud.alive')} ${aliveCount} · ${t('hud.elims')} ${me?.stats.kills ?? 0}`;
+    const right = t('hud.alive') + ' ' + state.aliveCount + ' · ' + t('hud.elims') + ' ' + state.localKills;
     ctx.textAlign = 'right';
-    const rw = ctx.measureText(right).width;
+    const rightWidth = ctx.measureText(right).width;
     ctx.fillStyle = 'rgba(10,14,22,0.72)';
-    ctx.fillRect(size - rw - 34, 12, rw + 20, 26);
+    ctx.fillRect(size - rightWidth - 34, 12, rightWidth + 20, 26);
     ctx.fillStyle = '#ffffff';
     ctx.fillText(right, size - 24, 30);
     return canvas;
   }
 
-  /** Minimap: player-centered crop of the real aerial render plus safe overlays. */
-  drawMinimap(match: Match, ctxProvider: () => CanvasRenderingContext2D | null, dt = 1 / 60): void {
-    this.minimapTimer += Math.max(0, Math.min(dt, 0.1));
-    if (this.minimapTimer < 1 / 12) return;
-    this.minimapTimer = 0;
-    const ctx = ctxProvider();
-    if (!ctx) return;
+  private drawMinimapCanvas(
+    ctx: CanvasRenderingContext2D,
+    mapDef: MapDef,
+    state: HudMapState,
+  ): void {
     const size = 188;
-    const scale = size / (match.mapDef.size * 0.62);
-    const me = match.localActor;
-    const cx = me ? me.body.position.x : 0;
-    const cz = me ? me.body.position.z : 0;
-
+    const scale = size / (mapDef.size * 0.62);
+    const me = state.actors.find((actor) => actor.id === state.localActorId) ?? null;
+    const cx = me?.x ?? 0;
+    const cz = me?.z ?? 0;
     ctx.clearRect(0, 0, size, size);
     ctx.save();
     ctx.translate(size / 2, size / 2);
     ctx.scale(scale, scale);
     ctx.translate(-cx, -cz);
 
-    // Use the same one-shot orthographic world capture as the fullscreen map.
-    // Drawing it in world coordinates lets the canvas clip the player-centred
-    // crop naturally, including at map edges, without another GPU readback.
-    const half = match.mapDef.size / 2;
+    const half = mapDef.size / 2;
     if (this.tacImage) {
       ctx.save();
       ctx.filter = 'brightness(0.74) saturate(0.82) contrast(1.08)';
-      ctx.drawImage(this.tacImage, -half, -half, match.mapDef.size, match.mapDef.size);
+      ctx.drawImage(this.tacImage, -half, -half, mapDef.size, mapDef.size);
       ctx.restore();
     } else {
       const span = size / scale;
@@ -1571,38 +1963,37 @@ export class Hud {
       ctx.fillRect(cx - span / 2, cz - span / 2, span, span);
     }
 
-    for (const poi of match.mapDef.pois) {
+    for (const poi of mapDef.pois) {
       ctx.fillStyle = 'rgba(140,165,195,0.32)';
       ctx.beginPath();
       ctx.arc(poi.x, poi.z, Math.max(4, poi.radius * 0.25), 0, Math.PI * 2);
       ctx.fill();
     }
-
-    for (const w of match.mapDef.water) {
+    for (const water of mapDef.water) {
       ctx.fillStyle = 'rgba(70,140,190,0.4)';
-      ctx.fillRect(w.minX, w.minZ, w.maxX - w.minX, w.maxZ - w.minZ);
+      ctx.fillRect(water.minX, water.minZ, water.maxX - water.minX, water.maxZ - water.minZ);
     }
 
-    const st = match.storm;
-    if (st.state !== 'idle') {
+    const storm = state.storm;
+    if (storm.state !== 'idle') {
       ctx.save();
       ctx.beginPath();
       ctx.rect(cx - size / scale, cz - size / scale, (size * 2) / scale, (size * 2) / scale);
-      ctx.arc(st.centerX, st.centerZ, st.radius, 0, Math.PI * 2, true);
+      ctx.arc(storm.centerX, storm.centerZ, storm.radius, 0, Math.PI * 2, true);
       ctx.fillStyle = 'rgba(118,52,196,0.3)';
       ctx.fill('evenodd');
       ctx.restore();
       ctx.strokeStyle = '#b078ff';
       ctx.lineWidth = 3 / scale;
       ctx.beginPath();
-      ctx.arc(st.centerX, st.centerZ, st.radius, 0, Math.PI * 2);
+      ctx.arc(storm.centerX, storm.centerZ, storm.radius, 0, Math.PI * 2);
       ctx.stroke();
-      if (st.state !== 'done') {
-        const nc = st.nextCircle();
+      const next = storm.state === 'done' ? null : storm.nextCircle?.() ?? null;
+      if (next) {
         ctx.strokeStyle = 'rgba(255,255,255,0.85)';
         ctx.setLineDash([8 / scale, 8 / scale]);
         ctx.beginPath();
-        ctx.arc(nc.x, nc.z, nc.r, 0, Math.PI * 2);
+        ctx.arc(next.x, next.z, next.r, 0, Math.PI * 2);
         ctx.stroke();
         ctx.setLineDash([]);
       }
@@ -1611,26 +2002,30 @@ export class Hud {
     if (this.tacMarker) {
       ctx.strokeStyle = '#ffb43a';
       ctx.lineWidth = 2 / scale;
-      const r = 10 / scale;
       ctx.beginPath();
-      ctx.arc(this.tacMarker.x, this.tacMarker.z, r, 0, Math.PI * 2);
+      ctx.arc(this.tacMarker.x, this.tacMarker.z, 10 / scale, 0, Math.PI * 2);
       ctx.stroke();
     }
 
-    // NOTE: Enemy positions are intentionally never drawn on any player-facing
-    // map. Hidden bot locations must never leak into production UI.
-
-    if (me) {
+    for (const actor of state.actors) {
+      if (!actor.alive) continue;
       ctx.save();
-      ctx.translate(me.body.position.x, me.body.position.z);
-      ctx.rotate(-me.yaw - Math.PI / 2);
-      ctx.fillStyle = '#5fd0ff';
-      ctx.beginPath();
-      ctx.moveTo(10 / scale, 0);
-      ctx.lineTo(-6 / scale, 7 / scale);
-      ctx.lineTo(-6 / scale, -7 / scale);
-      ctx.closePath();
-      ctx.fill();
+      ctx.translate(actor.x, actor.z);
+      if (actor.id === state.localActorId) {
+        ctx.rotate(-actor.yaw - Math.PI / 2);
+        ctx.fillStyle = '#5fd0ff';
+        ctx.beginPath();
+        ctx.moveTo(10 / scale, 0);
+        ctx.lineTo(-6 / scale, 7 / scale);
+        ctx.lineTo(-6 / scale, -7 / scale);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.fillStyle = mapAccentColor(actor.accentColor);
+        ctx.beginPath();
+        ctx.arc(0, 0, 7 / scale, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.restore();
     }
     ctx.restore();

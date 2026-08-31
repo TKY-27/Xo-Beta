@@ -268,12 +268,35 @@ export class PlayerController implements ActorController {
     this.pitch = pitch;
   }
 
+  /** Queue an owner-permitted inventory selection for the next sampled tick. */
+  requestInventorySlot(slot: number): boolean {
+    if (!this.inputEnabled || !Number.isSafeInteger(slot) || slot < 0 || slot > 4) return false;
+    this.slotRequest = slot;
+    return true;
+  }
+
+  /** Queue a drop request; the authoritative host still validates ownership. */
+  requestDropSelected(): boolean {
+    if (!this.inputEnabled) return false;
+    this.pendingDropWeapon = true;
+    return true;
+  }
+
   setSpectatorMode(active: boolean): void {
     this.spectatorMode = active;
     this.clearGameplayInput();
   }
 
   updateCommand(actor: Actor, dt: number): InputCommand {
+    return this.sampleCommand(actor.wpn.adsAmount, dt);
+  }
+
+  /**
+   * Sample local controls without requiring a mutable simulation Actor.
+   * Online guests pass the owner-scoped authoritative ADS amount from their
+   * read-only replica; only the host ever supplies this command to Match.
+   */
+  sampleCommand(adsAmount: number, dt: number): InputCommand {
     const cmd = emptyCommand();
     if (!this.enabled) {
       this.clearGameplayInput();
@@ -339,7 +362,10 @@ export class PlayerController implements ActorController {
     cmd.slotRequest = this.slotRequest;
     this.slotRequest = null;
 
-    if (this.gamepad) this.gamepad.applyTo(cmd, dt, actor.wpn.adsAmount);
+    const safeAdsAmount = Number.isFinite(adsAmount)
+      ? Math.max(0, Math.min(1, adsAmount))
+      : 0;
+    if (this.gamepad) this.gamepad.applyTo(cmd, dt, safeAdsAmount);
 
     // Look — gamepad is polled above, then consumed in the same simulation
     // tick so right-stick aiming cannot lag one frame behind movement.
@@ -347,11 +373,11 @@ export class PlayerController implements ActorController {
     let lookDy = this.lookDy;
     if (this.gamepad) {
       const padLook = this.gamepad.consumeLook();
-      const padScale = s.padLookSens * 11.5 * dt * 60 * 0.016 * (actor.wpn.adsAmount > 0.5 ? 0.55 : 1);
+      const padScale = s.padLookSens * 11.5 * dt * 60 * 0.016 * (safeAdsAmount > 0.5 ? 0.55 : 1);
       lookDx += padLook.dx * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
       lookDy += padLook.dy * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
     }
-    const sens = s.sensitivity * 0.0023 * (actor.wpn.adsAmount > 0.5 ? s.adsSensitivity : 1);
+    const sens = s.sensitivity * 0.0023 * (safeAdsAmount > 0.5 ? s.adsSensitivity : 1);
     this.yaw -= lookDx * sens;
     this.pitch -= lookDy * sens * (s.invertY ? -1 : 1);
     const lim = Math.PI / 2 - 0.02;

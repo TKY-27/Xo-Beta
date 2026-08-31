@@ -417,13 +417,54 @@ export class LobbyState {
    * authentication belongs in the reconnect coordinator; this method is the
    * host-authoritative state transition after that token has been checked.
    */
+  canReclaimParticipant(
+    participantId: string,
+    previousPeerId: string,
+    nextPeerId: string,
+    nextProtocolSession: string,
+  ): boolean {
+    try {
+      this.validateParticipantReclaim(participantId, previousPeerId, nextPeerId, nextProtocolSession);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   reclaimParticipant(
     participantId: string,
     previousPeerId: string,
     nextPeerId: string,
     nextProtocolSession: string,
   ): LobbyParticipant {
-    this.requireUnlocked();
+    const { participant, checkedNextPeerId, checkedSession } = this.validateParticipantReclaim(
+      participantId,
+      previousPeerId,
+      nextPeerId,
+      nextProtocolSession,
+    );
+
+    this.participantsValue.delete(previousPeerId);
+    participant.peerId = checkedNextPeerId;
+    participant.protocolSession = checkedSession;
+    participant.connected = false;
+    participant.channelsOpen = false;
+    participant.ready = false;
+    this.participantsValue.set(checkedNextPeerId, participant);
+    this.sessionGuard.nonceGuard.reset(previousPeerId);
+    this.sessionGuard.nonceGuard.reset(checkedNextPeerId);
+    this.sessionGuard.rateLimiter.reset(previousPeerId);
+    this.sessionGuard.rateLimiter.reset(checkedNextPeerId);
+    this.bumpRevision();
+    return freezeParticipant(participant);
+  }
+
+  private validateParticipantReclaim(
+    participantId: string,
+    previousPeerId: string,
+    nextPeerId: string,
+    nextProtocolSession: string,
+  ): { participant: MutableParticipant; checkedNextPeerId: string; checkedSession: string } {
     const checkedParticipantId = validateIdentifier(participantId, 'participantId');
     const participant = this.participantById.get(checkedParticipantId);
     if (!participant || participant.isHost || participant.peerId !== previousPeerId) {
@@ -443,20 +484,7 @@ export class LobbyState {
     if (checkedSession === participant.protocolSession) {
       throw new LobbyError('stale-session', 'Reconnect must rotate the protocol session');
     }
-
-    this.participantsValue.delete(previousPeerId);
-    participant.peerId = checkedNextPeerId;
-    participant.protocolSession = checkedSession;
-    participant.connected = false;
-    participant.channelsOpen = false;
-    participant.ready = false;
-    this.participantsValue.set(checkedNextPeerId, participant);
-    this.sessionGuard.nonceGuard.reset(previousPeerId);
-    this.sessionGuard.nonceGuard.reset(checkedNextPeerId);
-    this.sessionGuard.rateLimiter.reset(previousPeerId);
-    this.sessionGuard.rateLimiter.reset(checkedNextPeerId);
-    this.bumpRevision();
-    return freezeParticipant(participant);
+    return { participant, checkedNextPeerId, checkedSession };
   }
 
   rebindParticipant(
