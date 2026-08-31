@@ -242,7 +242,13 @@ const controller = new PrivateRoomController({
     return coordinator?.canAcceptReconnectedParticipant(participantId, peerId) === true;
   },
   onParticipantReconnected({ peerId, binding }) {
-    return coordinator?.acceptReconnectedParticipant(binding.participantId, peerId).accepted === true;
+    const result = coordinator?.prepareAcceptedReconnectedParticipant(binding.participantId, peerId);
+    if (!result?.accepted) return false;
+    return {
+      accepted: true as const,
+      commit: result.commit,
+      rollback: result.rollback,
+    };
   },
   onMatchStartAccepted: async (matchContext) => {
     const active = ensureCoordinator(matchContext);

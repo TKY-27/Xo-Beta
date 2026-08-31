@@ -376,6 +376,7 @@ async function main(): Promise<void> {
     await page.locator('#btn-quit').click();
     await waitForMain(page);
     await openPlay(page);
+    await page.locator('#map-list .map-card[data-map-id="neocity"]').click();
     await page.locator('#btn-practice-start').click();
     await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 });
     await sleep(1200);

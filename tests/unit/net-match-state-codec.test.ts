@@ -17,7 +17,13 @@ import {
   projectGameStateForViewer,
   protocolFrameToInputCommand,
 } from '../../src/net/matchStateCodec';
-import { decodeInputPacket } from '../../src/net/matchProtocol';
+import {
+  decodeInputPacket,
+  MATCH_HEADER_BYTES,
+  MATCH_HEADER_OFFSETS,
+  encodeSnapshotChunk,
+  splitSnapshot,
+} from '../../src/net/matchProtocol';
 import type { AuthoritativeMatchEvent } from '../../src/net/hostMatchSession';
 
 const SESSION = 0x1234_5678;
@@ -338,5 +344,49 @@ describe('Phase 4 binary match state adapter', () => {
       encodeAuthoritativeEventPacket(unknown, SESSION),
       SESSION,
     )).toThrow(/unknown authoritative event/i);
+  });
+
+  it('rejects prototype-polluting reliable keys and wrong-session chunks before reassembly', () => {
+    const dangerousPayload = Object.create(null) as Record<string, unknown>;
+    dangerousPayload.__proto__ = 1;
+    expect(() => encodeReliablePacket({
+      kind: 'keyframe-request', sessionId: SESSION, sequence: 1, tick: 2,
+      payload: dangerousPayload as never,
+    })).toThrow(/reserved key/i);
+
+    const valid = new Uint8Array(encodeReliablePacket({
+      kind: 'keyframe-request', sessionId: SESSION, sequence: 1, tick: 2,
+      payload: { safe: 1 },
+    }));
+    const dangerousBytes = new Uint8Array(MATCH_HEADER_BYTES + 18);
+    dangerousBytes.set(valid.slice(0, MATCH_HEADER_BYTES));
+    const dangerousView = new DataView(dangerousBytes.buffer);
+    dangerousView.setUint16(MATCH_HEADER_OFFSETS.payloadLength, 18, true);
+    dangerousBytes.set([
+      8, 1, 0, 9,
+      ...new TextEncoder().encode('__proto__'),
+      3, 1, 0, 0, 0,
+    ], MATCH_HEADER_BYTES);
+    expect(() => decodeReliablePacket(dangerousBytes, SESSION)).toThrow(/reserved key/i);
+
+    const view = state();
+    const order = view.destructibles.map((value) => value.id);
+    const chunks = splitSnapshot({
+      sessionId: SESSION,
+      sequence: 1,
+      hostTick: view.hostTick,
+      ackInputSeq: 0,
+      revision: view.stateRevision,
+      full: true,
+      snapshotId: 1,
+      entities: encodeGameStateRecords(view, 2, order),
+    }, 256);
+    expect(chunks.length).toBeGreaterThan(1);
+    const decoder = new MatchStateDecoder(SESSION, order);
+    expect(() => decoder.add(encodeSnapshotChunk({ ...chunks[0]!, sessionId: SESSION + 1 }))).toThrow(/session/i);
+    expect(decoder.hasKeyframe).toBe(false);
+    let decoded = null;
+    for (const chunk of chunks) decoded = decoder.add(encodeSnapshotChunk(chunk)) ?? decoded;
+    expect(decoded?.state.stateRevision).toBe(view.stateRevision);
   });
 });

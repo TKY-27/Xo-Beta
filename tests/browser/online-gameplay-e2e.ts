@@ -145,6 +145,12 @@ class DeterministicSignalingHub {
     for (const peerId of requested) {
       if (typeof peerId !== 'string' || !sender.joined.has(peerId)) continue;
       const peer = this.peers.get(peerId);
+      if (namespace === 'xo-game-signal-v1' && isRecord(data) && data.type === 'offer') {
+        const peerJoinComplete = await this.evaluate(sender.page, '__xoMockIsPeerJoinComplete', peerId);
+        if (peerJoinComplete !== true) {
+          await this.evaluate(sender.page, '__xoMockRecordEarlyGameOffer', peerId);
+        }
+      }
       if (peer) await this.evaluate(peer.page, '__xoMockReceiveAction', namespace, data, from);
     }
   }
@@ -161,9 +167,9 @@ class DeterministicSignalingHub {
     }
   }
 
-  private async evaluate(page: Page, method: string, ...args: unknown[]): Promise<void> {
-    if (page.isClosed()) return;
-    await page.evaluate(({ methodName, values }) => {
+  private async evaluate(page: Page, method: string, ...args: unknown[]): Promise<unknown> {
+    if (page.isClosed()) return undefined;
+    return page.evaluate(({ methodName, values }) => {
       const fn = (window as unknown as Record<string, unknown>)[methodName];
       if (typeof fn === 'function') return (fn as (...items: unknown[]) => unknown)(...values);
       return undefined;
@@ -267,6 +273,11 @@ async function main(): Promise<void> {
     peers.push(guest);
     await joinRoom(guest, invite.link);
     await waitUntil(async () => (await snapshot(host)).directStates.includes('open'), 'direct game channel');
+    const signalingDiagnostics = await host.page.evaluate(() => (
+      (window as unknown as { __xoMockGetDiagnostics: () => { earlyGameOffers: number } })
+        .__xoMockGetDiagnostics()
+    ));
+    assert.equal(signalingDiagnostics.earlyGameOffers, 0, 'initial SDP offer waits for the Trystero onPeerJoin activation');
     assert.equal((await snapshot(host)).role, 'host');
     assert.equal((await snapshot(guest)).role, 'guest');
 
@@ -397,6 +408,10 @@ async function main(): Promise<void> {
 
 function pairKey(left: string, right: string): string {
   return [left, right].sort().join('|');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 void main();

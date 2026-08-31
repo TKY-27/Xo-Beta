@@ -1151,7 +1151,7 @@ export interface OnlineTeammateHudState {
   alive: boolean;
 }
 
-export type OnlinePresenceNotice = 'left' | 'rejoined' | 'hostDisconnected';
+export type OnlinePresenceNotice = 'left' | 'rejoined' | 'hostDisconnected' | 'hostInactive';
 
 export function onlineConnectionLabel(state: OnlineConnectionState): TextKey {
   switch (state) {
@@ -1269,12 +1269,15 @@ export class Hud {
   showPresenceNotice(kind: OnlinePresenceNotice, displayName = '', duration = 3.2): void {
     const notice = $('online-presence-notice');
     notice.classList.toggle('host-disconnected', kind === 'hostDisconnected');
+    notice.classList.toggle('host-inactive', kind === 'hostInactive');
     const name = displayName.trim().slice(0, 24);
     notice.textContent = kind === 'left'
       ? t('hud.presenceLeft', { name: name || 'Player' })
       : kind === 'rejoined'
         ? t('hud.presenceRejoined', { name: name || 'Player' })
-        : t('hud.hostDisconnected');
+        : kind === 'hostInactive'
+          ? t('hud.hostInactive')
+          : t('hud.hostDisconnected');
     notice.classList.remove('hidden');
     if (this.onlineNoticeTimer !== null) window.clearTimeout(this.onlineNoticeTimer);
     this.onlineNoticeTimer = window.setTimeout(() => {
@@ -1283,11 +1286,21 @@ export class Hud {
     }, boundedDuration(duration, 3.2) * 1000);
   }
 
+  clearPresenceNotice(): void {
+    if (this.onlineNoticeTimer !== null) window.clearTimeout(this.onlineNoticeTimer);
+    this.onlineNoticeTimer = null;
+    const notice = $('online-presence-notice');
+    notice.classList.add('hidden');
+    notice.classList.remove('host-disconnected', 'host-inactive');
+  }
+
   /** Clear the current online notice and any cosmetic tactical ping. */
   resetOnlineHud(): void {
     if (this.onlineNoticeTimer !== null) window.clearTimeout(this.onlineNoticeTimer);
     this.onlineNoticeTimer = null;
-    $('online-presence-notice').classList.add('hidden');
+    const notice = $('online-presence-notice');
+    notice.classList.add('hidden');
+    notice.classList.remove('host-disconnected', 'host-inactive');
     $('online-hud-status').classList.add('hidden');
     $('online-team-status').classList.add('hidden');
     this.clearTacticalPing();

@@ -47,6 +47,7 @@ import type { GameNetworkMetrics } from './net/gameConnection';
 import {
   OnlineMatchCoordinator,
   HOST_DISCONNECT_GRACE_MS,
+  HOST_INACTIVITY_GRACE_MS,
   ONLINE_FIXED_DT,
   type GuestReplicaFactoryInput,
   type HostSessionFactoryInput,
@@ -466,10 +467,16 @@ async function boot(): Promise<void> {
   let onlineUi: OnlineLobbyUi | null = null;
   let activeOnlineContextKey = '';
   const onlineMetrics = new Map<string, GameNetworkMetrics>();
+  let hostVisibilityTimer: number | null = null;
+  const clearHostVisibilityTimer = (): void => {
+    if (hostVisibilityTimer !== null) window.clearTimeout(hostVisibilityTimer);
+    hostVisibilityTimer = null;
+  };
   const onlineContextKey = (context: OnlineRoomMatchContext): string => (
     `${context.role}:${context.localParticipantId}:${context.matchSessionBinding}`
   );
   const showMainMenuAfterOnline = (reason: OnlineMatchEndReason | null): void => {
+    clearHostVisibilityTimer();
     const coordinator = activeOnlineCoordinator;
     activeOnlineCoordinator = null;
     activeOnlineContextKey = '';
@@ -487,6 +494,11 @@ async function boot(): Promise<void> {
       $('loading-status').textContent = t('hud.hostDisconnected');
       $('loading-screen').classList.remove('hidden');
       window.setTimeout(() => $('loading-screen').classList.add('hidden'), 1800);
+    } else if (reason === 'host-inactive') {
+      $('loading-fill').style.width = '100%';
+      $('loading-status').textContent = t('hud.hostInactive');
+      $('loading-screen').classList.remove('hidden');
+      window.setTimeout(() => $('loading-screen').classList.add('hidden'), 2200);
     } else if (reason === 'protocol-error') {
       $('loading-status').textContent = t('online.protocolError');
       $('loading-screen').classList.add('hidden');
@@ -568,6 +580,10 @@ async function boot(): Promise<void> {
       onActivated: (role, payload) => activateOnlinePresentation(role, payload),
       onAuthoritativeEvent: presentOnlineAuthoritativeEvent,
       onPresenceNotice: (kind, displayName) => hud.showPresenceNotice(kind, displayName),
+      onHostVisibilityChange: (hidden) => {
+        if (hidden) hud.showPresenceNotice('hostInactive', '', HOST_INACTIVITY_GRACE_MS / 1000 + 1);
+        else hud.clearPresenceNotice();
+      },
       onReconnectResult: (accepted) => {
         hud.banner(t(accepted ? 'online.reconnectAccepted' : 'online.reconnectRejected'), 3.2);
       },
@@ -620,7 +636,14 @@ async function boot(): Promise<void> {
       activeOnlineCoordinator?.canAcceptReconnectedParticipant(participantId, peerId) === true
     ),
     onParticipantReconnected: ({ peerId, binding }) => {
-      return activeOnlineCoordinator?.acceptReconnectedParticipant(binding.participantId, peerId).accepted === true;
+      const coordinator = activeOnlineCoordinator;
+      const result = coordinator?.prepareAcceptedReconnectedParticipant(binding.participantId, peerId);
+      if (!result?.accepted) return false;
+      return {
+        accepted: true as const,
+        commit: result.commit,
+        rollback: result.rollback,
+      };
     },
     onMatchStartAccepted: async (context) => {
       try {
@@ -703,6 +726,7 @@ async function boot(): Promise<void> {
     audio.applyVolumes();
   });
   window.addEventListener('pagehide', () => {
+    clearHostVisibilityTimer();
     flushSettingsPersist();
     const coordinator = activeOnlineCoordinator;
     activeOnlineCoordinator = null;
@@ -722,6 +746,18 @@ async function boot(): Promise<void> {
   }
 
   document.addEventListener('visibilitychange', () => {
+    const coordinator = activeOnlineCoordinator;
+    if (document.hidden && coordinator?.role === 'host') {
+      coordinator.setHostVisibility(true);
+      clearHostVisibilityTimer();
+      hostVisibilityTimer = window.setTimeout(() => {
+        hostVisibilityTimer = null;
+        if (activeOnlineCoordinator === coordinator && document.hidden) coordinator.enforceHostVisibilityDeadline();
+      }, HOST_INACTIVITY_GRACE_MS + 50);
+    } else if (!document.hidden) {
+      clearHostVisibilityTimer();
+      if (coordinator?.role === 'host') coordinator.setHostVisibility(false);
+    }
     if (document.hidden && live && !paused && livePhase(live) !== 'results') openPause();
   });
   window.addEventListener('blur', () => {

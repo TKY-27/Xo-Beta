@@ -53,11 +53,17 @@ jobs:
       - name: Production build
         run: npm run build
 
+      - name: Zero-cost networking audit
+        run: npm run audit:zero-cost
+
       - name: Water renderer provenance audit
         run: npm run audit:water
 
       - name: Cloudflare packaging dry-run
-        run: npx wrangler deploy --dry-run --outdir .wrangler/dry-run
+        run: npm run cloudflare:dry-run
+
+      - name: Zero-cost deployment-output audit
+        run: npm run audit:zero-cost
 
       - name: Upload production bundle
         uses: actions/upload-artifact@v7

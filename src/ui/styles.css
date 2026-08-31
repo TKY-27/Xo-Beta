@@ -961,6 +961,7 @@ html[data-xo-qa='1'] .online-hud-diagnostics { display: inline; }
   font: 700 .86rem/1.25 var(--font-display); letter-spacing: .12em; text-shadow: var(--hud-shadow);
 }
 .online-presence-notice.host-disconnected { border-color: rgba(255, 95, 109, .62); color: #ffccd0; }
+.online-presence-notice.host-inactive { border-color: rgba(247, 190, 74, .72); color: #ffe7a3; }
 html[lang='ja'] .online-hud-status, html[lang='ja'] .online-team-status h2, html[lang='ja'] .online-presence-notice { letter-spacing: .06em; }
 @media (max-width: 800px) {
   .online-hud-status { left: 16px; top: 250px; }
