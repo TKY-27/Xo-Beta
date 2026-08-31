@@ -33,6 +33,11 @@ npx wrangler deploy  # uses wrangler.jsonc
 No secrets, bindings, Worker entry point or environment variables are required:
 this is an assets-only Worker and the game is entirely client-side.
 
+`npm run audit:zero-cost` also records a machine-readable
+`dist/zero-cost-networking-audit.json` receipt. The receipt must have the same
+tested commit SHA as the release artifact; it is a cost/networking audit, not
+proof of a successful live deployment.
+
 The checked-in Wrangler version and Node.js floor are declared in
 `package.json`. The release audit rejects symlinks, development hooks, missing
 legal notices, more than 20,000 files and any individual file over 25 MiB.

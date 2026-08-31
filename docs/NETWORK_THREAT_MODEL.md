@@ -42,11 +42,32 @@ friends-only rooms and a visible host badge make this trust choice explicit.
   projectile catch-up to a short authoritative history and never accepts a
   client target, muzzle position, or damage claim.
 - **Capacity and resource abuse:** four-human capacity, payload caps, message
-  allowlists, rate limits, bounded connection attempts, and explicit disposal.
+  allowlists, rate limits, bounded connection attempts, bounded per-peer
+  admission/replay state with idle expiry, transactional admission/reconnect,
+  and explicit disposal.
 - **Paid relay activation:** no TURN URI, credential, provider key, or
   `turnConfig` is accepted. Relay ICE candidates fail closed.
 - **Injection by names:** remote display names are normalized, length-limited,
   and rendered with `textContent`, never `innerHTML`.
+
+## Packet and state-machine audit
+
+The binary input, snapshot, reliable/event, match-start, and reassembly paths
+check actual buffer length before reading fields. They reject unsupported
+versions/types, non-zero reserved bytes, unknown enums, NaN/Infinity,
+negative/oversized counts, integer overflow, duplicate or stale sequences,
+future ticks, excessive rewind, duplicate event/entity IDs, wrong sessions,
+malformed UTF-8, and dangerous canonical object keys. Wrong-session snapshot
+chunks are rejected before they can allocate reassembly state. All decoder and
+state-machine exceptions remain ordinary bounded errors handled by the peer
+violation path.
+
+Fresh admission and reconnect do not become visible until the acceptance
+message is successfully handed to the transport. Failed acceptance delivery
+restores participant, Actor, token, and peer bindings. Per-peer rate/replay
+trackers have a fixed peer cap and idle expiry; peer departure clears their
+state. These controls reduce connection/reconnect flooding but do not prevent a
+malicious invited browser from attempting denial of service.
 
 ## Residual risks
 

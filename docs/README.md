@@ -8,6 +8,7 @@
 - [Bot AI](BOT_AI.md)
 - [UI design](UI_DESIGN.md)
 - [Networking](NETWORKING.md)
+- [Host authority model](HOST_AUTHORITY.md)
 - [Private-room protocol](PROTOCOL.md)
 - [Network threat model](NETWORK_THREAT_MODEL.md)
 - [Zero-cost networking invariant](ZERO_COST_NETWORKING.md)
