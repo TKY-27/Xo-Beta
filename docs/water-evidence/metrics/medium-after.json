@@ -1,0 +1,259 @@
+{
+  "label": "quality-final-medium",
+  "capturedAt": "2026-08-31T06:41:02.591Z",
+  "browser": "Google Chrome (Playwright channel)",
+  "viewport": {
+    "width": 1920,
+    "height": 1080
+  },
+  "map": "eden",
+  "seed": 42042,
+  "quality": {
+    "quality": "medium",
+    "resolutionScale": 1,
+    "shadows": true,
+    "shadowQuality": "high",
+    "postProcessing": true,
+    "bloom": true,
+    "reflections": true,
+    "ao": true,
+    "aa": "smaa",
+    "motionBlur": false,
+    "dof": false,
+    "fpsLimit": 0,
+    "cameraMode": "fps",
+    "onboarded": true,
+    "lang": "en"
+  },
+  "views": [
+    {
+      "name": "lake-shoreline",
+      "position": [
+        64,
+        0.4,
+        45
+      ],
+      "target": [
+        102,
+        -3.55,
+        58
+      ],
+      "fov": 66,
+      "time": 18
+    },
+    {
+      "name": "lake-low-sun",
+      "position": [
+        205,
+        0.45,
+        124
+      ],
+      "target": [
+        136,
+        -3.45,
+        62
+      ],
+      "fov": 58,
+      "time": 18
+    },
+    {
+      "name": "lake-dock",
+      "position": [
+        109,
+        -0.8,
+        45
+      ],
+      "target": [
+        126,
+        -3.95,
+        68
+      ],
+      "fov": 64,
+      "time": 18
+    },
+    {
+      "name": "lake-elevated",
+      "position": [
+        226,
+        50,
+        -15
+      ],
+      "target": [
+        143,
+        -4,
+        64
+      ],
+      "fov": 62,
+      "time": 18
+    },
+    {
+      "name": "river-along",
+      "position": [
+        170,
+        -1.25,
+        133
+      ],
+      "target": [
+        170,
+        -3.75,
+        165
+      ],
+      "fov": 62,
+      "time": 18
+    },
+    {
+      "name": "river-across",
+      "position": [
+        143,
+        -1.4,
+        151
+      ],
+      "target": [
+        191,
+        -3.85,
+        151
+      ],
+      "fov": 60,
+      "time": 18
+    },
+    {
+      "name": "pond-close",
+      "position": [
+        -174,
+        0.7,
+        204
+      ],
+      "target": [
+        -218,
+        -3.25,
+        204
+      ],
+      "fov": 60,
+      "time": 18
+    },
+    {
+      "name": "pond-elevated",
+      "position": [
+        -163,
+        27,
+        164
+      ],
+      "target": [
+        -215,
+        -3.7,
+        204
+      ],
+      "fov": 62,
+      "time": 18
+    },
+    {
+      "name": "lake-swimming",
+      "position": [
+        146,
+        -1.35,
+        49
+      ],
+      "target": [
+        134,
+        -3.1,
+        41
+      ],
+      "fov": 62,
+      "time": 18
+    },
+    {
+      "name": "river-swimming",
+      "position": [
+        182,
+        -1.15,
+        163
+      ],
+      "target": [
+        170,
+        -3.05,
+        155
+      ],
+      "fov": 62,
+      "time": 18
+    },
+    {
+      "name": "underwater-up",
+      "position": [
+        139,
+        -5.7,
+        71
+      ],
+      "target": [
+        140,
+        -3.3,
+        71
+      ],
+      "fov": 70,
+      "time": 18
+    }
+  ],
+  "frame": {
+    "p50Ms": 8.3,
+    "avgFps": 120,
+    "bestFps": 120,
+    "onePercentLowFps": 85,
+    "p95Ms": 9.1,
+    "p99Ms": 9.3,
+    "worstMs": 17,
+    "over33": 0,
+    "over50": 0,
+    "durationMs": 10000.3,
+    "n": 1196
+  },
+  "synchronousRender": {
+    "firstVisibleFrameMs": 1.3,
+    "warmVisibleFrameMs": 1.2,
+    "warmSamplesMs": [
+      1.3,
+      1.3,
+      1.2,
+      1.4,
+      1.4,
+      1.2,
+      1.1,
+      1.2,
+      1.2,
+      1.2,
+      1.3,
+      1.2
+    ]
+  },
+  "draw": {
+    "calls": 2,
+    "triangles": 18124,
+    "frames": 121
+  },
+  "runtime": {
+    "seed": 42042,
+    "worldConstructionMs": 179.3,
+    "presentMs": 1.79,
+    "water": {
+      "quality": "medium",
+      "volumes": 3,
+      "visibleVolumes": 3,
+      "drawCalls": 7,
+      "triangles": 4198,
+      "waveTextureBytes": 98304,
+      "depthTextureBytes": 53504,
+      "halfFloatWaveData": true,
+      "waveResolution": 64
+    },
+    "programs": 116,
+    "rendererMemory": {
+      "geometries": 180,
+      "textures": 135
+    },
+    "gpu": "Google Inc. (Apple) / ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+    "webglCanvasIds": [
+      "game-canvas"
+    ],
+    "runtimeIssues": "count=0"
+  },
+  "browserErrors": [],
+  "screenshotsCaptured": false
+}
