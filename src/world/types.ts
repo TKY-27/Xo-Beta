@@ -105,11 +105,24 @@ export interface LampSpec {
   range: number;
 }
 
+/** Presentation-only water profile. These fields never affect simulation. */
+export type WaterVisualKind = 'lake' | 'river' | 'pond' | 'fallback';
+
+export interface WaterVisualProfile {
+  kind: WaterVisualKind;
+  /** Optional world-space wind direction used only by the water shader. */
+  windDirection?: readonly [number, number];
+  /** Optional deterministic seed for cosmetic wave data. */
+  seed?: number;
+}
+
 export interface WaterVolume {
   minX: number; maxX: number;
   minZ: number; maxZ: number;
   surfaceY: number;
   depth: number;
+  /** Cosmetic rendering metadata; physics uses only the fields above. */
+  visual?: WaterVisualProfile;
 }
 
 export interface ChestSpawn {

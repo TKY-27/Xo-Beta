@@ -231,7 +231,11 @@ export async function computeGameplayMapHash(map: MapDef): Promise<string> {
     geo: map.geo.filter((entry) => entry.noCollide !== true),
     destructibles: map.destructibles,
     vehicles: map.vehicles,
-    water: map.water,
+    // Water presentation profiles are intentionally excluded. Only these
+    // physical fields can affect authoritative collision and swimming.
+    water: map.water.map(({ minX, maxX, minZ, maxZ, surfaceY, depth }) => ({
+      minX, maxX, minZ, maxZ, surfaceY, depth,
+    })),
     chests: map.chests,
     loot: map.loot,
     platforms: map.platforms,
