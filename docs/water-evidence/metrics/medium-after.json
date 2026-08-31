@@ -1,6 +1,6 @@
 {
   "label": "quality-final-medium",
-  "capturedAt": "2026-08-31T06:41:02.591Z",
+  "capturedAt": "2026-08-31T07:25:12.934Z",
   "browser": "Google Chrome (Playwright channel)",
   "viewport": {
     "width": 1920,
@@ -196,31 +196,31 @@
     "p50Ms": 8.3,
     "avgFps": 120,
     "bestFps": 120,
-    "onePercentLowFps": 85,
-    "p95Ms": 9.1,
+    "onePercentLowFps": 107,
+    "p95Ms": 9.2,
     "p99Ms": 9.3,
-    "worstMs": 17,
+    "worstMs": 9.4,
     "over33": 0,
     "over50": 0,
-    "durationMs": 10000.3,
-    "n": 1196
+    "durationMs": 9999.6,
+    "n": 1200
   },
   "synchronousRender": {
     "firstVisibleFrameMs": 1.3,
-    "warmVisibleFrameMs": 1.2,
+    "warmVisibleFrameMs": 1.7,
     "warmSamplesMs": [
-      1.3,
-      1.3,
-      1.2,
+      1.5,
+      3,
+      3.2,
+      1.5,
+      1.7,
+      1.7,
+      1.5,
+      1.5,
       1.4,
-      1.4,
-      1.2,
-      1.1,
-      1.2,
-      1.2,
-      1.2,
-      1.3,
-      1.2
+      1.9,
+      1.6,
+      1.7
     ]
   },
   "draw": {
@@ -230,8 +230,8 @@
   },
   "runtime": {
     "seed": 42042,
-    "worldConstructionMs": 179.3,
-    "presentMs": 1.79,
+    "worldConstructionMs": 189.1,
+    "presentMs": 2.06,
     "water": {
       "quality": "medium",
       "volumes": 3,
@@ -255,5 +255,6 @@
     "runtimeIssues": "count=0"
   },
   "browserErrors": [],
-  "screenshotsCaptured": false
+  "screenshotsCaptured": false,
+  "temporalFramesCaptured": 0
 }

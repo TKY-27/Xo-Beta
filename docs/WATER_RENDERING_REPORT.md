@@ -76,11 +76,15 @@ visibly parallel, synchronized bands. Shallow coloration used distance from a
 rectangular `WaterVolume` edge rather than terrain depth. Reflections were a
 uniform sky-color mix, and river/lake/pond behavior was not distinguished.
 
-The replacement uses deterministic periodic texture data sampled at rotated,
-scaled world-space coordinates. Height, gradient, and restrained horizontal
-displacement come from the same field, so normals, highlights, and crests stay
-attached. Terrain depth controls dry discard, absorption, shallow color, and
-shore readability. Shore sediment and foam are generated only from traced
+The replacement uses independently authored deterministic periodic value-noise
+texture data sampled at rotated, scaled world-space coordinates. Height,
+gradient, and restrained horizontal displacement come from the same field.
+One or two decorrelated fragment samples add bounded capillary normals on
+Medium/High quality. This removes the dominant low-frequency sine direction
+without adding a texture, mesh, or camera-relative input, so normals,
+highlights, and crests stay attached. Terrain depth controls dry discard,
+absorption, shallow color, and shore readability. Shore sediment and foam are
+generated only from traced
 terrain/water intersections, not the volume rectangle.
 
 ## Visual profiles
@@ -110,8 +114,11 @@ used.
 
 ## Visual evidence
 
-All solo pairs use Eden, seed `42042`, High quality, 1920 x 1080, the same
-camera transform/FOV, time `18`, exposure, and Chrome/Apple-M5 renderer.
+All solo source captures use Eden, seed `42042`, High quality, 1920 x 1080,
+the same camera transform/FOV, time `18`, exposure, and Chrome/Apple-M5
+renderer. For bounded repository size, both sides of every pair were uniformly
+downsampled after capture to 1280 x 720 without cropping. Online sources use
+1440 x 900 and both stored sides are uniformly downsampled to 1280 x 800.
 
 | View | Phase 4 water | New water |
 | --- | --- | --- |
@@ -151,30 +158,38 @@ unchanged. These are local-device measurements, not a claim for other GPUs.
 | Preset | Build | p50 | p95 | p99 | Worst | First | Warm | Frames >50 ms |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | High | Phase 4 | 8.3 ms | 9.2 ms | 9.3 ms | 16.7 ms | 1.4 ms | 1.3 ms | 0 |
-| High | New | 8.3 ms | 9.2 ms | 9.4 ms | 17.4 ms | 1.7 ms | 1.4 ms | 0 |
+| High | New | 8.3 ms | 8.7 ms | 9.2 ms | 16.6 ms | 1.6 ms | 1.3 ms | 0 |
 | Ultra | Phase 4 | 17.0 ms | 25.1 ms | 26.4 ms | 35.6 ms | 2.6 ms | 2.4 ms | 0 |
-| Ultra | New | 16.6 ms | 17.5 ms | 18.3 ms | 31.9 ms | 2.1 ms | 2.4 ms | 0 |
+| Ultra | New | 16.6 ms | 17.4 ms | 17.5 ms | 34.1 ms | 6.3 ms | 3.4 ms | 0 |
 
-High p95 was unchanged, p99 changed by +0.1 ms, and the synchronized warm
-frame changed by +0.1 ms. The presentation EMA changed from 1.50 to 1.67 ms.
-Ultra p95 improved by 7.6 ms under the matched run, its synchronized warm frame
-was unchanged at 2.4 ms, and its presentation EMA changed from 2.25 to
-2.15 ms. Both remain within the 1.5 ms High / 2.5 ms Ultra incremental budgets,
-with no frame over 50 ms. Cinematic measured p50 16.7 ms, p95 24.8 ms,
-p99 25.6 ms, worst 37.2 ms, and zero frames over 50 ms. Headed rAF pacing can
+High p95 improved by 0.5 ms, p99 improved by 0.1 ms, and the synchronized warm
+frame was unchanged. The presentation EMA changed from 1.50 to 1.93 ms.
+Ultra p95 improved by 7.7 ms under the matched run, its synchronized warm frame
+changed from 2.4 to 3.4 ms, and its presentation EMA changed from 2.25 to
+2.57 ms. Both remain within the 1.5 ms High / 2.5 ms Ultra incremental budgets,
+with no frame over 50 ms. Cinematic measured p50 16.7 ms, p95 25.1 ms,
+p99 25.9 ms, worst 38.1 ms, and zero frames over 50 ms. Headed rAF pacing can
 still reflect Chrome/display scheduling, so the synchronized frame and
 presentation measurements are retained alongside the frame percentiles.
 
 At the matched High camera, renderer totals remained 2 measured draw calls;
 triangles changed from 18,008 to 18,023. The water system's deterministic
 active-object count across the three authored volumes is 7 draws, while its
-selected surface meshes contain 7,398 triangles. The matched renderer total
-above includes the terrain shoreline presentation. Low disables foam and
-reports 5 configured draws and 4,198 selected surface triangles.
+selected surface meshes contain 8,516 triangles at the final captured view.
+The matched renderer total above includes the terrain shoreline presentation.
+Low disables foam and reports 5 configured draws and 4,198 selected surface
+triangles.
+
+The final Low capture measured p50/p95/p99 8.3/9.1/9.3 ms, and Medium
+measured 8.3/9.2/9.3 ms; neither produced a frame over 50 ms. Ultra and
+Cinematic each used 13,884 selected surface triangles. Resolution-normalized
+gradient data keeps Low calmer than High while preserving increasing detail in
+Ultra and Cinematic. Low/Medium/Cinematic first/warm visible frames were
+2.1/1.7 ms, 1.3/1.7 ms, and 2.5/2.8 ms respectively.
 
 High renderer memory counters changed from 172 to 180 geometries and 129 to
 135 textures. Program count remained 116. First-visible time changed from
-1.4 to 1.7 ms; warm-visible changed from 1.3 to 1.4 ms. No shader, console,
+1.4 to 1.6 ms; warm-visible remained 1.3 ms. No shader, console,
 WebGL, additional-canvas, or first-visible multi-second failure occurred.
 
 ## Online invariants and bandwidth
@@ -193,15 +208,15 @@ not real-network compatibility evidence.
 - No external WebSocket, relay candidate, water channel, water packet, or
   water-related production request was observed.
 - Snapshot payload size was exactly 196 bytes before and 196 bytes after.
-  Phase 4 sent 21 observed snapshots (4,116 bytes); the new build sent 23
-  (4,508 bytes) because the one-second observation crossed two more 20 Hz
+  Phase 4 sent 21 observed snapshots (4,116 bytes); the final new build sent 24
+  (4,704 bytes) because the one-second observation crossed three more 20 Hz
   ticks. Per-snapshot size was unchanged.
-- The one reliable control send was 4,599 bytes before and 4,586 bytes after;
+- The one reliable control send was 4,599 bytes before and 4,596 bytes after;
   the difference is payload data such as the random canonical match seed, not
   a water field.
 - RTC host upload over the observation windows was 20,185 bytes before and
-  21,364 bytes after. Channel labels and packet layouts were unchanged, and
-  the extra two snapshots account for 392 bytes of the timing-dependent RTC
+  21,826 bytes after. Channel labels and packet layouts were unchanged, and
+  the extra three snapshots account for 588 bytes of the timing-dependent RTC
   delta. No water channel, packet, or high-frequency field exists.
 
 Reconnect remains covered by the Phase 4 fake-transport and browser gameplay
@@ -237,7 +252,7 @@ Observed on 2026-08-31:
   packages, with no new dependency.
 - `npm audit --audit-level=high`: passed; zero vulnerabilities.
 - `npm run audit:water`: passed against source and the production bundle.
-- `npm test`: passed; 60 files and 611 tests.
+- `npm test`: passed; 60 files and 614 tests.
 - `npm run build`: passed; 119 modules and 233 audited production files. The
   existing large-chunk warning for Rapier/application bundles remains.
 - `npm run sim`: passed; deterministic hard NeoCity simulation, seed `75798`,
@@ -245,7 +260,7 @@ Observed on 2026-08-31:
   chests, and 105 pickups.
 - `npm run cloudflare:dry-run`: passed; 280 static files and no bindings or
   server-side multiplayer path.
-- Focused water and physical-map-hash tests passed; 3 files and 25 tests. The
+- Focused water and physical-map-hash tests passed; 3 files and 29 tests. The
   full suite includes the Phase 4 impairment, reconnect, latency compensation,
   authority, and multi-roster cases.
 - `npm run test:browser:online:gameplay`: passed the full two-context path from
@@ -261,6 +276,9 @@ Observed on 2026-08-31:
 - The headed low-sun temporal QA captured ten deterministic 30 Hz presentation
   frames; inspected start/middle/end frames moved continuously without a phase
   pop, seam, or detached highlight.
+- A deterministic gradient-orientation regression check limits any single
+  direction bin to less than 16% of total field magnitude; the final Eden High
+  field measured 13.5%, and fixed-camera review found no dominant parallel band.
 - Headed two-context direct-P2P online water capture passed with a succeeded,
   nominated, non-relay ICE pair and no external WebSocket.
 - Repeated create, quality-change, partial-construction failure, and

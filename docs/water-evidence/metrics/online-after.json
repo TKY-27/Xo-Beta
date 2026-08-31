@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-08-31T06:43:14.976Z",
+  "capturedAt": "2026-08-31T07:27:06.121Z",
   "browser": "Google Chrome (Playwright channel)",
   "headed": true,
   "viewport": {
@@ -24,8 +24,8 @@
     "guest": "eden"
   },
   "seed": {
-    "host": 2305119770,
-    "guest": 2305119770
+    "host": 2511106335,
+    "guest": 2511106335
   },
   "roles": {
     "host": "host",
@@ -79,8 +79,8 @@
           {
             "connectionState": "connected",
             "iceConnectionState": "connected",
-            "bytesSent": 15766,
-            "bytesReceived": 6910,
+            "bytesSent": 16719,
+            "bytesReceived": 8265,
             "packetsSent": null,
             "packetsReceived": null,
             "packetsLost": null,
@@ -103,7 +103,7 @@
         "channelSends": {
           "control": {
             "sends": 4,
-            "bytes": 5880
+            "bytes": 5890
           },
           "event": {
             "sends": 0,
@@ -114,8 +114,8 @@
             "bytes": 0
           },
           "snapshot": {
-            "sends": 2,
-            "bytes": 392
+            "sends": 4,
+            "bytes": 784
           }
         },
         "webSocketCount": 1,
@@ -130,8 +130,8 @@
           {
             "connectionState": "connected",
             "iceConnectionState": "connected",
-            "bytesSent": 6910,
-            "bytesReceived": 16224,
+            "bytesSent": 8265,
+            "bytesReceived": 17177,
             "packetsSent": null,
             "packetsReceived": null,
             "packetsLost": null,
@@ -161,8 +161,8 @@
           {
             "connectionState": "connected",
             "iceConnectionState": "connected",
-            "bytesSent": 37130,
-            "bytesReceived": 30936,
+            "bytesSent": 38545,
+            "bytesReceived": 33221,
             "packetsSent": null,
             "packetsReceived": null,
             "packetsLost": null,
@@ -185,7 +185,7 @@
         "channelSends": {
           "control": {
             "sends": 5,
-            "bytes": 10466
+            "bytes": 10486
           },
           "event": {
             "sends": 0,
@@ -196,8 +196,8 @@
             "bytes": 0
           },
           "snapshot": {
-            "sends": 25,
-            "bytes": 4900
+            "sends": 28,
+            "bytes": 5488
           }
         },
         "webSocketCount": 1,
@@ -212,8 +212,8 @@
           {
             "connectionState": "connected",
             "iceConnectionState": "connected",
-            "bytesSent": 30936,
-            "bytesReceived": 37130,
+            "bytesSent": 33221,
+            "bytesReceived": 38545,
             "packetsSent": null,
             "packetsReceived": null,
             "packetsLost": null,
@@ -238,15 +238,15 @@
     },
     "delta": {
       "host": {
-        "bytesSent": 21364,
-        "bytesReceived": 24026,
+        "bytesSent": 21826,
+        "bytesReceived": 24956,
         "packetsSent": null,
         "packetsReceived": null,
         "packetsLost": null
       },
       "guest": {
-        "bytesSent": 24026,
-        "bytesReceived": 20906,
+        "bytesSent": 24956,
+        "bytesReceived": 21368,
         "packetsSent": null,
         "packetsReceived": null,
         "packetsLost": null
