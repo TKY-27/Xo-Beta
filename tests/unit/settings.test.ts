@@ -21,10 +21,12 @@ describe('persistent settings boundary', () => {
       reducedMotion: true,
       tpsCharacterSide: 'right',
       playerSkin: 'specter',
+      preferredItemSlots: { enabled: true, slots: ['shotgun', 'smg', 'ar', 'sniper', 'healing'] },
       bindings: { forward: 'KeyI' },
     });
 
     expect(getSettings()).toMatchObject({ quality: 'low', fov: 96, reducedMotion: true, tpsCharacterSide: 'right', playerSkin: 'specter' });
+    expect(getSettings().preferredItemSlots).toEqual({ enabled: true, slots: ['shotgun', 'smg', 'ar', 'sniper', 'healing'] });
     expect(getSettings().bindings.forward).toBe('KeyI');
     expect(getSettings().bindings.back).toBe('KeyS');
   });
@@ -36,6 +38,7 @@ describe('persistent settings boundary', () => {
       masterVolume: -5,
       resolutionScale: Number.NaN,
       crosshairColor: 'url(javascript:bad)',
+      preferredItemSlots: { enabled: true, slots: ['ar', '__proto__', 'none', 'none', 'none'] },
       bindings: { forward: '\n', jump: 'Space', __proto__: { fire: 'Bad' } },
     });
     const settings = getSettings();
@@ -51,6 +54,7 @@ describe('persistent settings boundary', () => {
     expect(settings.bindings.jump).toBe('Space');
     expect(settings.tpsCharacterSide).toBe('left');
     expect(settings.playerSkin).toBe('vanguard');
+    expect(settings.preferredItemSlots).toEqual({ enabled: false, slots: ['none', 'none', 'none', 'none', 'none'] });
     expect(settings.bindings.shoulderSwap).toBe('KeyZ');
   });
 

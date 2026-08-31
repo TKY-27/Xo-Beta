@@ -89,7 +89,7 @@
     <div class="menu-shade left"></div>
     <header class="brand">
       <h1 class="logo">Xo<span> Beta</span></h1>
-      <p class="tagline" data-i18n="menu.tagline">Single-player battle royale · 10 combatants · last one standing</p>
+      <p class="tagline" data-i18n="menu.tagline">Private direct-P2P matches · up to 4 humans · 10 combatants</p>
     </header>
     <nav class="menu-rail">
       <button id="btn-play" class="btn-play" data-i18n="menu.soloPlay">SOLO PLAY</button>
@@ -101,6 +101,13 @@
     <footer class="menu-foot">
       <p class="hint" data-i18n="menu.hint">Desktop keyboard &amp; mouse required · Click PLAY to lock the cursor</p>
     </footer>
+    <button id="btn-skin-customization" class="skin-customization-launch" type="button" data-i18n-aria-label="menu.skinCustomization" aria-label="SKIN CUSTOMIZATION">
+      <span class="skin-launch-icon" aria-hidden="true">◇</span>
+      <span class="skin-launch-copy">
+        <span class="skin-launch-kicker" data-i18n="menu.skinCustomization">SKIN CUSTOMIZATION</span>
+        <strong id="skin-launch-name">Vanguard</strong>
+      </span>
+    </button>
   </div>
 
   <!-- Play flow: authored map browser -->
@@ -110,18 +117,31 @@
       <button id="btn-play-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
       <h2 data-i18n="menu.selectArena">SELECT ARENA</h2>
     </header>
-    <div class="play-body">
+    <div class="play-body empty-selection">
       <div id="map-list" class="map-list"></div>
-      <section id="selected-arena" class="selected-arena" aria-live="polite" aria-labelledby="selected-arena-title"></section>
+      <section id="selected-arena" class="selected-arena hidden" aria-live="polite" aria-labelledby="selected-arena-title" aria-hidden="true"></section>
       <div class="play-side">
-        <section id="skin-selector" aria-labelledby="skin-selector-title"></section>
         <div id="difficulty-block">
           <h3 data-i18n="menu.difficulty">BOT DIFFICULTY</h3>
           <div id="difficulty-list" class="difficulty-list"></div>
         </div>
         <button id="btn-play-start" class="btn-play deploy">START MATCH</button>
         <button id="btn-practice-start" class="btn-quiet practice" data-i18n="menu.practice">PRACTICE MODE</button>
+        <p id="play-selection-error" class="play-selection-error" role="alert" aria-live="polite"></p>
       </div>
+    </div>
+  </div>
+
+  <!-- Dedicated appearance screen. The lobby renderer stays mounted while this panel is open. -->
+  <div id="skin-customization-menu" class="screen hidden">
+    <div class="menu-shade full"></div>
+    <header class="screen-head">
+      <button id="btn-skin-customization-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
+      <h2 id="skin-customization-title" data-i18n="menu.skinCustomization">SKIN CUSTOMIZATION</h2>
+    </header>
+    <div class="skin-customization-body">
+      <section id="skin-customization-selector" aria-labelledby="skin-customization-selector-title"></section>
+      <p class="skin-customization-note" data-i18n="menu.skinCustomizationNote">Choose the appearance used by your next match. The preview updates immediately.</p>
     </div>
   </div>
 
@@ -373,7 +393,7 @@
     </div>
   </div>
 
-  <!-- Mouse-driven inventory. The match remains live while this is open. -->
+  <!-- Pointer-driven inventory. The match remains live while this is open. -->
   <div id="inventory-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="inventory-title">
     <div class="inventory-shell">
       <header class="inventory-header">
@@ -399,11 +419,12 @@
           <div id="inventory-drop-zone" class="inventory-drop-zone">
             <span class="drop-icon">↓</span>
             <strong data-i18n="inventory.drop">DROP ITEM</strong>
-            <small data-i18n="inventory.dropHint">Drag an item here to drop it</small>
+            <small data-i18n="inventory.dropHint">Move an item here to drop it</small>
           </div>
         </section>
       </div>
-      <footer class="inventory-footer" data-i18n="inventory.hint">Drag to reorder · Click to equip · Drag below to drop</footer>
+      <footer class="inventory-footer" data-i18n="inventory.hint">Pointer to reorder · Click to equip · Move below to drop</footer>
+      <div id="inventory-live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     </div>
   </div>
 

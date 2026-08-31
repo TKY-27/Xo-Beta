@@ -44,6 +44,7 @@ function deadzone(v: number, dz: number): number {
 export class GamepadInput {
   private prevButtons = new Array<boolean>(20).fill(false);
   private prevFireDown = false;
+  private crouchTogglePending = false;
   private lookX = 0;
   private lookY = 0;
   connected = false;
@@ -65,6 +66,13 @@ export class GamepadInput {
     this.lookX = 0;
     this.lookY = 0;
     return out;
+  }
+
+  /** Return and clear one edge-triggered crouch toggle from the B button. */
+  consumeCrouchToggle(): boolean {
+    const pending = this.crouchTogglePending;
+    this.crouchTogglePending = false;
+    return pending;
   }
 
   private pressed(pad: Gamepad, idx: number): boolean {
@@ -89,6 +97,8 @@ export class GamepadInput {
       // Treat a disconnected controller as released so reconnecting while RT
       // is already down still produces one well-defined rising edge.
       this.prevFireDown = false;
+      this.prevButtons.fill(false);
+      this.crouchTogglePending = false;
       return 0;
     }
 
@@ -126,8 +136,13 @@ export class GamepadInput {
     // Face buttons
     cmd.jumpHeld ||= this.pressed(pad, BUTTON.A);
     if (this.edge(pad, BUTTON.A)) { cmd.jumpPressed = true; this.cb.onJumpPress(); }
-    cmd.crouchHeld ||= this.pressed(pad, BUTTON.B);
-    if (this.edge(pad, BUTTON.B)) { cmd.crouchPressed = true; this.cb.onCrouchPress?.(); }
+    // Crouch is a shared toggle owned by PlayerController. Do not merge the
+    // physical B hold into the command: doing so would make keyboard and
+    // gamepad semantics disagree and would reintroduce keyup-dependent state.
+    if (this.edge(pad, BUTTON.B)) {
+      this.crouchTogglePending = true;
+      this.cb.onCrouchPress?.();
+    }
     if (this.edge(pad, BUTTON.X)) { cmd.reloadPressed = true; this.cb.onReloadPress(); }
     if (this.edge(pad, BUTTON.Y)) { cmd.interactPressed = true; this.cb.onInteractPress(); }
 

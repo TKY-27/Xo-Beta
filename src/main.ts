@@ -637,7 +637,9 @@ async function boot(): Promise<void> {
     showScreen: (id) => menus.showOnlineScreen(id),
   });
   menus.onUiSound = (kind) => audio.uiClick(kind);
-  menus.onScreenChanged = (id) => lobby.compose(id === 'settings-menu' ? 'settings' : 'main');
+  menus.onScreenChanged = (id) => lobby.compose(
+    id === 'settings-menu' ? 'settings' : id === 'skin-customization-menu' ? 'skin' : 'main',
+  );
   menus.onPlayRequested = (sel) => {
     if (activeOnlineCoordinator) {
       showMainMenuAfterOnline('host-ended');

@@ -13,6 +13,7 @@ async function main(): Promise<void> {
   await page.waitForTimeout(500);
   await page.click('#btn-play');
   await page.waitForTimeout(300);
+  await page.click('#map-list .map-card:nth-child(1)');
   await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
   await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 });
   await page.waitForTimeout(2500);

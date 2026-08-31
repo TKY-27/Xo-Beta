@@ -159,10 +159,8 @@ async function main(): Promise<void> {
       await page.waitForTimeout(400);
       await page.click('#btn-play');
       await page.waitForTimeout(300);
-      if (map !== 'neocity') {
-        const idx = productionMaps.indexOf(map as typeof productionMaps[number]) + 1;
-        await page.click(`#map-list .map-card:nth-child(${idx})`);
-      }
+      const idx = productionMaps.indexOf(map as typeof productionMaps[number]) + 1;
+      await page.click(`#map-list .map-card:nth-child(${idx})`);
       await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
       await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 });
       await page.bringToFront();

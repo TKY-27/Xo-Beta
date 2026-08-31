@@ -1,4 +1,10 @@
 import type { SkinId } from '../core/settings';
+import {
+  clonePreferredItemSlots,
+  DEFAULT_PREFERRED_ITEM_SLOTS,
+  validatePreferredItemSlots,
+  type PreferredItemSlots,
+} from '../core/preferredSlots';
 import { VALID_SKIN_IDS } from '../sim/roster';
 import {
   base64UrlDecode,
@@ -48,6 +54,7 @@ export interface AdmissionRequest {
   readonly protocolSession: string;
   readonly displayName: string;
   readonly skinId: SkinId;
+  readonly preferredItemSlots: PreferredItemSlots;
   readonly requestedSlot: number | null;
   readonly reconnectToken: string | null;
   readonly nonce: string;
@@ -89,6 +96,7 @@ interface CreateAdmissionRequestOptions {
   readonly protocolSession: string;
   readonly displayName: string;
   readonly skinId: SkinId;
+  readonly preferredItemSlots?: PreferredItemSlots;
   readonly lobbyAuthenticationKey: Uint8Array;
   readonly requestedSlot?: number | null;
   readonly reconnectToken?: string | null;
@@ -99,7 +107,7 @@ interface CreateAdmissionRequestOptions {
 const REQUEST_KEYS = Object.freeze([
   'type', 'version', 'role', 'protocolVersion', 'buildId', 'features',
   'expectedHostFingerprint', 'participantId', 'protocolSession', 'displayName',
-  'skinId', 'requestedSlot', 'reconnectToken', 'nonce', 'issuedAt', 'proof',
+  'skinId', 'preferredItemSlots', 'requestedSlot', 'reconnectToken', 'nonce', 'issuedAt', 'proof',
 ]);
 const ACCEPTED_RESPONSE_KEYS = Object.freeze([
   'type', 'version', 'accepted', 'role', 'requestNonce', 'hostPeerId',
@@ -122,6 +130,7 @@ export async function createAdmissionRequest(options: CreateAdmissionRequestOpti
     protocolSession: options.protocolSession,
     displayName: normalizeDisplayName(options.displayName),
     skinId: validateSkin(options.skinId),
+    preferredItemSlots: validatePreferredProfile(options.preferredItemSlots),
     requestedSlot: validateRequestedSlot(options.requestedSlot ?? null),
     reconnectToken: validateOptionalToken(options.reconnectToken ?? null),
     nonce: options.nonce ?? randomId(18),
@@ -156,6 +165,7 @@ export async function validateAdmissionRequest(
     protocolSession: identifier(record.protocolSession, 'protocolSession'),
     displayName: normalizeDisplayName(record.displayName),
     skinId: validateSkin(record.skinId),
+    preferredItemSlots: validatePreferredProfile(record.preferredItemSlots),
     requestedSlot: validateRequestedSlot(record.requestedSlot),
     reconnectToken: validateOptionalToken(record.reconnectToken),
     nonce: identifier(record.nonce, 'nonce'),
@@ -212,6 +222,7 @@ function validateRequestFields(request: Omit<AdmissionRequest, 'proof'>): void {
   if (request.protocolVersion !== PROTOCOL_VERSION) throw new Error('incompatible');
   identifier(request.buildId, 'buildId');
   validateFeatures(request.features);
+  validatePreferredItemSlots(request.preferredItemSlots);
   fingerprint(request.expectedHostFingerprint);
   if (request.reconnectToken === null) {
     if (request.participantId === null) throw new Error('invalid-participantId');
@@ -329,6 +340,14 @@ function normalizeDisplayName(value: unknown): string {
 function validateSkin(value: unknown): SkinId {
   if (typeof value !== 'string' || !VALID_SKIN_IDS.includes(value as SkinId)) throw new Error('invalid-skin');
   return value as SkinId;
+}
+
+function validatePreferredProfile(value: unknown): PreferredItemSlots {
+  try {
+    return clonePreferredItemSlots(value === undefined ? DEFAULT_PREFERRED_ITEM_SLOTS : validatePreferredItemSlots(value));
+  } catch {
+    throw new Error('invalid-preferred-item-slots');
+  }
 }
 
 function validateRequestedSlot(value: unknown): number | null {

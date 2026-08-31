@@ -1,5 +1,11 @@
 import type { Difficulty } from '../core/balance';
 import type { SkinId } from '../core/settings';
+import {
+  clonePreferredItemSlots,
+  DEFAULT_PREFERRED_ITEM_SLOTS,
+  validatePreferredItemSlots,
+  type PreferredItemSlots,
+} from '../core/preferredSlots';
 import type { MatchMode, RosterEntry } from '../sim/roster';
 import type { MapDef } from '../world/types';
 import type { MapId } from '../world';
@@ -362,10 +368,16 @@ export function validateMatchStartControl(value: unknown): MatchStartControl {
 
 function validateRosterEntry(value: unknown): RosterEntry {
   const object = record(value, 'roster entry');
-  exactKeys(object, [
+  const baseKeys = [
     'slotId', 'actorId', 'displayName', 'ownership', 'connectionState', 'teamId',
     'skinId', 'accentColor',
-  ]);
+  ];
+  const preferredItemSlots = Object.prototype.hasOwnProperty.call(object, 'preferredItemSlots')
+    ? validatePreferredProfile(object.preferredItemSlots)
+    : clonePreferredItemSlots(DEFAULT_PREFERRED_ITEM_SLOTS);
+  exactKeys(object, Object.prototype.hasOwnProperty.call(object, 'preferredItemSlots')
+    ? [...baseKeys, 'preferredItemSlots']
+    : baseKeys);
   const ownershipObject = record(object.ownership, 'roster ownership');
   const ownershipKind = enumValue(ownershipObject.kind, ['local-human', 'remote-human', 'bot'] as const, 'ownership kind');
   if (ownershipKind === 'bot') exactKeys(ownershipObject, ['kind']);
@@ -383,7 +395,16 @@ function validateRosterEntry(value: unknown): RosterEntry {
     teamId,
     skinId: enumValue(object.skinId, ['vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova'] as const, 'skinId'),
     accentColor: integer(object.accentColor, 0, 0xffffff, 'accentColor'),
+    preferredItemSlots,
   });
+}
+
+function validatePreferredProfile(value: unknown): PreferredItemSlots {
+  try {
+    return clonePreferredItemSlots(value === undefined ? DEFAULT_PREFERRED_ITEM_SLOTS : validatePreferredItemSlots(value));
+  } catch {
+    throw new Error('Invalid preferred item slot settings');
+  }
 }
 
 function canonicalJson(value: unknown): string {

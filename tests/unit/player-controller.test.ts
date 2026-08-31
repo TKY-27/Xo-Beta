@@ -150,6 +150,27 @@ describe('QA input timing', () => {
     controller.dispose();
   });
 
+  it('treats crouch as a toggle and ignores keyup and repeated keydown events', () => {
+    const controller = makeController();
+    window.dispatchEvent(keyEvent('keydown', 'ControlLeft'));
+    const first = controller.sampleCommand(0, 1 / 60);
+    expect(first.crouchPressed).toBe(true);
+    expect(first.crouchHeld).toBe(true);
+
+    window.dispatchEvent(keyEvent('keydown', 'ControlLeft', true));
+    window.dispatchEvent(keyEvent('keyup', 'ControlLeft'));
+    now = 10;
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(true);
+    now = QA_TAP_HOLD_MS + 1;
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(true);
+
+    window.dispatchEvent(keyEvent('keydown', 'ControlLeft'));
+    const second = controller.sampleCommand(0, 1 / 60);
+    expect(second.crouchPressed).toBe(true);
+    expect(second.crouchHeld).toBe(false);
+    controller.dispose();
+  });
+
   it('moves promptly but only about one walking step for a very short W tap', () => {
     const controller = makeController();
     window.dispatchEvent(keyEvent('keydown', 'KeyW'));
@@ -197,6 +218,38 @@ describe('QA input timing', () => {
     controller.dispose();
   });
 
+  it('uses the same latched crouch state for a gamepad B-button toggle', () => {
+    const buttons = Array.from({ length: 20 }, () => ({ pressed: false, value: 0 }));
+    const pad = { connected: true, axes: [0, 0, 0, 0], buttons } as unknown as Gamepad;
+    vi.stubGlobal('navigator', { getGamepads: () => [pad] });
+    const controller = makeController();
+    controller.gamepad = new GamepadInput({
+      onJumpPress: () => undefined, onReloadPress: () => undefined,
+      onInteractPress: () => undefined, onDashPress: () => undefined,
+      onGrapplePress: () => undefined, onPoundPress: () => undefined,
+      onMedkitPress: () => undefined, onShieldPress: () => undefined,
+      onDropWeaponPress: () => undefined, onCameraToggle: () => undefined,
+      onMapToggle: () => undefined, onPauseRequest: () => undefined,
+      onSlotRequest: () => undefined, onMeleePress: () => undefined,
+      onPingPress: () => undefined,
+    });
+
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(false);
+    buttons[1] = { pressed: true, value: 1 };
+    const first = controller.sampleCommand(0, 1 / 60);
+    expect(first.crouchPressed).toBe(true);
+    expect(first.crouchHeld).toBe(true);
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(true);
+
+    buttons[1] = { pressed: false, value: 0 };
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(true);
+    buttons[1] = { pressed: true, value: 1 };
+    const second = controller.sampleCommand(0, 1 / 60);
+    expect(second.crouchPressed).toBe(true);
+    expect(second.crouchHeld).toBe(false);
+    controller.dispose();
+  });
+
   it('retains a mouse click edge until a fixed sample consumes it', () => {
     const controller = makeController();
     // QA mode intentionally allows input without pointer lock, matching the
@@ -215,6 +268,8 @@ describe('QA input timing', () => {
     const controller = makeController();
     window.dispatchEvent(keyEvent('keydown', 'KeyW'));
     window.dispatchEvent(keyEvent('keydown', 'KeyR'));
+    window.dispatchEvent(keyEvent('keydown', 'ControlLeft'));
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(true);
     window.dispatchEvent(mouseEvent('mousedown', 0));
     controller.enabled = false;
 
@@ -227,6 +282,18 @@ describe('QA input timing', () => {
     expect(command.reloadPressed).toBe(false);
     expect(command.firePressed).toBe(false);
     expect(command.fireHeld).toBe(false);
+    expect(command.crouchPressed).toBe(false);
+    expect(command.crouchHeld).toBe(false);
+    controller.dispose();
+  });
+
+  it('clears the crouch latch when entering spectator mode', () => {
+    const controller = makeController();
+    window.dispatchEvent(keyEvent('keydown', 'ControlLeft'));
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(true);
+    controller.setSpectatorMode(true);
+    controller.setSpectatorMode(false);
+    expect(controller.sampleCommand(0, 1 / 60).crouchHeld).toBe(false);
     controller.dispose();
   });
 

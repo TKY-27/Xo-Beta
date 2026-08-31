@@ -25,7 +25,11 @@ export function skinIdAtOffset(current: SkinId, offset: number): SkinId {
 export class SkinSelector {
   private readonly unsubscribe: () => void;
 
-  constructor(private readonly root: HTMLElement, private readonly onSelect?: (id: SkinId) => void) {
+  constructor(
+    private readonly root: HTMLElement,
+    private readonly onSelect?: (id: SkinId) => void,
+    private readonly headingId = 'skin-selector-title',
+  ) {
     this.root.classList.add('skin-selector');
     this.unsubscribe = onSettingsChanged(() => this.sync());
     this.render();
@@ -55,7 +59,7 @@ export class SkinSelector {
     this.root.replaceChildren();
 
     const heading = document.createElement('h3');
-    heading.id = 'skin-selector-title';
+    heading.id = this.headingId;
     heading.textContent = t('menu.yourSkin');
     this.root.setAttribute('aria-labelledby', heading.id);
 
@@ -157,7 +161,7 @@ export class SkinSelector {
     });
   }
 
-  private focusSelected(): void {
+  focusSelected(): void {
     this.root.querySelector<HTMLButtonElement>(`.skin-card[data-skin="${getSettings().playerSkin}"]`)?.focus();
   }
 }

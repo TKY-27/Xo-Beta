@@ -60,7 +60,8 @@ export class PlayerController implements ActorController {
   private pendingDropWeapon = false;
   private pendingMelee = false;
   private slotRequest: number | null = null;
-  private lastCrouchHeld = false;
+  private lastCrouchDown = false;
+  private crouchLatched = false;
 
   /** Smoothed mouse velocity for weapon sway. */
   lookVelX = 0;
@@ -260,7 +261,8 @@ export class PlayerController implements ActorController {
     this.pendingDropWeapon = false;
     this.pendingMelee = false;
     this.slotRequest = null;
-    this.lastCrouchHeld = false;
+    this.lastCrouchDown = false;
+    this.crouchLatched = false;
   }
 
   resetLook(yaw: number, pitch: number): void {
@@ -325,10 +327,12 @@ export class PlayerController implements ActorController {
     cmd.moveZ = z;
     cmd.sprint = this.keys.has(b.sprint);
 
-    const crouchHeld = this.keys.has(b.crouch);
-    cmd.crouchPressed = crouchHeld && !this.lastCrouchHeld;
-    cmd.crouchHeld = crouchHeld;
-    this.lastCrouchHeld = crouchHeld;
+    const crouchDown = this.keys.has(b.crouch);
+    const crouchPressed = crouchDown && !this.lastCrouchDown;
+    if (crouchPressed) this.crouchLatched = !this.crouchLatched;
+    this.lastCrouchDown = crouchDown;
+    cmd.crouchPressed = crouchPressed;
+    cmd.crouchHeld = this.crouchLatched;
 
     cmd.jumpPressed = this.pendingJump;
     cmd.jumpHeld = this.keys.has(b.jump);
@@ -365,7 +369,14 @@ export class PlayerController implements ActorController {
     const safeAdsAmount = Number.isFinite(adsAmount)
       ? Math.max(0, Math.min(1, adsAmount))
       : 0;
-    if (this.gamepad) this.gamepad.applyTo(cmd, dt, safeAdsAmount);
+    if (this.gamepad) {
+      this.gamepad.applyTo(cmd, dt, safeAdsAmount);
+      if (this.gamepad.consumeCrouchToggle()) {
+        this.crouchLatched = !this.crouchLatched;
+        cmd.crouchPressed = true;
+      }
+      cmd.crouchHeld = this.crouchLatched;
+    }
 
     // Look — gamepad is polled above, then consumed in the same simulation
     // tick so right-stick aiming cannot lag one frame behind movement.

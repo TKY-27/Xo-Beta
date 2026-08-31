@@ -362,6 +362,7 @@ export class Match {
         entry.accentColor,
         personalityForRosterEntry(entry),
         entry.skinId,
+        entry.preferredItemSlots,
       );
       this.actors.push(actor);
     }
@@ -1373,6 +1374,8 @@ export class Match {
       if (victim.alive) continue;
       if (this.processedEliminations.has(victim.id)) continue;
       this.processedEliminations.add(victim.id);
+      victim.crouched = false;
+      victim.footstepAccum = 0;
       const aliveBefore = this.actors.filter((a) => a.alive).length + 1;
       victim.placement = aliveBefore;
       victim.deathTime = this.time;

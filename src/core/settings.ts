@@ -1,5 +1,11 @@
 /** Persistent user settings with safe fallbacks when storage is unavailable. */
 
+import {
+  DEFAULT_PREFERRED_ITEM_SLOTS,
+  safePreferredItemSlots,
+  type PreferredItemSlots,
+} from './preferredSlots';
+
 export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra' | 'cinematic';
 export type CameraMode = 'fps' | 'tps';
 export type TpsCharacterSide = 'left' | 'right';
@@ -63,6 +69,8 @@ export interface Settings {
   tpsCharacterSide: TpsCharacterSide;
   /** Selected player appearance. Applied to the next spawned rig in a match. */
   playerSkin: SkinId;
+  /** Optional deterministic pickup preferences for the five inventory slots. */
+  preferredItemSlots: PreferredItemSlots;
   crosshairColor: string;
   crosshairSize: number;
   crosshairDot: boolean;
@@ -114,6 +122,7 @@ export const DEFAULT_SETTINGS: Settings = {
   cameraMode: 'fps',
   tpsCharacterSide: 'left',
   playerSkin: 'vanguard',
+  preferredItemSlots: DEFAULT_PREFERRED_ITEM_SLOTS,
   crosshairColor: '#eaf6ff',
   crosshairSize: 10,
   crosshairDot: true,
@@ -221,6 +230,7 @@ function mergeSettings(base: Settings, patch: unknown): Settings {
     cameraMode: choice(patch.cameraMode, base.cameraMode, ['fps', 'tps']),
     tpsCharacterSide: choice(patch.tpsCharacterSide, base.tpsCharacterSide, ['left', 'right']),
     playerSkin: choice(patch.playerSkin, base.playerSkin, ['vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova']),
+    preferredItemSlots: safePreferredItemSlots(patch.preferredItemSlots, base.preferredItemSlots),
     crosshairColor,
     crosshairSize: bounded(patch.crosshairSize, base.crosshairSize, 4, 20),
     crosshairDot: bool(patch.crosshairDot, base.crosshairDot),

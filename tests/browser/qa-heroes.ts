@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     await page.click('#btn-play');
     await page.waitForTimeout(300);
     const idx = ['neocity', 'oldfront', 'eden', 'ashara'].indexOf(map) + 1;
-    if (map !== 'neocity') await page.click(`#map-list .map-card:nth-child(${idx})`);
+    await page.click(`#map-list .map-card:nth-child(${idx})`);
     await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
     await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 });
     const evalSoft = async <T>(expr: string, ms = 5000): Promise<T | null> =>

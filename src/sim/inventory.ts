@@ -112,8 +112,8 @@ export class Inventory {
 
   /**
    * Swap two inventory slots, including an occupied slot with an empty one.
-   * Selection follows the item so dragging the equipped item never silently
-   * changes what is in the player's hands. Fists (-1) are not draggable.
+   * Selection follows the item so moving the equipped item never silently
+   * changes what is in the player's hands. Fists (-1) are not movable.
    */
   swapSlots(from: number, to: number): boolean {
     if (!Number.isInteger(from) || !Number.isInteger(to)

@@ -166,7 +166,9 @@ export class MovementSystem {
     }
     if (a.dashTimer > 0) a.dashTimer -= dt;
 
-    // Crouch state (hold)
+    // Crouch state is a host-authoritative latch supplied by the controller.
+    // The movement layer only applies the requested state and keeps the
+    // existing headroom check when standing up.
     const wasCrouched = a.crouched;
     a.crouched = cmd.crouchHeld && a.state !== 'slide' && a.body.grounded;
     if (wasCrouched && !a.crouched) {
@@ -331,8 +333,10 @@ export class MovementSystem {
     // QA invariant: ground-locomotion state while physically airborne.
     a.airborneGroundTime = b.grounded ? 0 : a.airborneGroundTime + dt;
 
-    // Footsteps
-    if (b.grounded) {
+    // Crouched movement is intentionally silent and must not carry a gait
+    // remainder into the next standing step.
+    if (a.crouched || cmd.crouchHeld) a.footstepAccum = 0;
+    if (b.grounded && !a.crouched && !cmd.crouchHeld) {
       const hs = Math.hypot(v.x, v.z);
       if (hs > 0.75) {
         a.footstepAccum += hs * dt;
@@ -967,11 +971,16 @@ export class MovementSystem {
       a.state = 'air';
     }
 
-    // Swim footsteps (soft paddles) for AI hearing
-    a.footstepAccum += Math.hypot(v.x, v.z) * dt;
-    if (a.footstepAccum > 3.4) {
+    // Crouch remains a quiet movement state. In water it can still control
+    // diving, but it must not emit the normal paddle/hearing event.
+    if (!cmd.crouchHeld) {
+      a.footstepAccum += Math.hypot(v.x, v.z) * dt;
+      if (a.footstepAccum > 3.4) {
+        a.footstepAccum = 0;
+        this.events.onFootstep(a, false);
+      }
+    } else {
       a.footstepAccum = 0;
-      this.events.onFootstep(a, false);
     }
   }
 

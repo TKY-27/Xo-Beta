@@ -1,4 +1,10 @@
 import type { Difficulty } from '../core/balance';
+import {
+  clonePreferredItemSlots,
+  DEFAULT_PREFERRED_ITEM_SLOTS,
+  validatePreferredItemSlots,
+  type PreferredItemSlots,
+} from '../core/preferredSlots';
 import type { SkinId } from '../core/settings';
 import {
   buildRoster,
@@ -64,6 +70,7 @@ export interface LobbyStateOptions {
   readonly hostParticipantId?: string;
   readonly hostDisplayName?: string;
   readonly hostSkinId?: SkinId;
+  readonly hostPreferredItemSlots?: PreferredItemSlots;
   readonly mapId?: MapId;
   readonly mode?: MatchMode;
   readonly botFill?: boolean;
@@ -79,6 +86,7 @@ export interface LobbyParticipant {
   readonly slotId: number;
   readonly displayName: string;
   readonly skinId: SkinId;
+  readonly preferredItemSlots?: PreferredItemSlots;
   readonly teamId: TeamId | null;
   readonly ready: boolean;
   readonly isHost: boolean;
@@ -143,6 +151,7 @@ export interface LobbyJoinRequest {
   readonly handshake: Handshake;
   readonly displayName?: string;
   readonly skinId?: SkinId;
+  readonly preferredItemSlots?: PreferredItemSlots;
   readonly teamId?: TeamId | null;
   /** Guest slots are 1..3; null asks the host to assign the next free slot. */
   readonly requestedSlot?: number | null;
@@ -188,6 +197,7 @@ interface MutableParticipant {
   slotId: number;
   displayName: string;
   skinId: SkinId;
+  preferredItemSlots: PreferredItemSlots;
   teamId: TeamId | null;
   ready: boolean;
   isHost: boolean;
@@ -241,6 +251,7 @@ export class LobbyState {
       slotId: 0,
       displayName: validateDisplayName(options.hostDisplayName ?? 'HOST'),
       skinId: validateEnum(options.hostSkinId ?? 'vanguard', SKINS, 'hostSkinId'),
+      preferredItemSlots: validatePreferredProfile(options.hostPreferredItemSlots),
       teamId: null,
       // The host is allowed to set their own name before declaring ready.
       ready: false,
@@ -353,6 +364,7 @@ export class LobbyState {
       slotId,
       displayName: validateDisplayName(request.displayName ?? `PLAYER ${slotId + 1}`),
       skinId: validateEnum(request.skinId ?? defaultSkin(slotId), SKINS, 'skinId'),
+      preferredItemSlots: validatePreferredProfile(request.preferredItemSlots),
       teamId: participantTeamForMode(
         this.effectiveMode,
         slotId,
@@ -798,6 +810,7 @@ export class LobbyState {
         connectionState: participant.connected ? 'connected' as const : 'disconnected' as const,
         teamId: participant.teamId,
         skinId: participant.skinId,
+        preferredItemSlots: clonePreferredItemSlots(participant.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS),
         accentColor: participant.isHost ? 0x5fd0ff : 0x9b7dff + participant.slotId * 0x1100,
       }));
   }
@@ -814,6 +827,7 @@ function freezeParticipant(value: MutableParticipant): LobbyParticipant {
     slotId: value.slotId,
     displayName: value.displayName,
     skinId: value.skinId,
+    preferredItemSlots: clonePreferredItemSlots(value.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS),
     teamId: value.teamId,
     ready: value.ready,
     isHost: value.isHost,
@@ -827,10 +841,19 @@ function freezeParticipant(value: MutableParticipant): LobbyParticipant {
 function cloneRosterEntry(entry: RosterEntry): RosterEntry {
   return {
     ...entry,
+    preferredItemSlots: clonePreferredItemSlots(entry.preferredItemSlots ?? DEFAULT_PREFERRED_ITEM_SLOTS),
     ownership: entry.ownership.kind === 'bot'
       ? { kind: 'bot' }
       : { kind: entry.ownership.kind, peerId: entry.ownership.peerId },
   };
+}
+
+function validatePreferredProfile(value: unknown): PreferredItemSlots {
+  try {
+    return clonePreferredItemSlots(value === undefined ? DEFAULT_PREFERRED_ITEM_SLOTS : validatePreferredItemSlots(value));
+  } catch {
+    throw new LobbyError('invalid-lobby', 'Invalid preferred item slot settings');
+  }
 }
 
 function validateIdentifier(value: unknown, label: string): string {

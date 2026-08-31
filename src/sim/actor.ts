@@ -7,6 +7,11 @@ import type { BotPersonality, HitRegion, WeaponId } from '../core/balance';
 import { HEALTH_MAX, SHIELD_MAX } from '../core/balance';
 import { eyeYFromBodyCenter, type CharBody } from '../physics/physics';
 import { Inventory } from './inventory';
+import {
+  clonePreferredItemSlots,
+  DEFAULT_PREFERRED_ITEM_SLOTS,
+  type PreferredItemSlots,
+} from '../core/preferredSlots';
 import type { SkinId } from '../core/settings';
 
 export type MoveState =
@@ -57,6 +62,8 @@ export class Actor {
   readonly id: number;
   readonly name: string;
   readonly skinId: SkinId;
+  /** Locked at match start; pickup placement never reads mutable UI state. */
+  readonly preferredItemSlots: PreferredItemSlots;
   personality: BotPersonality | null;
   accentColor: number;
 
@@ -160,6 +167,7 @@ export class Actor {
     accentColor: number,
     personality: BotPersonality | null = null,
     skinId: SkinId = 'vanguard',
+    preferredItemSlots: PreferredItemSlots = DEFAULT_PREFERRED_ITEM_SLOTS,
   ) {
     // Collider metadata is authoritative for projectile hit resolution. A
     // module-global actor counter used to diverge from the 1..10 collider IDs
@@ -167,6 +175,7 @@ export class Actor {
     this.id = body.actorId;
     this.name = name;
     this.skinId = skinId;
+    this.preferredItemSlots = clonePreferredItemSlots(preferredItemSlots);
     this.body = body;
     this.accentColor = accentColor;
     this.personality = personality;
