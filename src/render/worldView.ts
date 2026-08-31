@@ -15,7 +15,6 @@ import {
   type GeoBox,
   type MapDef,
   type MatKey,
-  type WaterVolume,
 } from '../world/types';
 import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
@@ -26,6 +25,18 @@ import type { ChestView, GameStateView, LootView } from '../sim/gameStateView';
 import { RARITY_COLORS } from '../core/balance';
 import { buildTerrainRibbonIndices } from '../world/terrainMesh';
 import { getSettings } from '../core/settings';
+import {
+  WaterSurfaceSystem,
+  type WaterQaStats,
+  type WaterSurfaceSystemOptions,
+} from './waterSurfaceSystem';
+import type { WaterQuality } from './waterWaveField';
+
+export {
+  buildWaterlineRibbonPositions,
+  traceWaterline,
+  type WaterlineSegment,
+} from './waterSurfaceSystem';
 
 export interface PresentationTransport {
   position: THREE.Vector3;
@@ -88,196 +99,6 @@ const STORM_FRAG = /* glsl */ `
     gl_FragColor = vec4(col, alpha);
   }
 `;
-
-const WATER_VERT = /* glsl */ `
-  uniform float uTime;
-  varying vec3 vWPos;
-  varying vec3 vNormalW;
-  void main() {
-    vec3 p = position;
-    // gentle multi-wave displacement (plane is XY before rotateX)
-    float w = sin(p.x * 0.55 + uTime * 1.35) * 0.055
-            + sin(p.y * 0.72 - uTime * 1.05) * 0.045
-            + sin((p.x + p.y) * 0.31 + uTime * 0.75) * 0.038;
-    p.z += w;
-    // analytic-ish normal from wave gradient
-    float dx = cos(p.x * 0.55 + uTime * 1.35) * 0.55 * 0.055
-             + cos((p.x + p.y) * 0.31 + uTime * 0.75) * 0.31 * 0.038;
-    float dy = cos(p.y * 0.72 - uTime * 1.05) * 0.72 * 0.045
-             + cos((p.x + p.y) * 0.31 + uTime * 0.75) * 0.31 * 0.038;
-    vec3 n = normalize(vec3(-dx, -dy, 1.0));
-    vec4 wp = modelMatrix * vec4(p, 1.0);
-    vWPos = wp.xyz;
-    vNormalW = normalize(mat3(modelMatrix) * n);
-    gl_Position = projectionMatrix * viewMatrix * wp;
-  }
-`;
-
-const WATER_FRAG = /* glsl */ `
-  uniform vec3 uDeepColor;
-  uniform vec3 uShallowColor;
-  uniform vec3 uSkyColor;
-  uniform vec3 uSunDir;
-  uniform vec3 uSunColor;
-  uniform vec2 uWaterCenter;
-  uniform vec2 uHalfSize;
-  uniform float uTime;
-  varying vec3 vWPos;
-  varying vec3 vNormalW;
-
-  void main() {
-    // Add two fragment-scale wave fields to the displaced surface normal.
-    // The old single mesh normal produced a nearly uniform grey sheet from
-    // the gameplay camera; crossed directions keep highlights readable at
-    // both shore and vista distances without increasing mesh density.
-    float phaseA = vWPos.x * 0.83 + vWPos.z * 0.31 + uTime * 1.55;
-    float phaseB = vWPos.x * -0.27 + vWPos.z * 1.18 - uTime * 1.12;
-    float phaseC = (vWPos.x + vWPos.z) * 0.19 + uTime * 0.46;
-    vec2 slope = vec2(
-      cos(phaseA) * 0.075 - cos(phaseB) * 0.028 + cos(phaseC) * 0.022,
-      cos(phaseA) * 0.028 + cos(phaseB) * 0.095 + cos(phaseC) * 0.022
-    );
-    vec3 detailNormal = normalize(vec3(-slope.x, 1.0, -slope.y));
-    vec3 n = normalize(mix(normalize(vNormalW), detailNormal, 0.58));
-    vec3 v = normalize(cameraPosition - vWPos);
-    float facing = max(dot(n, v), 0.0);
-    float fres = pow(1.0 - facing, 3.2);
-
-    // Two sun lobes: a readable broad reflection with a restrained hot core.
-    // Map sunDirection is the direction light travels. The renderer places
-    // the light at its negation, so the surface-to-sun vector is -uSunDir.
-    vec3 h = normalize(-uSunDir + v);
-    float nh = max(dot(n, h), 0.0);
-    float specBroad = pow(nh, 54.0);
-    float specCore = pow(nh, 260.0);
-
-    // Sparse capillary glints break up the surface without a tiled texture.
-    float ripple = sin(vWPos.x * 6.7 + vWPos.z * 1.9 + uTime * 2.4)
-      * sin(vWPos.z * 5.9 - vWPos.x * 1.25 - uTime * 1.8);
-    float sparkle = smoothstep(0.985, 1.0, ripple) * (0.035 + specBroad * 0.06);
-
-    vec2 local = abs(vWPos.xz - uWaterCenter);
-    float edgeDistance = min(uHalfSize.x - local.x, uHalfSize.y - local.y);
-    float shoreline = 1.0 - smoothstep(0.0, 4.5, edgeDistance);
-    float depthVariation = sin(vWPos.x * 0.036 + vWPos.z * 0.021)
-      * sin(vWPos.z * 0.029 - vWPos.x * 0.017) * 0.5 + 0.5;
-    vec3 base = mix(uDeepColor, uShallowColor, shoreline * 0.68 + depthVariation * 0.08);
-    vec3 reflected = mix(base, uSkyColor, 0.035 + fres * 0.38);
-    vec3 col = reflected;
-    col += uSunColor * (specBroad * 0.2 + specCore * 0.42);
-    col += uSkyColor * sparkle;
-    col += uShallowColor * shoreline * 0.08;
-    col *= 0.9 + clamp(slope.x + slope.y, -0.08, 0.1) * 0.8;
-
-    float alpha = mix(0.94, 0.98, fres);
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
-
-export interface WaterlineSegment {
-  ax: number;
-  az: number;
-  bx: number;
-  bz: number;
-  y: number;
-}
-
-/**
- * Trace the actual terrain/water intersection instead of decorating the
- * rectangular water-volume bounds. The lake is exposed by a curved terrain
- * basin, so perimeter-only foam produced a floating rectangle far from the
- * visible bank.
- */
-export function traceWaterline(
-  heightAt: (x: number, z: number) => number,
-  water: WaterVolume,
-  spacing = 3,
-): WaterlineSegment[] {
-  const nx = Math.max(1, Math.ceil((water.maxX - water.minX) / spacing));
-  const nz = Math.max(1, Math.ceil((water.maxZ - water.minZ) / spacing));
-  const dx = (water.maxX - water.minX) / nx;
-  const dz = (water.maxZ - water.minZ) / nz;
-  const segments: WaterlineSegment[] = [];
-  const crossing = (
-    ax: number,
-    az: number,
-    ah: number,
-    bx: number,
-    bz: number,
-    bh: number,
-  ): { x: number; z: number } | null => {
-    const a = ah - water.surfaceY;
-    const b = bh - water.surfaceY;
-    if ((a < 0) === (b < 0) || Math.abs(a - b) < 1e-6) return null;
-    const t = a / (a - b);
-    return { x: ax + (bx - ax) * t, z: az + (bz - az) * t };
-  };
-  for (let iz = 0; iz < nz; iz++) {
-    for (let ix = 0; ix < nx; ix++) {
-      const x0 = water.minX + ix * dx;
-      const x1 = x0 + dx;
-      const z0 = water.minZ + iz * dz;
-      const z1 = z0 + dz;
-      const h00 = heightAt(x0, z0);
-      const h10 = heightAt(x1, z0);
-      const h11 = heightAt(x1, z1);
-      const h01 = heightAt(x0, z1);
-      const points = [
-        crossing(x0, z0, h00, x1, z0, h10),
-        crossing(x1, z0, h10, x1, z1, h11),
-        crossing(x1, z1, h11, x0, z1, h01),
-        crossing(x0, z1, h01, x0, z0, h00),
-      ].filter((point): point is { x: number; z: number } => point !== null);
-      // Ordinary marching cells produce two crossings. For the rare saddle,
-      // pair adjacent crossings; short local pieces are visually stable and
-      // avoid inventing a long diagonal across the cell.
-      for (let i = 0; i + 1 < points.length; i += 2) {
-        const a = points[i]!;
-        const b = points[i + 1]!;
-        if (Math.hypot(b.x - a.x, b.z - a.z) < 0.05) continue;
-        segments.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, y: water.surfaceY });
-      }
-    }
-  }
-  return segments;
-}
-
-export function buildWaterlineRibbonPositions(
-  segments: WaterlineSegment[],
-  width: number,
-  yOffset: number,
-): number[] {
-  const positions: number[] = [];
-  for (const segment of segments) {
-    const dx = segment.bx - segment.ax;
-    const dz = segment.bz - segment.az;
-    const length = Math.hypot(dx, dz);
-    const nx = -dz / length * width / 2;
-    const nz = dx / length * width / 2;
-    const y = segment.y + yOffset;
-    positions.push(
-      segment.ax - nx, y, segment.az - nz,
-      segment.bx + nx, y, segment.bz + nz,
-      segment.bx - nx, y, segment.bz - nz,
-      segment.ax - nx, y, segment.az - nz,
-      segment.ax + nx, y, segment.az + nz,
-      segment.bx + nx, y, segment.bz + nz,
-    );
-  }
-  return positions;
-}
-
-function waterlineRibbonGeometry(segments: WaterlineSegment[], width: number, yOffset: number): THREE.BufferGeometry {
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute(
-    'position',
-    new THREE.Float32BufferAttribute(buildWaterlineRibbonPositions(segments, width, yOffset), 3),
-  );
-  geometry.computeVertexNormals();
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
 
 /**
  * WorldItem Y is a lightweight settling centre kept 0.35 m above support.
@@ -524,8 +345,8 @@ export class WorldView {
   stormMesh!: THREE.Mesh;
   readonly transportGroup = new THREE.Group();
   private time = 0;
-  private waterMats: THREE.ShaderMaterial[] = [];
   private waterVolumes: import('../world/types').WaterVolume[] = [];
+  private readonly waterSystem: WaterSurfaceSystem;
   private weaponFactory: WeaponModelFactory;
   private lightPool: StaticLightPool;
   private viewPos = new THREE.Vector3();
@@ -539,8 +360,9 @@ export class WorldView {
     mats: MaterialLibrary,
     match: Match | null,
     props: PropLibrary,
+    waterOptions: WaterSurfaceSystemOptions = {},
   ): Promise<WorldView> {
-    const w = new WorldView(def, mats, match, props);
+    const w = new WorldView(def, mats, match, props, waterOptions);
     return w;
   }
 
@@ -549,6 +371,7 @@ export class WorldView {
     private mats: MaterialLibrary,
     match: Match | null,
     props: PropLibrary,
+    waterOptions: WaterSurfaceSystemOptions,
   ) {
     this.mapDef = def;
     const quality = getSettings().quality;
@@ -569,8 +392,12 @@ export class WorldView {
     this.group.add(this.vista.group);
     this.buildScatter(def, props);
     this.buildVehicles(def, props);
-    this.buildWater(def);
-    this.buildShorelineDetail(def);
+    this.waterVolumes = def.water.slice();
+    this.waterSystem = new WaterSurfaceSystem(def, {
+      ...waterOptions,
+      quality: waterOptions.quality ?? quality,
+    });
+    this.group.add(this.waterSystem.group);
     if (match) {
       this.trackDestructibles(match, props);
       this.trackChests(match);
@@ -1342,87 +1169,16 @@ export class WorldView {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Water — custom shader surface
-  // -------------------------------------------------------------------------
-
-  private buildWater(def: MapDef): void {
-    this.waterVolumes = def.water.slice();
-    for (const w of def.water) {
-      const geo = new THREE.PlaneGeometry(w.maxX - w.minX, w.maxZ - w.minZ, 48, 48);
-      const mat = new THREE.ShaderMaterial({
-        vertexShader: WATER_VERT,
-        fragmentShader: WATER_FRAG,
-        transparent: true,
-        side: THREE.DoubleSide,
-        depthTest: true,
-        depthWrite: false,
-        premultipliedAlpha: false,
-        uniforms: {
-          uTime: { value: 0 },
-          uDeepColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x06121e : 0x06283b) },
-          uShallowColor: { value: new THREE.Color(def.sky.preset === 'night' || def.sky.preset === 'bluehour' ? 0x102b3c : 0x19596b) },
-          uSkyColor: { value: new THREE.Color(def.sky.preset === 'day' ? 0x5f879e : def.sky.fogColor) },
-          uSunDir: { value: new THREE.Vector3(...def.sky.sunDirection).normalize() },
-          uSunColor: { value: new THREE.Color(def.sky.sunColor) },
-          uWaterCenter: { value: new THREE.Vector2((w.minX + w.maxX) / 2, (w.minZ + w.maxZ) / 2) },
-          uHalfSize: { value: new THREE.Vector2((w.maxX - w.minX) / 2, (w.maxZ - w.minZ) / 2) },
-        },
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set((w.minX + w.maxX) / 2, w.surfaceY, (w.minZ + w.maxZ) / 2);
-      mesh.geometry.rotateX(-Math.PI / 2);
-      mesh.renderOrder = 3;
-      this.waterMats.push(mat);
-      this.group.add(mesh);
-    }
-  }
-
-  private buildShorelineDetail(def: MapDef): void {
-    if (def.id !== 'eden' || !def.terrainHeight) return;
-    const segments = def.water.flatMap((water) => traceWaterline(def.terrainHeight!, water));
-    if (segments.length === 0) return;
-
-    // A broad, low-contrast sediment band grounds the bank; a broken narrow
-    // foam trace gives the waterline motion-scale without drawing a perfect
-    // procedural outline around the whole lake.
-    const sediment = new THREE.Mesh(
-      waterlineRibbonGeometry(segments, 0.42, 0.012),
-      new THREE.MeshStandardMaterial({
-        color: 0x34463b,
-        roughness: 0.96,
-        metalness: 0,
-        transparent: true,
-        opacity: 0.2,
-        depthWrite: false,
-      }),
-    );
-    sediment.name = 'shoreline:sediment';
-    sediment.receiveShadow = true;
-    sediment.renderOrder = 3.5;
-    this.group.add(sediment);
-
-    const brokenFoam = segments.filter((segment, index) => (
-      index % 4 === 1
-      && Math.sin(segment.ax * 0.37 + segment.az * 0.19) > 0.38
-    ));
-    const foam = new THREE.Mesh(
-      waterlineRibbonGeometry(brokenFoam, 0.07, 0.026),
-      new THREE.MeshBasicMaterial({
-        color: 0x8fa69c,
-        transparent: true,
-        opacity: 0.08,
-        depthWrite: false,
-        toneMapped: true,
-      }),
-    );
-    foam.name = 'shoreline:foam';
-    foam.renderOrder = 4;
-    this.group.add(foam);
-  }
-
   animateWater(t: number): void {
-    for (const m of this.waterMats) m.uniforms['uTime']!.value = t;
+    this.waterSystem.setPresentationTime(t);
+  }
+
+  setWaterQuality(quality: WaterQuality): void {
+    this.waterSystem.setQuality(quality);
+  }
+
+  getWaterQaStats(): WaterQaStats {
+    return this.waterSystem.getQaStats();
   }
 
   // -------------------------------------------------------------------------
@@ -2139,7 +1895,7 @@ export class WorldView {
     this.time += dt;
     this.vista.update(this.viewPos, this.time);
     this.lightPool.update(dt, this.viewPos);
-    this.animateWater(this.time);
+    this.waterSystem.update(match.time, this.viewPos);
     this.syncLoot(match);
     this.syncChests(match);
     this.syncDestructibles(match);
@@ -2188,7 +1944,7 @@ export class WorldView {
     this.time += dt;
     this.vista.update(this.viewPos, this.time);
     this.lightPool.update(dt, this.viewPos);
-    this.animateWater(this.time);
+    this.waterSystem.update(view.time, this.viewPos);
     this.syncReplica(view);
     const stormMat = this.stormMesh.material as THREE.ShaderMaterial;
     stormMat.uniforms['uTime']!.value = this.time;
@@ -2199,6 +1955,8 @@ export class WorldView {
   dispose(): void {
     this.vista.dispose();
     this.group.remove(this.vista.group);
+    this.group.remove(this.waterSystem.group);
+    this.waterSystem.dispose();
     this.weaponFactory.dispose();
 
     const geometries = new Set<THREE.BufferGeometry>();

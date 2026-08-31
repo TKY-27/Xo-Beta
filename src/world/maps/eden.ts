@@ -55,9 +55,9 @@ export function buildEdenFacility(): MapDef {
   buildHeightfield(b);
 
   // Water: lake + river to the south
-  b.water(70, 215, -15, 135, -4.2, 6);          // lake basin
-  b.water(150, 190, 135, 165, -4.0, 5);         // river mouth heading south-east... simplified channel
-  b.water(-248, -180, 180, 230, -3.8, 4);       // small pond SW (inside playable bounds)
+  b.water(70, 215, -15, 135, -4.2, 6, { kind: 'lake' });
+  b.water(150, 190, 135, 165, -4.0, 5, { kind: 'river' });
+  b.water(-248, -180, 180, 230, -3.8, 4, { kind: 'pond' });
 
   // ------------------------------------------------------------------
   // POI: RESEARCH COMPLEX (main labs, west plateau)
