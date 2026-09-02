@@ -55,6 +55,11 @@ interface AnimSet {
   [key: string]: THREE.AnimationClip;
 }
 
+/** Fade bookkeeping so completed crossfades can retire the outgoing action. */
+interface FadingAction extends AnimationAction {
+  _fadingFrom?: AnimationAction;
+}
+
 /** Rig clip key -> authored Universal Animation Library clip name. */
 export const CLIP_MAP: Array<[string, string]> = [
   ['idle', 'Idle_Loop'],
@@ -145,7 +150,35 @@ export function skinForName(name: string): SkinId {
   return SKIN_IDS[(hash >>> 0) % SKIN_IDS.length]!;
 }
 
+interface LiveRig {
+  group: THREE.Group;
+  casters: THREE.Mesh[];
+  lodTier: number;
+  distSq: number;
+}
+
+/** All live full character rigs (fallback capsule rigs excluded). */
+const liveRigs: Array<LiveRig> = [];
+
 export class CharacterFactory {
+  /**
+   * Per-frame LOD/shadow bookkeeping. Computes a distance tier per rig and
+   * enforces the character-shadow budget: only the closest `maxFull` rigs
+   * render into the shadow map; everyone else keeps a fully rendered body
+   * with shadow casting disabled. Deterministic given the camera position.
+   */
+  static beginFrame(cameraPosition: THREE.Vector3, maxFullShadowCasters = 4): void {
+    for (const rig of liveRigs) {
+      rig.distSq = rig.group.position.distanceToSquared(cameraPosition);
+      rig.lodTier = rig.distSq < 25 * 25 ? 0 : rig.distSq < 60 * 60 ? 1 : 2;
+    }
+    const casters = liveRigs.filter((r) => r.distSq < 90 * 90)
+      .sort((a, b) => a.distSq - b.distSq);
+    for (const rig of liveRigs) {
+      const full = casters.indexOf(rig) < maxFullShadowCasters;
+      for (const mesh of rig.casters) mesh.castShadow = full;
+    }
+  }
   private protoMale: THREE.Group | null = null;
   private protoFemale: THREE.Group | null = null;
   private anims: AnimSet = {};
@@ -258,7 +291,18 @@ export class CharacterFactory {
       mesh.material = Array.isArray(mesh.material) ? next : next[0]!;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
-      mesh.frustumCulled = false;
+      // Real frustum culling with bounds expanded for the animation range:
+      // permanently unculled skinned meshes cost skeleton/skin work for every
+      // off-screen actor in ten-combatant matches.
+      mesh.frustumCulled = true;
+      const skinned = mesh as THREE.SkinnedMesh;
+      if (typeof skinned.computeBoundingSphere === 'function') {
+        skinned.computeBoundingSphere();
+        if (skinned.boundingSphere) {
+          skinned.boundingSphere.radius += 0.6;
+          skinned.boundingSphere.center.y += 0.15;
+        }
+      }
     });
 
     // ---- Costume attachments -------------------------------------------
@@ -330,7 +374,7 @@ export class CharacterFactory {
         glow.position.set(0, 0.03, 0.075);
         plate.add(main, glow);
         anchor.add(plate);
-        plate.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = false; });
+        plate.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = true; });
       }
       // Pauldrons
       for (const side of ['l', 'r']) {
@@ -345,7 +389,7 @@ export class CharacterFactory {
         pad.scale.set(1, 0.72, 1);
         pad.position.set(side === 'l' ? -0.045 : 0.045, 0.055, 0);
         b.add(pad);
-        pad.frustumCulled = false;
+        pad.frustumCulled = true;
       }
     }
 
@@ -356,7 +400,7 @@ export class CharacterFactory {
       cell.position.set(0.06, 0, -0.062);
       pack.add(cell);
       bones['spine_01'].add(pack);
-      pack.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = false; });
+      pack.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = true; });
     }
 
     // ---- Weapon attachment ---------------------------------------------
@@ -372,19 +416,35 @@ export class CharacterFactory {
       }
     }
 
+    // Register for per-frame LOD tiers and the shadow budget.
+    const casters: THREE.Mesh[] = [];
+    body.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh && mesh.castShadow) casters.push(mesh);
+    });
+    const registryEntry: LiveRig = { group, casters, lodTier: 0, distSq: 0 };
+    liveRigs.push(registryEntry);
+
     // ---- Animation state machine ---------------------------------------
     const mixer = new AnimationMixer(body);
-    const actions: Record<string, AnimationAction> = {};
+    const actions: Record<string, FadingAction> = {};
     for (const k of Object.keys(this.anims)) {
       const a = mixer.clipAction(this.anims[k]!);
       a.enabled = true;
       a.setEffectiveWeight(0);
       actions[k] = a;
     }
-    const looped = new Set(['idle', 'walk', 'jog', 'sprint', 'crouch_idle', 'crouch_walk', 'swim', 'swim_idle', 'jump_loop', 'armed_idle']);
-    for (const k of looped) if (actions[k]) actions[k]!.play();
+    // Only the initial base clip and the armed-idle layer stay scheduled;
+    // every other action is started by crossfade() on demand and stopped when
+    // its fade completes. Ten combatants x ~10 pre-played loops used to cost
+    // substantial mixer evaluation every frame for zero visual output.
+    actions['idle']?.play();
+    actions['armed_idle']?.play();
 
     let currentBase = '';
+    let animAccum = 0;
+    let fadingFrom: FadingAction | null = null;
+    let fadingTimer = 0;
     let aimWeight = 0;
     let wasGrounded = true;
     let jumpStartT = 0;
@@ -481,7 +541,13 @@ export class CharacterFactory {
       if (phase > 0) a.time = phase * a.getClip().duration;
       a.setEffectiveWeight(1);
       a.play();
-      if (b) b.crossFadeTo(a, dur, false);
+      if (b) {
+        b.crossFadeTo(a, dur, false);
+        // Retire the outgoing action once the blend completes so the mixer
+        // stops evaluating it; a new crossfade retires the previous one.
+        fadingFrom = b;
+        fadingTimer = dur + 0.03;
+      }
     }
 
     const rig: CharacterRig = {
@@ -543,6 +609,26 @@ export class CharacterFactory {
         if (a.punchTimer > 0 && punchHoldT <= 0) triggerPunch();
         punchHoldT = Math.max(0, punchHoldT - dt);
 
+        // Retire faded-out actions: keeps the mixer's evaluated-action set
+        // bounded at (base + one fading) instead of every visited clip.
+        if (fadingFrom && (fadingTimer -= dt) <= 0) {
+          fadingFrom.stop();
+          fadingFrom.setEffectiveWeight(0);
+          fadingFrom = null;
+        }
+
+        // Distance LOD: far actors animate at a reduced cadence (timer-based
+        // one-shots and authoritative gameplay state stay current; the mixer
+        // and pose work run at 20 Hz instead of every presented frame).
+        let animDt = dt;
+        if (registryEntry.lodTier > 0) {
+          animAccum += dt;
+          const minStep = registryEntry.lodTier === 1 ? 1 / 30 : 1 / 20;
+          if (animAccum < minStep) return;
+          animDt = animAccum;
+          animAccum = 0;
+        }
+
         let want: string;
         if (dashing) {
           want = 'sprint';
@@ -598,11 +684,11 @@ export class CharacterFactory {
           actions['aim_up']!.setEffectiveWeight(wUp * aimWeight);
           actions['aim_down']!.setEffectiveWeight(wDown * aimWeight);
           if (speedH < 0.6) {
-            actions['aim_neutral']!.play();
-            actions['aim_up']!.play();
-            actions['aim_down']!.play();
+            if (!actions['aim_neutral']!.isRunning()) actions['aim_neutral']!.play();
+            if (!actions['aim_up']!.isRunning()) actions['aim_up']!.play();
+            if (!actions['aim_down']!.isRunning()) actions['aim_down']!.play();
           }
-          actions['armed_idle']!.play();
+          if (!actions['armed_idle']!.isRunning()) actions['armed_idle']!.play();
           actions['armed_idle']!.setEffectiveWeight(aimWeight);
         } else {
           actions['aim_neutral']?.setEffectiveWeight(0);
@@ -611,7 +697,7 @@ export class CharacterFactory {
           actions['armed_idle']?.setEffectiveWeight(0);
         }
 
-        mixer.update(dt);
+        mixer.update(animDt);
 
         // Smooth whole-body anticipation: sprint/dash leans into travel while
         // lateral acceleration produces only a restrained counter-lean. This
@@ -672,6 +758,11 @@ export class CharacterFactory {
         rig.animName = a.moveState === 'freefall' ? 'freefall' : want;
         const action = actions[want];
         if (action) action.timeScale = locomotionTimeScale(want, speedH);
+        if (fadingFrom && (fadingTimer -= dt) <= 0) {
+          fadingFrom.stop();
+          fadingFrom.setEffectiveWeight(0);
+          fadingFrom = null;
+        }
         mixer.update(dt);
 
         // Same broad skydive presentation as the host path: the networked
@@ -706,6 +797,8 @@ export class CharacterFactory {
       dispose() {
         if (disposed) return;
         disposed = true;
+        const registryIndex = liveRigs.indexOf(registryEntry);
+        if (registryIndex >= 0) liveRigs.splice(registryIndex, 1);
         rig.attachWeapon?.(null);
         mixer.stopAllAction();
         mixer.uncacheRoot(body);
