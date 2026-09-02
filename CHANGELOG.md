@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.1 — Performance and NeoCity Hotfix (public beta)
+
+Performance:
+- Single-pass sniper optics: the world renders exactly once per frame at
+  any magnification; scoped draws dropped from 13 to 4 per frame,
+  presentation cost from 8.4 ms to 2.45 ms, and the right-click scope
+  entry hitch from 186 ms to 19 ms (measured, headed Chrome). 1x/2x/4x
+  retained; ADS response is continuous from the first frame.
+- Character budgets: retired animation crossfades, real frustum culling
+  with animation-expanded bounds, a four-rig full-shadow budget, and
+  distance-based animation cadence (30/20 Hz far).
+- Bot workload: deterministic vision-phase staggering and state-aware
+  cadence end synchronized all-bot perception spikes; LOS callbacks are
+  cached per controller.
+- Louder local sniper report (~3-4 dB) with a short ambience duck; the
+  master limiter keeps headroom and remote bands are unchanged.
+
+NeoCity:
+- Deterministic mid-block infill (dumpsters, utility cabinets, planters,
+  delivery crates) in eight sparse blocks; the generic residual cover
+  pass is reduced to a residual role.
+- Neon sign posts and footings now collide; free-standing thin poles are
+  solidified unless wall-mounted; a floating vehicle and hovering crates
+  over sloped ground are grounded. Machine-checkable integrity gates
+  enforce vehicle support, prop grounding, collision intent and build
+  determinism.
+
+Known limitations:
+- Frame measurements cited above were taken at 1600x900 DPR 1 (harness
+  cap 120 Hz); the reference M5/Chrome full-DPR matrix and an Auto 60 FPS
+  governor are follow-up work.
+- The online gameplay browser fixture ("guest sends compact input
+  ticks") still fails; verified pre-existing at v0.3.0 and outside CI.
+- Direct P2P only (no TURN/SFU); restrictive NATs may still fail.
+
+
 ## 0.4.0 — World and Combat Fidelity Update (public beta)
 
 New functionality:
