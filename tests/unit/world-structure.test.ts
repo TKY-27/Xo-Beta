@@ -473,7 +473,8 @@ describe('world-space structure contracts', () => {
         && (geo.y + (geo.kind === 'box' ? geo.sy : geo.h) / 2) >= face.y - face.sy / 2
       ));
       expect(groundedPosts, `floating pylon at ${x},${z}`).toHaveLength(2);
-      expect(groundedPosts.every((post) => post.noCollide), `pylon blocks play at ${x},${z}`).toBe(true);
+      // v0.4.1: person-sized sign posts are structural and must stop actors.
+      expect(groundedPosts.every((post) => !post.noCollide), `pylon blocks play at ${x},${z}`).toBe(true);
 
       const light = def.lights.find((candidate) => (
         Math.abs(candidate.x - face.x) < 0.25
