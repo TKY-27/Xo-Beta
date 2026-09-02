@@ -53,6 +53,26 @@ interface ProjectileCollisionHitBase {
   dist: number;
 }
 
+/**
+ * Authoritative ballistic distance falloff: full damage until `start`, linear
+ * interpolation to `endMult` at `end`, floored at 1 so damage never goes
+ * negative or zero. Pure so QA can table-test every weapon boundary.
+ */
+export function damageAfterDistanceFalloff(
+  damage: number,
+  dist: number,
+  falloffStart: number,
+  falloffEnd: number,
+  falloffEndMult: number,
+): number {
+  let dmg = damage;
+  if (dist > falloffStart) {
+    const t = Math.min(1, (dist - falloffStart) / Math.max(1, falloffEnd - falloffStart));
+    dmg *= 1 + (falloffEndMult - 1) * t;
+  }
+  return Math.max(1, dmg);
+}
+
 export type ProjectileCollisionHit = ProjectileCollisionHitBase & (
   | { kind: 'actor'; actorId: number; region: string }
   | {
@@ -220,7 +240,6 @@ export class CombatSystem {
     }
 
     rt.fireCooldown = 60 / def.rpm;
-    rt.lastShotTime = 0;
     w.ammoInMag--;
     a.stats.shotsFired++;
 
@@ -274,11 +293,24 @@ export class CombatSystem {
       firedProjectiles.push(proj);
     }
 
-    // Recoil & bloom
+    // Recoil & bloom. One profile drives every layer; the seeded variation
+    // keeps bursts slightly irregular without unseeded yaw drift.
     const rMod = RARITY_MODS[w.rarity].recoilMult;
-    rt.recoilPitch += def.recoilKick * rMod * (0.85 + gameNext() * 0.3);
-    rt.recoilYaw += (gameNext() - 0.5) * def.recoilKick * 0.7 * rMod;
+    const profile = def.recoil;
+    // Sustained fire climbs; a pause longer than the sustain window resets.
+    const sustained = rt.lastShotTime < 0.35;
+    rt.recoilClimb = sustained
+      ? Math.min(profile.climbMax, rt.recoilClimb + profile.climbPerShot)
+      : 0;
+    const stanceMult = (1 - rt.adsAmount * (1 - profile.ads))
+      * (a.crouched ? profile.crouch : 1);
+    const kick = (profile.vertical * (1 + rt.recoilClimb)) * rMod * stanceMult;
+    rt.recoilPitch += kick * (0.85 + gameNext() * 0.3);
+    rt.recoilYaw += (gameNext() - 0.5) * 2 * profile.horizontal * rMod * stanceMult;
     rt.bloom = Math.min(def.bloomMax, rt.bloom + def.bloomPerShot);
+    // Stamp the shot time last: the climb decision above compares against the
+    // previous shot, not this one.
+    rt.lastShotTime = 0;
 
     this.events.onMuzzleFlash(a, w.weaponId, muzzleX, muzzleY, muzzleZ, baseDir.x, baseDir.y, baseDir.z);
     this.events.onShotFired(a, w.weaponId, muzzleX, muzzleY, muzzleZ, false);
@@ -378,9 +410,15 @@ export class CombatSystem {
       rt.currentSpread = 0;
     }
 
-    // Recoil recovery (view returns toward original aim)
+    // Time since the previous real shot drives the sustained-fire climb.
+    rt.lastShotTime += dt;
+
+    // Recoil recovery (view returns toward original aim). The rate is the
+    // weapon profile's, so heavy weapons visibly recover slower; exponential
+    // decay keeps it frame-rate independent.
     if (rt.recoilPitch !== 0 || rt.recoilYaw !== 0) {
-      const k = Math.exp(-6 * dt);
+      const def = w ? WEAPONS[w.weaponId] : null;
+      const k = Math.exp(-(def?.recoil.recover ?? 6) * dt);
       rt.recoilPitch *= k;
       rt.recoilYaw *= k;
       if (Math.abs(rt.recoilPitch) < 1e-4) rt.recoilPitch = 0;
@@ -680,7 +718,10 @@ export class CombatSystem {
         material: meta.material,
       };
     }
-    return { ...base, kind: 'world', material: 'stone' };
+    // Pass the collider's authored material through so presentation (bullet
+    // marks, impact audio) can react to metal/wood/dirt surfaces instead of
+    // treating every wall as stone.
+    return { ...base, kind: 'world', material: meta?.kind === 'world' ? meta.material ?? 'stone' : 'stone' };
   }
 
   private resolveActorHit(p: Projectile, target: Actor, hx: number, hy: number, hz: number, region: string): void {
@@ -693,13 +734,14 @@ export class CombatSystem {
     else if (region === 'abdomen') mult = HIT_REGION_MULT.abdomen;
     else if (region === 'arms') mult = HIT_REGION_MULT.arms;
 
-    // Falloff by distance traveled
-    let dmg = p.damage * mult;
-    if (p.dist > p.falloffStart) {
-      const t = Math.min(1, (p.dist - p.falloffStart) / Math.max(1, p.falloffEnd - p.falloffStart));
-      dmg *= 1 + (p.falloffEndMult - 1) * t;
-    }
-    dmg = Math.max(1, dmg);
+    // Falloff by distance traveled (pure shared implementation).
+    const dmg = damageAfterDistanceFalloff(
+      p.damage * mult,
+      p.dist,
+      p.falloffStart,
+      p.falloffEnd,
+      p.falloffEndMult,
+    );
 
     const wasAlive = target.alive;
     const dealt = target.applyDamage(dmg);

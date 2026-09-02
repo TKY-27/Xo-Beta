@@ -208,10 +208,12 @@ export class VfxSystem {
     this.tracerMesh.setColorAt(tracer.slot, _col.setHex(color));
     // Every physical projectile contributes successive substep segments.
     // Keeping more than about two presented frames stacks an entire flight
-    // path into a solid laser. A 34 ms afterimage is still visible while the
-    // gaps between rounds preserve the impression of discrete bullets.
-    tracer.life = 0.034;
-    tracer.maxLife = 0.034;
+    // path into a solid laser, but a lifetime at or below one presented frame
+    // reads as flicker (and vanishes entirely under a single clamped hitch
+    // frame). 45 ms stays clearly a discrete bullet while remaining visible
+    // at 60/120/144 Hz and surviving one worst-case frame step.
+    tracer.life = 0.045;
+    tracer.maxLife = 0.045;
     tracer.color = color;
     this.tracerDirty = true;
   }
@@ -238,8 +240,28 @@ export class VfxSystem {
       f.light.intensity = (heavy ? 5.5 : 3.2) * scale;
       f.light.color.setHex(heavy ? 0xffb060 : 0xffc878);
     }
-    f.life = heavy ? 0.055 : 0.04;
+    // The update step clamps its delta at 50 ms, so a flash shorter than
+    // that could die on its first update having never been presented — the
+    // reported "flash sometimes never appears / muzzle goes dark" case.
+    // Both budgets now survive one worst-case frame with margin.
+    f.life = heavy ? 0.075 : 0.055;
     f.maxLife = f.life;
+    // Short directional flame ejecta along the shot axis gives the flash a
+    // readable cone without growing an energy orb. Local ephemeral particles
+    // may use local variation (they cannot affect simulation or tests).
+    const ejectaSpeed = heavy ? 14 : 10;
+    for (let i = 0; i < 2; i++) {
+      const spreadDir = (i === 0 ? 1 : -1) * 0.06;
+      this.spawnParticle(
+        f.sprite.position.x, f.sprite.position.y, f.sprite.position.z,
+        (dx + dy * spreadDir) * ejectaSpeed,
+        (dy + dz * spreadDir) * ejectaSpeed,
+        (dz + dx * spreadDir) * ejectaSpeed,
+        0.05, heavy ? 0.05 : 0.035,
+        heavy ? 0xffb060 : 0xffc878,
+        4,
+      );
+    }
   }
 
   impactSparks(x: number, y: number, z: number, nx: number, ny: number, nz: number, count = 7): void {
