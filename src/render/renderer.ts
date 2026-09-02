@@ -15,6 +15,7 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
 import type { SkyConfig } from '../world/types';
+import { SkyAtmosphereSystem } from './skyAtmosphere';
 import { getSettings } from '../core/settings';
 import { loadHdri, clampHdriPeaks } from '../assets/assets';
 
@@ -204,6 +205,7 @@ export class GameRenderer {
   private envRenderTarget: THREE.WebGLRenderTarget | null = null;
   private ownedBackground: THREE.Texture | null = null;
   private fallbackSky: THREE.Mesh | null = null;
+  private skyAtmosphere: SkyAtmosphereSystem | null = null;
   private sunOffset = new THREE.Vector3(120, 220, 90);
   private grading = { vignette: 0.3, saturation: 1.05, contrast: 1.03, lift: new THREE.Vector3(0, 0, 0.004) };
   private readonly gpuProfiling: boolean;
@@ -506,6 +508,8 @@ export class GameRenderer {
   }
 
   private disposeEnvironment(): void {
+    this.skyAtmosphere?.dispose();
+    this.skyAtmosphere = null;
     this.envRenderTarget?.dispose();
     this.envRenderTarget = null;
     this.ownedBackground?.dispose();

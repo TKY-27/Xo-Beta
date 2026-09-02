@@ -5,7 +5,7 @@ export type MatKey =
   | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld'
   | 'glass' | 'grass' | 'dirt' | 'rock' | 'roofTile' | 'gold'
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
-  | 'windowWarm' | 'windowCool'
+  | 'windowWarm' | 'windowCool' | 'windowDark'
   | 'facadeA' | 'facadeB' | 'facadeC' | 'marble' | 'sandbag' | 'hay'
   | 'corrugated' | 'bricksOld' | 'facilityFloor'
   | 'interiorCeiling'
@@ -176,8 +176,35 @@ export interface SkyGrade {
   lift?: [number, number, number];
 }
 
+/**
+ * Presentation-only visible-sky profile consumed by SkyAtmosphereSystem.
+ * Never affects simulation, lighting physics or the gameplay map hash — the
+ * existing HDRI/environment map remains the IBL source.
+ */
+export interface SkyAtmosphereProfile {
+  /** Zenith / horizon gradient colours (linear-ish sRGB hex). */
+  zenith: number;
+  horizon: number;
+  /** Sun/moon disc: size in radians of the visual half-angle, tint, glow. */
+  discSize: number;
+  discColor: number;
+  discGlow: number;
+  /** 0..1 cloud coverage; layers scroll with windSpeed (u/s, deterministic). */
+  cloudCover: number;
+  cloudTint: number;
+  cloudShade: number;
+  windSpeed: number;
+  /** Visible stars (masked by cloud opacity). */
+  starOpacity: number;
+  /** Horizon haze band colour and strength. */
+  hazeColor: number;
+  hazeStrength: number;
+}
+
 export interface SkyConfig {
   preset: 'night' | 'bluehour' | 'overcast' | 'day';
+  /** Visible-sky presentation profile (see SkyAtmosphereProfile). */
+  atmosphere?: SkyAtmosphereProfile;
   /** Equirectangular HDRI file (public/assets/sky) used as background + IBL. */
   hdri?: string;
   fogColor: number;
