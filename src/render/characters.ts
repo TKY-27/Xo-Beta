@@ -8,8 +8,6 @@
 
 import * as THREE from 'three';
 
-const _punchQ = new THREE.Quaternion();
-const _punchX = new THREE.Vector3(1, 0, 0);
 import { AnimationAction, AnimationMixer, LoopOnce } from 'three';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import type { Actor } from '../sim/actor';
@@ -39,6 +37,12 @@ export interface CharacterRig {
   update?(a: Actor, t: number, dt: number): void;
   /** Replica-only presentation update; does not require an Actor or Match. */
   updateView?(a: ActorView, t: number, dt: number): void;
+  /**
+   * Trigger one melee swing presentation (jab/cross alternating). The host
+   * path calls this internally from the authoritative punchTimer edge;
+   * guests call it from the networked meleeSwing event.
+   */
+  playPunch?(): void;
   attachWeapon?(model: THREE.Object3D | null): void;
   /** Resolve the attached weapon's authored muzzle in world space. */
   muzzleWorld?(position: THREE.Vector3, direction: THREE.Vector3): boolean;
@@ -51,7 +55,8 @@ interface AnimSet {
   [key: string]: THREE.AnimationClip;
 }
 
-const CLIP_MAP: Array<[string, string]> = [
+/** Rig clip key -> authored Universal Animation Library clip name. */
+export const CLIP_MAP: Array<[string, string]> = [
   ['idle', 'Idle_Loop'],
   ['walk', 'Walk_Loop'],
   ['jog', 'Jog_Fwd_Loop'],
@@ -72,13 +77,32 @@ const CLIP_MAP: Array<[string, string]> = [
   ['hit_chest', 'Hit_Chest'],
   ['death', 'Death01'],
   ['interact', 'Interact'],
+  ['punch_jab', 'Punch_Jab'],
+  ['punch_cross', 'Punch_Cross'],
 ];
 
 /** Clips that play once and hold their final pose until the state machine moves on. */
-const ONESHOT_CLIPS = new Set(['jump_start', 'jump_land', 'hit_chest', 'reload', 'interact', 'death']);
+const ONESHOT_CLIPS = new Set(['jump_start', 'jump_land', 'hit_chest', 'reload', 'interact', 'death', 'punch_jab', 'punch_cross']);
 const LOCOMOTION_CLIPS = new Set(['walk', 'jog', 'sprint', 'crouch_walk']);
 
 const TARGET_HEIGHT = 1.86;
+
+/**
+ * Nominal metres-per-second each locomotion clip was calibrated against, and
+ * the shared playback-rate clamp. Both the authoritative-actor and replica
+ * paths rate clips through this one function so a guest's characters never
+ * march at a different cadence than the host's. Climb above the clamp shows
+ * as foot skating; sprint+dash caps slightly higher by design.
+ */
+export function locomotionTimeScale(clip: string, speed: number, dashing = false): number {
+  const nominal: Record<string, number> = { walk: 2.35, jog: 5.9, sprint: 9.7, crouch_walk: 2.0 };
+  const base = nominal[clip];
+  if (!base) return 1;
+  return THREE.MathUtils.clamp(speed / base, 0.65, dashing ? 1.55 : 1.42);
+}
+
+/** Slow the freefall blend in/out; sharp enough to read, soft enough to never snap. */
+const FREEFALL_BLEND_RATE = 3.2;
 
 /**
  * Appearance is deliberately data-driven, but all geometry remains procedural
@@ -372,7 +396,76 @@ export class CharacterFactory {
     let sideLean = 0;
     let disposed = false;
     const bodyBaseRotation = body.rotation.clone();
-    const punchPose: { active: boolean; base: { a: THREE.Quaternion; f: THREE.Quaternion | null } | null } = { active: false, base: null };
+    // Melee: real licensed one-shot clips (Punch_Jab / Punch_Cross), hands
+    // alternating per swing. punchClipHolds tracks the active presentation.
+    let punchClip = 'punch_jab';
+    let punchHoldT = 0;
+    let swingIndex = 0;
+    // Trained freefall pose blend (0 = normal clips, 1 = full skydive pose).
+    let freefallBlend = 0;
+    const _fwq = new THREE.Quaternion();
+    const _bwq = new THREE.Quaternion();
+    const _wq = new THREE.Quaternion();
+    const _tq = new THREE.Quaternion();
+    const _axis = new THREE.Vector3();
+    function triggerPunch(): void {
+      punchClip = swingIndex % 2 === 0 ? 'punch_jab' : 'punch_cross';
+      swingIndex++;
+      punchHoldT = 0.34;
+      crossfade(currentBase, punchClip, 0.05);
+      currentBase = punchClip;
+    }
+
+    /**
+     * Rotate `bone` by `angle` (radians) about a body-space axis, converted
+     * into the bone's local space, as an additive overlay on whatever the
+     * mixer wrote this frame. The mixer rewrites local quaternions on the
+     * next update, so the overlay never accumulates drift.
+     */
+    function twistFromBodyAxis(bone: THREE.Object3D, axis: 'x' | 'y' | 'z', angle: number): void {
+      if (!bone.parent || angle === 0) return;
+      bone.parent.getWorldQuaternion(_fwq);
+      body.getWorldQuaternion(_bwq);
+      _axis.set(0, 0, 0);
+      _axis[axis] = 1;
+      _axis.applyQuaternion(_bwq);
+      _wq.setFromAxisAngle(_axis, angle);
+      _tq.copy(_fwq).invert().multiply(_wq).multiply(_fwq);
+      bone.quaternion.premultiply(_tq);
+    }
+
+    /**
+     * Trained freefall pose: body horizontal, back toward the ground, chest
+     * and face up, arms spread, knees bent and legs separated. `blend`
+     * eases the whole pose in and out so transitions never snap, and the
+     * gameplay collider is untouched (presentation-only).
+     */
+    function applyFreefallPose(blend: number): void {
+      if (blend < 0.001) return;
+      // Belly-up: rotating the body -90deg about its local X tips the head
+      // back and the chest skyward while travel stays along body +Z.
+      body.rotation.x = bodyBaseRotation.x - (Math.PI / 2 - 0.14) * blend;
+      // Arms spread wide for stability (left -Z / right +Z derived from the
+      // UBL bind layout: -Z about the body roll axis abducts the left limbs).
+      const armL = bones['upperarm_l'];
+      const armR = bones['upperarm_r'];
+      const foreL = bones['lowerarm_l'];
+      const foreR = bones['lowerarm_r'];
+      if (armL) twistFromBodyAxis(armL, 'z', -0.62 * blend);
+      if (armR) twistFromBodyAxis(armR, 'z', 0.62 * blend);
+      // Slight elbow bend so the arms read as controlled, not rigid.
+      if (foreL) twistFromBodyAxis(foreL, 'y', 0.35 * blend);
+      if (foreR) twistFromBodyAxis(foreR, 'y', -0.35 * blend);
+      // Legs separated with bent knees, heels trailing toward the back plane.
+      const thighL = bones['thigh_l'];
+      const thighR = bones['thigh_r'];
+      const calfL = bones['calf_l'];
+      const calfR = bones['calf_r'];
+      if (thighL) twistFromBodyAxis(thighL, 'z', -0.2 * blend);
+      if (thighR) twistFromBodyAxis(thighR, 'z', 0.2 * blend);
+      if (calfL) twistFromBodyAxis(calfL, 'x', -0.5 * blend);
+      if (calfR) twistFromBodyAxis(calfR, 'x', -0.5 * blend);
+    }
 
     function crossfade(from: string, to: string, dur = 0.16): void {
       const a = actions[to], b = actions[from];
@@ -397,6 +490,9 @@ export class CharacterFactory {
       accentMats: accents,
       baseMats: baseMats,
       dissolving: 0,
+      playPunch() {
+        triggerPunch();
+      },
       prewarmDeath() {
         const death = actions['death'];
         if (!death) return;
@@ -443,6 +539,10 @@ export class CharacterFactory {
         hitT = Math.max(0, hitT - dt);
         a.interactTimer = Math.max(0, a.interactTimer - dt);
 
+        // Melee presentation: real jab/cross one-shots on the swing edge.
+        if (a.punchTimer > 0 && punchHoldT <= 0) triggerPunch();
+        punchHoldT = Math.max(0, punchHoldT - dt);
+
         let want: string;
         if (dashing) {
           want = 'sprint';
@@ -450,13 +550,16 @@ export class CharacterFactory {
           case 'slide': want = 'roll'; break;
           case 'mantle': want = 'roll'; break;
           case 'wallrun': want = 'sprint'; break;
-          case 'freefall': want = speedH > 20 ? 'sprint' : 'jump_loop'; break;
+          // Freefall keeps a gentle base clip for micro-motion; the trained
+          // skydive pose is applied procedurally after the mixer step.
+          case 'freefall': want = 'jump_loop'; break;
           case 'glide': want = 'jump_loop'; break;
           case 'swim': want = speedH > 1 ? 'swim' : 'swim_idle'; break;
           default:
             if (!a.body.grounded) want = jumpStartT > 0 ? 'jump_start' : 'jump_loop';
             else if (landT > 0 && speedH < 2.5) want = 'jump_land';
             else if (hitT > 0 && speedH < 3) want = 'hit_chest';
+            else if (punchHoldT > 0) want = punchClip;
             else if (a.interactTimer > 0 && speedH < 2) want = 'interact';
             else if (a.crouched) want = speedH > 0.6 ? 'crouch_walk' : 'crouch_idle';
             else if (speedH < 0.6) {
@@ -472,18 +575,12 @@ export class CharacterFactory {
           crossfade(currentBase, want);
           currentBase = want;
         }
-        rig.animName = want;
+        // Freefall QA label: the skydive pose is procedural, so surface it.
+        rig.animName = a.state === 'freefall' ? 'freefall' : want;
         // Time-warp locomotion to actual speed so footfalls match ground speed
-        const baseSpeeds: Record<string, number> = {
-          walk: 2.35, jog: 5.9, sprint: 9.7, crouch_walk: 2.0,
-        };
         const act = actions[want];
         if (!act) return;
-        if (baseSpeeds[want]) {
-          act.timeScale = THREE.MathUtils.clamp(visualSpeed / baseSpeeds[want]!, 0.72, dashing ? 1.45 : 1.32);
-        } else {
-          act.timeScale = 1;
-        }
+        act.timeScale = locomotionTimeScale(want, visualSpeed, dashing);
 
         // Upper-body aim layer while holding a weapon (suppressed while a
         // full-body one-shot owns the pose)
@@ -535,29 +632,12 @@ export class CharacterFactory {
           bodyBaseRotation.z + sideLean,
         );
 
-        // Procedural punch override (melee presentation)
-        if (a.punchTimer > 0 || punchPose.active) {
-          const arm = bones['upperarm_r'];
-          const fore = bones['lowerarm_r'];
-          if (arm) {
-            if (!punchPose.base) punchPose.base = { a: arm.quaternion.clone(), f: fore?.quaternion.clone() ?? null };
-            if (a.punchTimer > 0) {
-              punchPose.active = true;
-              const ph = 1 - a.punchTimer / 0.32;
-              const ext = Math.sin(Math.min(1, ph) * Math.PI);
-              _punchQ.setFromAxisAngle(_punchX, -ext * 1.45);
-              arm.quaternion.copy(punchPose.base.a).multiply(_punchQ);
-              if (fore && punchPose.base.f) {
-                _punchQ.setFromAxisAngle(_punchX, -Math.max(0, 0.5 - ext) * 1.2);
-                fore.quaternion.copy(punchPose.base.f).multiply(_punchQ);
-              }
-            } else {
-              arm.quaternion.copy(punchPose.base.a);
-              if (fore && punchPose.base.f) fore.quaternion.copy(punchPose.base.f);
-              punchPose.active = false;
-              punchPose.base = null;
-            }
-          }
+        // Trained freefall pose (presentation-only; collider unchanged).
+        freefallBlend += ((a.state === 'freefall' ? 1 : 0) - freefallBlend)
+          * Math.min(1, dt * FREEFALL_BLEND_RATE);
+        if (freefallBlend > 0.001) {
+          body.updateMatrixWorld(true);
+          applyFreefallPose(freefallBlend);
         }
       },
       updateView(a: ActorView, _t: number, dt: number) {
@@ -578,22 +658,30 @@ export class CharacterFactory {
           ? (speedH > 1 ? 'swim' : 'swim_idle')
           : a.moveState === 'slide' || a.moveState === 'mantle'
             ? 'roll'
-            : !a.grounded
+            : a.moveState === 'freefall' || a.moveState === 'glide'
               ? 'jump_loop'
-              : a.crouched
-                ? (speedH > 0.6 ? 'crouch_walk' : 'crouch_idle')
-                : speedH < 0.6 ? 'idle' : speedH < 3.2 ? 'walk' : speedH < 8.6 ? 'jog' : 'sprint';
+              : !a.grounded
+                ? 'jump_loop'
+                : a.crouched
+                  ? (speedH > 0.6 ? 'crouch_walk' : 'crouch_idle')
+                  : speedH < 0.6 ? 'idle' : speedH < 3.2 ? 'walk' : speedH < 8.6 ? 'jog' : 'sprint';
         if (want !== currentBase) {
           crossfade(currentBase, want);
           currentBase = want;
         }
-        rig.animName = want;
+        rig.animName = a.moveState === 'freefall' ? 'freefall' : want;
         const action = actions[want];
-        if (action && (want === 'walk' || want === 'jog' || want === 'sprint' || want === 'crouch_walk')) {
-          const base = want === 'walk' ? 2.35 : want === 'jog' ? 5.9 : want === 'sprint' ? 9.7 : 2;
-          action.timeScale = THREE.MathUtils.clamp(speedH / base, 0.72, 1.32);
-        }
+        if (action) action.timeScale = locomotionTimeScale(want, speedH);
         mixer.update(dt);
+
+        // Same broad skydive presentation as the host path: the networked
+        // moveState carries freefall, so replicas blend the pose identically.
+        freefallBlend += ((a.moveState === 'freefall' ? 1 : 0) - freefallBlend)
+          * Math.min(1, dt * FREEFALL_BLEND_RATE);
+        if (freefallBlend > 0.001) {
+          body.updateMatrixWorld(true);
+          applyFreefallPose(freefallBlend);
+        }
       },
       attachWeapon(model: THREE.Object3D | null) {
         if (!weaponHolder) return;
