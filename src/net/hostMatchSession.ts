@@ -118,7 +118,7 @@ export const AUTHORITATIVE_EVENT_TYPES = [
   'shotFired', 'impact', 'glassBreak', 'destructibleDestroyed', 'actorHit',
   'shieldHit', 'shieldBroken', 'eliminated', 'itemPickedUp', 'chestOpened', 'reloadStarted',
   'healStarted', 'healCancelled', 'healDone', 'stormWaiting', 'stormShrinking',
-  'stormFinal', 'phaseChanged', 'matchWon',
+  'stormFinal', 'phaseChanged', 'matchWon', 'meleeSwing',
 ] as const;
 
 export class HostAuthoritativeMatchSession {

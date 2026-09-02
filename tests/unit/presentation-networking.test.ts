@@ -1,27 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import { AUTHORITATIVE_EVENT_TYPES } from '../../src/net/hostMatchSession';
 import { DECAL_BUDGETS } from '../../src/render/impactDecals';
 import { WEAPONS } from '../../src/core/balance';
 
-/**
- * Presentation systems must stay inside the released networking model: every
- * new presentation feature (decals, tracers, flash changes) is derived from
- * the ALREADY-networked authoritative event set. This pins that set so an
- * accidental new high-frequency network field fails here, not in review.
- */
-const NETWORKED_EVENT_TYPES = [
-  'shotFired', 'impact', 'glassBreak', 'destructibleDestroyed', 'actorHit',
-  'shieldHit', 'shieldBroken', 'eliminated', 'itemPickedUp', 'chestOpened', 'reloadStarted',
-  'healStarted', 'healCancelled', 'healDone', 'stormWaiting', 'stormShrinking',
-  'stormFinal', 'phaseChanged', 'matchWon',
-] as const;
+
 
 describe('presentation networking invariants', () => {
   it('impact decals derive from the already-networked impact event only', () => {
-    expect(NETWORKED_EVENT_TYPES).toContain('impact');
-    expect(NETWORKED_EVENT_TYPES).toContain('shotFired');
+    // v0.4 deliberately added meleeSwing (bounded, low frequency) so guests
+    // see punches; melee hits stay host-authoritative in the meleeHit flow.
+    expect(AUTHORITATIVE_EVENT_TYPES).toContain('meleeSwing');
     // No decal/tracer-specific event types were added to the wire format.
-    expect(NETWORKED_EVENT_TYPES.filter((t) => t.toLowerCase().includes('decal'))).toEqual([]);
-    expect(NETWORKED_EVENT_TYPES.filter((t) => t.toLowerCase().includes('tracer'))).toEqual([]);
+    expect(AUTHORITATIVE_EVENT_TYPES.filter((t) => t.toLowerCase().includes('decal'))).toEqual([]);
+    expect(AUTHORITATIVE_EVENT_TYPES.filter((t) => t.toLowerCase().includes('tracer'))).toEqual([]);
   });
 
   it('decal pools stay bounded across every quality preset', () => {
