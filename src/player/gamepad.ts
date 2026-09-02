@@ -24,6 +24,8 @@ export interface GamepadCallbacks {
   onMeleePress(): void;
   onPingPress(): void;
   onCrouchPress?(): void;
+  /** LB + D-pad Up/Down while scoped: cycle sniper magnification. */
+  onScopeZoomCycle?(direction: 1 | -1): void;
 }
 
 const BUTTON = {
@@ -158,9 +160,16 @@ export class GamepadInput {
       else { cmd.shieldPressed = true; this.cb.onShieldPress(); }
     }
 
-    // D-pad
-    if (this.edge(pad, BUTTON.DPAD_UP)) { cmd.grapplePressed = true; this.cb.onGrapplePress(); }
-    if (this.edge(pad, BUTTON.DPAD_DOWN)) { cmd.poundPressed = true; this.cb.onPoundPress(); }
+    // D-pad. With LB held the up/down edges become the (otherwise unused)
+    // scope-magnification cycling combo instead of grapple/pound.
+    if (this.edge(pad, BUTTON.DPAD_UP)) {
+      if (lbDown) this.cb.onScopeZoomCycle?.(1);
+      else { cmd.grapplePressed = true; this.cb.onGrapplePress(); }
+    }
+    if (this.edge(pad, BUTTON.DPAD_DOWN)) {
+      if (lbDown) this.cb.onScopeZoomCycle?.(-1);
+      else { cmd.poundPressed = true; this.cb.onPoundPress(); }
+    }
     if (this.edge(pad, BUTTON.DPAD_LEFT)) { cmd.dropWeaponPressed = true; this.cb.onDropWeaponPress(); }
     if (this.edge(pad, BUTTON.DPAD_RIGHT)) { cmd.dashPressed = true; this.cb.onDashPress(); }
 

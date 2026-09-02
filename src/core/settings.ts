@@ -21,6 +21,8 @@ export interface KeyBindings {
   spectatePrev: string; spectateNext: string; mapToggle: string;
   /** Moves the third-person shoulder to the opposite side. */
   shoulderSwap: string;
+  /** Cycles sniper scope magnification (1x/2x/4x) while scoped. */
+  scopeZoom: string;
 }
 
 export const DEFAULT_BINDINGS: KeyBindings = {
@@ -32,6 +34,7 @@ export const DEFAULT_BINDINGS: KeyBindings = {
   dropWeapon: 'KeyX', useMedkit: 'KeyG', useShield: 'KeyH',
   spectatePrev: 'ArrowLeft', spectateNext: 'ArrowRight', mapToggle: 'KeyM',
   shoulderSwap: 'KeyZ',
+  scopeZoom: 'KeyT',
 };
 
 export interface Settings {
@@ -40,6 +43,8 @@ export interface Settings {
   adsSensitivity: number;
   invertY: boolean;
   fov: number;
+  /** Sniper scope magnification level (1 | 2 | 4); persists across matches. */
+  scopeMagnification: number;
   bindings: KeyBindings;
 
   // Graphics
@@ -98,6 +103,7 @@ export const DEFAULT_SETTINGS: Settings = {
   adsSensitivity: 0.8,
   invertY: false,
   fov: 80,
+  scopeMagnification: 2,
   bindings: { ...DEFAULT_BINDINGS },
 
   quality: 'high',
@@ -206,6 +212,9 @@ function mergeSettings(base: Settings, patch: unknown): Settings {
     adsSensitivity: bounded(patch.adsSensitivity, base.adsSensitivity, 0.2, 2),
     invertY: bool(patch.invertY, base.invertY),
     fov: bounded(patch.fov, base.fov, 60, 110),
+    scopeMagnification: [1, 2, 4].includes(patch.scopeMagnification as number)
+      ? patch.scopeMagnification as number
+      : base.scopeMagnification,
     bindings: safeBindings(base.bindings, patch.bindings),
 
     quality: choice(patch.quality, base.quality, ['low', 'medium', 'high', 'ultra', 'cinematic']),
