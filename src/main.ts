@@ -33,6 +33,8 @@ import { LobbyScene } from './render/lobby';
 import { GameRenderer } from './render/renderer';
 import { WorldView } from './render/worldView';
 import { VfxSystem } from './render/vfx';
+import { ImpactDecalSystem } from './render/impactDecals';
+import { SCOPE_MAGNIFICATIONS } from './render/renderer';
 import { CameraRig } from './render/cameraRig';
 import { ViewModel } from './render/viewmodel';
 import { CharacterFactory, updateEliminationFx, type CharacterRig } from './render/characters';
@@ -84,6 +86,8 @@ interface LivePresentation {
   renderer: GameRenderer;
   world: WorldView;
   vfx: VfxSystem;
+  decals: ImpactDecalSystem;
+  hud: Hud;
   rig: CameraRig;
   viewmodel: ViewModel;
   rigs: Map<number, CharacterRig>;
@@ -129,6 +133,36 @@ interface PreparedGuestRuntime {
 }
 
 let live: LiveGame | null = null;
+
+/** Apply a magnification to the active presentation and persist the preference. */
+function applyScopeZoom(magnification: number): void {
+  updateSettings({ scopeMagnification: magnification });
+  live?.renderer.setScopeMagnification(magnification);
+  if (live) live.player.scopedZoom = magnification;
+  live?.hud.setScopeZoom(magnification);
+}
+
+/** Cycle 1x -> 2x -> 4x -> 1x; wheel up = stronger, wheel down = weaker. */
+function cycleScopeZoom(direction: 1 | -1): void {
+  const current = getSettings().scopeMagnification;
+  const index = Math.max(0, SCOPE_MAGNIFICATIONS.indexOf(current as 1 | 2 | 4));
+  const next = SCOPE_MAGNIFICATIONS[(index + direction + SCOPE_MAGNIFICATIONS.length) % SCOPE_MAGNIFICATIONS.length]!;
+  applyScopeZoom(next);
+}
+
+// Scope magnification input: remappable key and the mouse wheel (only while
+// fully scoped, so normal weapon slot cycling is untouched), plus the
+// LB+D-pad gamepad combo wired per-controller below.
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (e.code === getSettings().bindings.scopeZoom && document.body.classList.contains('scoped')) {
+    cycleScopeZoom(1);
+  }
+});
+window.addEventListener('wheel', (e) => {
+  if (!document.body.classList.contains('scoped') || e.deltaY === 0) return;
+  cycleScopeZoom(e.deltaY > 0 ? 1 : -1);
+}, { passive: true });
 let hud: Hud;
 let audio: AudioEngine;
 let menus: Menus;
@@ -281,13 +315,12 @@ const presentationTransportPos = new THREE.Vector3();
 let qaGlassBreakTimes: number[] = [];
 let qaGlassBreakFrames: Array<{ time: number; presentMs: number }> = [];
 
-const WEAPON_KICK: Record<string, number> = {
-  pistol: 0.7,
-  smg: 0.45,
-  ar: 0.8,
-  shotgun: 2.2,
-  sniper: 3,
-};
+/** Viewmodel impulse per weapon from the shared recoil profile. */
+function weaponViewmodelKick(weaponId: string): number {
+  const profile = WEAPONS[weaponId as keyof typeof WEAPONS]?.recoil;
+  // Scale to the ViewModel.kick impulse range the old table used.
+  return (profile?.viewmodel ?? 0.5) * 2.2;
+}
 const WEAPON_ICONS: Record<string, string> = {
   pistol: '⌐',
   smg: '⁝⁝',
@@ -721,6 +754,7 @@ async function boot(): Promise<void> {
       lastGfxKey = key;
       live?.renderer.applyQuality();
       live?.world.setWaterQuality(s.quality);
+      live?.decals.setQuality(s.quality);
     }
     hud.applyCrosshair();
     audio.applyVolumes();
@@ -1055,10 +1089,20 @@ async function prepareOnlineGuestRuntime(
       renderer.scene.remove(vfx.group);
       vfx.dispose();
     });
+    const decals = new ImpactDecalSystem(renderer.scene, getSettings().quality);
+    decals.prewarm();
+    registerStartCleanup(generation, () => {
+      decals.dispose();
+    });
     const rig = new CameraRig(window.innerWidth / window.innerHeight);
     rig.onScopedChanged = (scoped) => {
       hud.setScoped(scoped);
       renderer.setScopeActive(scoped, rig.camera);
+      if (scoped) {
+        const mag = getSettings().scopeMagnification;
+        renderer.setScopeMagnification(mag);
+        hud.setScopeZoom(mag);
+      }
     };
     renderer.buildComposer(rig.camera);
     renderer.applyQuality();
@@ -1151,6 +1195,7 @@ async function prepareOnlineGuestRuntime(
       }),
       () => toggleInventory(),
     );
+    player.scopedZoom = getSettings().scopeMagnification;
     registerStartCleanup(generation, () => player.dispose());
     player.gamepad = new GamepadInput({
       onJumpPress: () => undefined,
@@ -1171,6 +1216,7 @@ async function prepareOnlineGuestRuntime(
       onPauseRequest: () => handlePauseOrSpectateExit(),
       onSlotRequest: (slot) => player.requestInventorySlot(slot),
       onMeleePress: () => undefined,
+      onScopeZoomCycle: (direction) => cycleScopeZoom(direction),
       onPingPress: requestAimPing,
     });
     const routeX = input.map.transportRoute.to[0] - input.map.transportRoute.from[0];
@@ -1240,6 +1286,8 @@ async function prepareOnlineGuestRuntime(
       renderer,
       world,
       vfx,
+      decals,
+      hud,
       rig,
       viewmodel,
       rigs,
@@ -1440,10 +1488,20 @@ async function startMatchImpl(
     renderer.scene.remove(vfx.group);
     vfx.dispose();
   });
+  const decals = new ImpactDecalSystem(renderer.scene, getSettings().quality);
+  decals.prewarm();
+  registerStartCleanup(generation, () => {
+    decals.dispose();
+  });
   const rig = new CameraRig(window.innerWidth / window.innerHeight);
   rig.onScopedChanged = (s) => {
     hud.setScoped(s);
     renderer.setScopeActive(s, rig.camera);
+    if (s) {
+      const mag = getSettings().scopeMagnification;
+      renderer.setScopeMagnification(mag);
+      hud.setScopeZoom(mag);
+    }
   };
   renderer.buildComposer(rig.camera);
   renderer.applyQuality();
@@ -1476,6 +1534,7 @@ async function startMatchImpl(
       }
     },
     onPingPress: () => placePingAtAim(),
+    onScopeZoomCycle: (direction) => cycleScopeZoom(direction),
   });
   const player = new PlayerController(
     canvas,
@@ -1494,6 +1553,7 @@ async function startMatchImpl(
     }),
     () => toggleInventory(),
   );
+  player.scopedZoom = getSettings().scopeMagnification;
   registerStartCleanup(generation, () => player.dispose());
   player.gamepad = gamepad;
 
@@ -1802,6 +1862,8 @@ async function startMatchImpl(
     renderer,
     world,
     vfx,
+    decals,
+    hud,
     rig,
     viewmodel,
     rigs,
@@ -1980,7 +2042,7 @@ async function startMatchImpl(
     });
   }
 
-  wirePresentation(match, world, vfx, rigs, hud, viewmodel, rig);
+  wirePresentation(match, world, vfx, live.decals, rigs, hud, viewmodel, rig);
 
   await setLoad(0.85, t('load.final'));
   if (generation !== matchGeneration || live?.generation !== generation) throw new MatchStartCancelled();
@@ -2146,6 +2208,7 @@ function wirePresentation(
   match: Match,
   _world: WorldView,
   vfx: VfxSystem,
+  decals: ImpactDecalSystem,
   rigs: Map<number, CharacterRig>,
   hud: Hud,
   viewmodel: ViewModel,
@@ -2160,7 +2223,7 @@ function wirePresentation(
   match.events.on('muzzleFlash', (e) => {
     const isPlayer = e.actorId === match.localActor?.id;
     if (isPlayer && rig.mode === 'fps') {
-      viewmodel.kick(WEAPON_KICK[e.weaponId] ?? 1);
+      viewmodel.kick(weaponViewmodelKick(e.weaponId));
       viewmodel.muzzlePulse(isPlayer ? 0.8 : 1.15);
     } else {
       const renderedMuzzle = rigs.get(e.actorId)?.muzzleWorld?.(
@@ -2181,6 +2244,10 @@ function wirePresentation(
   });
   match.events.on('tracer', (e) => vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color));
   match.events.on('impact', (e) => vfx.impactSparks(e.x, e.y, e.z, e.nx, e.ny, e.nz, e.material === 'metal' ? 10 : 6));
+  match.events.on('impact', (e) => decals.spawn(
+    e.x, e.y, e.z, e.nx, e.ny, e.nz, e.material,
+    `${e.x.toFixed(2)}|${e.y.toFixed(2)}|${e.z.toFixed(2)}`,
+  ));
   match.events.on('glassBreak', (e) => vfx.glassShards(e.x, e.y, e.z));
   if (QA_MODE) match.events.on('glassBreak', () => {
     const time = performance.now();
@@ -2353,7 +2420,7 @@ function presentOnlineAuthoritativeEvent(
     if (dry) return;
     const actor = actorView(actorId);
     if (isLocal && game.rig.mode === 'fps') {
-      game.viewmodel.kick(WEAPON_KICK[weaponId] ?? 1);
+      game.viewmodel.kick(weaponViewmodelKick(weaponId));
       game.viewmodel.muzzlePulse(0.8);
       return;
     }
@@ -2376,12 +2443,29 @@ function presentOnlineAuthoritativeEvent(
       isLocal ? 0.9 : 1.35,
       weaponId === 'shotgun' || weaponId === 'sniper',
     );
+    // Guests previously received no tracers at all (tracer events are
+    // host-local). Derive a stable short segment from the shot's authored
+    // muzzle and aim direction — no new network field required.
+    if (!dry) {
+      const startX = hasMuzzle ? presentationMuzzle.x : x;
+      const startY = hasMuzzle ? presentationMuzzle.y : y;
+      const startZ = hasMuzzle ? presentationMuzzle.z : z;
+      game.vfx.spawnTracer(
+        startX, startY, startZ,
+        startX + dx * 38, startY + dy * 38, startZ + dz * 38,
+        WEAPONS[weaponId].tracerColor,
+      );
+    }
     return;
   }
   if (event.type === 'impact') {
     const material = typeof payload.material === 'string' ? payload.material : 'stone';
     const x = number('x'); const y = number('y'); const z = number('z');
     game.vfx.impactSparks(x, y, z, number('nx'), number('ny', 1), number('nz'), material === 'metal' ? 10 : 6);
+    // Reliable authoritative events are deduplicated by eventId upstream, so
+    // a confirmed shot yields exactly one mark. event.eventId doubles as the
+    // deterministic orientation identity.
+    game.decals.spawn(x, y, z, number('nx'), number('ny', 1), number('nz'), material, String(event.eventId));
     audio.impact(x, y, z, material);
     return;
   }
@@ -2500,7 +2584,7 @@ function predictGuestFirePresentation(inputSequence: number, command: Readonly<I
   game.nextPredictedShotAtMs = time + 60_000 / def.rpm;
   audio.gunshot(weaponId, actor.position.x, actor.position.y, actor.position.z, false, true);
   if (game.rig.mode === 'fps') {
-    game.viewmodel.kick(WEAPON_KICK[weaponId] ?? 1);
+    game.viewmodel.kick(weaponViewmodelKick(weaponId));
     game.viewmodel.muzzlePulse(0.8);
   } else {
     const yaw = actor.yaw;
@@ -2647,7 +2731,7 @@ function present(dtReal: number): void {
 }
 
 function presentMatch(game: MatchLiveGame, dtReal: number): void {
-  const { match: m, renderer, world, vfx, rig, viewmodel, rigs, player, characterFill } = game;
+  const { match: m, renderer, world, vfx, decals, rig, viewmodel, rigs, player, characterFill } = game;
 
   // Debug/QA introspection hook. Development-only because the related helpers
   // below can mutate match state and must not ship as a production backdoor.
@@ -3287,6 +3371,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   world.update(dtReal, m, { position: presentationTransportPos });
   applyQaWaterView(rig, world, true);
   vfx.update(dtReal, rig.camera.position);
+  decals.update(dtReal);
 
   {
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
@@ -3320,7 +3405,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
 }
 
 function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
-  const { renderer, world, vfx, rig, viewmodel, rigs, player, characterFill } = game;
+  const { renderer, world, vfx, decals, rig, viewmodel, rigs, player, characterFill } = game;
   const view = game.replica.update(performance.now());
   game.view = view;
   if (!view) {
@@ -3497,6 +3582,7 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
   world.updateReplica(dtReal, view);
   applyQaWaterView(rig, world, true);
   vfx.update(dtReal, rig.camera.position);
+  decals.update(dtReal);
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
   AudioEngine.setListener(
     rig.camera.position.x, rig.camera.position.y, rig.camera.position.z,
