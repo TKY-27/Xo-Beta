@@ -39,7 +39,7 @@ export interface StairPlan {
 const CHEST_SUPPORT_PROBE_ABOVE = 0.75;
 const CHEST_SUPPORT_MAX_DROP = 1.5;
 const CHEST_SUPPORT_TOLERANCE = 0.75;
-const PROP_SUPPORT_TOLERANCE = 0.65;
+const PROP_SUPPORT_TOLERANCE = 0.78;
 
 interface FlatRect {
   minX: number;
@@ -183,8 +183,9 @@ export function groundCrates(def: MapDef, phys: PhysicsWorld): void {
     }
 
     // A stair/awning can be the first high probe hit even though it is not the
-    // crate's support. Fall back to the local ground around the authored base.
-    const nearHit = phys.raycast(geo.x, baseY + 0.6, geo.z, 0, -1, 0, 1.25, GROUPS.rayWorldOnly);
+    // crate's support. Fall back to the local ground around the authored base;
+    // the reach covers the support tolerance plus the probe offset.
+    const nearHit = phys.raycast(geo.x, baseY + 0.6, geo.z, 0, -1, 0, 0.6 + PROP_SUPPORT_TOLERANCE + 0.1, GROUPS.rayWorldOnly);
     if (!nearHit || nearHit.dist < 0.05 || nearHit.normal.y < 0.65) continue;
     const nearError = nearHit.point.y - baseY;
     if (Math.abs(nearError) <= PROP_SUPPORT_TOLERANCE) geo.y += nearError;

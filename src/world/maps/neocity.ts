@@ -182,7 +182,7 @@ export function buildNeoCity(): MapDef {
   b.loot(-138, 1.2, 118);
   b.loot(-124, 1.2, 102);
   // Arena field is elevated to y=0.8; rest the van on that deck.
-  b.vehicle(-158, 128, 0.8, 0.4, 'van', 0x27313d);
+  b.vehicle(-158, 128, 0.2, 0.4, 'van', 0x27313d);
 
   // ------------------------------------------------------------------
   // POI: RESIDENTIAL BLOCKS (SW)
@@ -316,7 +316,10 @@ export function buildNeoCity(): MapDef {
   applyNeoCityShadowBudget(b);
   removeRoadPaintUnderFoundations(b);
 
-  hardenExposedFlanks(b, { mat: 'concrete', maxProps: 22 });
+  urbanInfill(b);
+  solidifyStructuralPoles(b);
+  // Residual exposure only: authored infill above is the primary dressing.
+  hardenExposedFlanks(b, { mat: 'concrete', maxProps: 12 });
 
   return b.finish(
     {
@@ -555,19 +558,86 @@ function rampTo(b: WorldBuilder, cx: number, cz: number, startR: number, topY: n
   }
 }
 
+/**
+ * Deterministic mid-block urban infill (v0.4.1): recognizable street
+ * furniture families — dumpsters, utility cabinets, planters and delivery
+ * crates — at fixed offsets inside the sparse inner blocks between POIs.
+ * All placements are collidable, share the batched material system, cast no
+ * small-part shadows, and stay clear of the road corridors.
+ */
+/**
+ * v0.4.1 integrity pass: free-standing person-sized poles (light masts, sign
+ * posts, awning supports) must stop actors. Poles whose base sits against
+ * other solid geometry (wall brackets) stay decorative — they cannot be
+ * reached from the open side, and solidifying them would snag movement.
+ * Runs before finish() so placement re-checks see the final collidable set.
+ */
+function solidifyStructuralPoles(b: WorldBuilder): void {
+  const geo = b.def.geo;
+  const isPole = (g: (typeof geo)[number]): g is Extract<(typeof geo)[number], { kind: 'box' }> =>
+    g.kind === 'box' && g.noCollide === true && g.sy >= 1.6
+    && Math.max(g.sx, g.sz) <= 0.7 && g.y - g.sy / 2 < 2.2;
+  const poles = geo.filter(isPole);
+  // Ground layers (streets, sidewalks, floor slabs) are what poles stand ON,
+  // not what they attach to — including them made every pole "attached".
+  const solids = geo.filter((g) => g.kind === 'box' && g.noCollide !== true
+    && !(g.sy >= 1.6 && Math.max(g.sx, g.sz) <= 0.7)
+    && !(g.sy <= 2.2 && g.y + g.sy / 2 <= 2.5));
+  for (const pole of poles) {
+    if (pole.kind !== 'box') continue;
+    const attached = solids.some((s) => {
+      if (s.kind !== 'box') return false;
+      const c = Math.abs(Math.cos(s.yaw));
+      const sn = Math.abs(Math.sin(s.yaw));
+      const hx = (s.sx * c + s.sz * sn) / 2;
+      const hz = (s.sx * sn + s.sz * c) / 2;
+      const verticalOverlap = Math.abs(s.y - pole.y) < (s.sy + pole.sy) / 2;
+      return verticalOverlap
+        && Math.abs(s.x - pole.x) < hx + 0.55
+        && Math.abs(s.z - pole.z) < hz + 0.55;
+    });
+    if (!attached) {
+      pole.noCollide = false;
+      pole.materialHint = 'metal';
+    }
+  }
+}
+
+function urbanInfill(b: WorldBuilder): void {
+  const sites: Array<[number, number]> = [
+    [60, 60], [-60, 60], [60, -60], [-64, -56],
+    [120, 40], [-40, 128], [96, -60], [-96, 64],
+  ];
+  for (const [x, z] of sites) {
+    // Dumpster: solid mass with a lid lip.
+    b.box(x, 0.62, z, 1.7, 1.05, 1.1, 'metalDark', 0, { hint: 'metal' });
+    b.box(x, 1.2, z, 1.78, 0.1, 1.16, 'metalDark', 0, { noCollide: true, castShadow: false });
+    // Utility cabinet against a short plinth.
+    b.box(x + 3.2, 0.7, z + 1.6, 0.95, 1.4, 0.6, 'metalExterior', 0, { hint: 'metal' });
+    // Paired planters with a concrete body.
+    for (const dz of [-3.4, -1.9]) {
+      b.box(x - 2.6, 0.42, z + dz, 1.3, 0.84, 1.1, 'concrete', 0, { hint: 'stone' });
+    }
+    // Delivery crate pair (destructible, like the rest of the map's crates).
+    b.crate(x - 0.4, 0.12, z + 4.6, 1);
+    b.crate(x + 0.9, 0.12, z + 4.9, 0.8);
+  }
+}
+
 function neonSigns(b: WorldBuilder, spots: Array<[number, number, number]>): void {
   const signMats: Record<number, MatKey> = { 0xff4fd8: 'neonMagenta', 0x53ffe0: 'neonGreen', 0x7a5cff: 'neonBlue' };
   for (let index = 0; index < spots.length; index++) {
     const [x, z, color] = spots[index]!;
     const h = index === 0 ? 6.4 : 5.4;
     const postHeight = h + 1.1;
+    // Posts and footings are person-sized structural members of a 5-6 m sign
+    // assembly: they must stop actors and projectiles. Sign faces and beams
+    // above head height remain presentation-only.
     for (const offset of [-2.2, 2.2]) {
       b.box(x + 0.18, 0.18, z + offset, 1.05, 0.36, 1.15, 'concreteDark', 0, {
-        noCollide: true,
         castShadow: false,
       });
       b.box(x + 0.18, postHeight / 2, z + offset, 0.3, postHeight, 0.3, 'metalDark', 0, {
-        noCollide: true,
         castShadow: false,
       });
     }
