@@ -3380,6 +3380,8 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   applyQaWaterView(rig, world, true);
   vfx.update(dtReal, rig.camera.position);
   decals.update(dtReal);
+  renderer.setScopeUniforms(rig.scopeProgress);
+  CharacterFactory.beginFrame(rig.camera.position);
 
   {
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
@@ -3591,6 +3593,8 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
   applyQaWaterView(rig, world, true);
   vfx.update(dtReal, rig.camera.position);
   decals.update(dtReal);
+  renderer.setScopeUniforms(rig.scopeProgress);
+  CharacterFactory.beginFrame(rig.camera.position);
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(rig.camera.quaternion);
   AudioEngine.setListener(
     rig.camera.position.x, rig.camera.position.y, rig.camera.position.z,

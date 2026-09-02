@@ -198,6 +198,8 @@ export class AudioEngine {
   private masterFilter: BiquadFilterNode | null = null;
   private masterLimiter: DynamicsCompressorNode | null = null;
   private buses: Partial<Record<BusName, GainNode>> = {};
+  /** Pre-muted base level per bus so ducking restores the authored level. */
+  private busBaseLevels: Partial<Record<BusName, number>> = {};
   private buffers = new Map<string, AudioBuffer>();
   private noiseBuffer: AudioBuffer | null = null;
   private missingSampleWarnings = new Set<string>();
@@ -300,6 +302,11 @@ export class AudioEngine {
     this.buses.music!.gain.value = s.musicVolume * 0.5;
     this.buses.ambience!.gain.value = s.ambienceVolume;
     this.buses.ui!.gain.value = s.uiVolume;
+    // Record authored levels so transient ducking restores exactly these.
+    this.busBaseLevels.sfx = s.sfxVolume;
+    this.busBaseLevels.music = s.musicVolume * 0.5;
+    this.busBaseLevels.ambience = s.ambienceVolume;
+    this.busBaseLevels.ui = s.uiVolume;
   }
 
   async loadSamples(onProgress?: (pct: number) => void): Promise<void> {
@@ -401,6 +408,23 @@ export class AudioEngine {
   // Gameplay SFX
   // -------------------------------------------------------------------------
 
+  /**
+   * Briefly attenuate the ambience bus (e.g. around a local sniper report)
+   * and recover smoothly. One reusable gain automation on the shared bus —
+   * no per-shot node creation.
+   */
+  duckAmbience(durationSeconds: number, targetScale: number): void {
+    const bus = this.buses['ambience'];
+    const ctx = this.ctx;
+    if (!bus || !ctx) return;
+    const now = ctx.currentTime;
+    const base = this.busBaseLevels['ambience'] ?? 1;
+    bus.gain.cancelScheduledValues(now);
+    bus.gain.setValueAtTime(bus.gain.value, now);
+    bus.gain.linearRampToValueAtTime(base * targetScale, now + 0.02);
+    bus.gain.exponentialRampToValueAtTime(Math.max(0.0001, base), now + 0.02 + durationSeconds);
+  }
+
   gunshot(kind: string, x: number, y: number, z: number, dry = false, isLocal = false): void {
     if (!this.ctx) return;
     if (dry) {
@@ -428,13 +452,18 @@ export class AudioEngine {
       shotgun: { report: 1.08, crack: 0.18, body: 'boom/b', bodyVol: 0.25, bodyRate: 1.2, tail: 0.16 },
       sniper: { report: 1.12, crack: 0.24, body: 'boom/a', bodyVol: 0.28, bodyRate: 1.05, tail: 0.2 },
     }[kind] ?? { report: 0.92, crack: 0.12, body: 'boom/a', bodyVol: 0.055, bodyRate: 2.35, tail: 0.075 };
+    // Local-only presentation boost: the shooter's own report reads ~3-4 dB
+    // more forceful (x1.45 gain) without touching remote bands or other
+    // weapons. The layered report/crack/body/tail design is preserved.
+    const localSniperBoost = isLocal && kind === 'sniper' ? 1.45 : 1;
+    if (localSniperBoost > 1) this.duckAmbience(0.19, 0.55);
 
     // The close report is a verified CC0 firearm recording. A very short
     // filtered crack, low body and delayed outdoor tail restore the physical
     // layers that disappear when a real shot is reduced to a single sample.
     this.play(key, {
       x, y, z,
-      vol: weaponProfile.report * distanceProfile.reportGain,
+      vol: weaponProfile.report * distanceProfile.reportGain * localSniperBoost,
       rate: 0.94 + Math.random() * 0.12,
       lp: distanceProfile.reportLp,
       refDist: distanceProfile.reportRefDist,
@@ -442,14 +471,14 @@ export class AudioEngine {
     });
     this.gunCrack(
       x, y, z,
-      weaponProfile.crack * distanceProfile.crackGain,
+      weaponProfile.crack * distanceProfile.crackGain * localSniperBoost,
       distanceProfile.crackRefDist,
       distanceProfile.crackLp,
       distanceProfile.crackRolloff,
     );
     this.play(weaponProfile.body, {
       x, y, z,
-      vol: weaponProfile.bodyVol * distanceProfile.bodyGain,
+      vol: weaponProfile.bodyVol * distanceProfile.bodyGain * localSniperBoost,
       rate: weaponProfile.bodyRate + Math.random() * 0.08,
       lp: distanceProfile.bodyLp,
       refDist: distanceProfile.bodyRefDist,

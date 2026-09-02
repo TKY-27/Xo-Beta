@@ -85,13 +85,11 @@ export function scopeFovForMagnification(baseVerticalFov: number, magnification:
 const ScopeCompositeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    tScope: { value: null as THREE.Texture | null },
     uAspect: { value: 1 },
-    // Match the 72vmin physical lens aperture in the DOM housing. Keeping
-    // the optical composite and bezel on the same radius prevents a second,
-    // larger magnified circle from leaking under the scope body.
+    // Match the 72vmin physical lens aperture in the DOM housing.
     uRadius: { value: 0.36 },
-    uEnabled: { value: 0 },
+    /** Continuous ADS progress 0..1: drives mask, bezel and reticle opacity. */
+    uProgress: { value: 0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -99,48 +97,45 @@ const ScopeCompositeShader = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
-    uniform sampler2D tScope;
     uniform float uAspect;
     uniform float uRadius;
-    uniform float uEnabled;
+    uniform float uProgress;
     varying vec2 vUv;
     void main() {
       vec4 base = texture2D(tDiffuse, vUv);
-      if (uEnabled < 0.5) { gl_FragColor = base; return; }
+      if (uProgress < 0.001) { gl_FragColor = base; return; }
+      // Single-pass optics: the primary camera already carries the angular
+      // magnification, so this overlay only shapes the lens. The periphery
+      // outside the aperture is the same magnified render, progressively
+      // dimmed — it is visually hidden behind the DOM housing at full ADS.
       vec2 p = (vUv - vec2(0.5)) * vec2(uAspect, 1.0);
       float d = length(p);
-      float lens = 1.0 - smoothstep(uRadius - 0.008, uRadius + 0.008, d);
-      vec4 optics = texture2D(tScope, vUv);
-      // Subtle blue/green lens cast, restrained so the scene remains legible.
-      optics.rgb *= vec3(0.94, 0.98, 1.03);
-      vec3 color = mix(base.rgb, optics.rgb, lens);
-      // Preserve the unzoomed peripheral view. Only a fine optical edge marks
-      // the lens; the old near-black outside mask obscured situational awareness.
+      float outside = smoothstep(uRadius - 0.02, uRadius + 0.006, d);
+      vec3 color = mix(base.rgb, base.rgb * 0.12, outside * uProgress);
+      // Fine optical edge marks the aperture boundary.
       float edge = 1.0 - smoothstep(0.0, 0.012, abs(d - uRadius));
-      color = mix(color, color * 0.52, edge * 0.42);
-      color += vec3(0.16, 0.21, 0.23) * edge;
+      color = mix(color, color * 0.52, edge * 0.42 * uProgress);
+      color += vec3(0.16, 0.21, 0.23) * edge * uProgress;
       // Reticle in lens-space; central gap avoids hiding the target point.
       float lineX = 1.0 - smoothstep(0.0015, 0.004, abs(p.x));
       float lineY = 1.0 - smoothstep(0.0015, 0.004, abs(p.y));
       float gap = smoothstep(0.022, 0.036, d);
-      float reticle = max(lineX, lineY) * gap * lens;
-      // MIL/hash ticks on both axes and a lower range scale.
+      float reticle = max(lineX, lineY) * gap * (1.0 - outside);
       for (int i = -8; i <= 8; i++) {
         float tick = float(i) * 0.045;
         float horizontal = (1.0 - smoothstep(0.0015, 0.0035, abs(p.x - tick)))
           * (1.0 - smoothstep(0.0012, 0.0035, abs(p.y - 0.028)));
         float vertical = (1.0 - smoothstep(0.0015, 0.0035, abs(p.y - tick)))
           * (1.0 - smoothstep(0.0012, 0.0035, abs(p.x - 0.028)));
-        reticle = max(reticle, (horizontal + vertical) * lens * 0.85);
+        reticle = max(reticle, (horizontal + vertical) * (1.0 - outside) * 0.85);
         float rangeTick = (1.0 - smoothstep(0.0014, 0.0035, abs(p.x - tick)))
           * (1.0 - smoothstep(0.0012, 0.0035, abs(p.y + 0.22)));
-        reticle = max(reticle, rangeTick * lens * 0.7);
+        reticle = max(reticle, rangeTick * (1.0 - outside) * 0.7);
       }
-      // A dark duplex-style cross remains legible over both sky and emitters.
-      color = mix(color, vec3(0.01, 0.016, 0.014), clamp(reticle, 0.0, 1.0) * 0.92);
+      color = mix(color, vec3(0.01, 0.016, 0.014), clamp(reticle, 0.0, 1.0) * 0.92 * uProgress);
       // A small reflection streak provides a glass cue without hiding the view.
-      float reflection = (1.0 - smoothstep(0.0, 0.035, abs(p.y + p.x * 0.44 - 0.24))) * lens * 0.055;
-      color += vec3(0.8, 0.93, 1.0) * reflection;
+      float reflection = (1.0 - smoothstep(0.0, 0.035, abs(p.y + p.x * 0.44 - 0.24))) * (1.0 - outside) * 0.055;
+      color += vec3(0.8, 0.93, 1.0) * reflection * uProgress;
       gl_FragColor = vec4(color, 1.0);
     }
   `,
@@ -155,11 +150,10 @@ class ScopeCompositePass extends Pass {
     this.needsSwap = true;
   }
 
-  setScope(texture: THREE.Texture | null, active: boolean, aspect: number): void {
-    this.material.uniforms['tScope']!.value = texture;
-    this.material.uniforms['uEnabled']!.value = active ? 1 : 0;
+  setScope(enabled: boolean, progress: number, aspect: number): void {
+    this.material.uniforms['uProgress']!.value = progress;
     this.material.uniforms['uAspect']!.value = aspect;
-    this.enabled = active;
+    this.enabled = enabled;
   }
 
   override render(renderer: THREE.WebGLRenderer, writeBuffer: THREE.WebGLRenderTarget, readBuffer: THREE.WebGLRenderTarget): void {
@@ -180,6 +174,8 @@ class ScopeCompositePass extends Pass {
   }
 }
 
+
+
 export class GameRenderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
@@ -193,10 +189,8 @@ export class GameRenderer {
   private gradingPass: ShaderPass | null = null;
   private outputPass: OutputPass | null = null;
   private scopePass: ScopeCompositePass | null = null;
-  private scopeTarget: THREE.WebGLRenderTarget | null = null;
-  private scopeCamera: THREE.PerspectiveCamera | null = null;
-  private scopeSource: THREE.PerspectiveCamera | null = null;
   private scopeActive = false;
+  private scopeProgress = 0;
   private scopeMagnification: number = SCOPE_DEFAULT_MAGNIFICATION;
   private sun: THREE.DirectionalLight | null = null;
   private hemi: THREE.HemisphereLight | null = null;
@@ -251,7 +245,6 @@ export class GameRenderer {
       this.composer.setPixelRatio(pr);
       this.composer.setSize(w, h);
     }
-    this.resizeScopeTarget(w, h);
     if (this.fxaaPass) {
       (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(1 / (w * pr), 1 / (h * pr));
     }
@@ -261,11 +254,7 @@ export class GameRenderer {
     window.removeEventListener('resize', this.onResize);
     this.composer?.dispose();
     this.scopePass?.dispose();
-    this.scopeTarget?.dispose();
     this.scopePass = null;
-    this.scopeTarget = null;
-    this.scopeCamera = null;
-    this.scopeSource = null;
     this.disposeEnvironment();
     this.renderer.dispose();
   }
@@ -298,88 +287,29 @@ export class GameRenderer {
     return this.scopeMagnification;
   }
 
-  /** Enable the optical sniper view without replacing the primary camera. */
-  setScopeActive(active: boolean, sourceCamera?: THREE.PerspectiveCamera): void {
-    this.scopeActive = active;
-    if (active && sourceCamera) {
-      this.scopeSource = sourceCamera;
-      if (!this.scopeCamera) this.scopeCamera = new THREE.PerspectiveCamera();
-      if (!this.scopeTarget) this.resizeScopeTarget(window.innerWidth, window.innerHeight);
-    } else if (!active) {
-      this.scopeSource = null;
-      this.scopeCamera = null;
-      this.scopeTarget?.dispose();
-      this.scopeTarget = null;
-    }
-    if (this.scopePass) {
-      this.scopePass.enabled = this.scopeActive;
-      this.scopePass.setScope(
-        this.scopeTarget?.texture ?? null,
-        this.scopeActive,
-        window.innerWidth / Math.max(1, window.innerHeight),
-      );
-    }
-  }
-
   /**
-   * Scope render-target resolution for the current viewport, DPR and quality.
-   * The DOM lens aperture is 72vmin and the composite maps it to uRadius 0.36
-   * (0.72 of the target height), so sizing the target height to
-   * minViewport * dpr * qualityFactor yields ~1 scope texel per physical lens
-   * pixel on High, a bounded factor below it on Medium/Low, and modest
-   * supersampling on Ultra/Cinematic. The full-frame target keeps the
-   * composite's straight-through UV mapping unchanged.
+   * Enable the optical sniper view. Single-pass optics: this only flips a
+   * uniform-gated overlay pass — no render target, camera or scene-compile
+   * work happens here, so right-click can never allocate GPU resources.
+   * Overlay weights track continuous ADS progress via setScopeUniforms().
    */
-  scopeTargetSize(width: number, height: number): { width: number; height: number } {
-    const quality = getSettings().quality;
-    const qualityFactor = quality === 'low' ? 0.6
-      : quality === 'medium' ? 0.75
-        : quality === 'ultra' || quality === 'cinematic' ? 1.25 : 1.0;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const heightPx = Math.min(width, height) * dpr * qualityFactor;
-    const clampedHeight = Math.max(256, Math.min(2048, Math.round(heightPx)));
-    const aspect = width / Math.max(1, height);
-    return { width: Math.round(clampedHeight * aspect), height: clampedHeight };
+  setScopeActive(active: boolean, _sourceCamera?: THREE.PerspectiveCamera): void {
+    this.scopeActive = active;
+    this.syncScopePass();
   }
 
-  private resizeScopeTarget(width: number, height: number): void {
-    if (!this.scopeActive && !this.scopeTarget) return;
-    const target = this.scopeTargetSize(width, height);
-    const targetWidth = target.width;
-    const targetHeight = target.height;
-    if (!this.scopeTarget) {
-      this.scopeTarget = new THREE.WebGLRenderTarget(targetWidth, targetHeight, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        depthBuffer: true,
-        stencilBuffer: false,
-      });
-    } else if (this.scopeTarget.width !== targetWidth || this.scopeTarget.height !== targetHeight) {
-      this.scopeTarget.setSize(targetWidth, targetHeight);
-    }
-    this.scopePass?.setScope(this.scopeTarget.texture, this.scopeActive, width / Math.max(1, height));
+  /** Continuous ADS progress for the scope overlay weights (0..1). */
+  setScopeUniforms(progress: number): void {
+    this.scopeProgress = THREE.MathUtils.clamp(progress, 0, 1);
+    this.syncScopePass();
   }
 
-  private renderScopeTarget(): void {
-    if (!this.scopeActive || !this.scopeSource || !this.scopeCamera || !this.scopeTarget) return;
-    const source = this.scopeSource;
-    const scope = this.scopeCamera;
-    scope.position.copy(source.position);
-    scope.quaternion.copy(source.quaternion);
-    scope.near = source.near;
-    scope.far = source.far;
-    scope.aspect = this.scopeTarget.width / Math.max(1, this.scopeTarget.height);
-    // Angular magnification: the view shrinks by exactly the tangent ratio,
-    // so 1x is optically identical to the hip view and sensitivity can scale
-    // with the same factor on the input side.
-    scope.fov = scopeFovForMagnification(source.fov, this.scopeMagnification);
-    scope.updateProjectionMatrix();
-    scope.updateMatrixWorld(true);
-    const previousTarget = this.renderer.getRenderTarget();
-    this.renderer.setRenderTarget(this.scopeTarget);
-    this.renderer.clear();
-    this.renderer.render(this.scene, scope);
-    this.renderer.setRenderTarget(previousTarget);
+  private syncScopePass(): void {
+    this.scopePass?.setScope(
+      this.scopeActive && this.scopeProgress > 0.001,
+      this.scopeProgress,
+      window.innerWidth / Math.max(1, window.innerHeight),
+    );
   }
 
   /**
@@ -649,11 +579,7 @@ export class GameRenderer {
     // costs a full-resolution draw and buffer swap. Skip the pass entirely
     // until the optical scope is actually active.
     this.scopePass.enabled = this.scopeActive;
-    this.scopePass.setScope(
-      this.scopeTarget?.texture ?? null,
-      this.scopeActive,
-      w / Math.max(1, h),
-    );
+    this.scopePass.setScope(this.scopeActive, this.scopeProgress, w / Math.max(1, h));
     this.composer.addPass(this.scopePass);
 
     if (settings.bloom && settings.postProcessing) {
@@ -709,8 +635,6 @@ export class GameRenderer {
 
   applyQuality(): void {
     const settings = getSettings();
-    // Quality changes the scope target's sampling factor as well.
-    this.resizeScopeTarget(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = settings.shadows;
     if (this.sun) {
       const size =
@@ -756,7 +680,6 @@ export class GameRenderer {
     const settings = getSettings();
     const usePost = settings.postProcessing || settings.aa !== 'off';
     if (this.gpuProfiling) this.renderer.info.reset();
-    this.renderScopeTarget();
     if (this.composer && (usePost || this.scopeActive) && this.renderPass) {
       this.composer.render(dt);
     } else {
