@@ -2458,6 +2458,14 @@ function presentOnlineAuthoritativeEvent(
     }
     return;
   }
+  if (event.type === 'meleeSwing') {
+    // Bounded v0.4 presentation addition: guests see the jab/cross one-shot.
+    // The hit itself stays in the host-authoritative meleeHit event.
+    const attacker = game.rigs.get(integer('actorId'));
+    attacker?.playPunch?.();
+    audio.meleeSwing(number('x'), number('y'), number('z'));
+    return;
+  }
   if (event.type === 'impact') {
     const material = typeof payload.material === 'string' ? payload.material : 'stone';
     const x = number('x'); const y = number('y'); const z = number('z');
