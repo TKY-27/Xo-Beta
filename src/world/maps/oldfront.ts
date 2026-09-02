@@ -5,7 +5,7 @@
  */
 
 import { planStairs, STAIR_MAX_RISE, WorldBuilder } from '../builder';
-import { ROCK_COLLIDER_RADIUS, type MapDef, type MatKey } from '../types';
+import { ROCK_CLEARANCE_RADIUS, type MapDef, type MatKey } from '../types';
 import { Rng } from '../../core/rng';
 import { addBuilding, scatterRocks, scatterTrees, structureBaseY } from './common';
 
@@ -572,6 +572,15 @@ function watchtower(b: WorldBuilder, cx: number, cz: number): void {
   const railCentreZ = stairStartZ + stairPlan.run / 2;
   for (const side of [-1, 1]) {
     const railX = stairX + side * (stairPlan.width / 2 + 0.04);
+    // The guard envelope sits a hand-width outside the visible rail line so
+    // the walking lane keeps full clearance beside the rail: a capsule hugging
+    // the outer corner of the base riser must still autostep cleanly.
+    b.guardRail(
+      { x: railX + side * 0.1, z: stairStartZ },
+      { x: railX + side * 0.1, z: stairStartZ + stairPlan.run },
+      stairStartY - 0.15,
+      stairStartY + finalRise + 1.0,
+    );
     for (const railHeight of [0.52, 0.94]) {
       b.box(
         railX,
@@ -832,7 +841,7 @@ function quarry(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
     const rx = cx + rng.range(-26, 26);
     const rz = cz + rng.range(-20, 20);
     const scale = rng.range(0.8, 2);
-    const radius = ROCK_COLLIDER_RADIUS * scale;
+    const radius = ROCK_CLEARANCE_RADIUS * scale;
     // The removed analytic surface is not a valid support. Keep the entire
     // visible/collision footprint outside both the pit and its stair cut so a
     // boulder cannot float over the finished floor or intersect a retaining wall.
@@ -848,7 +857,7 @@ function quarry(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
     const blocksChest = Math.hypot(rx - (cx - 6), rz - (cz - 4)) < radius + 1.8;
     const overlapsRock = b.def.rocks.some((rock) => (
       Math.hypot(rock.x - rx, rock.z - rz)
-        < (ROCK_COLLIDER_RADIUS * rock.scale + radius) * 0.82
+        < (ROCK_CLEARANCE_RADIUS * rock.scale + radius) * 0.82
     ));
     if (blocksExcavation || blocksAccess || blocksChest || overlapsRock) continue;
     b.rock(rx, rz, terrainH(rx, rz), scale);

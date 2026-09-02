@@ -23,7 +23,7 @@ function payload(mapHash = 'a'.repeat(64)): MatchStartPayload {
   return {
     type: 'match-prepare',
     version: 1,
-    protocolVersion: 1,
+    protocolVersion: 2,
     protocolSession: 'session-1',
     buildHash: 'build-1',
     mapId: 'eden',

@@ -420,7 +420,10 @@ function compoundWall(
 
 function kestrelCompound(b: WorldBuilder, cx: number, cz: number): void {
   const y = structureBaseY(terrainH, cx, cz, 44, 40);
-  compoundWall(b, cx, cz, 46, 42, y, 'concrete');
+  // 52 m wide, not 46: the main building's outer fire-escape flight hangs on
+  // the west facade at cx-23.2, and the former wall line ran straight through
+  // the flight, leaving its top ridge as the only descent surface.
+  compoundWall(b, cx, cz, 52, 42, y, 'concrete');
   addBuilding(b, {
     x: cx - 10, z: cz - 6, baseY: y, w: 18, d: 16, floors: 2,
     wallMat: 'concrete', trimMat: 'metalDark', doors: [[0, 8, 2.6]], roofAccess: true,
@@ -547,6 +550,14 @@ function fuelCourt(b: WorldBuilder, cx: number, cz: number): void {
       for (const postX of [bridgeX - 1.8, bridgeX, bridgeX + 1.8]) {
         b.box(postX, y + 5.69, railZ, 0.08, 0.54, 0.08, 'metalDark', 0, { noCollide: true });
       }
+      // Guard envelope along each visible rail so the tank-top walkway cannot
+      // be walked off sideways.
+      b.guardRail(
+        { x: bridgeX - 4.15 / 2, z: railZ },
+        { x: bridgeX + 4.15 / 2, z: railZ },
+        y + 5.3,
+        y + 5.95,
+      );
     }
   }
   // The southern opening now reads as an industrial gate: grounded jambs,

@@ -42,6 +42,7 @@ function testMap(water: readonly WaterVolume[], terrainHeight?: (x: number, z: n
     loot: [],
     pois: [],
     platforms: [],
+    stairs: [],
     transportRoute: { from: [-40, -40], to: [40, 40] },
   };
 }

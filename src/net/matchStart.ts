@@ -237,6 +237,9 @@ export async function computeGameplayMapHash(map: MapDef): Promise<string> {
     geo: map.geo.filter((entry) => entry.noCollide !== true),
     destructibles: map.destructibles,
     vehicles: map.vehicles,
+    // Rocks carry measured compound colliders (variant + yaw affect solid
+    // geometry), so unlike vegetation they participate in the gameplay hash.
+    rocks: map.rocks,
     // Water presentation profiles are intentionally excluded. Only these
     // physical fields can affect authoritative collision and swimming.
     water: map.water.map(({ minX, maxX, minZ, maxZ, surfaceY, depth }) => ({

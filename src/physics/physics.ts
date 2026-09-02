@@ -15,6 +15,15 @@ export const CG = {
   WORLD: 1 << 0,
   ACTOR: 1 << 1,
   PROP: 1 << 2,
+  /**
+   * Stair tread boxes. Solid to cameras, projectiles, mantle probes and all
+   * ray queries (so bullets still meet the visible structural geometry), but
+   * excluded from character-controller movement: actors ride each flight's
+   * invisible movement ramp instead of sawtooth treads, which removes both
+   * mid-flight autostep snagging and snap-to-ground oscillation between the
+   * ramp and the tread below it.
+   */
+  STEP: 1 << 3,
 } as const;
 
 /** Build an InteractionGroups value: (memberships << 16) | filterMask. */
@@ -27,10 +36,12 @@ export const GROUPS = {
   /** Actors collide with the world but pass through each other (soft player collision). */
   actor: grp(CG.ACTOR, CG.WORLD),
   prop: grp(CG.PROP, 0xffff),
+  /** Stair treads: solid to ray queries, skipped by character movement. */
+  step: grp(CG.STEP, 0xffff),
   /** Rays that should hit anything solid. */
-  rayAll: grp(0xffff, CG.WORLD | CG.ACTOR | CG.PROP),
+  rayAll: grp(0xffff, CG.WORLD | CG.ACTOR | CG.PROP | CG.STEP),
   /** Rays that ignore actors (line-of-sight checks against scenery only). */
-  rayWorldOnly: grp(0xffff, CG.WORLD | CG.PROP),
+  rayWorldOnly: grp(0xffff, CG.WORLD | CG.PROP | CG.STEP),
 };
 
 /**
@@ -76,6 +87,13 @@ export interface WorldHitMeta {
   material?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'water' | 'foliage';
   /** True only for the finished terrain surface, never for roofs/floors. */
   terrain?: boolean;
+  /**
+   * Invisible stair movement ramp. Solid to character movement, cameras and
+   * projectiles, but excluded from standing-clearance queries: nav nodes,
+   * spawn checks and QA penetration probes reason about the visible tread
+   * surfaces, not the ramp wedge riding above them.
+   */
+  stairRamp?: boolean;
 }
 export interface DestructibleHitMeta {
   kind: 'destructible';
@@ -143,16 +161,22 @@ export class PhysicsWorld {
     yaw = 0,
     material: WorldHitMeta['material'] = 'stone',
     terrain = false,
+    pitch = 0,
+    roll = 0,
+    stairRamp = false,
+    collisionGroups: number = GROUPS.worldStatic,
   ): RAPIER.Collider {
     const body = this.world.createRigidBody(
-      RAPIER.RigidBodyDesc.fixed().setTranslation(cx, cy, cz).setRotation(quatFromYaw(yaw)),
+      RAPIER.RigidBodyDesc.fixed()
+        .setTranslation(cx, cy, cz)
+        .setRotation(pitch !== 0 || roll !== 0 ? quatFromEulerYXZ(yaw, pitch, roll) : quatFromYaw(yaw)),
     );
     const desc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
       .setFriction(1.0)
       .setRestitution(0)
-      .setCollisionGroups(GROUPS.worldStatic);
+      .setCollisionGroups(collisionGroups);
     const collider = this.world.createCollider(desc, body);
-    this.setMeta(collider, { kind: 'world', material, terrain });
+    this.setMeta(collider, { kind: 'world', material, terrain, ...(stairRamp ? { stairRamp: true } : {}) });
     return collider;
   }
 
@@ -380,6 +404,9 @@ export class PhysicsWorld {
       (collider) => {
         const meta = this.metaOf(collider);
         if (!meta || (meta.kind !== 'world' && meta.kind !== 'destructible')) return true;
+        // Movement-ramp wedges ride above their visible tread surfaces;
+        // standing clearance (nav, spawns, QA) reasons about the treads.
+        if (meta.kind === 'world' && meta.stairRamp) return true;
         const contact = this.characterShape.contactShape(
           position,
           this.identityRotation,
@@ -455,6 +482,9 @@ export class PhysicsWorld {
       excludeBody,
       (collider) => {
         const meta = this.metaOf(collider);
+        // Movement-ramp wedges ride above their visible tread surfaces and
+        // must not prune authored stair links.
+        if (meta?.kind === 'world' && meta.stairRamp) return false;
         return meta?.kind === 'world' || meta?.kind === 'destructible';
       },
     );
@@ -531,6 +561,33 @@ export class PhysicsWorld {
 export function quatFromYaw(yaw: number): { x: number; y: number; z: number; w: number } {
   const h = yaw / 2;
   return { x: 0, y: Math.sin(h), z: 0, w: Math.cos(h) };
+}
+
+/**
+ * Quaternion from the renderer's Euler convention (order 'YXZ': yaw about the
+ * world Y, then pitch/roll about the rotated local axes — equal to the
+ * quaternion product qY * qX * qZ, verified against THREE.Euler('YXZ')).
+ * Using the same convention here keeps pitched collider boxes aligned with
+ * their rendered geometry (stair movement ramps, sloped structural proxies).
+ */
+export function quatFromEulerYXZ(
+  yaw: number,
+  pitch: number,
+  roll: number,
+): { x: number; y: number; z: number; w: number } {
+  const cy = Math.cos(yaw / 2);
+  const sy = Math.sin(yaw / 2);
+  const cp = Math.cos(pitch / 2);
+  const sp = Math.sin(pitch / 2);
+  const cr = Math.cos(roll / 2);
+  const sr = Math.sin(roll / 2);
+  // qY * qX * qZ, expanded (verified against THREE.Euler('YXZ')).
+  return {
+    x: cy * sp * cr + sy * cp * sr,
+    y: sy * cp * cr - cy * sp * sr,
+    z: cy * cp * sr - sy * sp * cr,
+    w: cy * cp * cr + sy * sp * sr,
+  };
 }
 
 // ---------------------------------------------------------------------------
