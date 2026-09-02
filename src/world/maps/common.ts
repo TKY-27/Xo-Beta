@@ -4,7 +4,7 @@
  */
 
 import { planStairs, WorldBuilder } from '../builder';
-import { ROCK_CLEARANCE_RADIUS, type MatKey, type TerrainCutout } from '../types';
+import { ROCK_CLEARANCE_RADIUS, type MapDef, type MatKey, type TerrainCutout } from '../types';
 import { Rng } from '../../core/rng';
 
 export interface BuildingOpts {
@@ -55,6 +55,185 @@ export function structureBaseY(
     }
   }
   return highest + 0.12;
+}
+
+/**
+ * Deterministic combat-cover hardening pass (v0.4 QA task 5.2).
+ *
+ * Replays the QA exposure analysis against the half-built map and drops a
+ * bounded number of low crouch barriers at the most exposed cells, so open
+ * fields gain reachable cover without filling deliberate long sightlines.
+ * Deterministic: the same map build always produces the same placements.
+ * Placement avoids stair flights (plus approach margin), loot, chests,
+ * nav-relevant doorways and previously added barriers.
+ */
+const coverCache = new Map<string, Array<{ x: number; z: number; yaw: number }>>();
+
+export function hardenExposedFlanks(b: WorldBuilder, opts: { mat: MatKey; maxProps: number }): void {
+  const def = b.def;
+  // The analysis is deterministic per map build; cache it so repeated
+  // loadMap calls (tests, replicas, reconnects) replay the placements
+  // instantly instead of re-running the exposure sweep.
+  const cacheKey = `${def.id}:${def.geo.length}:${def.rocks.length}:${def.trees.length}`;
+  const cached = coverCache.get(cacheKey);
+  if (cached) {
+    for (const placement of cached) {
+      b.box(placement.x, 0.28, placement.z, placement.yaw === 0 ? 1.6 : 0.55, 0.56,
+        placement.yaw === 0 ? 0.55 : 1.6, opts.mat, 0, { hint: 'stone' });
+    }
+    return;
+  }
+  {
+    const half = def.size / 2 - 18;
+    // 24 m sampling keeps the worst-cell ranking stable at a third of the
+    // sweep cost; cover still spreads across the whole map via the 9 m
+    // spacing rule.
+    const step = 24;
+    interface Cell { x: number; z: number; exposure: number }
+    const cells: Cell[] = [];
+    for (let x = -half; x <= half; x += step) {
+      for (let z = -half; z <= half; z += step) {
+        if (def.water.some((w) => x >= w.minX && x <= w.maxX && z >= w.minZ && z <= w.maxZ)) continue;
+        let blocked = 0;
+        let insideSolid = false;
+        for (const g of def.geo) {
+          if (g.noCollide || g.noRender || g.kind !== 'box') continue;
+          if (g.sy <= 2.2 && g.y + g.sy / 2 <= 2.5) continue;
+          const c = Math.abs(Math.cos(g.yaw));
+          const s = Math.abs(Math.sin(g.yaw));
+          const hx = (g.sx * c + g.sz * s) / 2;
+          const hz = (g.sx * s + g.sz * c) / 2;
+          if (Math.abs(x - g.x) < hx + 0.5 && Math.abs(z - g.z) < hz + 0.5) insideSolid = true;
+        }
+        if (insideSolid) continue;
+        for (let k = 0; k < 8; k++) {
+          const angle = (k / 8) * Math.PI * 2;
+          // Crouch-height rays: the pass adds crouch barriers, so it targets
+          // cells where even crouching finds no cover. Pure 2D occlusion —
+          // map building must never depend on initialised physics.
+          if (segmentBlocked2D(def, x, z, Math.cos(angle), Math.sin(angle), 30)) blocked++;
+        }
+        const exposure = (8 - blocked) / 8;
+        if (exposure >= 0.875) cells.push({ x, z, exposure });
+      }
+    }
+    // Worst first; deterministic tiebreak by coordinates.
+    cells.sort((a, b2) => (b2.exposure - a.exposure) || (a.x - b2.x) || (a.z - b2.z));
+
+    const nearStair = (x: number, z: number): boolean => def.stairs.some((f) => {
+      const dirX = f.dir === 1 ? 1 : f.dir === 3 ? -1 : 0;
+      const dirZ = f.dir === 0 ? 1 : f.dir === 2 ? -1 : 0;
+      const cx = f.x + dirX * f.run / 2;
+      const cz = f.z + dirZ * f.run / 2;
+      const rx = Math.abs(dirX) * (f.run / 2 + 3) + Math.abs(dirZ) * (f.width / 2 + 3);
+      const rz = Math.abs(dirZ) * (f.run / 2 + 3) + Math.abs(dirX) * (f.width / 2 + 3);
+      return Math.abs(x - cx) < rx && Math.abs(z - cz) < rz;
+    });
+    const nearLoot = (x: number, z: number): boolean =>
+      def.loot.some((l) => Math.hypot(l.x - x, l.z - z) < 4.5)
+      || def.chests.some((c) => Math.hypot(c.x - x, c.z - z) < 4.5)
+      || def.pois.some((p) => Math.hypot(p.x - x, p.z - z) < p.radius * 0.2 && false);
+    const added: Array<{ x: number; z: number; yaw: number }> = [];
+    for (const cell of cells) {
+      if (added.length >= opts.maxProps) break;
+      if (nearStair(cell.x, cell.z) || nearLoot(cell.x, cell.z)) continue;
+      if (added.some((a) => Math.hypot(a.x - cell.x, a.z - cell.z) < 9)) continue;
+      // Alternate orientation for variety; 0.55 m tall crouch cover that bots
+      // can also step over (below the stepHeight nav gate).
+      const yaw = added.length % 2 === 0 ? 0 : Math.PI / 2;
+      const sx = yaw === 0 ? 1.6 : 0.55;
+      const sz = yaw === 0 ? 0.55 : 1.6;
+      b.box(cell.x, 0.28, cell.z, sx, 0.56, sz, opts.mat, 0, { hint: 'stone' });
+      added.push({ x: cell.x, z: cell.z, yaw });
+      if (added.length === opts.maxProps) coverCache.set(cacheKey, added.slice());
+    }
+  }
+}
+
+/**
+ * True when the horizontal segment from (x,z) along (dx,dz) up to `dist`
+ * crosses solid map geometry: yawed collider boxes (walls, props, vehicles,
+ * barriers, tree trunks) or rock/tile footprints. 2D only — terrain relief
+ * is intentionally ignored so the metric stays cheap and pure.
+ */
+function segmentBlocked2D(
+  def: MapDef,
+  x: number, z: number,
+  dx: number, dz: number,
+  dist: number,
+): boolean {
+  for (const g of def.geo) {
+    if (g.noCollide || g.noRender) continue;
+    if (g.kind !== 'box') {
+      // Cylinders/spheres (tanks, drums): conservative circle test.
+      const r = g.r;
+      const ox = g.x - x, oz = g.z - z;
+      const t = ox * dx + oz * dz;
+      if (t < 0 || t > dist + r) continue;
+      const perp = Math.abs(ox * dz - oz * dx);
+      if (perp < r) return true;
+      continue;
+    }
+    const isGroundLayer = g.sy <= 2.2 && g.y + g.sy / 2 <= 2.5;
+    if (isGroundLayer) continue;
+    // Cheap broad-phase reject before any trig: the sweep radius is `dist`.
+    const gdx = g.x - x;
+    const gdz = g.z - z;
+    if (gdx * dx + gdz * dz < -4 || Math.abs(gdx) > dist + 8 || Math.abs(gdz) > dist + 8) continue;
+    const c = Math.abs(Math.cos(g.yaw));
+    const s = Math.abs(Math.sin(g.yaw));
+    const hx = (g.sx * c + g.sz * s) / 2;
+    const hz = (g.sx * s + g.sz * c) / 2;
+    if (rayIntersectsRotatedBox(x, z, dx, dz, g.x, g.z, hx + 0.2, hz + 0.2, g.yaw, dist)) return true;
+  }
+  for (const rock of def.rocks) {
+    const ox = rock.x - x, oz = rock.z - z;
+    const t = ox * dx + oz * dz;
+    const r = ROCK_CLEARANCE_RADIUS * rock.scale;
+    if (t < 0 || t > dist + r) continue;
+    if (Math.abs(ox * dz - oz * dx) < r * 0.82) return true;
+  }
+  for (const tree of def.trees) {
+    const ox = tree.x - x, oz = tree.z - z;
+    const t = ox * dx + oz * dz;
+    const r = 0.3 * tree.scale + 0.25;
+    if (t < 0 || t > dist + r) continue;
+    if (Math.abs(ox * dz - oz * dx) < r) return true;
+  }
+  return false;
+}
+
+/** 2D slab test of a ray against a yaw-aligned box (half extents hx/hz). */
+function rayIntersectsRotatedBox(
+  ox: number, oz: number,
+  dx: number, dz: number,
+  cx: number, cz: number,
+  hx: number, hz: number,
+  yaw: number,
+  dist: number,
+): boolean {
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  // World -> box local (rotate by -yaw).
+  const lx = (ox - cx) * c - (oz - cz) * s;
+  const lz = (ox - cx) * s + (oz - cz) * c;
+  const ldx = dx * c - dz * s;
+  const ldz = dx * s + dz * c;
+  let tMin = -Infinity;
+  let tMax = Infinity;
+  for (const [o, d, h] of [[lx, ldx, hx], [lz, ldz, hz]] as Array<[number, number, number]>) {
+    if (Math.abs(d) < 1e-8) {
+      if (o < -h || o > h) return false;
+      continue;
+    }
+    let t1 = (-h - o) / d;
+    let t2 = (h - o) / d;
+    if (t1 > t2) [t1, t2] = [t2, t1];
+    tMin = Math.max(tMin, t1);
+    tMax = Math.min(tMax, t2);
+    if (tMin > tMax) return false;
+  }
+  return tMax >= 0 && tMin <= dist;
 }
 
 /**

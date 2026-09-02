@@ -7,7 +7,7 @@
 import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding as addBaseBuilding, addGround, slabWithHole, type BuildingOpts } from './common';
+import { addBuilding as addBaseBuilding, addGround, hardenExposedFlanks, slabWithHole, type BuildingOpts } from './common';
 
 const S = 500; // map size
 const TRANSIT_CUTOUT = { minX: 117.7, maxX: 121.3, minZ: -140, maxZ: -127, surfaceY: 0 };
@@ -315,6 +315,8 @@ export function buildNeoCity(): MapDef {
   lotDressing(b, rng);
   applyNeoCityShadowBudget(b);
   removeRoadPaintUnderFoundations(b);
+
+  hardenExposedFlanks(b, { mat: 'concrete', maxProps: 22 });
 
   return b.finish(
     {
