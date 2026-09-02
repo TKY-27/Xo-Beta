@@ -102,6 +102,22 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       b.platform(px - half, px + half, pz - half, pz + half, y);
     }
   };
+  /**
+   * Deterministic per-window family. The old facade pasted the same
+   * centre-mullioned unit on every opening; families now vary per window
+   * while pane geometry, stableId order and destructible mechanics stay
+   * byte-identical.
+   */
+  const windowFamily = (side: number, offset: number, floor: number): 'single' | 'dual' | 'transom' | 'dark' => {
+    const h = Math.imul(Math.round((x + z) * 100) ^ Math.round(offset * 37) ^ (side * 7) ^ (floor * 13), 2654435761) >>> 0;
+    const bucket = h % 10;
+    if (floor === 0 && bucket < 3) return 'dark';
+    if (bucket < 5) return 'single';
+    if (bucket < 8) return 'dual';
+    return 'transom';
+  };
+  const windowMaterial = (family: 'single' | 'dual' | 'transom' | 'dark'): MatKey => family === 'dark' ? 'windowDark' : 'windowCool';
+
   const addGroundFacadeWindow = (
     side: 1 | 2 | 3,
     offset: number,
@@ -112,18 +128,34 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     const paneH = 1.42;
     const paneY = y0 + sillH + paneH / 2;
     const surfaceOffset = t / 2 + 0.025;
+    const family = windowFamily(side, offset, 0);
+    const mat = windowMaterial(family);
     if (side === 2) {
       const paneX = x - hw + offset + width / 2;
       const paneZ = z - hd - surfaceOffset;
-      b.box(paneX, paneY, paneZ, width, paneH, 0.045, 'windowCool', 0, { noCollide: true });
-      b.box(paneX, paneY, paneZ - 0.026, 0.075, paneH + 0.08, 0.055, trim, 0, { noCollide: true });
+      b.box(paneX, paneY, paneZ, width, paneH, 0.045, mat, 0, { noCollide: true });
+      // Head and sill trims every window shares.
       b.box(paneX, paneY, paneZ - 0.026, width + 0.08, 0.075, 0.055, trim, 0, { noCollide: true });
+      b.box(paneX, paneY - paneH / 2 - 0.02, paneZ - 0.026, width + 0.08, 0.075, 0.055, trim, 0, { noCollide: true });
+      if (family === 'dual') {
+        // Mullion split into two sashes.
+        b.box(paneX, paneY, paneZ - 0.026, 0.075, paneH + 0.08, 0.055, trim, 0, { noCollide: true });
+      } else if (family === 'transom') {
+        // Horizontal transom bar at two-thirds height.
+        b.box(paneX, paneY + paneH / 6, paneZ - 0.026, width + 0.08, 0.06, 0.055, trim, 0, { noCollide: true });
+      }
+      // 'single': one uninterrupted pane.
     } else {
       const paneX = x + (side === 1 ? hw + surfaceOffset : -hw - surfaceOffset);
       const paneZ = z - hd + offset + width / 2;
-      b.box(paneX, paneY, paneZ, 0.045, paneH, width, 'windowCool', 0, { noCollide: true });
-      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, paneH + 0.08, 0.075, trim, 0, { noCollide: true });
+      b.box(paneX, paneY, paneZ, 0.045, paneH, width, mat, 0, { noCollide: true });
       b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, 0.075, width + 0.08, trim, 0, { noCollide: true });
+      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY - paneH / 2 - 0.02, paneZ, 0.055, 0.075, width + 0.08, trim, 0, { noCollide: true });
+      if (family === 'dual') {
+        b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, paneH + 0.08, 0.075, trim, 0, { noCollide: true });
+      } else if (family === 'transom') {
+        b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY + paneH / 6, paneZ, 0.055, 0.06, width + 0.08, trim, 0, { noCollide: true });
+      }
     }
   };
   const addUpperWindowGlass = (
@@ -136,16 +168,27 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     const paneH = Math.max(0.8, fh - sillH - 0.5);
     const paneY = y0 + sillH + paneH / 2;
     const inset = t / 2 + 0.045;
+    // Glass dressing only: the destructible pane call (and its stableId
+    // position) is untouched by the family choice.
+    const family = windowFamily(side, offset, 1);
     if (side === 0 || side === 2) {
       const paneX = x - hw + offset + width / 2;
       const paneZ = z + (side === 0 ? hd - inset : -hd + inset);
       b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'x');
-      b.box(paneX, paneY, paneZ + (side === 0 ? 0.022 : -0.022), 0.055, paneH, 0.045, trim, 0, { noCollide: true });
+      if (family === 'dual') {
+        b.box(paneX, paneY, paneZ + (side === 0 ? 0.022 : -0.022), 0.055, paneH, 0.045, trim, 0, { noCollide: true });
+      } else if (family === 'transom') {
+        b.box(paneX, paneY + paneH / 6, paneZ + (side === 0 ? 0.022 : -0.022), width, 0.055, 0.045, trim, 0, { noCollide: true });
+      }
     } else {
       const paneX = x + (side === 1 ? hw - inset : -hw + inset);
       const paneZ = z - hd + offset + width / 2;
       b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'z');
-      b.box(paneX + (side === 1 ? 0.022 : -0.022), paneY, paneZ, 0.045, paneH, 0.055, trim, 0, { noCollide: true });
+      if (family === 'dual') {
+        b.box(paneX + (side === 1 ? 0.022 : -0.022), paneY, paneZ, 0.045, paneH, 0.055, trim, 0, { noCollide: true });
+      } else if (family === 'transom') {
+        b.box(paneX + (side === 1 ? 0.022 : -0.022), paneY + paneH / 6, paneZ, 0.045, 0.055, width, trim, 0, { noCollide: true });
+      }
     }
   };
 
