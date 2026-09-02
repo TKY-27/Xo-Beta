@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.0 — World and Combat Fidelity Update (public beta)
+
+New functionality:
+- Sniper scopes support 1x/2x/4x angular magnification (remappable key,
+  mouse wheel while scoped, LB+D-pad on gamepad) with lens-density scope
+  resolution instead of a fixed ~640px target.
+- Bullet impacts leave pooled, material-aware marks for ~6 s; world
+  surfaces now report their real material to presentation.
+- Visible per-map sky atmospheres: gradient, sun/moon disc, scrolling
+  cloud layers, stars and horizon haze (NeoCity blue-hour rain, Old Front
+  overcast, Eden daytime, Ashara dust) — the HDRI remains the IBL source.
+- Deterministic combat-cover hardening: fully exposed combat cells drop
+  from 31-39% to 19-28% per map while 30 m+ sightlines are preserved.
+
+Refinements:
+- Per-weapon recoil profiles (kick, climb, recovery, ADS/crouch, camera,
+  viewmodel) shared by sim, camera and viewmodel; distance-falloff math
+  pinned by boundary tables.
+- Locomotion cadence calibrated and shared across host/replica; melee
+  now plays the licensed jab/cross clips; guests see punches via a
+  bounded meleeSwing event (hits stay host-authoritative).
+- Windows vary per opening (single/dual/transom/occupied-dark) instead
+  of one repeated centre-post unit; terrain gains generated micro-normal
+  detail.
+
+Collider corrections:
+- Stair flights reopened across all maps (divider crossings, landing
+  overlaps, planter/parapet/wall site bugs) and gain movement ramps with
+  a STEP tread group; every authored flight is covered by a traversal
+  harness.
+- Railings gained functional guard envelopes; rocks use measured
+  per-variant compound colliders instead of one oversized AABB (rocks
+  now participate in the gameplay map hash; protocol version 2).
+
+Known limitations:
+- `test:browser:online:gameplay` fails its "guest sends compact input
+  ticks" fixture assertion; verified pre-existing at the v0.3.0 baseline
+  and outside CI. Follow-up scheduled.
+- Freefall/melee limb angles and sky visuals are first-pass tuned; a
+  browser visual QA pass against fixed camera positions is scheduled.
+- Not universally compatible: still Chromium-first; WebKit/Playwright
+  coverage remains partial. Direct-P2P only (no TURN/SFU): restrictive
+  NATs may still fail to connect.
+
+
 All notable changes to Xo Beta are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com); versioning is
 [SemVer](https://semver.org) — until 1.0.0, minor versions may break behavior.
