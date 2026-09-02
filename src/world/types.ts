@@ -28,6 +28,17 @@ export interface GeoBox {
   noCollide?: boolean;
   /** Collider/placement proxy that is intentionally hidden from rendering. */
   noRender?: boolean;
+  /**
+   * Invisible stair movement ramp aligned with the flight's nosing line.
+   * Solid to movement/cameras/projectiles but excluded from standing-clearance
+   * queries so nav and spawn checks reason about the visible treads.
+   */
+  stairRamp?: boolean;
+  /**
+   * Stair tread body: solid to cameras, projectiles and ray probes, but the
+   * character controller rides the flight's stairRamp instead (CG.STEP).
+   */
+  stairTread?: boolean;
   /** Skip the static shadow pass for presentation-only detail. */
   castShadow?: boolean;
   /** Authored bridge/stair geometry that intentionally occupies a terrain opening. */
@@ -89,13 +100,21 @@ export interface TreeSpec {
 export interface RockSpec {
   x: number; z: number; y: number;
   scale: number;
+  /** Deterministic model variant shared by physics profiles and rendering. */
+  variant: 'medium-1' | 'medium-2';
+  /** Deterministic yaw (radians) shared by physics compound colliders and rendering. */
+  yaw: number;
 }
 
-// Quaternius Rock_Medium source bounds reach roughly 2.0 m from the origin
-// after the render scale/tilt used by WorldView. Keep gameplay, camera casts
-// and placement exclusion outside that visible mass rather than the former
-// 0.7 m proxy that allowed actors and cameras deep inside the mesh.
-export const ROCK_COLLIDER_RADIUS = 2.15;
+/**
+ * Visual clearance radius for an authored rock at scale 1: the widest lobe of
+ * either Quaternius rock variant after the render scale/tilt used by
+ * WorldView (measured: 1.876 * 1.12 ≈ 2.10, rounded up with margin). Used to
+ * keep placements out of the VISIBLE rock mass. Collider geometry itself is
+ * the per-variant measured profile in ./rockProfiles.
+ */
+export const ROCK_CLEARANCE_RADIUS = 2.15;
+/** Legacy physics-envelope height, kept only for visual clearance checks. */
 export const ROCK_COLLIDER_HEIGHT = 2.4;
 
 export interface LampSpec {
@@ -245,10 +264,29 @@ export interface MapDef {
   pois: Poi[];
   /** Walkable platform rects recorded during construction (for nav generation). */
   platforms: PlatformRect[];
+  /** Deterministic manifest of every authored stair flight (QA + guard proxies). */
+  stairs: StairFlight[];
   /** Suggested drop-route band across the map for the transport. */
   transportRoute: { from: [number, number]; to: [number, number] };
   /** Rain-slicked streets: ground materials get reflective wet treatment. */
   wetGround?: boolean;
+}
+
+/**
+ * Deterministic record of one authored stair flight, emitted by
+ * WorldBuilder.stairs(). Derived entirely from the flight's hashed geometry;
+ * QA traversal harnesses and guard-proxy generation consume it instead of
+ * re-deriving flight layouts from raw geo boxes.
+ */
+export interface StairFlight {
+  x: number; y: number; z: number;
+  dir: 0 | 1 | 2 | 3;
+  steps: number;
+  stepH: number;
+  stepD: number;
+  width: number;
+  totalRise: number;
+  run: number;
 }
 
 export interface PlatformRect {
