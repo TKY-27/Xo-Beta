@@ -10,7 +10,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import {
-  ROCK_COLLIDER_RADIUS,
+  ROCK_CLEARANCE_RADIUS,
   vehicleRenderSpec,
   type GeoBox,
   type MapDef,
@@ -813,7 +813,7 @@ export class WorldView {
       for (const r of def.rocks) {
         if (rnd() > 0.55) continue;
         const a = rnd() * Math.PI * 2;
-        const d = ROCK_COLLIDER_RADIUS * r.scale + 0.6 + rnd() * 1.4;
+        const d = ROCK_CLEARANCE_RADIUS * r.scale + 0.6 + rnd() * 1.4;
         const x = r.x + Math.cos(a) * d;
         const z = r.z + Math.sin(a) * d;
         const y = def.terrainHeight ? def.terrainHeight(x, z) : r.y;
@@ -853,17 +853,18 @@ export class WorldView {
     // Rocks → Quaternius rock models. Each authored collider owns one primary
     // boulder plus a smaller companion kept inside the same physical radius;
     // this breaks the repeated single-mesh silhouette without inventing
-    // non-colliding visual mass around the obstacle.
-    const rockKeys = ['rock/medium1', 'rock/medium2'];
+    // non-colliding visual mass around the obstacle. Variant and yaw come
+    // from the authored RockSpec so physics compound colliders and rendered
+    // instances resolve the identical shape and orientation.
+    const rockKeys = ['rock/medium1', 'rock/medium2'] as const;
     const rockBuckets = new Map<string, THREE.Matrix4[]>();
-    def.rocks.forEach((r, i) => {
-      const phase = r.x * 7.7 + r.z * 3.3;
-      const keyIndex = Math.abs(Math.round(phase * 1.73 + i * 2.31)) % rockKeys.length;
-      const key = rockKeys[keyIndex]!;
+    def.rocks.forEach((r) => {
+      const key = r.variant === 'medium-1' ? rockKeys[0] : rockKeys[1];
       const addRock = (bucketKey: string, matrix: THREE.Matrix4) => {
         if (!rockBuckets.has(bucketKey)) rockBuckets.set(bucketKey, []);
         rockBuckets.get(bucketKey)!.push(matrix);
       };
+      const phase = r.yaw;
       const tiltZ = Math.sin(r.x * 9.1 + r.z * 5.3) * 0.06;
       const tiltX = Math.cos(r.x * 3.7 + r.z * 13.1) * 0.05;
       const heightVariation = 0.96 + Math.sin(phase * 0.63) * 0.08;
@@ -883,12 +884,15 @@ export class WorldView {
 
       const clusterAngle = phase * 1.91 + 0.7;
       const companionScale = r.scale * (0.24 + (Math.sin(phase * 2.3) * 0.5 + 0.5) * 0.12);
-      const clusterDistance = r.scale * (0.8 + (Math.cos(phase * 1.4) * 0.5 + 0.5) * 0.22);
+      // The companion stays inside the primary rock's measured collider
+      // envelope (profile footprint * scale minus the companion's own reach)
+      // so no rendered mass sits outside solid collision.
+      const clusterDistance = r.scale * (0.45 + (Math.cos(phase * 1.4) * 0.5 + 0.5) * 0.25);
       const companionX = r.x + Math.cos(clusterAngle) * clusterDistance;
       const companionZ = r.z + Math.sin(clusterAngle) * clusterDistance;
-      const companionKeyIndex = (keyIndex + 1) % rockKeys.length;
+      const companionKey = r.variant === 'medium-1' ? rockKeys[1] : rockKeys[0];
       addRock(
-        rockKeys[companionKeyIndex]!,
+        companionKey,
         new THREE.Matrix4().compose(
           new THREE.Vector3(
             companionX,

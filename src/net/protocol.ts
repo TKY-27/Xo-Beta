@@ -13,7 +13,14 @@ import type { MapId } from '../world/index';
  * too easy for an untrusted peer to smuggle a second authority into the
  * lobby.
  */
-export const PROTOCOL_VERSION = 1 as const;
+/**
+ * Bumped to 2 by the v0.4 world-fidelity program: stair flights gained
+ * movement-ramp/step collider semantics and rocks gained measured compound
+ * colliders that now participate in the gameplay map hash. Peers on different
+ * protocol versions must refuse to interop rather than silently disagreeing
+ * about solid geometry.
+ */
+export const PROTOCOL_VERSION = 2 as const;
 export const PROTOCOL_MAX_PAYLOAD_BYTES = 16 * 1024;
 export const MAX_PROTOCOL_PAYLOAD_BYTES = PROTOCOL_MAX_PAYLOAD_BYTES;
 export const MAX_DISPLAY_NAME_LENGTH = 24;

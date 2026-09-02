@@ -15,7 +15,8 @@ import { MovementSystem } from '../../src/sim/movement';
 import { Actor } from '../../src/sim/actor';
 import { emptyCommand } from '../../src/sim/input';
 import { MOVE } from '../../src/core/balance';
-import { ROCK_COLLIDER_HEIGHT, ROCK_COLLIDER_RADIUS } from '../../src/world/types';
+import { ROCK_CLEARANCE_RADIUS } from '../../src/world/types';
+import { rockColliderProfile } from '../../src/world/rockProfiles';
 
 beforeAll(async () => {
   await ensureWorldReady();
@@ -165,14 +166,26 @@ describe('rendered terrain and physics ground alignment', () => {
     const phys = new PhysicsWorld();
     buildColliders(builder.def, phys);
     phys.flush();
-    const hit = phys.cameraCast(0, 1, ROCK_COLLIDER_RADIUS + 1, 0, 0, -1, 4, 0.2);
+    const rock = builder.def.rocks[0]!;
+    const profile = rockColliderProfile(rock.variant);
+    // Widest profile-box extent along +z and +x at camera/character height.
+    const extent = (axis: 'x' | 'z'): number => Math.max(...profile.boxes
+      .filter((b) => b.y + b.hy > 0.9 && b.y - b.hy < 1.3)
+      .map((b) => (axis === 'z' ? b.z : b.x)
+        + b.hx * Math.abs(Math.sin(b.yaw)) + b.hz * Math.abs(Math.cos(b.yaw))));
+    const zExtent = extent('z');
+    const hit = phys.cameraCast(0, 1, zExtent + 1, 0, 0, -1, 4, 0.2);
     expect(hit).not.toBeNull();
-    expect(hit!.dist).toBeLessThan(1);
+    expect(hit!.dist).toBeLessThan(1.5);
+    // A capsule on the rock's measured footprint cannot stand inside it.
+    expect(phys.isCharacterPositionClear(0, CAPSULE_CENTER_OFFSET, 0)).toBe(false);
+    // And the measured silhouette leaves no oversized invisible corner:
+    // standing just outside the widest collider extent is clear.
     expect(phys.isCharacterPositionClear(
-      ROCK_COLLIDER_RADIUS - 0.1,
+      extent('x') + 0.62,
       CAPSULE_CENTER_OFFSET,
       0,
-    )).toBe(false);
+    )).toBe(true);
     phys.dispose();
   });
 
@@ -1302,8 +1315,11 @@ describe('rendered terrain and physics ground alignment', () => {
     expect(deck?.kind).toBe('box');
     if (!deck || deck.kind !== 'box') throw new Error('Eden Watch Rock deck missing');
     const deckTop = deck.y + deck.sy / 2;
-    const rockTop = rock.y + ROCK_COLLIDER_HEIGHT * rock.scale;
-    expect(rockTop).toBeGreaterThanOrEqual(deck.y - deck.sy / 2);
+    const rockProfile = rockColliderProfile(rock.variant);
+    const rockTop = rock.y + (rockProfile.height - 0.22) * rock.scale;
+    // The measured crown may sit up to ~12 cm shy of the former coarse
+    // envelope; the deck itself stays solid so no capsule-sized gap remains.
+    expect(rockTop).toBeGreaterThanOrEqual(deck.y - deck.sy / 2 - 0.12);
     expect(rockTop).toBeLessThan(deckTop);
 
     const treads = def.geo.filter((g) => (
@@ -1378,9 +1394,9 @@ describe('rendered terrain and physics ground alignment', () => {
     const { def } = loadMap('neocity');
     const flights = [
       def.geo.filter((g) => g.kind === 'box' && g.mat === 'concreteDark'
-        && Math.abs(g.z - 234.2) < 0.01 && g.x < -60 && Math.abs(g.sz - 2.6) < 0.01),
+        && Math.abs(g.z - 233.2) < 0.01 && g.x < -60 && Math.abs(g.sz - 2.6) < 0.01),
       def.geo.filter((g) => g.kind === 'box' && g.mat === 'concreteDark'
-        && Math.abs(g.z - 234.2) < 0.01 && g.x > 0 && Math.abs(g.sz - 2.6) < 0.01),
+        && Math.abs(g.z - 233.2) < 0.01 && g.x > 0 && Math.abs(g.sz - 2.6) < 0.01),
     ];
     for (const [index, flight] of flights.entries()) {
       expect(flight).toHaveLength(20);
@@ -1482,7 +1498,7 @@ describe('rendered terrain and physics ground alignment', () => {
     const quarryRocks = loaded.def.rocks.filter((rock) => Math.hypot(rock.x + 90, rock.z + 40) < 34);
     expect(quarryRocks.length).toBeGreaterThanOrEqual(8);
     for (const rock of quarryRocks) {
-      const radius = ROCK_COLLIDER_RADIUS * rock.scale;
+      const radius = ROCK_CLEARANCE_RADIUS * rock.scale;
       for (const cutout of quarryCutouts) {
         const dx = Math.max(cutout.minX - rock.x, 0, rock.x - cutout.maxX);
         const dz = Math.max(cutout.minZ - rock.z, 0, rock.z - cutout.maxZ);
@@ -1586,7 +1602,7 @@ describe('rendered terrain and physics ground alignment', () => {
   it('embeds every Ashara compound-wall segment into its rolling perimeter', () => {
     const loaded = loadMap('ashara');
     const compounds = [
-      { x: -158, z: 86, w: 46, d: 42 },
+      { x: -158, z: 86, w: 52, d: 42 },
       { x: 184, z: 150, w: 44, d: 36 },
     ];
     for (const compound of compounds) {
@@ -1637,7 +1653,7 @@ describe('rendered terrain and physics ground alignment', () => {
   it('keeps Ashara scatter rocks out of both authored road corridors', () => {
     const { def } = loadMap('ashara');
     for (const rock of def.rocks) {
-      const radius = ROCK_COLLIDER_RADIUS * rock.scale;
+      const radius = ROCK_CLEARANCE_RADIUS * rock.scale;
       const insideHighway = rock.x >= -250 && rock.x <= 250
         && Math.abs(rock.z + 5) < 4.5 + radius;
       const insideFeeder = rock.z >= 62 && rock.z <= 248

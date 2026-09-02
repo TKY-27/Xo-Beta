@@ -235,10 +235,13 @@ export function buildNeoCity(): MapDef {
   b.poi('Sky Gardens', 20, -180, 45);
   addBuilding(b, { x: 8, z: -185, w: 26, d: 20, floors: 2, wallMat: 'facadeC', doors: [[0, 10, 2.6], [2, 10, 2.6]], roofAccess: true });
   addBuilding(b, { x: 42, z: -178, w: 18, d: 16, floors: 3, wallMat: 'facadeA', doors: [[3, 6, 2.2]] });
-  // Garden planters on first roof
+  // Garden planters on first roof. The grid is centred on the building, not
+  // the map origin: laid out from x=0 the west pair hung over the roof's west
+  // edge, straight above the fire-escape flight, and its 0.8 m planter box
+  // beheaded real KCC ascent one riser below the roof.
   for (let i = 0; i < 4; i++) {
-    b.box(0 + (i % 2) * 14 - 7, 7.6, -190 + Math.floor(i / 2) * 10, 5, 0.8, 3, 'concrete');
-    b.tree({ x: (i % 2) * 14 - 7, z: -190 + Math.floor(i / 2) * 10, y: 8, scale: 0.7, variant: 'palm' });
+    b.box(8 + (i % 2) * 14 - 7, 7.6, -190 + Math.floor(i / 2) * 10, 5, 0.8, 3, 'concrete');
+    b.tree({ x: 8 + (i % 2) * 14 - 7, z: -190 + Math.floor(i / 2) * 10, y: 8, scale: 0.7, variant: 'palm' });
   }
   b.chest(8, 7.6, -182, 'elite');
   b.chest(44, 11.2, -180, 'standard');
@@ -675,6 +678,14 @@ function parkingGarage(b: WorldBuilder, cx: number, cz: number): void {
       const railCentreZ = rampStartZ + ramp.run / 2;
       for (const side of [-1, 1]) {
         const railX = rampX + side * (ramp.width / 2 + 0.04);
+        // Continuous guard envelope behind the visible rails: the open
+        // stairwell's presentation-only rails must stop a capsule.
+        b.guardRail(
+          { x: railX, z: rampStartZ },
+          { x: railX, z: rampStartZ + ramp.run },
+          y + 0.25,
+          y + 0.4 + ramp.totalRise + 1.0,
+        );
         for (const railHeight of [0.5, 0.9]) {
           b.box(
             railX,
@@ -781,9 +792,58 @@ function overpass(b: WorldBuilder, cx: number, cz: number): void {
   // Keep the north-side flights clear of the neighbouring upper-floor slabs.
   // At z=cz the left flight passed through a building ceiling at x≈-74 and
   // the right flight met another floor near x≈12, blocking real KCC ascent.
-  const accessZ = cz + 4.2;
+  // Keep the north-side flights clear of the neighbouring upper-floor slabs.
+  // At z=cz the left flight passed through a building ceiling at x=-74 and
+  // the right flight met another floor near x=12, blocking real KCC ascent.
+  // z=cz+3.2 additionally keeps the 2.6 m lanes clear of the deck parapet
+  // band (cz+5), whose end caps otherwise block the top treads' exit lane.
+  const accessZ = cz + 3.2;
   b.stairs(cx - 30 - access.run, 0, accessZ, 1, access.steps, access.stepH, access.stepD, access.width, 'concreteDark');
   b.stairs(cx + 30 + access.run, 0, accessZ, 3, access.steps, access.stepH, access.stepD, access.width, 'concreteDark');
+  // Exposed 6.8 m flights need readable edges: slim rails on both sides of
+  // each access flight, each backed by a continuous guard envelope so the
+  // visual rail line actually stops a capsule.
+  for (const flightX of [cx - 30 - access.run, cx + 30 + access.run]) {
+    // West flight ascends +x, east flight ascends -x.
+    const sign = flightX < cx ? 1 : -1;
+    for (const side of [-1, 1]) {
+      const railZ = accessZ + side * (access.width / 2 + 0.06);
+      const slope = Math.atan2(access.totalRise, access.run);
+      // Length sits in the box's local z axis with yaw = pi/2 so the sloped
+      // handrail runs along the world x axis.
+      b.box(
+        flightX + sign * access.run / 2,
+        access.totalRise / 2 + 0.95,
+        railZ,
+        0.09,
+        0.09,
+        Math.hypot(access.run, access.totalRise),
+        'metalDark',
+        Math.PI / 2,
+        { noCollide: true, pitch: -sign * slope },
+      );
+      for (let post = 0; post <= 8; post++) {
+        const t = post / 8;
+        b.box(
+          flightX + sign * access.run * t,
+          access.totalRise * t + 0.5,
+          railZ,
+          0.09,
+          1.0,
+          0.09,
+          'metalDark',
+          0,
+          { noCollide: true },
+        );
+      }
+      b.guardRail(
+        { x: flightX, z: railZ },
+        { x: flightX + sign * access.run, z: railZ },
+        -0.15,
+        access.totalRise + 1.05,
+      );
+    }
+  }
   b.chest(cx, 6.8, cz, 'elite');
   b.loot(cx + 12, 6.9, cz + 2);
   b.crate(cx - 12, 6.6, cz - 2, 1);

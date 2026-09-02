@@ -442,6 +442,12 @@ describe('character capsule penetration invariants', () => {
           body.position.z,
           body.body,
         ), `${route.name} frame ${frame}`).toEqual([]);
+        // The descent probes are blind straight-line pushes. Once a route has
+        // demonstrably reached its target region, stop pushing: the ramped
+        // stair surfaces glide faster than the old snag-prone treads, and an
+        // over-travelled probe would walk past the entrance into unrelated
+        // pit-edge geometry that this scenario does not reason about.
+        if (route.entered(body) && route.finalFeet(feetYFromBodyCenter(body.position.y))) break;
       }
       expect(route.entered(body), JSON.stringify(body.position)).toBe(true);
       expect(route.finalFeet(feetYFromBodyCenter(body.position.y)), JSON.stringify(body.position)).toBe(true);

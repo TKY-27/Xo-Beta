@@ -9,8 +9,6 @@
 import {
   vehicleColliderCenter,
   vehicleColliderBox,
-  ROCK_COLLIDER_HEIGHT,
-  ROCK_COLLIDER_RADIUS,
   type MapDef,
   type MatKey,
   type ChestSpawn,
@@ -18,6 +16,7 @@ import {
   type TerrainCutout,
   type WaterVisualProfile,
 } from './types';
+import { rockColliderProfile, type RockVariant } from './rockProfiles';
 import { GROUPS, PhysicsWorld } from '../physics/physics';
 import { buildTerrainGridMesh, sampleTerrainHeightfield } from './terrainMesh';
 
@@ -364,8 +363,9 @@ export function isChestPlacementClear(def: MapDef, chest: ChestSpawn): boolean {
       && overlapsY(tree.y, tree.y + 2.5 * tree.scale)) return false;
   }
   for (const rock of def.rocks) {
-    if (Math.hypot(chest.x - rock.x, chest.z - rock.z) < ROCK_COLLIDER_RADIUS * rock.scale + 0.55
-      && overlapsY(rock.y, rock.y + ROCK_COLLIDER_HEIGHT * rock.scale)) return false;
+    const profile = rockColliderProfile(rock.variant);
+    if (Math.hypot(chest.x - rock.x, chest.z - rock.z) < profile.footprintRadius * rock.scale + 0.55
+      && overlapsY(rock.y, rock.y + profile.height * rock.scale)) return false;
   }
   for (const vehicle of def.vehicles) {
     const box = vehicleColliderBox(vehicle.variant, vehicle.x, vehicle.z);
@@ -409,8 +409,9 @@ export function isTreePlacementClear(def: MapDef, tree: MapDef['trees'][number])
       && overlapsY(g.y - g.r, g.y + g.r)) return false;
   }
   for (const rock of def.rocks) {
-    if (Math.hypot(tree.x - rock.x, tree.z - rock.z) < ROCK_COLLIDER_RADIUS * rock.scale + trunkRadius
-      && overlapsY(rock.y, rock.y + ROCK_COLLIDER_HEIGHT * rock.scale)) return false;
+    const profile = rockColliderProfile(rock.variant);
+    if (Math.hypot(tree.x - rock.x, tree.z - rock.z) < profile.footprintRadius * rock.scale + trunkRadius
+      && overlapsY(rock.y, rock.y + profile.height * rock.scale)) return false;
   }
   for (const vehicle of def.vehicles) {
     const box = vehicleColliderBox(vehicle.variant, vehicle.x, vehicle.z);
@@ -442,6 +443,7 @@ export class WorldBuilder {
       loot: [],
       pois: [],
       platforms: [],
+      stairs: [],
       // Starts outside the playable area and crosses the boundary exactly
       // 5 s in (130 m lead-in at the transport's 26 m/s cruise speed).
       transportRoute: { from: [-size / 2 - 130, 0], to: [size / 2 + 80, 0] },
@@ -456,12 +458,14 @@ export class WorldBuilder {
     opts?: {
       noCollide?: boolean;
       noRender?: boolean;
+      stairRamp?: boolean;
+      stairTread?: boolean;
       castShadow?: boolean;
       hint?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage';
       floor?: boolean;
       terrain?: boolean;
       preserveInTerrainCutout?: boolean;
-      /** Visual-only tilt; use with noCollide unless physics gains full 3-axis boxes. */
+      /** Tilt for collidable sloped proxies (stair movement ramps). */
       pitch?: number;
       roll?: number;
     },
@@ -472,6 +476,8 @@ export class WorldBuilder {
       roll: opts?.roll,
       noCollide: opts?.noCollide,
       noRender: opts?.noRender,
+      stairRamp: opts?.stairRamp,
+      stairTread: opts?.stairTread,
       castShadow: opts?.castShadow,
       terrain: opts?.terrain,
       preserveInTerrainCutout: opts?.preserveInTerrainCutout,
@@ -531,6 +537,42 @@ export class WorldBuilder {
     this.def.surfacePaths.push({ points, mat, yOffset });
   }
 
+  /**
+   * Invisible continuous guard envelope matching an authored rail line.
+   *
+   * Handrails and guardrails across the maps are presentation-only geo; this
+   * proxy is the shared collision strategy that makes them functional without
+   * turning every post into its own physics actor. One thin yaw-aligned box
+   * spans the rail's horizontal run and its full vertical envelope (from the
+   * guarded floor line up to the rail top), so a capsule can neither walk nor
+   * slide through the visually closed guard, while bullets still pass the
+   * open gaps between posts and rails. Place it exactly along the visible
+   * rail line — never as an unexplained invisible wall.
+   */
+  guardRail(
+    from: { x: number; z: number },
+    to: { x: number; z: number },
+    yLow: number,
+    yHigh: number,
+    thickness = 0.16,
+  ): void {
+    const dx = to.x - from.x;
+    const dz = to.z - from.z;
+    const len = Math.hypot(dx, dz);
+    if (!(len >= 0.05) || !(yHigh - yLow >= 0.05)) return;
+    this.box(
+      (from.x + to.x) / 2,
+      (yLow + yHigh) / 2,
+      (from.z + to.z) / 2,
+      thickness,
+      yHigh - yLow,
+      len,
+      'metalDark',
+      Math.atan2(dx, dz),
+      { noRender: true, hint: 'metal', castShadow: false },
+    );
+  }
+
   // -- composite helpers -----------------------------------------------------
 
   /**
@@ -586,6 +628,15 @@ export class WorldBuilder {
     dir: 0 | 1 | 2 | 3, steps: number, stepH: number, stepD: number, width: number, mat: MatKey,
   ): StairPlan {
     const plan = planStairs(steps, stepH, stepD, width);
+    this.def.stairs.push({
+      x, y, z, dir,
+      steps: plan.steps,
+      stepH: plan.stepH,
+      stepD: plan.stepD,
+      width: plan.width,
+      totalRise: plan.totalRise,
+      run: plan.run,
+    });
     // Each tread includes one riser and a small overlap with its neighbour.
     // Building every tread down to the flight's base created a solid stepped
     // pyramid; on stacked flights that mass occupied the headroom of the
@@ -600,8 +651,17 @@ export class WorldBuilder {
       else if (dir === 2) cz = z - off;
       else cx = x - off;
       if (dir === 1 || dir === 3) { sx = plan.stepD; sz = plan.width; }
+      // Ascending flights carry the movement ramp: every tread the ramp
+      // covers is a CG.STEP body (solid to cameras/projectiles/probes,
+      // skipped by character movement) so the KCC never snaps between the
+      // ramp and the tread below it, and both end treads stay fully solid as
+      // arrival surfaces. Descending flights keep the shipped solid-tread
+      // behaviour: their street/ground lip exits interact with adjacent
+      // ground geometry in ways the ramp wedge must not overlap.
+      const ascending = plan.stepH > 0;
       this.box(cx, topY - treadHeight / 2, cz, sx, treadHeight, sz, mat, 0, {
         preserveInTerrainCutout: true,
+        stairTread: ascending && i > 0 && i < plan.steps - 1,
       });
       let navMinX = cx - sx / 2;
       let navMaxX = cx + sx / 2;
@@ -618,13 +678,65 @@ export class WorldBuilder {
       else navMinX += navBackoff;
       this.platform(navMinX, navMaxX, navMinZ, navMaxZ, topY, false, true);
     }
+    // Shared flight-axis vectors and yaw (treads, ramp and soffit all use them).
+    const dirX = dir === 1 ? 1 : dir === 3 ? -1 : 0;
+    const dirZ = dir === 0 ? 1 : dir === 2 ? -1 : 0;
+    const yaw = dir === 0 ? 0 : dir === 1 ? Math.PI / 2 : dir === 2 ? Math.PI : -Math.PI / 2;
+    // Invisible movement ramp along the flight's nosing line (the surface
+    // through every tread's top-front edge). Character capsules that hug a
+    // side wall or overhang a tread's outer edge get the KCC's autostep
+    // refused mid-flight — the reported diagonal/edge stair snagging. The
+    // ramp gives movement one smooth <=24-degree surface while the visible
+    // treads and their risers remain full colliders for cameras and
+    // projectiles, and clearance queries (nav, spawns, QA) skip the ramp via
+    // its stairRamp marker. The ramp spans exactly from the first nosing to
+    // the last, so total elevation, landings and walking-through-adjacent-
+    // wall behaviour are unchanged; only the base riser remains a step, as
+    // before. The surface is 0.3 m wider than the flight so a capsule hugging
+    // the outer tread edge keeps full ramp support instead of jamming on the
+    // ramp's side edge.
+    if (plan.steps >= 2 && plan.stepH > 0) {
+      // Ascending flights only (see the tread note above). The ramp spans
+      // from tread 0's nosing to the top tread's nosing: every mid-flight
+      // riser disappears under a smooth surface, while the base riser (an
+      // autostep that always worked) and both solid end treads remain.
+      // The leading face stays exactly coplanar with tread 0's riser: one
+      // flat wall for the approaching capsule (a buried face instead creates
+      // a tiny convex edge whose diagonal contact normal makes the KCC slide
+      // sideways rather than autostep).
+      const rampStartS = 0;
+      const rampEndS = plan.stepD * (plan.steps - 1);
+      const rampRun = rampEndS - rampStartS;
+      const rampAngle = Math.atan2(plan.stepH, plan.stepD);
+      const rampLength = Math.hypot(rampRun, rampRun * Math.tan(rampAngle));
+      const rampThickness = 0.3;
+      // The ramp rides 2 cm above the exact nosing line so it is strictly the
+      // topmost surface across the whole flight: no coplanar seam with the
+      // tread tops exists for the KCC to snap through, and a capsule can
+      // never wedge itself between a tread and the ramp above it.
+      const rampLift = 0.02;
+      // Offset the centre by half the thickness along the surface normal
+      // n = (0, cos a, 0) - sin a * travel.
+      const midS = (rampStartS + rampEndS) / 2;
+      const midX = x + dirX * midS;
+      const midY = y + plan.stepH + midS * (plan.stepH / plan.stepD) + rampLift;
+      const midZ = z + dirZ * midS;
+      const rampX = midX + (rampThickness / 2) * Math.sin(rampAngle) * dirX;
+      const rampY = midY - (rampThickness / 2) * Math.cos(rampAngle);
+      const rampZ = midZ + (rampThickness / 2) * Math.sin(rampAngle) * dirZ;
+      const rampSx = plan.width + 0.3;
+      const rampSz = rampLength;
+      this.box(rampX, rampY, rampZ, rampSx, rampThickness, rampSz, mat, yaw, {
+        noRender: true,
+        pitch: -rampAngle,
+        preserveInTerrainCutout: true,
+        stairRamp: true,
+      });
+    }
     // Thin independent treads expose a jagged underside that reads as
     // floating geometry indoors. Give masonry flights a continuous soffit and
     // metal flights two real side stringers. These are visual supports only;
     // the KCC continues to use the exact tread/riser colliders above.
-    const dirX = dir === 1 ? 1 : dir === 3 ? -1 : 0;
-    const dirZ = dir === 0 ? 1 : dir === 2 ? -1 : 0;
-    const yaw = dir === 0 ? 0 : dir === 1 ? Math.PI / 2 : dir === 2 ? Math.PI : -Math.PI / 2;
     const slopeAngle = Math.atan2(plan.totalRise, plan.run);
     const slopeLength = Math.hypot(plan.run, plan.totalRise);
     const supportY = y + plan.totalRise / 2 - Math.abs(plan.stepH) / 2 - 0.11;
@@ -730,8 +842,19 @@ export class WorldBuilder {
     return true;
   }
 
+  /**
+   * Author one rock. Variant and yaw are derived here from the same position
+   * phases the renderer previously used for model selection, so physics
+   * compound colliders and rendered instances always resolve the identical
+   * rock shape at the identical orientation.
+   */
   rock(x: number, z: number, y: number, scale: number): void {
-    this.def.rocks.push({ x, z, y, scale });
+    const phase = x * 7.7 + z * 3.3;
+    const index = this.def.rocks.length;
+    const variant: RockVariant = Math.abs(Math.round(phase * 1.73 + index * 2.31)) % 2 === 0
+      ? 'medium-1'
+      : 'medium-2';
+    this.def.rocks.push({ x, z, y, scale, variant, yaw: phase });
   }
 
   vehicle(x: number, z: number, y: number, yaw: number, variant: 'sedan' | 'van' | 'truck' | 'wrecked', color: number): void {
@@ -817,6 +940,10 @@ export function buildColliders(def: MapDef, phys: PhysicsWorld): void {
         g.yaw,
         g.materialHint ?? matToHint(g.mat),
         g.terrain === true,
+        g.pitch ?? 0,
+        g.roll ?? 0,
+        g.stairRamp === true,
+        g.stairTread === true ? GROUPS.step : GROUPS.worldStatic,
       );
     } else if (g.kind === 'cyl') {
       if (g.noCollide) continue;
@@ -854,16 +981,26 @@ export function buildColliders(def: MapDef, phys: PhysicsWorld): void {
     phys.addStaticBox(t.x, t.y + 1.25 * s, t.z, 0.26 * s, 1.25 * s, 0.26 * s, 0, 'wood');
   }
   for (const r of def.rocks) {
-    phys.addStaticBox(
-      r.x,
-      r.y + ROCK_COLLIDER_HEIGHT * r.scale / 2,
-      r.z,
-      ROCK_COLLIDER_RADIUS * r.scale,
-      ROCK_COLLIDER_HEIGHT * r.scale / 2,
-      ROCK_COLLIDER_RADIUS * r.scale,
-      0,
-      'stone',
-    );
+    // Measured per-variant compound profile (see ./rockProfiles): 2-3 yawed
+    // boxes approximating the actual licensed mesh, uniformly scaled and
+    // buried by the same 0.22 * scale the renderer uses to seat the model.
+    const profile = rockColliderProfile(r.variant);
+    const cos = Math.cos(r.yaw);
+    const sin = Math.sin(r.yaw);
+    for (const box of profile.boxes) {
+      const ox = box.x * cos + box.z * sin;
+      const oz = -box.x * sin + box.z * cos;
+      phys.addStaticBox(
+        r.x + ox * r.scale,
+        r.y + (box.y - 0.22) * r.scale,
+        r.z + oz * r.scale,
+        box.hx * r.scale,
+        box.hy * r.scale,
+        box.hz * r.scale,
+        r.yaw + box.yaw,
+        'stone',
+      );
+    }
   }
 
   // Vehicles are real cover: static collider boxes matching the scaled

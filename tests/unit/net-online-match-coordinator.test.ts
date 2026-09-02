@@ -25,7 +25,7 @@ interface Delivery {
 }
 
 function contexts(): { host: OnlineRoomMatchContext; guest: OnlineRoomMatchContext } {
-  const build = Object.freeze({ protocolVersion: 1, buildId: 'test-build-1234', features: Object.freeze(['lobby-v1', 'reconnect-v1'] as const) });
+  const build = Object.freeze({ protocolVersion: 2, buildId: 'test-build-1234', features: Object.freeze(['lobby-v1', 'reconnect-v1'] as const) });
   const hostEntry = Object.freeze({
     slotId: 0, actorId: 1, displayName: 'HOST',
     ownership: Object.freeze({ kind: 'local-human' as const, peerId: 'host-peer' }),
