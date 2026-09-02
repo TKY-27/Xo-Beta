@@ -43,6 +43,11 @@ export class PlayerController implements ActorController {
   }
   locked = false;
   private spectatorMode = false;
+  /**
+   * Current sniper scope magnification, mirrored from the renderer by the
+   * game shell so scoped mouse deltas scale with the angular FOV.
+   */
+  scopedZoom = 1;
   /** Optional controller input merged into every command. */
   gamepad: GamepadInput | null = null;
 
@@ -388,7 +393,10 @@ export class PlayerController implements ActorController {
       lookDx += padLook.dx * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
       lookDy += padLook.dy * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
     }
-    const sens = s.sensitivity * 0.0023 * (safeAdsAmount > 0.5 ? s.adsSensitivity : 1);
+    let sens = s.sensitivity * 0.0023 * (safeAdsAmount > 0.5 ? s.adsSensitivity : 1);
+    // Angular scaling while scoped: turning rate shrinks with the scope's
+    // tangent ratio, so 4x feels controllable and 1x feels unchanged.
+    if (this.scopedZoom > 1 && safeAdsAmount > 0.5) sens /= this.scopedZoom;
     this.yaw -= lookDx * sens;
     this.pitch -= lookDy * sens * (s.invertY ? -1 : 1);
     const lim = Math.PI / 2 - 0.02;

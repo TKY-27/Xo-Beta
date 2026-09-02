@@ -109,6 +109,18 @@ interface PeerRuntime {
 }
 
 /** One fixed 60 Hz Match, irrespective of peer count. */
+/**
+ * The complete set of host-authoritative match events forwarded to guests.
+ * Presentation features (decals, tracers, flashes) must derive from these
+ * existing events — never add new high-frequency network fields.
+ */
+export const AUTHORITATIVE_EVENT_TYPES = [
+  'shotFired', 'impact', 'glassBreak', 'destructibleDestroyed', 'actorHit',
+  'shieldHit', 'shieldBroken', 'eliminated', 'itemPickedUp', 'chestOpened', 'reloadStarted',
+  'healStarted', 'healCancelled', 'healDone', 'stormWaiting', 'stormShrinking',
+  'stormFinal', 'phaseChanged', 'matchWon',
+] as const;
+
 export class HostAuthoritativeMatchSession {
   private readonly peersByPeerId = new Map<string, PeerRuntime>();
   private readonly peersByParticipant = new Map<string, PeerRuntime>();

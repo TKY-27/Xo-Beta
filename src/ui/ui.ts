@@ -1523,6 +1523,12 @@ export class Hud {
     document.body.classList.toggle('scoped', scoped);
   }
 
+  /** Magnification readout inside the scope lens (1x / 2x / 4x). */
+  setScopeZoom(magnification: number): void {
+    const el = document.getElementById('scope-zoom');
+    if (el) el.textContent = `${magnification}×`;
+  }
+
   syncPlayerState(match: Match, dt = 1 / 60): void {
     this.updateOnlineHud();
     const p = match.localActor;

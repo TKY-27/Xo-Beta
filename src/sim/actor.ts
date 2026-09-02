@@ -37,7 +37,10 @@ export interface WeaponRuntime {
   recoilYaw: number;
   adsAmount: number;
   swapTimer: number;
+  /** Seconds since the previous real shot (drives sustained-fire recoil climb). */
   lastShotTime: number;
+  /** Accumulated sustained-fire climb fraction (0..recoil.climbMax). */
+  recoilClimb: number;
   /** Live cone half-angle (radians) the next shot disperses within. */
   currentSpread: number;
 }
@@ -94,6 +97,7 @@ export class Actor {
     adsAmount: 0,
     swapTimer: 0,
     lastShotTime: -99,
+    recoilClimb: 0,
     currentSpread: 0,
   };
   healing: HealRuntime | null = null;

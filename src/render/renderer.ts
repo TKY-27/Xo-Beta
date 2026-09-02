@@ -65,6 +65,22 @@ const GradingShader = {
     }`,
 };
 
+/** Supported sniper scope magnification levels (angular-FOV based). */
+export const SCOPE_MAGNIFICATIONS = [1, 2, 4] as const;
+/** Default when scoping in. */
+export const SCOPE_DEFAULT_MAGNIFICATION = 2;
+
+/**
+ * Angular field of view for a scope magnification: halving the tangent
+ * halves the perceived angle, so a 2x scope shows exactly half the view.
+ * At 1x this returns the base FOV unchanged (identity of the formula).
+ */
+export function scopeFovForMagnification(baseVerticalFov: number, magnification: number): number {
+  const halfTan = Math.tan(THREE.MathUtils.degToRad(baseVerticalFov) / 2);
+  const scoped = 2 * Math.atan(halfTan / magnification);
+  return Math.max(1.5, THREE.MathUtils.radToDeg(scoped));
+}
+
 const ScopeCompositeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
@@ -180,6 +196,7 @@ export class GameRenderer {
   private scopeCamera: THREE.PerspectiveCamera | null = null;
   private scopeSource: THREE.PerspectiveCamera | null = null;
   private scopeActive = false;
+  private scopeMagnification: number = SCOPE_DEFAULT_MAGNIFICATION;
   private sun: THREE.DirectionalLight | null = null;
   private hemi: THREE.HemisphereLight | null = null;
   private ambient: THREE.AmbientLight | null = null;
@@ -265,6 +282,20 @@ export class GameRenderer {
     return performance.now() - start;
   }
 
+  /**
+   * Switch magnification without recreating any renderer resource; the next
+   * scoped frame simply projects with the new angular FOV.
+   */
+  setScopeMagnification(magnification: number): void {
+    this.scopeMagnification = (SCOPE_MAGNIFICATIONS as readonly number[]).includes(magnification)
+      ? magnification
+      : SCOPE_DEFAULT_MAGNIFICATION;
+  }
+
+  get scopeFovMagnification(): number {
+    return this.scopeMagnification;
+  }
+
   /** Enable the optical sniper view without replacing the primary camera. */
   setScopeActive(active: boolean, sourceCamera?: THREE.PerspectiveCamera): void {
     this.scopeActive = active;
@@ -288,11 +319,32 @@ export class GameRenderer {
     }
   }
 
+  /**
+   * Scope render-target resolution for the current viewport, DPR and quality.
+   * The DOM lens aperture is 72vmin and the composite maps it to uRadius 0.36
+   * (0.72 of the target height), so sizing the target height to
+   * minViewport * dpr * qualityFactor yields ~1 scope texel per physical lens
+   * pixel on High, a bounded factor below it on Medium/Low, and modest
+   * supersampling on Ultra/Cinematic. The full-frame target keeps the
+   * composite's straight-through UV mapping unchanged.
+   */
+  scopeTargetSize(width: number, height: number): { width: number; height: number } {
+    const quality = getSettings().quality;
+    const qualityFactor = quality === 'low' ? 0.6
+      : quality === 'medium' ? 0.75
+        : quality === 'ultra' || quality === 'cinematic' ? 1.25 : 1.0;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const heightPx = Math.min(width, height) * dpr * qualityFactor;
+    const clampedHeight = Math.max(256, Math.min(2048, Math.round(heightPx)));
+    const aspect = width / Math.max(1, height);
+    return { width: Math.round(clampedHeight * aspect), height: clampedHeight };
+  }
+
   private resizeScopeTarget(width: number, height: number): void {
     if (!this.scopeActive && !this.scopeTarget) return;
-    const scale = Math.min(0.55, 640 / Math.max(width, height));
-    const targetWidth = Math.max(256, Math.round(width * scale));
-    const targetHeight = Math.max(144, Math.round(height * scale));
+    const target = this.scopeTargetSize(width, height);
+    const targetWidth = target.width;
+    const targetHeight = target.height;
     if (!this.scopeTarget) {
       this.scopeTarget = new THREE.WebGLRenderTarget(targetWidth, targetHeight, {
         minFilter: THREE.LinearFilter,
@@ -315,7 +367,10 @@ export class GameRenderer {
     scope.near = source.near;
     scope.far = source.far;
     scope.aspect = this.scopeTarget.width / Math.max(1, this.scopeTarget.height);
-    scope.fov = Math.max(13, source.fov / 5);
+    // Angular magnification: the view shrinks by exactly the tangent ratio,
+    // so 1x is optically identical to the hip view and sensitivity can scale
+    // with the same factor on the input side.
+    scope.fov = scopeFovForMagnification(source.fov, this.scopeMagnification);
     scope.updateProjectionMatrix();
     scope.updateMatrixWorld(true);
     const previousTarget = this.renderer.getRenderTarget();
@@ -650,6 +705,8 @@ export class GameRenderer {
 
   applyQuality(): void {
     const settings = getSettings();
+    // Quality changes the scope target's sampling factor as well.
+    this.resizeScopeTarget(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = settings.shadows;
     if (this.sun) {
       const size =

@@ -27,6 +27,32 @@ export const MELEE = {
   knockback: 3.2,
 } as const;
 
+/**
+ * Per-weapon recoil response shared by every presentation layer so the sim
+ * firing state, gameplay camera and first-person viewmodel read as one
+ * system. Kick values are radians before multipliers (rarity, ADS, crouch).
+ */
+export interface RecoilProfile {
+  /** Initial vertical kick per shot. */
+  vertical: number;
+  /** Horizontal pattern amplitude (alternating via seeded variation). */
+  horizontal: number;
+  /** Sustained climb added to the vertical kick per consecutive shot. */
+  climbPerShot: number;
+  /** Ceiling on the accumulated climb fraction. */
+  climbMax: number;
+  /** Exponential return rate (1/s) toward the pre-fire aim. */
+  recover: number;
+  /** Fraction of the accumulated kick shown on the gameplay camera. */
+  camera: number;
+  /** Viewmodel impulse strength (feeds ViewModel.kick). */
+  viewmodel: number;
+  /** Recoil multiplier while fully aimed down sights. */
+  ads: number;
+  /** Recoil multiplier while crouched. */
+  crouch: number;
+}
+
 export interface WeaponDef {
   id: WeaponId;
   name: string;
@@ -48,8 +74,8 @@ export interface WeaponDef {
   bloomPerShot: number;
   bloomDecay: number;
   bloomMax: number;
-  recoilKick: number;
-  recoilRecover: number;
+  /** Coherent per-weapon recoil response (sim + camera + viewmodel layers). */
+  recoil: RecoilProfile;
   adsTime: number;
   reloadTactical: number;
   reloadEmpty: number;
@@ -73,7 +99,11 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     damage: [26, 29, 32, 35, 38], pellets: 1, magSize: 15, reserveMax: 240, ammoType: 'light',
     projectileSpeed: 340, dropGravity: 0.55,
     spreadHip: 0.017, spreadAds: 0.004, bloomPerShot: 0.006, bloomDecay: 0.05, bloomMax: 0.045,
-    recoilKick: 0.011, recoilRecover: 7, adsTime: 0.16,
+    recoil: {
+      vertical: 0.011, horizontal: 0.004, climbPerShot: 0.12, climbMax: 0.36,
+      recover: 7, camera: 0.6, viewmodel: 0.55, ads: 0.85, crouch: 0.9,
+    },
+    adsTime: 0.16,
     reloadTactical: 1.5, reloadEmpty: 2.1, swapInTime: 0.35,
     falloffStart: 45, falloffEnd: 110, falloffEndMult: 0.6,
     headMult: 2.0, legMult: 0.75, mobility: 1.0, tracerColor: 0xffd27a,
@@ -83,7 +113,11 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     damage: [17, 18, 19, 20, 21], pellets: 1, magSize: 32, reserveMax: 480, ammoType: 'light',
     projectileSpeed: 380, dropGravity: 0.6,
     spreadHip: 0.03, spreadAds: 0.014, bloomPerShot: 0.0045, bloomDecay: 0.07, bloomMax: 0.08,
-    recoilKick: 0.0075, recoilRecover: 8, adsTime: 0.19,
+    recoil: {
+      vertical: 0.0075, horizontal: 0.005, climbPerShot: 0.2, climbMax: 0.9,
+      recover: 8, camera: 0.5, viewmodel: 0.4, ads: 0.8, crouch: 0.85,
+    },
+    adsTime: 0.19,
     reloadTactical: 1.9, reloadEmpty: 2.6, swapInTime: 0.4,
     falloffStart: 28, falloffEnd: 75, falloffEndMult: 0.5,
     headMult: 1.7, legMult: 0.8, mobility: 0.98, tracerColor: 0x9adcff,
@@ -93,7 +127,11 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     damage: [24, 26, 28, 30, 32], pellets: 1, magSize: 30, reserveMax: 360, ammoType: 'medium',
     projectileSpeed: 480, dropGravity: 0.5,
     spreadHip: 0.02, spreadAds: 0.005, bloomPerShot: 0.005, bloomDecay: 0.06, bloomMax: 0.06,
-    recoilKick: 0.010, recoilRecover: 6.5, adsTime: 0.24,
+    recoil: {
+      vertical: 0.010, horizontal: 0.0035, climbPerShot: 0.14, climbMax: 0.6,
+      recover: 6.5, camera: 0.6, viewmodel: 0.5, ads: 0.8, crouch: 0.85,
+    },
+    adsTime: 0.24,
     reloadTactical: 2.2, reloadEmpty: 3.0, swapInTime: 0.45,
     falloffStart: 60, falloffEnd: 160, falloffEndMult: 0.68,
     headMult: 1.9, legMult: 0.78, mobility: 0.94, tracerColor: 0xffb36b,
@@ -103,7 +141,11 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     damage: [11, 12.5, 14, 17.5, 22], pellets: 10, magSize: 6, reserveMax: 96, ammoType: 'shells',
     projectileSpeed: 300, dropGravity: 0.7,
     spreadHip: 0.055, spreadAds: 0.042, bloomPerShot: 0.002, bloomDecay: 0.05, bloomMax: 0.01,
-    recoilKick: 0.035, recoilRecover: 5, adsTime: 0.22,
+    recoil: {
+      vertical: 0.035, horizontal: 0.006, climbPerShot: 0.05, climbMax: 0.15,
+      recover: 5, camera: 0.75, viewmodel: 1.0, ads: 0.9, crouch: 0.92,
+    },
+    adsTime: 0.22,
     reloadTactical: 0.62, reloadEmpty: 0.62, swapInTime: 0.5,
     falloffStart: 11, falloffEnd: 38, falloffEndMult: 0.22,
     headMult: 1.6, legMult: 0.85, mobility: 0.92, tracerColor: 0xffe0a0,
@@ -113,7 +155,11 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     damage: [100, 115, 140, 205, 230], pellets: 1, magSize: 5, reserveMax: 60, ammoType: 'heavy',
     projectileSpeed: 900, dropGravity: 0.22,
     spreadHip: 0.05, spreadAds: 0.0008, bloomPerShot: 0.01, bloomDecay: 0.04, bloomMax: 0.02,
-    recoilKick: 0.05, recoilRecover: 4, adsTime: 0.34,
+    recoil: {
+      vertical: 0.05, horizontal: 0.004, climbPerShot: 0, climbMax: 0,
+      recover: 4, camera: 0.85, viewmodel: 1.15, ads: 0.95, crouch: 0.9,
+    },
+    adsTime: 0.34,
     reloadTactical: 2.6, reloadEmpty: 3.4, swapInTime: 0.6,
     falloffStart: 300, falloffEnd: 500, falloffEndMult: 0.85,
     headMult: 2.2, legMult: 0.8, mobility: 0.88, tracerColor: 0xbfd4ff,
