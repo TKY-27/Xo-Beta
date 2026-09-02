@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { getSettings } from '../core/settings';
-import { MOVE } from '../core/balance';
+import { MOVE, WEAPONS, type WeaponId } from '../core/balance';
 import { feetYFromBodyCenter } from '../physics/physics';
 
 const _tv = new THREE.Vector3();
@@ -114,9 +114,13 @@ export class CameraRig {
     let yaw = actor.yaw;
     let pitch = actor.pitch;
     if (!opts.spectating) {
-      // Recoil punch applied visually on top of commanded aim
-      yaw += actor.wpn.recoilYaw * 0.6;
-      pitch += actor.wpn.recoilPitch * 0.6;
+      // Recoil punch applied visually on top of commanded aim. The visible
+      // fraction comes from the weapon's shared recoil profile so camera,
+      // sim firing state and viewmodel read as one system.
+      const weaponId = actor.inv.selectedWeapon?.weaponId as WeaponId | undefined;
+      const cameraFactor = weaponId ? WEAPONS[weaponId]?.recoil.camera ?? 0.6 : 0.6;
+      yaw += actor.wpn.recoilYaw * cameraFactor;
+      pitch += actor.wpn.recoilPitch * cameraFactor;
     }
 
     // ADS FOV zoom + sprint FOV kick
@@ -242,8 +246,11 @@ export class CameraRig {
     const feetY = feetYFromBodyCenter(p.y);
     const eyeH = actor.crouched ? MOVE.crouchEyeHeight : MOVE.eyeHeight;
     this.smoothEye += (eyeH - this.smoothEye) * Math.min(1, dt * 12);
-    const yaw = actor.yaw + (opts.recoilYaw ?? 0) * 0.6;
-    const pitch = actor.pitch + (opts.recoilPitch ?? 0) * 0.6;
+    const cameraFactor = actor.equippedWeapon
+      ? WEAPONS[actor.equippedWeapon as WeaponId]?.recoil.camera ?? 0.6
+      : 0.6;
+    const yaw = actor.yaw + (opts.recoilYaw ?? 0) * cameraFactor;
+    const pitch = actor.pitch + (opts.recoilPitch ?? 0) * cameraFactor;
     if (this.mode === 'fps') {
       this.camera.position.set(p.x + shakeX, feetY + this.smoothEye + shakeY, p.z);
       this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shakeY * 0.5, yaw + shakeX * 0.5, 0, 'YXZ'));
