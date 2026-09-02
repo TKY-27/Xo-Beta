@@ -4,7 +4,7 @@
  */
 
 import { planStairs, WorldBuilder } from '../builder';
-import { ROCK_COLLIDER_RADIUS, type MatKey, type TerrainCutout } from '../types';
+import { ROCK_CLEARANCE_RADIUS, type MatKey, type TerrainCutout } from '../types';
 import { Rng } from '../../core/rng';
 
 export interface BuildingOpts {
@@ -281,7 +281,16 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
           y0 + (f > 0 ? 0.18 : 0.08),
         );
       } else {
-        b.wallWithGaps(x - hw + t, z - hd + divOffset, o.w - t * 2, fh, 0.3, 'x', trim, [[gapStart, 1.6]], 0, y0);
+        // The odd-floor divider runs straight across the stairwell. Without a
+        // passage it formed a 3.6 m wall crossing the flight at mid-height:
+        // real KCC ascent stalled against it and descent from the floor above
+        // was impossible. Give the stairwell a full-height opening that clears
+        // the whole flight width.
+        const stairGapEnd = hasInteriorStair
+          ? (stairX + interiorStair.width / 2 + 0.12) - (x - hw + t)
+          : 0;
+        b.wallWithGaps(x - hw + t, z - hd + divOffset, o.w - t * 2, fh, 0.3, 'x', trim,
+          [[gapStart, 1.6], [0, Math.max(0, stairGapEnd)]], 0, y0);
         navDoorway(
           x - hw + t + gapStart + 0.8,
           z - hd + divOffset,
@@ -359,8 +368,11 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     const landingWidth = innerStairX - outerStairX + stair.width + 0.4;
     // A real bottom landing gives the stair sampler a capsule-clear node that
     // connects to the surrounding ground grid instead of an isolated point
-    // trapped between the first riser and the fire-escape posts.
-    b.slab(outerStairX, baseY + 0.04, frontZ + 1, stair.width + 0.5, 2, 0.2, 'metalExterior');
+    // trapped between the first riser and the fire-escape posts. It extends
+    // 0.4 m under the first tread: a slab edge exactly at the riser line left
+    // the approaching capsule half-supported there and its autostep never
+    // completed.
+    b.slab(outerStairX, baseY + 0.04, frontZ + 0.8, stair.width + 0.5, 2.4, 0.2, 'metalExterior');
     let remainingSteps = stair.steps;
     let currentY = baseY;
     let currentZ = frontZ;
@@ -411,19 +423,47 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
           pitch: -travelSign * Math.atan2(railRise, railRun),
         },
       );
+      // Continuous guard envelope behind the visible rail line: the
+      // presentation-only posts and handrail now actually stop a capsule.
+      b.guardRail(
+        { x: railX, z: currentZ },
+        { x: railX, z: currentZ + travelSign * railRun },
+        currentY - 0.15,
+        currentY + railRise + 1.2,
+      );
       currentZ += (dir === 0 ? 1 : -1) * flightPlan.run;
       currentY += flightPlan.totalRise;
       remainingSteps -= flightSteps;
       if (flight < flightCount - 1) {
-        b.slab(landingCenterX, currentY + 0.05, currentZ, landingWidth, 2.4, 0.25, 'metalExterior');
-        const nextTravelSign = (flight + 1) % 2 === 0 ? -1 : 1;
-        // The switchback opens toward the next flight. Guard the opposite
-        // landing edge so the rail alternates with the stair direction.
-        const guardedZ = currentZ - nextTravelSign * 1.16;
+        // Bias the switchback landing FORWARD along the arrival direction. A
+        // slab centred on the flight boundary hung 1.2 m back over the last
+        // treads with only ~0.15 m of headroom, and real KCC ascent stalled
+        // against its edge one riser below every switchback.
+        const arriveSign = dir === 0 ? 1 : -1;
+        const landingNear = currentZ - arriveSign * 0.25;
+        const landingFar = currentZ + arriveSign * 2.15;
+        b.slab(
+          landingCenterX,
+          currentY + 0.05,
+          (landingNear + landingFar) / 2,
+          landingWidth,
+          Math.abs(landingFar - landingNear),
+          0.25,
+          'metalExterior',
+        );
+        // The switchback opens toward the next flight. Guard the far edge so
+        // the rail alternates with the stair direction.
+        const guardedZ = landingFar - arriveSign * 0.2;
         b.box(landingCenterX, currentY + 1.05, guardedZ, landingWidth, 0.09, 0.09, 'metalExterior', 0, { noCollide: true });
         for (const landingX of [landingCenterX - landingWidth / 2 + 0.08, landingCenterX + landingWidth / 2 - 0.08]) {
           b.box(landingX, currentY + 0.55, guardedZ, 0.085, 1.05, 0.085, 'metalExterior', 0, { noCollide: true });
         }
+        b.guardRail(
+          { x: landingCenterX - landingWidth / 2, z: guardedZ },
+          { x: landingCenterX + landingWidth / 2, z: guardedZ },
+          currentY - 0.1,
+          currentY + 1.12,
+        );
         const supportHeight = currentY - fireEscapeFoundationY;
         if (supportHeight > 0.4) {
           b.box(outerStairX, fireEscapeFoundationY + supportHeight / 2, currentZ, 0.14, supportHeight, 0.14, 'metalExterior', 0, { noCollide: true });
@@ -432,23 +472,50 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     }
     const zLand = currentZ;
     // Top landing bridges the wall gap and physically overlaps the roof edge.
+    // It is biased forward along the arriving flight's direction (like the
+    // switchback landings): a centred bridge hung 1.3 m back over the top
+    // treads with ~0.15 m of headroom and blocked the last steps of every
+    // fire escape.
+    const arriveSign = (flightCount - 1) % 2 === 0 ? -1 : 1;
+    const bridgeLo = arriveSign === 1
+      ? zLand - 0.25
+      : Math.max(zLand - 2.35, z - hd - 0.25);
+    const bridgeHi = arriveSign === 1
+      ? Math.min(zLand + 2.35, z + hd + 0.25)
+      : zLand + 0.25;
     const roofLandingInnerEdge = x - hw + 0.25;
     const roofLandingOuterEdge = topStairX - stair.width / 2 - 0.2;
     b.slab(
       (roofLandingInnerEdge + roofLandingOuterEdge) / 2,
       roofY + 0.05,
-      zLand,
+      (bridgeLo + bridgeHi) / 2,
       roofLandingInnerEdge - roofLandingOuterEdge,
-      2.6,
+      Math.abs(bridgeHi - bridgeLo),
       0.25,
       'metalExterior',
     );
     // Guard and support the exposed outer edge of the roof bridge. These are
     // visual-only so the authored traversal width remains unchanged.
-    b.box(roofLandingOuterEdge, roofY + 1.05, zLand, 0.09, 0.09, 2.6, 'metalExterior', 0, { noCollide: true });
-    for (const postZ of [zLand - 1.1, zLand + 1.1]) {
+    b.box(
+      roofLandingOuterEdge,
+      roofY + 1.05,
+      (bridgeLo + bridgeHi) / 2,
+      0.09,
+      0.09,
+      Math.abs(bridgeHi - bridgeLo),
+      'metalExterior',
+      0,
+      { noCollide: true },
+    );
+    for (const postZ of [bridgeLo + 0.2, (bridgeLo + bridgeHi) / 2, bridgeHi - 0.2]) {
       b.box(roofLandingOuterEdge, roofY + 0.55, postZ, 0.085, 1.05, 0.085, 'metalExterior', 0, { noCollide: true });
     }
+    b.guardRail(
+      { x: roofLandingOuterEdge, z: bridgeLo },
+      { x: roofLandingOuterEdge, z: bridgeHi },
+      roofY - 0.1,
+      roofY + 1.15,
+    );
     const topSupportHeight = roofY - fireEscapeFoundationY;
     b.box(
       roofLandingOuterEdge,
@@ -616,11 +683,11 @@ export function scatterRocks(
     const x = rng.range(area.minX, area.maxX);
     const z = rng.range(area.minZ, area.maxZ);
     const scale = rng.range(0.6, 2.4);
-    const radius = ROCK_COLLIDER_RADIUS * scale;
+    const radius = ROCK_CLEARANCE_RADIUS * scale;
     if (avoid.some((a) => Math.hypot(a.x - x, a.z - z) < a.r + radius)) continue;
     if (b.def.rocks.some((rock) => (
       Math.hypot(rock.x - x, rock.z - z)
-        < (ROCK_COLLIDER_RADIUS * rock.scale + radius) * 0.82
+        < (ROCK_CLEARANCE_RADIUS * rock.scale + radius) * 0.82
     ))) continue;
     b.rock(x, z, heightAt ? heightAt(x, z) : 0, scale);
     placed++;

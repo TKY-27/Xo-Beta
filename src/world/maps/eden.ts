@@ -810,6 +810,12 @@ function watchRock(b: WorldBuilder, cx: number, cz: number): void {
   const railCentreX = stairStartX - stairPlan.run / 2;
   for (const side of [-1, 1]) {
     const railZ = cz + side * (stairPlan.width / 2 + 0.04);
+    b.guardRail(
+      { x: stairStartX, z: railZ },
+      { x: stairStartX - stairPlan.run, z: railZ },
+      stairStartY - 0.15,
+      stairStartY + finalRise + 1.0,
+    );
     for (const height of [0.5, 0.9]) {
       b.box(
         railCentreX,
