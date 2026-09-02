@@ -32,6 +32,8 @@ export class BotController {
   readonly kind = 'bot' as const;
   mode: BotMode = 'drop';
   perception: Perception;
+  /** Cached LOS closure — rebuilt once per controller, not per tick. */
+  private readonly cachedLos!: (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => boolean;
   navigator: BotNavigator;
   combat: BotCombat;
   private params: EffectiveParams;
