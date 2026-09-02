@@ -161,6 +161,15 @@ export function buildOldFront(): MapDef {
   return b.finish(
     {
       preset: 'overcast',
+      atmosphere: {
+        // Overcast war-torn ceiling: multiple cloud scales, a soft sun
+        // smeared behind cover, cold horizon variation.
+        zenith: 0x5b6672, horizon: 0x8b949c,
+        discSize: 0.06, discColor: 0xd8dde2, discGlow: 0.22,
+        cloudCover: 0.88, cloudTint: 0x9aa3ac, cloudShade: 0x59636d,
+        windSpeed: 0.008, starOpacity: 0.0,
+        hazeColor: 0x8f99a2, hazeStrength: 0.62,
+      },
       hdri: 'kloofendal_overcast_puresky_2k.hdr',
       fogColor: 0x8b949c,
       fogDensity: 0.00115,

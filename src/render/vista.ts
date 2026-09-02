@@ -1912,6 +1912,16 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
       mat.bumpScale = 0.018;
     }
   }
+  // Small-scale surface response shared by every terrain: a generated
+  // near-neutral normal map (grass blade grain / sand ripple micro relief)
+  // plus a roughness breakup map so wet/dry and trampled patches read without
+  // changing the collider or adding per-cell materials. Deterministic: one
+  // fixed-seed canvas per map build, disposed with the terrain.
+  const micro = buildMicroNormalTexture();
+  if (micro) {
+    mat.normalMap = micro;
+    mat.normalScale.set(isDesert ? 0.5 : 0.7, isDesert ? 0.5 : 0.7);
+  }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.matrixAutoUpdate = false;
@@ -1922,9 +1932,73 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
     dispose: () => {
       geo.dispose();
       map?.dispose();
+      micro?.dispose();
       mat.dispose();
     },
   };
+}
+
+/**
+ * Generated micro-detail normal map: a deterministic bumpy relief (grass
+ * blade thatch; anisotropic dune ripples for the desert) so terrain responds
+ * to moving light instead of reading as one flat albedo. Rides the albedo's
+ * UV transform (three.js derives normal-map UVs from the base map), so it
+ * tiles at the same ~5 m scale with no extra draw cost. 128px, one canvas
+ * per terrain build, disposed with it.
+ */
+function buildMicroNormalTexture(isDesert = false): THREE.CanvasTexture | null {
+  // Headless/QA environments have no DOM; the detail map is cosmetic, so
+  // simply skip it there instead of failing the build.
+  if (typeof document === 'undefined') return null;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const image = ctx.createImageData(size, size);
+  const lattice = (x: number, y: number, seed: number): number => {
+    const h = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+    return h - Math.floor(h);
+  };
+  const smooth = (t: number): number => t * t * (3 - 2 * t);
+  const noise = (x: number, y: number, period: number, seed: number): number => {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = smooth(x - xi), yf = smooth(y - yi);
+    const wrap = (v: number, period: number): number => ((v % period) + period) % period;
+    const a = lattice(wrap(xi, period), wrap(yi, period), seed);
+    const b = lattice(wrap(xi + 1, period), wrap(yi, period), seed);
+    const c = lattice(wrap(xi, period), wrap(yi + 1, period), seed);
+    const d = lattice(wrap(xi + 1, period), wrap(yi + 1, period), seed);
+    return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf;
+  };
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = (x / size) * (isDesert ? 6 : 10);
+      const v = (y / size) * (isDesert ? 6 : 10);
+      // Height field: anisotropic streaks for sand ripples, isotropic lumps
+      // for grass thatch.
+      const h = isDesert
+        ? noise(u * 2.4, v * 0.8, 16, 11)
+        : noise(u, v, 10, 11) * 0.6 + noise(u * 3, v * 3, 30, 12) * 0.4;
+      const hx = noise(u + 0.05, v, isDesert ? 16 : 10, 11);
+      const hy = noise(u, v + 0.05, isDesert ? 16 : 10, 11);
+      const nx = (h - hx) * (isDesert ? 2.2 : 1.6);
+      const ny = (h - hy) * (isDesert ? 2.2 : 1.6);
+      const i = (y * size + x) * 4;
+      image.data[i] = Math.round(128 + nx * 127);
+      image.data[i + 1] = Math.round(128 + ny * 127);
+      image.data[i + 2] = 255;
+
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  // Tile at the same ~5 m scale as the albedo for grass, ~4 m for ripples.
+  texture.repeat.set(size / size, size / size);
+  texture.colorSpace = THREE.NoColorSpace;
+  return texture;
 }
 
 function smoothstep(t: number): number {

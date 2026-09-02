@@ -85,6 +85,16 @@ export function buildAsharaReach(): MapDef {
 
   return b.finish({
     preset: 'day',
+    atmosphere: {
+      // Dry bright desert: high cirrus, dust at the horizon, stronger but
+      // controlled sun glare with clear depth to the ridges.
+      zenith: 0x3a76b8, horizon: 0xd8c9a8,
+      discSize: 0.033, discColor: 0xfff6dd, discGlow: 0.7,
+      cloudCover: 0.22, cloudTint: 0xf7f2e6, cloudShade: 0xc0b49a,
+      windSpeed: 0.014, starOpacity: 0.0,
+      hazeColor: 0xcbb896, hazeStrength: 0.58,
+    },
+
     hdri: 'qwantani_puresky_2k.hdr',
     fogColor: 0xc7b99f,
     fogDensity: 0.00125,

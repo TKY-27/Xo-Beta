@@ -171,6 +171,15 @@ export function buildEdenFacility(): MapDef {
   return b.finish(
     {
       preset: 'day',
+      atmosphere: {
+        // Readable daytime: blue zenith, lighter horizon, coherent sun disc,
+        // soft cumulus, restrained aerial perspective.
+        zenith: 0x2f6cb3, horizon: 0xa9c2d4,
+        discSize: 0.036, discColor: 0xfff2d4, discGlow: 0.55,
+        cloudCover: 0.42, cloudTint: 0xf2f5f7, cloudShade: 0x9fb2c4,
+        windSpeed: 0.01, starOpacity: 0.0,
+        hazeColor: 0xb9cdd8, hazeStrength: 0.34,
+      },
       hdri: 'qwantani_puresky_2k.hdr',
       fogColor: 0xa9c2d4,
       fogDensity: 0.0013,

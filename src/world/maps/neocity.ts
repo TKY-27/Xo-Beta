@@ -319,6 +319,15 @@ export function buildNeoCity(): MapDef {
   return b.finish(
     {
       preset: 'bluehour',
+      atmosphere: {
+        // Deep blue-hour rain sky: layered low clouds, subdued stars in the
+        // gaps, distant urban glow at the horizon. No nebula, no giant moon.
+        zenith: 0x0e1730, horizon: 0x27354f,
+        discSize: 0.031, discColor: 0xcfd8e6, discGlow: 0.32,
+        cloudCover: 0.74, cloudTint: 0x39465c, cloudShade: 0x171d29,
+        windSpeed: 0.012, starOpacity: 0.34,
+        hazeColor: 0x43536b, hazeStrength: 0.5,
+      },
       // Bright blue-hour: authored sky provides both backdrop and IBL, so
       // combat stays readable while everything still reads as night.
       fogColor: 0x33456a,

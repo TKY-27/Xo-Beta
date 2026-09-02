@@ -355,6 +355,15 @@ export async function createMaterials(): Promise<MaterialLibrary> {
     roughness: 0.7,
     metalness: 0.02,
   }));
+  // Occupied-dark facade window: unlit glass behind a dim interior, still
+  // distinct from a wall hole. Presentation-only, below the bloom threshold.
+  mats.set('windowDark', new THREE.MeshStandardMaterial({
+    color: 0x111a22,
+    emissive: 0x2a3b46,
+    emissiveIntensity: 0.06,
+    roughness: 0.82,
+    metalness: 0.05,
+  }));
   // Large sign panels: emissive just above the 1.62 bloom threshold so big
   // surfaces glow without blowing out into white slabs.
   mats.set('signDimCyan', neon(0x53e0ff, 1.05));
