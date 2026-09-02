@@ -1,7 +1,7 @@
 {
   "name": "xo-beta",
-  "version": "0.3.0",
-  "description": "Xo Beta — a browser-native private direct-P2P 3D battle royale FPS/TPS for up to four humans and Bots.",
+  "version": "0.4.0",
+  "description": "Xo Beta \u2014 a browser-native private direct-P2P 3D battle royale FPS/TPS for up to four humans and Bots.",
   "private": true,
   "type": "module",
   "license": "MIT",
