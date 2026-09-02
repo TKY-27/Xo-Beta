@@ -130,6 +130,9 @@ async function main(): Promise<void> {
   }
   const maps = requestedMap ? [requestedMap] : [...productionMaps];
   const stress = args.includes('--stress');
+  const scenario = args.find((a) => a.startsWith('--scenario='))?.slice(11) ?? 'practice';
+  const scopeMag = args.find((a) => a.startsWith('--mag='))?.slice(6) ?? '2';
+  if (!['practice', 'bot10', 'scope'].includes(scenario)) throw new Error(`Unknown scenario: ${scenario}`);
   const only = args.find((a) => a.startsWith('--only='))?.slice(7);
   const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
   await server.listen();
@@ -150,11 +153,13 @@ async function main(): Promise<void> {
   for (const map of maps) {
     for (const [name, patch] of CONFIGS) {
       if (only && name !== only) continue;
-      const cfg = { onboarded: true, ...BASE, ...patch };
+      const cfg = { onboarded: true, ...BASE, ...patch,
+        ...(scenario === 'scope' ? { scopeMagnification: Number(scopeMag) } as Record<string, unknown> : {}) };
       await page.addInitScript((c) => {
         localStorage.setItem('xo-beta-settings-v1', JSON.stringify(c));
       }, cfg);
-      await page.goto('http://localhost:5199/?qa=1', { waitUntil: 'domcontentloaded' });
+      const rosterQs = scenario === 'bot10' ? '&roster=4v6' : '';
+      await page.goto(`http://localhost:5199/?qa=1${rosterQs}`, { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#main-menu:not(.hidden)', { timeout: 90000 });
       await page.waitForTimeout(400);
       await page.click('#btn-play');
@@ -164,9 +169,19 @@ async function main(): Promise<void> {
       await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
       await page.waitForSelector('#hud:not(.hidden)', { timeout: 90000 });
       await page.bringToFront();
+      // Scenario setup: equip the sniper and hold ADS (right mouse) so the
+      // measurement covers the scoped render path end to end.
+      if (scenario === 'scope') {
+        const gave = await page.evaluate('window.__xoGive ? window.__xoGive("sniper", "legendary") : false') as boolean;
+        if (!gave) throw new Error('Scope scenario could not equip the sniper');
+        await page.waitForTimeout(400);
+        await page.mouse.down({ button: 'right' });
+        await page.waitForTimeout(1200);
+      }
       const stats = await measure(page, stress);
+      if (scenario === 'scope') await page.mouse.up({ button: 'right' });
       if (errors.length > 0) throw new Error(`${map}/${name}: browser errors: ${errors.join(' | ')}`);
-      console.log(`${map}/${name}${stress ? '/stress' : ''}:`, JSON.stringify(stats));
+      console.log(`${map}/${name}${stress ? '/stress' : ''}/${scenario}${scenario === 'scope' ? `mag${scopeMag}` : ''}:`, JSON.stringify(stats));
     }
   }
   console.log('errors:', errors.length, errors.slice(0, 3));

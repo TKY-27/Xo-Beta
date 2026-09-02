@@ -8,6 +8,7 @@ import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { getSettings } from '../core/settings';
 import { MOVE, WEAPONS, type WeaponId } from '../core/balance';
+import { scopeFovForMagnification } from './renderer';
 import { feetYFromBodyCenter } from '../physics/physics';
 
 const _tv = new THREE.Vector3();
@@ -60,6 +61,11 @@ export class CameraRig {
   /** True while the sniper scope is fully engaged. */
   scoped = false;
   onScopedChanged: ((scoped: boolean) => void) | null = null;
+  /** Continuous sniper scope blend 0..1 (drives FOV and overlay weights). */
+  private scopedBlend = 0;
+  get scopeProgress(): number {
+    return this.scopedBlend;
+  }
 
   constructor(aspect: number) {
     this.camera = new THREE.PerspectiveCamera(this.baseFov, aspect, 0.08, 900);
@@ -129,16 +135,23 @@ export class CameraRig {
     const hsNow = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
     const sprinting = actor.body.grounded && !actor.crouched && hsNow > MOVE.walkSpeed + 0.8;
     this.sprintKick += ((sprinting ? 1 : 0) - this.sprintKick) * Math.min(1, dt * 6);
-    const sniperScoped = actor.inv.selectedWeapon?.weaponId === 'sniper' && this.currentAds > 0.85;
-    // The primary view keeps a modest ADS zoom. A dedicated scope camera owns
-    // the ~5x optical view, preventing the old full-screen magnification hack.
+    const sniperAds = actor.inv.selectedWeapon?.weaponId === 'sniper' && this.currentAds > 0.55;
+    // Single-pass optics: the primary camera itself carries the angular
+    // magnification, blended in continuously with ADS so the first visual
+    // response is immediate and there is no heavy path that switches on at
+    // full draw.
+    this.scopedBlend += ((sniperAds ? 1 : 0) - this.scopedBlend) * (1 - Math.exp(-9 * dt));
+    if (this.scopedBlend < 0.001) this.scopedBlend = 0;
     const presentationFov = this.mode === 'tps'
       ? THREE.MathUtils.clamp(this.baseFov * 0.55, 42, 60)
       : this.baseFov;
-    const targetFov =
+    const adsFov =
       presentationFov - this.currentAds * (this.mode === 'tps' ? 6 : 14) +
       this.sprintKick * presentationFov * 0.085;
-    const scopedNow = sniperScoped && this.currentAds > 0.97;
+    const magnification = getSettings().scopeMagnification;
+    const scopedFov = scopeFovForMagnification(presentationFov, magnification);
+    const targetFov = THREE.MathUtils.lerp(adsFov, Math.max(3, scopedFov), this.scopedBlend);
+    const scopedNow = sniperAds && this.currentAds > 0.97;
     this.setScoped(scopedNow);
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 12);
