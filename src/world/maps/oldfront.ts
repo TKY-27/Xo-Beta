@@ -7,7 +7,7 @@
 import { planStairs, STAIR_MAX_RISE, WorldBuilder } from '../builder';
 import { ROCK_CLEARANCE_RADIUS, type MapDef, type MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { addBuilding, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
@@ -157,6 +157,8 @@ export function buildOldFront(): MapDef {
   decorateOldFront(b, rng);
   hedgerowsAndWalls(b, rng);
   edgeHomesteads(b, rng);
+
+  hardenExposedFlanks(b, { mat: 'sandbag', maxProps: 30 });
 
   return b.finish(
     {

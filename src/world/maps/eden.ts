@@ -7,7 +7,7 @@
 import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { addBuilding, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
@@ -167,6 +167,8 @@ export function buildEdenFacility(): MapDef {
   forestLife(b, rng);
 
   decorateEden(b, rng);
+
+  hardenExposedFlanks(b, { mat: 'concreteDark', maxProps: 36 });
 
   return b.finish(
     {

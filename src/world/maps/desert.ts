@@ -10,7 +10,7 @@
 import { Rng } from '../../core/rng';
 import { WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
-import { addBuilding, scatterRocks, structureBaseY } from './common';
+import { addBuilding, hardenExposedFlanks, scatterRocks, structureBaseY } from './common';
 
 const S = 500;
 
@@ -82,6 +82,8 @@ export function buildAsharaReach(): MapDef {
 
   roadsideInfrastructure(b, rng);
   desertScatter(b, rng);
+
+  hardenExposedFlanks(b, { mat: 'concreteDark', maxProps: 20 });
 
   return b.finish({
     preset: 'day',
