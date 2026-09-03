@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { loadMap, type MapId } from '../../src/world';
+import type { GeoBox } from '../../src/world/types';
 
 /**
  * Z-fighting regression guard.
@@ -40,7 +41,7 @@ describe('no visible coplanar box tops (z-fighting guard)', () => {
   for (const id of ['neocity', 'oldfront', 'eden', 'ashara'] satisfies MapId[]) {
     it(`${id} has no flickering coplanar surface pairs`, () => {
       const { def } = loadMap(id);
-      const boxes = def.geo.filter((g) => g.kind === 'box' && !g.noRender);
+      const boxes = def.geo.filter((g): g is GeoBox => g.kind === 'box' && !g.noRender);
       const obbs = boxes.map(obb);
       const tops = boxes.map((g) => g.y + g.sy / 2);
       const fights: object[] = [];

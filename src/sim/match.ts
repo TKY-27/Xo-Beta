@@ -104,7 +104,7 @@ export interface MatchEventsMap {
   footstep: { actorId: number; x: number; y: number; z: number; running: boolean; surface: 'stone' | 'metal' | 'wood' | 'grass' | 'water' };
   muzzleFlash: { actorId: number; x: number; y: number; z: number; dx: number; dy: number; dz: number; weaponId: WeaponId };
   impact: { x: number; y: number; z: number; nx: number; ny: number; nz: number; material: string };
-  tracer: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; color: number };
+  tracer: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; color: number; weaponId: WeaponId };
   ricochet: { x: number; y: number; z: number };
   glassBreak: { destructibleId: string; revision: number; destroyed: true; actorId: number; x: number; y: number; z: number };
   destructibleDestroyed: { id: number; destructibleId: string; revision: number; destroyed: true; x: number; y: number; z: number };
@@ -843,8 +843,8 @@ export class Match {
       onShieldBroken: (target) => {
         this.events.emit('shieldBroken', { actorId: target.id });
       },
-      onTracer: (x1, y1, z1, x2, y2, z2, color) => {
-        this.events.emit('tracer', { x1, y1, z1, x2, y2, z2, color });
+      onTracer: (x1, y1, z1, x2, y2, z2, color, weaponId) => {
+        this.events.emit('tracer', { x1, y1, z1, x2, y2, z2, color, weaponId });
       },
       onRicochet: (x, y, z) => this.events.emit('ricochet', { x, y, z }),
       onGlassBreak: (destructibleId, x, y, z, actorId) => {
