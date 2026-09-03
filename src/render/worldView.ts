@@ -336,6 +336,16 @@ export class GlassInstancePool {
 
 const _Y_AXIS = new THREE.Vector3(0, 1, 0);
 
+/**
+ * Chests render this far sunk into their resolved support surface. The skirt
+ * and foot bases are authored flush with the chest origin, so an exact sit
+ * leaves them coplanar with the ground — invisible per-pixel at close range
+ * but a flickering ring inside depth precision at distance. A 1.5 cm embed
+ * reads as settled weight and keeps every base face strictly below ground.
+ * The physics box is authored separately and stays untouched.
+ */
+const CHEST_RENDER_SINK = 0.015;
+
 export class WorldView {
   readonly group = new THREE.Group();
   private destructibleMeshes = new Map<number, THREE.Object3D>();
@@ -525,7 +535,18 @@ export class WorldView {
       geometry.computeVertexNormals();
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
-      const mesh = new THREE.Mesh(geometry, this.mats.get(path.mat));
+      // Ribbons stack over the heightfield and over earlier paths. A shared
+      // material cannot express that order, so each path gets its own clone
+      // with a depth bias ranked by path order — the decal technique already
+      // proven by impactDecals. Bias lives in device space, so stacking stays
+      // flicker-free at every range where the height gaps (1–5 cm) fall below
+      // depth precision.
+      const mat = (this.mats.get(path.mat) as THREE.Material).clone();
+      mat.userData.externalShared = false;
+      mat.polygonOffset = true;
+      mat.polygonOffsetFactor = -2 - pathIndex * 2;
+      mat.polygonOffsetUnits = -2 - pathIndex * 2;
+      const mesh = new THREE.Mesh(geometry, mat);
       mesh.receiveShadow = true;
       mesh.castShadow = false;
       this.group.add(mesh);
@@ -560,7 +581,7 @@ export class WorldView {
       // those axes in world space but does not swap the stored dimensions.
       const width = Math.max(...group.map((box) => box.sz));
       const steps = Math.max(2, Math.ceil((end - start) / 2));
-      const addStrip = (stripWidth: number, yOffset: number, mat: MatKey) => {
+      const addStrip = (stripWidth: number, yOffset: number, mat: MatKey, layer: number) => {
         const positions: number[] = [];
         const uvs: number[] = [];
         for (let i = 0; i <= steps; i++) {
@@ -580,7 +601,15 @@ export class WorldView {
         geometry.computeVertexNormals();
         geometry.computeBoundingBox();
         geometry.computeBoundingSphere();
-        const mesh = new THREE.Mesh(geometry, this.mats.get(mat));
+        // Paved surface sits 5 cm over its dirt shoulder — inside depth
+        // precision past ~250 m. Rank the layers with the same decal-style
+        // depth bias the surface paths use so asphalt always wins cleanly.
+        const material = (this.mats.get(mat) as THREE.Material).clone();
+        material.userData.externalShared = false;
+        material.polygonOffset = true;
+        material.polygonOffsetFactor = -2 - layer * 2;
+        material.polygonOffsetUnits = -2 - layer * 2;
+        const mesh = new THREE.Mesh(geometry, material);
         mesh.receiveShadow = true;
         mesh.castShadow = false;
         this.group.add(mesh);
@@ -589,8 +618,8 @@ export class WorldView {
       // uphill edges pierced the welded asphalt as pale transverse bands.
       // Render both layers from the same sampled ribbon instead: a wider,
       // lower dirt shoulder followed by the continuous asphalt surface.
-      addStrip(width + 1.8, 0.064, 'dirt');
-      addStrip(width, 0.116, 'asphaltDesert');
+      addStrip(width + 1.8, 0.064, 'dirt', 0);
+      addStrip(width, 0.116, 'asphaltDesert', 1);
     }
   }
 
@@ -1475,7 +1504,7 @@ export class WorldView {
       nextIdx[tier] = idx + 1;
       this.chestSlots.set(c.id, {
         tier, idx,
-        pos: new THREE.Vector3(c.x, c.y, c.z),
+        pos: new THREE.Vector3(c.x, c.y - CHEST_RENDER_SINK, c.z),
         yaw: Math.abs(Math.round((c.x * 13.7 + c.z * 7.3))) * 0.61 % (Math.PI * 2),
         lidAngle: 0, opened: false,
       });

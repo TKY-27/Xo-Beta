@@ -401,8 +401,10 @@ function atriumLink(b: WorldBuilder, cx: number, cz: number): void {
   // at distance where the glass panes fade into the fog.
   for (let i = 0; i < 7; i++) {
     const z = cz - 13 + i * (26 / 6);
-    b.box(cx - 4.7, gy + 2.4, z, 0.5, 4.8, 0.5, 'metalDark');
-    b.box(cx + 4.7, gy + 2.4, z, 0.5, 4.8, 0.5, 'metalDark');
+    // Mullion tops stop 4 cm under the roof surface: flush tops z-fought
+    // against the slab across every mullion footprint.
+    b.box(cx - 4.7, gy + 2.38, z, 0.5, 4.76, 0.5, 'metalDark');
+    b.box(cx + 4.7, gy + 2.38, z, 0.5, 4.76, 0.5, 'metalDark');
     b.box(cx, gy + 4.35, z, 9.4, 0.18, 0.24, 'metalDark', 0, { noCollide: true });
   }
   b.slab(cx, gy + 4.8, cz, 10.6, 26.6, 0.4, 'metalDark');
@@ -556,7 +558,9 @@ function treatmentPlant(b: WorldBuilder, cx: number, cz: number): void {
   const retainingX = entryX + stair.run / 2;
   b.box(retainingX, (entrySurfaceY + py) / 2, entryZ - 1.7, retainingLength, entrySurfaceY - py, 0.3, 'concreteDark');
   b.box(retainingX, (entrySurfaceY + py) / 2, entryZ + 1.7, retainingLength, entrySurfaceY - py, 0.3, 'concreteDark');
-  b.slab(cx - 12.5, py, entryZ, 7, 3.2, 0.35, 'concreteDark');
+  // The stair landing sits 2 cm under the pump-room floor so the two tops
+  // never share a plane across their 1x3.2 m seam.
+  b.slab(cx - 12.5, py - 0.02, entryZ, 7, 3.2, 0.35, 'concreteDark');
   b.slab(cx, py, cz - 6, 20, 14, 0.5, 'concreteDark');
   b.slab(cx, py + 4.2, cz - 6, 20, 14, 0.5, 'concreteDark');
   b.wallWithGaps(cx - 10, cz - 13, 20, 4.2, 0.5, 'x', 'concrete', [], 0, py);
