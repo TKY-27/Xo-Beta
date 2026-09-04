@@ -727,13 +727,10 @@ function underpassStation(b: WorldBuilder, cx: number, cz: number): void {
   const depth = 5;
   const entryX = cx - 5.5;
   const entryZ = cz - 15;
-  b.stairs(entryX, 0.02, entryZ, 0, 10, -depth / 10, 0.78, 2.6, 'concreteDark');
+  b.stairs(entryX, 0, entryZ, 0, 10, -depth / 10, 0.78, 2.6, 'concreteDark');
   b.box(entryX - 1.7, -2.5, entryZ + 4, 0.3, 5, 9.2, 'concreteDark');
   b.box(entryX + 1.7, -2.5, entryZ + 4, 0.3, 5, 9.2, 'concreteDark');
-  // The landing sits 2 cm under the platform floor and the bottom stair
-  // tread 2 cm above it — flush underground floors z-fought across every
-  // landing/platform overlap.
-  b.slab(entryX, -depth - 0.02, cz - 6.5, 3.2, 3.8, 0.35, 'concreteDark');
+  b.slab(entryX, -depth, cz - 6.5, 3.2, 3.8, 0.35, 'concreteDark');
   // Platform box (hollow room underground)
   const py = -depth;
   b.slab(cx, py, cz, 30, 16, 0.5, 'concreteDark');

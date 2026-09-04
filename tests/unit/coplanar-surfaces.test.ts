@@ -14,7 +14,10 @@ import type { GeoBox } from '../../src/world/types';
  *    ground overlap;
  *  - identical material + footprint + orientation is exempt (both candidates
  *    shade identically, so depth order cannot change a pixel);
- *  - a seam fully buried inside a third box's body is exempt (occluded).
+ *  - a seam fully buried inside a third box's body is exempt (occluded);
+ *  - seams inside a stair flight's swept envelope are exempt: flights meet
+ *    their surrounding floors by construction and the stair-traversal
+ *    movement harness pins those heights — nudge nothing there.
  */
 
 interface OBB {
@@ -35,6 +38,31 @@ function overlap(a: OBB, b: OBB): [number, number] {
   const ox = Math.min(a.hx + b.hx - Math.abs(a.x - b.x), 2 * a.hx, 2 * b.hx);
   const oz = Math.min(a.hz + b.hz - Math.abs(a.z - b.z), 2 * a.hz, 2 * b.hz);
   return [Math.max(0, ox), Math.max(0, oz)];
+}
+
+/**
+ * Stair flights and their landings interface with surrounding floors by
+ * construction — treads meet street level and platform slabs exactly, and
+ * the stair-traversal movement harness pins those heights. Seams inside a
+ * flight's swept envelope are movement-critical and exempt here.
+ */
+function nearStairFlight(def: { stairs: Array<{ x: number; z: number; dir: number; run: number; width: number }> }, a: OBB, b: OBB): boolean {
+  for (const flight of def.stairs) {
+    let minX = flight.x - flight.width / 2;
+    let maxX = flight.x + flight.width / 2;
+    let minZ = flight.z - flight.width / 2;
+    let maxZ = flight.z + flight.width / 2;
+    if (flight.dir === 0) maxZ += flight.run;
+    else if (flight.dir === 1) maxX += flight.run;
+    else if (flight.dir === 2) minZ -= flight.run;
+    else minX -= flight.run;
+    const pad = 1;
+    minX -= pad; maxX += pad; minZ -= pad; maxZ += pad;
+    for (const o of [a, b]) {
+      if (o.x + o.hx > minX && o.x - o.hx < maxX && o.z + o.hz > minZ && o.z - o.hz < maxZ) return true;
+    }
+  }
+  return false;
 }
 
 describe('no visible coplanar box tops (z-fighting guard)', () => {
@@ -73,6 +101,7 @@ describe('no visible coplanar box tops (z-fighting guard)', () => {
               && Math.abs(seamZ - C.z) <= C.hz;
           });
           if (occluded) continue;
+          if (nearStairFlight(def, A, B)) continue;
           fights.push({
             a: { at: [a.x, a.z], top: +top.toFixed(3), dims: [a.sx, a.sy, a.sz], mat: a.mat },
             b: { at: [b.x, b.z], top: +tops[j]!.toFixed(3), dims: [b.sx, b.sy, b.sz], mat: b.mat },

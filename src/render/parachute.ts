@@ -11,7 +11,9 @@ const CANOPY_Y = 2.35;
 const DEPLOY_RATE = 7.5;
 
 /** Classic radial panel stripes tinted with the actor's accent colour. */
-function panelTexture(accent: number): THREE.CanvasTexture {
+function panelTexture(accent: number): THREE.CanvasTexture | null {
+  // Unit-test/node environments have no DOM: fall back to a plain material.
+  if (typeof document === 'undefined') return null;
   const c = document.createElement('canvas');
   c.width = 512;
   c.height = 128;
@@ -43,8 +45,10 @@ export class ParachuteView {
     // the classic chase camera (below and behind) sees the striped inside.
     const geo = new THREE.SphereGeometry(1.35, 20, 10, 0, Math.PI * 2, 0, 1.15);
     geo.scale(1, 0.62, 0.86);
+    const stripeMap = panelTexture(accent);
     const mat = new THREE.MeshStandardMaterial({
-      map: panelTexture(accent),
+      ...(stripeMap ? { map: stripeMap } : {}),
+      color: stripeMap ? 0xffffff : new THREE.Color(accent).lerp(new THREE.Color(0xe8e4da), 0.4),
       side: THREE.DoubleSide,
       roughness: 0.86,
       metalness: 0,
@@ -80,7 +84,10 @@ export class ParachuteView {
     this.lines.frustumCulled = false;
     this.group.add(this.lines);
 
-    this.group.position.set(0, CANOPY_Y, 0.05);
+    // Rest folded at the rig's feet: a canopy parked overhead would inflate
+    // every rig bounding box (and with it LOD/QA metrics) for a prop that is
+    // invisible until the glide state lifts it into place.
+    this.group.position.set(0, 0.01, 0);
     this.group.scale.setScalar(0.001);
     this.group.visible = false;
   }
@@ -94,6 +101,7 @@ export class ParachuteView {
       return;
     }
     this.group.visible = true;
+    this.group.position.set(0, CANOPY_Y, 0.05);
     // easeOutBack: a fast snatch past full size sells canopy inflation.
     const c1 = 1.70158;
     const c3 = c1 + 1;
