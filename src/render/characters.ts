@@ -14,6 +14,7 @@ import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import type { SkinId } from '../core/settings';
 import { feetYFromBodyCenter } from '../physics/physics';
+import { ParachuteView } from './parachute';
 
 export type { SkinId } from '../core/settings';
 
@@ -463,6 +464,10 @@ export class CharacterFactory {
     let swingIndex = 0;
     // Trained freefall pose blend (0 = normal clips, 1 = full skydive pose).
     let freefallBlend = 0;
+    // Glide canopy: presentation-only, deployed while the actor descends
+    // under canopy ('glide' move state). Removed with the rig on dispose.
+    const parachute = new ParachuteView(skin.accent);
+    group.add(parachute.group);
     const _fwq = new THREE.Quaternion();
     const _bwq = new THREE.Quaternion();
     const _wq = new THREE.Quaternion();
@@ -495,36 +500,42 @@ export class CharacterFactory {
     }
 
     /**
-     * Trained freefall pose: body horizontal, back toward the ground, chest
-     * and face up, arms spread, knees bent and legs separated. `blend`
-     * eases the whole pose in and out so transitions never snap, and the
-     * gameplay collider is untouched (presentation-only).
+     * Trained freefall pose: stable belly-to-earth arch — body horizontal
+     * and face-down, chest toward the ground, arms spread with a controlled
+     * elbow bend, knees bent so the heels trail toward the sky, plus a small
+     * wind flutter so the pose never reads as frozen. `blend` eases the
+     * whole pose in and out so transitions never snap, and the gameplay
+     * collider is untouched (presentation-only).
      */
-    function applyFreefallPose(blend: number): void {
+    function applyFreefallPose(blend: number, time: number): void {
       if (blend < 0.001) return;
-      // Belly-up: rotating the body -90deg about its local X tips the head
-      // back and the chest skyward while travel stays along body +Z.
-      body.rotation.x = bodyBaseRotation.x - (Math.PI / 2 - 0.14) * blend;
+      // Belly-down: rotating the body +90deg about its local X tips the face
+      // and chest toward the ground while travel stays along body +Z; the
+      // -0.14 keeps the head a touch raised, reading as forward scan.
+      body.rotation.x = bodyBaseRotation.x + (Math.PI / 2 - 0.14) * blend;
+      // Low-amplitude two-frequency flutter: airframe shake on the spread
+      // limbs, in counter-phase left/right so it reads as wind, not a tween.
+      const flutter = Math.sin(time * 13.5) * 0.05 + Math.sin(time * 7.1) * 0.03;
       // Arms spread wide for stability (left -Z / right +Z derived from the
       // UBL bind layout: -Z about the body roll axis abducts the left limbs).
       const armL = bones['upperarm_l'];
       const armR = bones['upperarm_r'];
       const foreL = bones['lowerarm_l'];
       const foreR = bones['lowerarm_r'];
-      if (armL) twistFromBodyAxis(armL, 'z', -0.62 * blend);
-      if (armR) twistFromBodyAxis(armR, 'z', 0.62 * blend);
+      if (armL) twistFromBodyAxis(armL, 'z', (-0.62 - flutter) * blend);
+      if (armR) twistFromBodyAxis(armR, 'z', (0.62 + flutter) * blend);
       // Slight elbow bend so the arms read as controlled, not rigid.
       if (foreL) twistFromBodyAxis(foreL, 'y', 0.35 * blend);
       if (foreR) twistFromBodyAxis(foreR, 'y', -0.35 * blend);
-      // Legs separated with bent knees, heels trailing toward the back plane.
+      // Legs separated with bent knees, heels trailing toward the sky.
       const thighL = bones['thigh_l'];
       const thighR = bones['thigh_r'];
       const calfL = bones['calf_l'];
       const calfR = bones['calf_r'];
       if (thighL) twistFromBodyAxis(thighL, 'z', -0.2 * blend);
       if (thighR) twistFromBodyAxis(thighR, 'z', 0.2 * blend);
-      if (calfL) twistFromBodyAxis(calfL, 'x', -0.5 * blend);
-      if (calfR) twistFromBodyAxis(calfR, 'x', -0.5 * blend);
+      if (calfL) twistFromBodyAxis(calfL, 'x', (-0.5 + flutter * 0.6) * blend);
+      if (calfR) twistFromBodyAxis(calfR, 'x', (-0.5 - flutter * 0.6) * blend);
     }
 
     function crossfade(from: string, to: string, dur = 0.16): void {
@@ -723,8 +734,9 @@ export class CharacterFactory {
           * Math.min(1, dt * FREEFALL_BLEND_RATE);
         if (freefallBlend > 0.001) {
           body.updateMatrixWorld(true);
-          applyFreefallPose(freefallBlend);
+          applyFreefallPose(freefallBlend, t);
         }
+        parachute.update(a.state === 'glide', t, dt);
       },
       updateView(a: ActorView, _t: number, dt: number) {
         rig.group.position.set(a.position.x, feetYFromView(a.position.y), a.position.z);
@@ -771,8 +783,9 @@ export class CharacterFactory {
           * Math.min(1, dt * FREEFALL_BLEND_RATE);
         if (freefallBlend > 0.001) {
           body.updateMatrixWorld(true);
-          applyFreefallPose(freefallBlend);
+          applyFreefallPose(freefallBlend, _t);
         }
+        parachute.update(a.moveState === 'glide', _t, dt);
       },
       attachWeapon(model: THREE.Object3D | null) {
         if (!weaponHolder) return;
@@ -800,6 +813,7 @@ export class CharacterFactory {
         const registryIndex = liveRigs.indexOf(registryEntry);
         if (registryIndex >= 0) liveRigs.splice(registryIndex, 1);
         rig.attachWeapon?.(null);
+        parachute.dispose();
         mixer.stopAllAction();
         mixer.uncacheRoot(body);
         for (const material of new Set<THREE.Material>([...baseMats, ...accents])) material.dispose();
@@ -904,6 +918,10 @@ function fallbackRig(
   add(new THREE.CapsuleGeometry(0.06, 0.48, 6, 10), darkMat, torso, [0.29, 0, 0]);
   add(new THREE.BoxGeometry(0.24, 0.3, 0.11), darkMat, torso, [0, 0.02, -0.18]);
   group.add(hips);
+  // Even the emergency rig deploys the glide canopy so descent reads the
+  // same across hosts and degraded clients.
+  const parachute = new ParachuteView(skin.accent);
+  group.add(parachute.group);
   const rig: CharacterRig = {
     group,
     animName: 'idle',
@@ -911,14 +929,23 @@ function fallbackRig(
     accentMats: accents,
     baseMats: baseMats,
     dissolving: 0,
-    update(a: Actor) {
+    update(a: Actor, t: number, dt: number) {
       group.rotation.y = a.yaw + Math.PI;
+      // Emergency rigs get the same face-down freefall read as the skinned
+      // rigs (presentation-only; the collider never moves).
+      const ff = a.state === 'freefall' ? Math.PI / 2 - 0.14 : 0;
+      hips.rotation.x += (ff - hips.rotation.x) * Math.min(1, dt * 6);
+      parachute.update(a.state === 'glide', t, dt);
     },
-    updateView(a: ActorView) {
+    updateView(a: ActorView, t: number, dt: number) {
       group.position.set(a.position.x, feetYFromView(a.position.y), a.position.z);
       group.rotation.y = a.yaw + Math.PI;
+      const ff = a.moveState === 'freefall' ? Math.PI / 2 - 0.14 : 0;
+      hips.rotation.x += (ff - hips.rotation.x) * Math.min(1, dt * 6);
+      parachute.update(a.moveState === 'glide', t, dt);
     },
     dispose() {
+      parachute.dispose();
       for (const material of new Set<THREE.Material>([...baseMats, ...accents])) material.dispose();
       const geometry = new Set<THREE.BufferGeometry>();
       group.traverse((o) => {

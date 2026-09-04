@@ -37,47 +37,100 @@ export function buildNeoCity(): MapDef {
 
   addGround(b, S, 'asphalt', 0, true, [TRANSIT_CUTOUT]);
 
-  // Street grid: roads every 100u (visual strips), sidewalks
+  // Street grid: roads every 100u. Along-Z strips stay continuous; along-X
+  // strips are segmented between crossings so no two rendered tops share a
+  // plane — the previous full-span strips stacked coplanar road/curb faces at
+  // all 25 intersections and flickered from any distance.
+  const S2 = S / 2;
+  const CROSSINGS = [-200, -100, 0, 100, 200];
+  /** Free intervals between [c-h, c+h] bands across the full map span. */
+  const gapsBetween = (h: number): Array<[number, number]> => {
+    const out: Array<[number, number]> = [];
+    let cursor = -S2;
+    for (const c of CROSSINGS) {
+      if (c - h > cursor + 1e-6) out.push([cursor, c - h]);
+      cursor = c + h;
+    }
+    if (S2 > cursor + 1e-6) out.push([cursor, S2]);
+    return out;
+  };
+  const roadSegs = gapsBetween(7);
+  const curbSegs = gapsBetween(7.24);
+  // Sidewalks split only at perpendicular sidewalk bands so each strip keeps
+  // bridging the road as the existing raised crossing table.
+  const walkSegs: Array<[number, number]> = [];
+  {
+    const bands: Array<[number, number]> = [];
+    for (const c of CROSSINGS) bands.push([c - 27, c - 7], [c + 7, c + 27]);
+    let cursor = -S2;
+    for (const [lo, hi] of bands) {
+      if (lo > cursor + 1e-6) walkSegs.push([cursor, lo]);
+      cursor = Math.max(cursor, hi);
+    }
+    if (S2 > cursor + 1e-6) walkSegs.push([cursor, S2]);
+  }
+  const segBox = (
+    seg: [number, number], fixed: number, alongX: boolean,
+    sx: number, sy: number, sz: number, mat: MatKey, y: number,
+    opts?: Parameters<WorldBuilder['box']>[8],
+  ): void => {
+    const mid = (seg[0] + seg[1]) / 2;
+    const len = seg[1] - seg[0];
+    if (alongX) b.box(mid, y, fixed, len, sy, sz, mat, 0, opts);
+    else b.box(fixed, y, mid, sx, sy, len, mat, 0, opts);
+  };
+
   for (let i = -2; i <= 2; i++) {
     const c = i * 100;
+    // Along-Z road: continuous, owns every intersection surface. Along-X
+    // roads: segmented so tops only ever abut, never overlap.
     b.box(c, 0.06, 0, 14, 0.12, S, 'concreteDark', 0, { noCollide: true });
-    b.box(0, 0.06, c, S, 0.12, 14, 'concreteDark', 0, { noCollide: true });
+    for (const seg of roadSegs) segBox(seg, c, true, 14, 0.12, 14, 'concreteDark', 0.06, { noCollide: true });
     // sidewalk slabs FLANK the 14w road (20w each side, 7..27 from centerline)
     b.box(c + 17, 0.1, 0, 20, 0.2, S, 'paving', 0, { floor: true });
     b.box(c - 17, 0.1, 0, 20, 0.2, S, 'paving', 0, { floor: true });
-    b.box(0, 0.1, c + 17, S, 0.2, 20, 'paving', 0, { floor: true });
-    b.box(0, 0.1, c - 17, S, 0.2, 20, 'paving', 0, { floor: true });
+    for (const seg of walkSegs) {
+      segBox(seg, c + 17, true, 20, 0.2, 20, 'paving', 0.1, { floor: true });
+      segBox(seg, c - 17, true, 20, 0.2, 20, 'paving', 0.1, { floor: true });
+    }
     // Continuous curb lips define the road edge without adding collision
     // snags; the walkable sidewalk slab remains the sole gameplay surface.
+    // Both axes break at the perpendicular road (+curb width) so no curb
+    // strip crosses an intersection and corner tops never share a plane.
     for (const side of [-1, 1]) {
-      b.box(c + side * 7.1, 0.19, 0, 0.28, 0.18, S, 'metalExterior', 0, {
-        noCollide: true,
-        castShadow: false,
-      });
-      b.box(0, 0.19, c + side * 7.1, S, 0.18, 0.28, 'metalExterior', 0, {
-        noCollide: true,
-        castShadow: false,
-      });
+      for (const seg of curbSegs) {
+        segBox(seg, c + side * 7.1, true, 0.28, 0.18, 0.28, 'metalExterior', 0.19, { noCollide: true, castShadow: false });
+        segBox(seg, c + side * 7.1, false, 0.28, 0.18, 0.28, 'metalExterior', 0.19, { noCollide: true, castShadow: false });
+      }
     }
-    // road lane markings (dashed centerline both directions) — above road top (0.12)
+    // road lane markings (dashed centerline both directions). Every decor box
+    // sinks well into the road body (top ~2cm proud of road top 0.12) so no
+    // bottom face sits millimetres above the surface and flickers at range.
+    // Dashes stop short of intersections — perpendicular dashes crossing in
+    // the junction shared one plane (and real streets break the line there).
+    const inIntersection = (d: number): boolean =>
+      CROSSINGS.some((k) => Math.abs(d - k) < 7 + 1.7);
     for (let d = -S / 2 + 6; d < S / 2 - 6; d += 9) {
-      b.box(c, 0.132, d, 0.35, 0.02, 3.4, 'paint', 0, { noCollide: true });
-      b.box(d, 0.132, c, 3.4, 0.02, 0.35, 'paint', 0, { noCollide: true });
+      if (!inIntersection(d)) {
+        b.box(c, 0.11, d, 0.35, 0.06, 3.4, 'paint', 0, { noCollide: true });
+        b.box(d, 0.11, c, 3.4, 0.06, 0.35, 'paint', 0, { noCollide: true });
+      }
     }
-    // crosswalks near each intersection
+    // crosswalks near each intersection — striped across the raised sidewalk
+    // table (top 0.2), sunken 2cm into it so they read from any distance.
     for (const s of [-1, 1]) {
       for (let k = -6; k <= 6; k += 2.4) {
-        b.box(c + k * 0.28, 0.132, c + s * 11.5, 0.5, 0.02, 5.2, 'paint', 0, { noCollide: true });
-        b.box(c + s * 11.5, 0.132, c + k * 0.28, 5.2, 0.02, 0.5, 'paint', 0, { noCollide: true });
+        b.box(c + k * 0.28, 0.21, c + s * 11.5, 0.5, 0.06, 5.2, 'paint', 0, { noCollide: true });
+        b.box(c + s * 11.5, 0.21, c + k * 0.28, 5.2, 0.06, 0.5, 'paint', 0, { noCollide: true });
       }
     }
     // manhole covers + storm drains for street credibility
     for (let d = -S / 2 + 22; d < S / 2 - 22; d += 47) {
-      b.cyl(c + 4.2, 0.14, d + ((i + 2) % 3) * 13, 0.55, 0.04, 'metalDark');
-      b.cyl(d + ((i + 3) % 4) * 11, 0.14, c - 4.2, 0.55, 0.04, 'metalDark');
-      b.box(c + 6.1, 0.135, d, 0.7, 0.03, 1.35, 'metalDark', 0, { noCollide: true, castShadow: false });
-      b.box(d, 0.135, c - 6.1, 1.35, 0.03, 0.7, 'metalDark', 0, { noCollide: true, castShadow: false });
-      b.box(c - 2.8, 0.134, d + 9, 3.8, 0.018, 6.2, 'concreteDark', ((i * 17 + d) % 5) * 0.045 - 0.09, {
+      b.cyl(c + 4.2, 0.13, d + ((i + 2) % 3) * 13, 0.55, 0.04, 'metalDark');
+      b.cyl(d + ((i + 3) % 4) * 11, 0.13, c - 4.2, 0.55, 0.04, 'metalDark');
+      b.box(c + 6.1, 0.12, d, 0.7, 0.06, 1.35, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(d, 0.12, c - 6.1, 1.35, 0.06, 0.7, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(c - 2.8, 0.1, d + 9, 3.8, 0.086, 6.2, 'concreteDark', ((i * 17 + d) % 5) * 0.045 - 0.09, {
         noCollide: true,
         castShadow: false,
       });
@@ -159,7 +212,9 @@ export function buildNeoCity(): MapDef {
     }
   }
   b.box(120, 4.18, marketGateZ, 18.5, 0.34, 0.62, 'metalExterior', 0, { noCollide: true });
-  b.box(120, 4.2, marketGateZ - 0.36, 7.4, 0.13, 0.08, 'signDimCyan', 0, { noCollide: true });
+  // Luminous insert mounts through the header face (2cm embedded, 2cm proud);
+  // the previous 1cm standoff left it flickering against the front face.
+  b.box(120, 4.2, marketGateZ - 0.33, 7.4, 0.13, 0.08, 'signDimCyan', 0, { noCollide: true });
   b.light(120, 4.25, marketGateZ - 0.6, 0x67dfff, 1.15, 18);
 
   // ------------------------------------------------------------------
@@ -500,14 +555,18 @@ function perimeterBand(b: WorldBuilder, rng: Rng): void {
       if (rng.bool(0.45)) b.chest(sx + rng.range(-6, 6), 0.3, sz + rng.range(-5, 5), rng.bool(0.25) ? 'elite' : 'standard');
       b.loot(sx + rng.range(-7, 7), 0.4, sz + rng.range(-6, 6));
     } else if (roll < 0.68) {
-      // Container / crate yard with cover lanes
+      // Container / crate yard with cover lanes. Containers sink 2–10 cm by
+      // stack index: random yards overlap neighbours, and equal-height tops
+      // z-fought across every crossing pair. The invisible walkable platform
+      // follows each sink so feet stay on the visible container top.
       const stacks = rng.int(3, 5);
       for (let i = 0; i < stacks; i++) {
         const bx = sx + rng.range(-10, 10);
         const bz = sz + rng.range(-10, 10);
-        b.box(bx, 1.3, bz, 5.2, 2.6, 2.4, rng.bool(0.5) ? 'rust' : 'metalDark', rng.range(0, Math.PI));
-        if (rng.bool(0.35)) b.box(bx + rng.range(-1, 1), 3.9, bz + rng.range(-1, 1), 5, 2.6, 2.3, 'rust', rng.range(0, Math.PI));
-        b.platform(bx - 2.6, bx + 2.6, bz - 1.2, bz + 1.2, 2.6);
+        const sink = 0.02 + i * 0.02;
+        b.box(bx, 1.3 - sink, bz, 5.2, 2.6, 2.4, rng.bool(0.5) ? 'rust' : 'metalDark', rng.range(0, Math.PI));
+        if (rng.bool(0.35)) b.box(bx + rng.range(-1, 1), 3.9 - sink, bz + rng.range(-1, 1), 5, 2.6, 2.3, 'rust', rng.range(0, Math.PI));
+        b.platform(bx - 2.6, bx + 2.6, bz - 1.2, bz + 1.2, 2.6 - sink);
       }
       b.loot(sx + rng.range(-8, 8), 0.4, sz + rng.range(-8, 8));
       if (rng.bool(0.3)) b.chest(sx + rng.range(-9, 9), 0.3, sz + rng.range(-9, 9), 'standard');
@@ -834,10 +893,12 @@ function miniPlaza(b: WorldBuilder, cx: number, cz: number): void {
 function serverBunker(b: WorldBuilder, cx: number, cz: number): void {
   b.slab(cx, 0.08, cz, 16, 12, 0.5, 'concreteDark');
   b.slab(cx, 3.2, cz, 16.8, 12.8, 0.5, 'concrete');
-  b.wallWithGaps(cx - 8, cz - 6, 16, 3.2, 0.4, 'x', 'concrete', [[6, 2.2]]);
-  b.wallWithGaps(cx - 8, cz + 6, 16, 3.2, 0.4, 'x', 'concrete', []);
-  b.wallWithGaps(cx - 8, cz - 6, 12, 3.2, 0.4, 'z', 'concrete', []);
-  b.wallWithGaps(cx + 8, cz - 6, 12, 3.2, 0.4, 'z', 'concrete', []);
+  // Walls stop 4 cm under the roof surface — flush tops z-fought along the
+  // whole parapet when the bunker roof was viewed from neighbouring towers.
+  b.wallWithGaps(cx - 8, cz - 6, 16, 3.16, 0.4, 'x', 'concrete', [[6, 2.2]]);
+  b.wallWithGaps(cx - 8, cz + 6, 16, 3.16, 0.4, 'x', 'concrete', []);
+  b.wallWithGaps(cx - 8, cz - 6, 12, 3.16, 0.4, 'z', 'concrete', []);
+  b.wallWithGaps(cx + 8, cz - 6, 12, 3.16, 0.4, 'z', 'concrete', []);
   // Server racks inside
   for (let i = 0; i < 4; i++) {
     b.box(cx - 5 + i * 3.4, 1.1, cz - 2, 1.4, 2.2, 3, 'metalDark');

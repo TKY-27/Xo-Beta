@@ -110,7 +110,7 @@ export interface CombatEvents {
   onImpact(x: number, y: number, z: number, nx: number, ny: number, nz: number, material: string, projectile: boolean): void;
   onActorHit(target: Actor, attacker: Actor | null, damage: number, region: string, weaponId: WeaponId, killed: boolean, headshot: boolean): void;
   onShieldBroken?(target: Actor): void;
-  onTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number): void;
+  onTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number, weaponId: WeaponId): void;
   onRicochet(x: number, y: number, z: number): void;
   onGlassBreak(destructibleId: string, x: number, y: number, z: number, actorId: number): void;
   onDestructibleDamaged(id: number, destructibleId: string, x: number, y: number, z: number, destroyed: boolean): void;
@@ -551,7 +551,7 @@ export class CombatSystem {
     const startZ = p.z;
     const emitTracer = (x: number, y: number, z: number): void => {
       if (Math.hypot(x - startX, y - startY, z - startZ) > 1e-4) {
-        this.events.onTracer(startX, startY, startZ, x, y, z, p.tracerColor);
+        this.events.onTracer(startX, startY, startZ, x, y, z, p.tracerColor, p.weaponId);
       }
     };
 
