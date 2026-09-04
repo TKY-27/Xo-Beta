@@ -49,7 +49,7 @@ const TINTS: Partial<Record<MatKey, number>> = {
 function finalize(tex: THREE.Texture): THREE.Texture {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
-  tex.anisotropy = 8;
+  tex.anisotropy = 16;
   return tex;
 }
 

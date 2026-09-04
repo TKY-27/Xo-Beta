@@ -1,17 +1,22 @@
 /**
- * VFX: pooled tracers, muzzle flashes (sprite + light), impact sparks/debris,
- * shell casings, glass shards, ground-pound shockwaves, grapple ropes,
- * explosion bursts, elimination energy wisps. Everything is pooled — no
- * per-effect allocations in steady state.
+ * VFX: pooled per-weapon tracers (bullet-profile core + additive glow),
+ * muzzle flashes (sprite + light), impact sparks/debris, shell casings,
+ * glass shards, ground-pound shockwaves, grapple ropes, explosion bursts,
+ * elimination energy wisps. Everything is pooled — no per-effect
+ * allocations in steady state.
  */
 
 import * as THREE from 'three';
+import type { WeaponId } from '../core/balance';
 
 interface Tracer {
   slot: number;
   life: number;
   maxLife: number;
+  /** Authored weapon tracer colour (hex) this streak tints with. */
   color: number;
+  /** Brightness multiplier baked into the core colour at spawn. */
+  brightness: number;
 }
 
 interface Flash {
@@ -34,7 +39,33 @@ interface Particle {
   gravity: number;
 }
 
-const MAX_TRACERS = 128;
+/**
+ * Per-weapon tracer identity. Every class gets its own bullet-silhouette
+ * geometry pair (hot metal core + additive heat glow), lifetime and bloom
+ * push, so a pistol report reads thin and brief while a sniper round draws
+ * a long luminous spike that survives several presented frames.
+ */
+interface TracerSpec {
+  /** Core radius in metres (glow shell is glowScale x wider). */
+  radius: number;
+  /** Presented lifetime in seconds. */
+  life: number;
+  glowScale: number;
+  coreOpacity: number;
+  glowOpacity: number;
+  /** Core colour multiplier; above the bloom threshold the core blooms. */
+  brightness: number;
+  pool: number;
+}
+
+const TRACER_SPECS: Record<WeaponId, TracerSpec> = {
+  pistol: { radius: 0.02, life: 0.042, glowScale: 2.0, coreOpacity: 0.9, glowOpacity: 0.5, brightness: 1.15, pool: 24 },
+  smg: { radius: 0.021, life: 0.042, glowScale: 2.0, coreOpacity: 0.9, glowOpacity: 0.5, brightness: 1.2, pool: 32 },
+  ar: { radius: 0.024, life: 0.048, glowScale: 2.1, coreOpacity: 0.95, glowOpacity: 0.55, brightness: 1.3, pool: 32 },
+  shotgun: { radius: 0.036, life: 0.04, glowScale: 2.6, coreOpacity: 0.5, glowOpacity: 0.4, brightness: 1.0, pool: 40 },
+  sniper: { radius: 0.03, life: 0.09, glowScale: 2.4, coreOpacity: 1.0, glowOpacity: 0.62, brightness: 1.7, pool: 8 },
+};
+
 const MAX_FLASHES = 24;
 const MAX_FLASH_LIGHTS = 6;
 const MAX_PARTICLES = 512;
@@ -42,6 +73,47 @@ const MAX_SHOCKWAVES = 8;
 
 function finite(...values: number[]): boolean {
   return values.every(Number.isFinite);
+}
+
+/**
+ * Bullet silhouette lathe: closed tail, straight body, tapering ogive nose.
+ * Unit length along -Y after rotation (tail at the origin, nose at z=-1)
+ * so the instance z-scale equals the segment length; the profile radius is
+ * the class radius in metres (pass radius*glowScale for the glow shell).
+ */
+function bulletGeometry(radius: number, segments: number): THREE.BufferGeometry {
+  const pts = [
+    new THREE.Vector2(0.32, 0.0),
+    new THREE.Vector2(0.92, 0.02),
+    new THREE.Vector2(1.0, 0.16),
+    new THREE.Vector2(1.0, 0.78),
+    new THREE.Vector2(0.55, 0.95),
+    new THREE.Vector2(0.0, 1.0),
+  ].map((p) => new THREE.Vector2(p.x * radius, p.y));
+  const geo = new THREE.LatheGeometry(pts, segments);
+  // Nose (+Y end) swings onto -Z so the existing lookAt/stretch matrix
+  // math aims the bullet at the target.
+  geo.rotateX(-Math.PI / 2);
+  return geo;
+}
+
+/** Bright head, fading tail — mapped over the lathe's length axis. */
+function tracerGradientTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 4;
+  c.height = 64;
+  const ctx = c.getContext('2d')!;
+  const grad = ctx.createLinearGradient(0, 64, 0, 0);
+  grad.addColorStop(0, 'rgba(255,255,255,0.16)');
+  grad.addColorStop(0.55, 'rgba(255,255,255,0.7)');
+  grad.addColorStop(0.9, 'rgba(255,255,255,1)');
+  grad.addColorStop(1, 'rgba(255,255,255,0.9)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 4, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  return tex;
 }
 
 // Shared scratch objects — never allocate inside spawn/update paths.
@@ -53,6 +125,8 @@ const _v2 = new THREE.Vector3();
 const _axis = new THREE.Vector3(0.3, 0.8, 0.2).normalize();
 const _up = new THREE.Vector3(0, 1, 0);
 const _col = new THREE.Color();
+const _col2 = new THREE.Color();
+const _white = new THREE.Color(1, 1, 1);
 const _lookM = new THREE.Matrix4();
 
 interface Shockwave {
@@ -61,11 +135,18 @@ interface Shockwave {
   maxLife: number;
 }
 
+/** One weapon class' live tracer slots plus its core/glow instanced meshes. */
+interface TracerPool {
+  core: THREE.InstancedMesh;
+  glow: THREE.InstancedMesh;
+  tracers: Tracer[];
+  spec: TracerSpec;
+  dirty: boolean;
+}
+
 export class VfxSystem {
   readonly group = new THREE.Group();
-  private tracers: Tracer[] = [];
-  private tracerMesh: THREE.InstancedMesh;
-  private tracerDirty = false;
+  private tracerPools = new Map<WeaponId, TracerPool>();
   private flashes: Flash[] = [];
   private particles: Particle[] = [];
   private particleMeshes: THREE.InstancedMesh[] = [];
@@ -100,31 +181,47 @@ export class VfxSystem {
       }
     }
 
-    // Tracer pool: ONE instanced mesh, per-instance color fade (additive)
-    // At gameplay speeds a 3 cm / 90 ms segment vanishes between presented
-    // frames, especially when travelling toward the camera. A slightly wider
-    // luminous core with a longer persistence reads as a fast projectile
-    // rather than a static laser line.
-    const tracerGeo = new THREE.BoxGeometry(0.026, 0.026, 1);
-    tracerGeo.translate(0, 0, -0.5);
-    this.tracerMesh = new THREE.InstancedMesh(
-      tracerGeo,
-      new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.72,
+    // Tracer pools: one core+glow instanced pair per weapon class. At
+    // gameplay speeds a raw substep segment vanishes between presented
+    // frames, so each tracer is a bullet-silhouetted streak — bright ogive
+    // head into a fading tail — wearing an additive heat shell the bloom
+    // pass can lift. A pistol report reads thin and brief, a sniper round a
+    // long luminous spike that survives several frames. Both layers use a
+    // negative polygon offset so streaks grazing geometry neither clip into
+    // surfaces nor flicker against them.
+    const gradTex = tracerGradientTexture();
+    for (const [weapon, spec] of Object.entries(TRACER_SPECS) as [WeaponId, TracerSpec][]) {
+      const coreMat = new THREE.MeshBasicMaterial({
+        map: gradTex, transparent: true, opacity: spec.coreOpacity,
         blending: THREE.AdditiveBlending, depthWrite: false,
-      }),
-      MAX_TRACERS,
-    );
-    this.tracerMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.tracerMesh.frustumCulled = false;
-    this.tracerMesh.count = 0;
-    this.group.add(this.tracerMesh);
-    for (let i = 0; i < MAX_TRACERS; i++) {
-      this.tracers.push({ slot: i, life: 0, maxLife: 1, color: 0xffffff });
-      _m4.makeScale(0, 0, 0);
-      this.tracerMesh.setMatrixAt(i, _m4);
+        polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+      });
+      const glowMat = new THREE.MeshBasicMaterial({
+        map: gradTex, transparent: true, opacity: spec.glowOpacity,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      });
+      const core = new THREE.InstancedMesh(bulletGeometry(spec.radius, 10), coreMat, spec.pool);
+      const glow = new THREE.InstancedMesh(bulletGeometry(spec.radius * spec.glowScale, 10), glowMat, spec.pool);
+      for (const mesh of [glow, core]) {
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 3;
+        for (let i = 0; i < spec.pool; i++) {
+          _m4.makeScale(0, 0, 0);
+          mesh.setMatrixAt(i, _m4);
+          mesh.setColorAt(i, _col.setHex(0xffffff));
+        }
+        mesh.count = spec.pool;
+        this.group.add(mesh);
+      }
+      core.renderOrder = 4;
+      const tracers: Tracer[] = [];
+      for (let i = 0; i < spec.pool; i++) {
+        tracers.push({ slot: i, life: 0, maxLife: 1, color: 0xffffff, brightness: spec.brightness });
+      }
+      this.tracerPools.set(weapon, { core, glow, tracers, spec, dirty: false });
     }
-    this.tracerMesh.instanceMatrix.needsUpdate = true;
 
     // Muzzle flash pool — two looks: compact core (pistol/SMG/AR) and
     // wide petal star (shotgun/sniper).
@@ -192,10 +289,16 @@ export class VfxSystem {
     return new THREE.CanvasTexture(c);
   }
 
-  spawnTracer(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, color: number): void {
+  spawnTracer(
+    x1: number, y1: number, z1: number,
+    x2: number, y2: number, z2: number,
+    color: number, weaponId: WeaponId = 'ar',
+  ): void {
     if (!finite(x1, y1, z1, x2, y2, z2, color)) return;
-    const tracer = this.tracers.find((t) => t.life <= 0)
-      ?? this.tracers.reduce((oldest, current) => current.life < oldest.life ? current : oldest, this.tracers[0]!);
+    const pool = this.tracerPools.get(weaponId) ?? this.tracerPools.get('ar')!;
+    const spec = pool.spec;
+    const tracer = pool.tracers.find((t) => t.life <= 0)
+      ?? pool.tracers.reduce((oldest, current) => current.life < oldest.life ? current : oldest, pool.tracers[0]!);
     const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
     const len = Math.hypot(dx, dy, dz);
     if (len < 0.5) return;
@@ -204,18 +307,25 @@ export class VfxSystem {
     _lookM.lookAt(_v1, _v2, _up);
     _q.setFromRotationMatrix(_lookM);
     _m4.compose(_v1, _q, _scl.set(1, 1, len));
-    this.tracerMesh.setMatrixAt(tracer.slot, _m4);
-    this.tracerMesh.setColorAt(tracer.slot, _col.setHex(color));
+    pool.core.setMatrixAt(tracer.slot, _m4);
+    pool.glow.setMatrixAt(tracer.slot, _m4);
+    // Core: weapon colour washed toward white and pushed above 1.0 so hot
+    // classes bleed into the bloom pass. Glow: pure weapon colour for the
+    // heat shell.
+    pool.core.setColorAt(tracer.slot, _col.setHex(color).lerp(_white, 0.6).multiplyScalar(spec.brightness));
+    pool.glow.setColorAt(tracer.slot, _col2.setHex(color));
     // Every physical projectile contributes successive substep segments.
     // Keeping more than about two presented frames stacks an entire flight
     // path into a solid laser, but a lifetime at or below one presented frame
     // reads as flicker (and vanishes entirely under a single clamped hitch
-    // frame). 45 ms stays clearly a discrete bullet while remaining visible
-    // at 60/120/144 Hz and surviving one worst-case frame step.
-    tracer.life = 0.045;
-    tracer.maxLife = 0.045;
+    // frame). Per-class lifetimes near 45 ms stay clearly discrete bullets
+    // while remaining visible at 60/120/144 Hz; the sniper's 90 ms spike is
+    // the deliberate exception that sells its reach.
+    tracer.life = spec.life;
+    tracer.maxLife = spec.life;
     tracer.color = color;
-    this.tracerDirty = true;
+    tracer.brightness = spec.brightness;
+    pool.dirty = true;
   }
 
   muzzleFlash(x: number, y: number, z: number, dx: number, dy: number, dz: number, scale = 1, heavy = false): void {
@@ -450,29 +560,37 @@ export class VfxSystem {
     const frameDt = Math.min(dt, 0.05);
     this.time += frameDt;
 
-    let liveTracers = 0;
-    for (const t of this.tracers) {
-      if (t.life > 0) {
+    for (const pool of this.tracerPools.values()) {
+      let live = 0;
+      for (const t of pool.tracers) {
+        if (t.life <= 0) continue;
         t.life -= frameDt;
-        const k = Math.max(0, t.life / t.maxLife);
-        this.tracerMesh.setColorAt(
-          t.slot,
-          _col.setHex(t.color).multiplyScalar(k > 0 ? 0.82 + 0.18 * k : 0),
-        );
         if (t.life <= 0) {
           // Collapse expired tracers so no stale instance stays visible.
           _m4.makeScale(0, 0, 0);
-          this.tracerMesh.setMatrixAt(t.slot, _m4);
-        } else {
-          liveTracers++;
+          pool.core.setMatrixAt(t.slot, _m4);
+          pool.glow.setMatrixAt(t.slot, _m4);
+          pool.dirty = true;
+          continue;
         }
+        live++;
+        const k = t.life / t.maxLife;
+        // The core holds most of its brightness into the final frames; the
+        // glow shell decays early so the streak thins out instead of
+        // blinking off.
+        pool.core.setColorAt(
+          t.slot,
+          _col.setHex(t.color).lerp(_white, 0.6).multiplyScalar((0.82 + 0.18 * k) * t.brightness),
+        );
+        pool.glow.setColorAt(t.slot, _col2.setHex(t.color).multiplyScalar(k * k));
       }
-    }
-    if (liveTracers > 0 || this.tracerDirty) {
-      this.tracerMesh.count = MAX_TRACERS;
-      this.tracerMesh.instanceMatrix.needsUpdate = true;
-      if (this.tracerMesh.instanceColor) this.tracerMesh.instanceColor.needsUpdate = true;
-      this.tracerDirty = liveTracers > 0;
+      if (live > 0 || pool.dirty) {
+        pool.core.instanceMatrix.needsUpdate = true;
+        pool.glow.instanceMatrix.needsUpdate = true;
+        if (pool.core.instanceColor) pool.core.instanceColor.needsUpdate = true;
+        if (pool.glow.instanceColor) pool.glow.instanceColor.needsUpdate = true;
+        pool.dirty = live > 0;
+      }
     }
 
     for (const f of this.flashes) {

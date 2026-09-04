@@ -40,7 +40,24 @@ async function main(): Promise<void> {
 
     console.log(`\n=== ${mapId.toUpperCase()} ===`);
     await page.goto('http://localhost:5199/?qa=1', { waitUntil: 'networkidle' });
-    await page.waitForTimeout(1800);
+    // Fresh profiles land on the first-run onboarding overlay and the main
+    // menu stays hidden behind it, so poll for whichever appears first and
+    // clear onboarding before waiting for the menu.
+    for (let i = 0; i < 30; i++) {
+      const onboarding = await page.$('#onboarding-screen:not(.hidden)');
+      if (onboarding) {
+        await page.click('#btn-onb-en');
+        await page.waitForTimeout(200);
+        await page.click('#btn-onb-fp');
+        await page.waitForTimeout(300);
+        break;
+      }
+      const menu = await page.$('#main-menu:not(.hidden)');
+      if (menu) break;
+      await page.waitForTimeout(500);
+    }
+    await page.waitForSelector('#main-menu:not(.hidden)', { timeout: 90000 });
+    await page.waitForTimeout(300);
 
     await page.click('#btn-play');
     await page.waitForTimeout(300);

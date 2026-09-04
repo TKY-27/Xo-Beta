@@ -379,7 +379,7 @@ function reviveCutoutFoliage(v: { geoms: THREE.BufferGeometry[]; materials: (THR
     tex.colorSpace = source.colorSpace;
     tex.wrapS = source.wrapS;
     tex.wrapT = source.wrapT;
-    tex.anisotropy = 4;
+    tex.anisotropy = 16;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
     tex.generateMipmaps = true;

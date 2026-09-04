@@ -107,14 +107,18 @@ export const DEFAULT_SETTINGS: Settings = {
   bindings: { ...DEFAULT_BINDINGS },
 
   quality: 'high',
-  resolutionScale: 0.5,
+  // 0.5 made every default install render at half resolution and upscale —
+  // the single biggest reason the game read soft rather than AAA-sharp. 0.7
+  // keeps a safe fill-rate margin on integrated GPUs while preserving most
+  // of the detail; ultra/cinematic users should raise it further.
+  resolutionScale: 0.7,
   shadows: true,
-  shadowQuality: 'medium',
+  shadowQuality: 'high',
   postProcessing: true,
   bloom: true,
   reflections: true,
   ao: true,
-  aa: 'fxaa',
+  aa: 'smaa',
   motionBlur: false,
   dof: false,
   fpsLimit: 0,

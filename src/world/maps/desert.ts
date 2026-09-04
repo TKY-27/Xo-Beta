@@ -174,9 +174,15 @@ function highway(b: WorldBuilder): void {
   for (let x = -240; x <= 240; x += 20) roadSegment(b, x, -5, 20.4, 9, 0);
   // Southern feeder road toward the checkpoint.
   for (let z = 72; z <= 238; z += 18) roadSegment(b, 42, z, 18.4, 7, Math.PI / 2);
-  // Broken lane paint and shoulder blocks keep the route readable at range.
+  // Broken lane paint keeps the route readable at range. Dashes are authored
+  // as terrain-sampled surface paths so they hug the welded asphalt ribbon
+  // exactly; the former flat boxes pierced or submerged under it wherever
+  // the road rolled across a segment boundary.
   for (let x = -232; x <= 232; x += 16) {
-    b.box(x, terrainH(x, -5) + 0.12, -5, 6, 0.025, 0.16, 'paint', 0, { noCollide: true });
+    b.surfacePath([
+      { x: x - 3, z: -5, width: 0.16 },
+      { x: x + 3, z: -5, width: 0.16 },
+    ], 'paint', 0.146);
   }
 
   // Shallow terrain-following drains replace the former ruler-straight hard
@@ -384,8 +390,10 @@ function wadiCrossing(b: WorldBuilder, cx: number, cz: number): void {
   const deckY = Math.max(terrainH(cx, cz - 25), terrainH(cx, cz + 25)) + 0.7;
   b.slab(cx, deckY, cz, 13, 55, 0.8, 'concrete');
   for (const z of [cz - 20, cz, cz + 20]) {
-    b.box(cx - 5, deckY - 3, z, 1, 6, 1, 'concrete');
-    b.box(cx + 5, deckY - 3, z, 1, 6, 1, 'concrete');
+    // Pier tops stop 4 cm under the deck surface so the flush concrete faces
+    // never z-fight across the 1x1 pier footprints.
+    b.box(cx - 5, deckY - 3.02, z, 1, 5.96, 1, 'concrete');
+    b.box(cx + 5, deckY - 3.02, z, 1, 5.96, 1, 'concrete');
   }
   for (const x of [cx - 6, cx + 6]) b.box(x, deckY + 0.55, cz, 0.35, 1.1, 55, 'concrete');
   b.chest(cx - 3, deckY + 0.3, cz + 12, 'elite');
