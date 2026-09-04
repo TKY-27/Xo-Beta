@@ -2176,7 +2176,7 @@ function retoneRockMap(std: THREE.MeshStandardMaterial, color: number, amount: n
   texture.wrapT = source.wrapT;
   texture.magFilter = THREE.LinearFilter;
   texture.minFilter = THREE.LinearMipmapLinearFilter;
-  texture.anisotropy = 4;
+  texture.anisotropy = 16;
   texture.userData.worldViewOwned = true;
   std.map = texture;
   // The source atlas contains useful cracks and strata but previously only
