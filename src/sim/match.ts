@@ -999,6 +999,11 @@ export class Match {
       a.pitch = cmd.pitch;
       const forced = t >= 1;
       if ((cmd.jumpPressed && this.transportGateOpen) || forced) {
+        // One press = one exit. The same command object continues into
+        // updateLive this tick; leaving jumpPressed set would let
+        // updateFreefall read it as an instant canopy deploy and skip the
+        // skydive entirely.
+        cmd.jumpPressed = false;
         a.body.teleport(this.transportPos.x, this.transportPos.y - MATCH.transportHangOffset, this.transportPos.z);
         a.body.velocity.x = 0; a.body.velocity.y = -6; a.body.velocity.z = 0;
         this.movement.beginFreefall(a);
