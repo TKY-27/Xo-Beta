@@ -1866,11 +1866,13 @@ export class WorldView {
   }
 
   private buildTransport(): void {
-    const hullMat = new THREE.MeshStandardMaterial({ color: 0x42566f, roughness: 0.42, metalness: 0.7 });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x1c2633, roughness: 0.48, metalness: 0.72 });
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0xa87332, roughness: 0.34, metalness: 0.84 });
+    // Muted military gunship palette: the former bright blue/cyan/orange toy
+    // scheme undercut the drop — the most-watched object of every match.
+    const hullMat = new THREE.MeshStandardMaterial({ color: 0x3a4249, roughness: 0.52, metalness: 0.62 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x22282e, roughness: 0.55, metalness: 0.6 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x565f68, roughness: 0.4, metalness: 0.75 });
     const glassMat = new THREE.MeshStandardMaterial({
-      color: 0x0c1218, emissive: 0x53e0ff, emissiveIntensity: 0.9, roughness: 0.3, metalness: 0.5,
+      color: 0x0c1218, emissive: 0x9fd8e8, emissiveIntensity: 0.5, roughness: 0.25, metalness: 0.4,
     });
     const hull = new THREE.Mesh(new THREE.CapsuleGeometry(3.4, 14, 6, 14), hullMat);
     hull.geometry.rotateZ(Math.PI / 2);
