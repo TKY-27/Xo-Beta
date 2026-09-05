@@ -49,6 +49,8 @@ five cycles.
 
 | 13 | ashara dry-canals black-plain investigation | A whole terrain region rendered void-black under the post chain. Bisected across raw/post/bloom/noshadow configs: the r185 GTAONode returns ~0 occlusion on the WebGPU backend (whole terrain multiplies to black). AO pass removed from the shipped chain per the evidence-based-decision clause; contact grounding stays with the shadow map. Also: dynamic camera near plane replaced with discrete bands + post-chain rebuild (a continuously sliding near broke depth-derived passes). Revisit GTAO on a three.js upgrade | canal region renders correctly; no black void |
 
+| 15 | THIRD INDEPENDENT CRITIC (fresh context) | Verified fixed: ashara canal void, toy-blue stairs, night clouds. New/remaining: (1) eden water reads flat from some angles; (2) no contact shadows after AO removal; (3) pure-black unlit props near ashara compound — CORRELATES with the 22 zero-size-uniform WebGPU validation errors (eden/oldfront/neocity 22, ashara 0 — the delta is Quaternius foliage/instancing); (4) canal teleport burial; (5) night-map shadow floors read 0-value black; (6) QA_SKIN probe env not switching lobby label. Verdict: improvement remains; black-prop class is the top render-path bug | backlog reordered — validation errors first |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
