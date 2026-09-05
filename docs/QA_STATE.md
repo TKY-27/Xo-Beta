@@ -53,6 +53,8 @@ five cycles.
 
 | 16 | Focused investigation (subagent) | Root cause of the 22 zero-size-uniform validation errors found: MapBuilder.finish filters out all lamps on eden/oldfront/neocity, leaving 5 zero-capacity InstancedMesh lamp pools; three r185 wraps the empty instanceMatrix in a buffer node → device.createBuffer({size:0}) per bind group. Fix: lamp pools only build when lamps survive (worldView.ts). All four maps now 0 errors; renders verified. The 'black prop' near the ashara compound is a lamp fixture in dark metalDark (cosmetic, separate) | eden/oldfront/neocity/ashara: 0 errors |
 
+| 17 | ashara canals post-fix verification | Zero-error fix regression pass: canal region renders clean (lit beds, terrain variation, no void, no black props in view) | verified |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
