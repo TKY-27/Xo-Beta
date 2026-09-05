@@ -379,6 +379,40 @@ export class CharacterFactory {
       head.add(helm);
     }
 
+    // Light-armored skins still read as geared operators: a slim chest rig
+    // with straps and a belt kit, instead of the bare mannequin body.
+    if (!armorHeavy && (bones['spine_02'] || bones['spine_03'])) {
+      const anchor = bones['spine_03'] ?? bones['spine_02']!;
+      const rig = new THREE.Group();
+      const panel = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.2, 0.09), costumeMat);
+      panel.position.z = 0.02;
+      for (const strapX of [-0.075, 0.075]) {
+        const strap = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.26, 0.075), costumeMat);
+        strap.position.set(strapX, 0.02, 0.0);
+        strap.rotation.z = strapX > 0 ? -0.12 : 0.12;
+        rig.add(strap);
+      }
+      for (const pouchX of [-0.08, 0.02]) {
+        const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.07, 0.045), costumeMat);
+        pouch.position.set(pouchX, -0.06, 0.062);
+        rig.add(pouch);
+      }
+      const buckle = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.035, 0.02), trimMat);
+      buckle.position.set(0, 0.0, 0.068);
+      rig.add(buckle);
+      rig.add(panel);
+      anchor.add(rig);
+      rig.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = true; });
+      // Belt kit on the hips.
+      if (bones['spine_01']) {
+        const beltAnchor = bones['spine_01'];
+        const belt = new THREE.Mesh(new THREE.TorusGeometry(0.155, 0.022, 6, 14), costumeMat);
+        belt.rotation.x = Math.PI / 2 - 0.08;
+        belt.scale.set(1, 1, 0.82);
+        beltAnchor.add(belt);
+        belt.frustumCulled = true;
+      }
+    }
     if (armorHeavy) {
       // Chest plate
       if (bones['spine_02'] || bones['spine_03']) {
