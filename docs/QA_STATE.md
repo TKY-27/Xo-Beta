@@ -37,6 +37,10 @@ five cycles.
 - Minimap/tactical map track the transport during the ride.
 - 12 skins across male/female body archetypes (EN/JA labels).
 
+| 6 | night sky + default-quality grounding | (a) Cloud noise sampled nearest-neighbour → blocky texel patches; (b) default 'high' chain had no AO → unanchored props | (a) explicit linear/mipmap filtering + anisotropy; (b) AO enabled for high preset (samples 10) |
+| 7 | rain on ashara + streak quality | Desert rain implausible + streaks read as scratches → dryStorm drops the rain field (thunder/clouds carry it); streaks longer/softer (0.85m, opacity 0.2) | rain reads as weather where it remains |
+| 8 | oldfront meadow macro variation | Open fields read as one flat color at default quality → terrain vertex variation to full strength (verified in capture) | visible dry/green patchwork |
+
 ## Known open items
 
 - Engine-level WebGPU validation warnings (`Binding size … is zero`) from
