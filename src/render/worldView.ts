@@ -800,8 +800,11 @@ export class WorldView {
       this.group.add(trunks, crowns, fronds);
     }
 
-    // Undergrowth: bushes / ferns / clover / flowers near tree clusters
-    const undergrowthKeys = ['bush/common', 'bush/flowers', 'fern/1', 'clover/1', 'flower/group'];
+    // Undergrowth: bushes / ferns / clover / flowers near tree clusters.
+    // Ashara uses a dry-climate set (sparse bushes only) instead of none.
+    const undergrowthKeys = def.id === 'ashara'
+      ? ['bush/common', 'rock/medium1']
+      : ['bush/common', 'bush/flowers', 'fern/1', 'clover/1', 'flower/group'];
     const underMatrices = new Map<string, THREE.Matrix4[]>();
     const rngSeed = def.id === 'neocity' ? 11 : 23;
     let s1 = rngSeed * 1000 + 17;
@@ -810,7 +813,7 @@ export class WorldView {
       return (s1 & 0x7fffffff) / 0x7fffffff;
     };
     for (const t of def.trees) {
-      const count = def.id === 'ashara' ? 0 : def.id === 'eden' ? 6 : 3;
+      const count = def.id === 'ashara' ? 2 : def.id === 'eden' ? 6 : 3;
       for (let i = 0; i < count; i++) {
         const a = rnd() * Math.PI * 2;
         const r = 1.6 + rnd() * 3.4;
