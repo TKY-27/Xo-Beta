@@ -1130,6 +1130,33 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
  * barricades now line every road so streets read as a lived-in city.
  */
 function lotDressing(b: WorldBuilder, rng: Rng): void {
+  // Block interiors: the mid-lot cores between the street grid used to sit
+  // empty and unlit. Give every block a lamp, sparse prop clutter and an
+  // occasional kiosk so the dark cores read as inhabited lots.
+  const blockCs = [-150, -50, 50, 150];
+  for (const bx of blockCs) {
+    for (const bz of blockCs) {
+      const jitterX = rng.range(-14, 14);
+      const jitterZ = rng.range(-14, 14);
+      const lx = bx + jitterX;
+      const lz = bz + jitterZ;
+      const warm = rng.bool(0.5);
+      b.lampPost(lx, lz, 0, 5.6, warm ? 0xffc9a0 : 0x9fd8ff, 3.0, 34);
+      if (rng.bool(0.7)) {
+        const px = bx + rng.range(-30, 30);
+        const pz = bz + rng.range(-30, 30);
+        b.crate(px, 0.35, pz, 1);
+        if (rng.bool(0.5)) b.crate(px + rng.range(-2.4, 2.4), 0.35, pz + rng.range(-2.4, 2.4), 1);
+      }
+      if (rng.bool(0.45)) {
+        const kx = bx + rng.range(-26, 26);
+        const kz = bz + rng.range(-26, 26);
+        b.box(kx, 1.5, kz, 4.4, 3, 3.4, 'metalExterior', rng.bool(0.5) ? 0 : Math.PI / 2);
+        b.box(kx, 3.12, kz, 4.7, 0.24, 3.7, 'metalDark', 0);
+        b.light(kx, 3.2, kz, warm ? 0xffd9a0 : 0x9fd8ff, 0.9, 14);
+      }
+    }
+  }
   const carCols = [0x27313d, 0x503030, 0x2e3a2f, 0x33384a, 0x3a2f28];
   const roadCs = [-200, -100, 0, 100, 200];
   for (let i = -2; i <= 2; i++) {
