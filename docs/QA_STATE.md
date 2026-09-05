@@ -58,6 +58,8 @@ five cycles.
 | 18 | eden lake capture | Water base color dominated at most view angles → sky-reflection fresnel weight raised (0.20+0.28·clarity → 0.42+0.30·clarity) | visible sky reflection + wave texture; hard shoreline still queued |
 
 
+| 20 | FOURTH INDEPENDENT CRITIC (fresh context) | Verified fixed: ashara void, eden stairs, night clouds; shore band works at ground level. Remaining top items: (1) no contact shadows/AO anywhere — props float; (2) water still reads painted (uniform cyan from above, no depth tint); (3) ashara ground corduroy tiling striation; (4) pure-black unlit faces on boulder bases/poles; (5) oldfront plaza reads as polished marble; (6) toy-blue remains on some ashara compound rails. Verdict: improvement remains — grounding is the biggest gap | blob-shadow grounding + stair rails queued (cycles 21-22) |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
