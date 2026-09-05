@@ -25,6 +25,8 @@ five cycles.
 | 1 | oldfront town/field captures (g1) | OldFront read near-black (exposure 0.79, contrast 1.07) while paving blew out → exposure 0.95, ambient 0.55, hemi 1.0, vignette 0.26, contrast 1.0 | meadows/landmarks readable, paving balanced |
 | 2 | neocity intersection + block cores | Mid-block cores sat empty and unlit → per-block lamp posts, crates, kiosks (16 blocks, deterministic) | minimap shows lit block cores; street props richer |
 | 3 | eden lake shore (water verification) | Ported TSL water needed in-engine verification → verified: sky reflection, wave detail, boundary fade, foam, dock scene all correct | no fix required; highest-risk port confirmed good |
+| 4 | ashara compound captures | Compound architecture read as cool blue-grey placeholder slabs against warm sand → new warm 'mudbrick' material (concrete set + sand tint) for compound walls/market buildings; wall-embedding test updated for the new key | warm desert-consistent architecture |
+| 5 | INDEPENDENT CRITIC REVIEW (fresh-context subagent, self-captured evidence, all 4 maps) | Top findings: (P0) featureless ground planes map-wide; (P0) no AO grounding at default 'high' quality; (P1) vegetation placeholder grade + white sliver scatters; (P1) lake reads flat cyan at some angles; (P1) FP weapon boxy + magenta-rod rarity accent; (P1) lobby skin showcase is an untinted clay mannequin; (P1) night cloud texels blocky; (P1) rain reads as random scratches; (P2) transport aircraft toy-like; (P2) ashara terrain contour banding. Verdict: meaningful improvement remains, concentrated in 3 systemic gaps (ground detail, AO grounding, vegetation/prop quality) | backlog adopted as cycles 6+; AO default fix first |
 
 ## Pre-loop user-report fixes (verified in-engine)
 
