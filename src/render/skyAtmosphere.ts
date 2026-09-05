@@ -190,6 +190,27 @@ export class SkyAtmosphereSystem {
     this.material.uniforms.uTime!.value = this.time;
   }
 
+  /**
+   * Per-match weather overrides over the authored atmosphere profile. Only
+   * provided fields change; uniform updates never recompile the program.
+   */
+  setWeatherOverrides(profile: {
+    cloudCover?: number;
+    cloudTint?: number;
+    cloudShade?: number;
+    windSpeed?: number;
+    starOpacity?: number;
+    hazeStrength?: number;
+  }): void {
+    const u = this.material.uniforms;
+    if (profile.cloudCover !== undefined) u.uCloudCover!.value = profile.cloudCover;
+    if (profile.cloudTint !== undefined) u.uCloudTint!.value = new THREE.Color(profile.cloudTint);
+    if (profile.cloudShade !== undefined) u.uCloudShade!.value = new THREE.Color(profile.cloudShade);
+    if (profile.windSpeed !== undefined) u.uWindSpeed!.value = profile.windSpeed;
+    if (profile.starOpacity !== undefined) u.uStarOpacity!.value = profile.starOpacity;
+    if (profile.hazeStrength !== undefined) u.uHazeStrength!.value = profile.hazeStrength;
+  }
+
   dispose(): void {
     this.mesh.geometry.dispose();
     this.material.dispose();

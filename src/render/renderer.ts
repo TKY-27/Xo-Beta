@@ -14,7 +14,7 @@ import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
-import type { SkyConfig } from '../world/types';
+import type { SkyConfig, WeatherProfile } from '../world/types';
 import { SkyAtmosphereSystem } from './skyAtmosphere';
 import { getSettings } from '../core/settings';
 import { loadHdri, clampHdriPeaks } from '../assets/assets';
@@ -200,6 +200,8 @@ export class GameRenderer {
   private ownedBackground: THREE.Texture | null = null;
   private fallbackSky: THREE.Mesh | null = null;
   private skyAtmosphere: SkyAtmosphereSystem | null = null;
+  private baseFogDensity = 0;
+  private baseExposure = 1.25;
   private sunOffset = new THREE.Vector3(120, 220, 90);
   private grading = { vignette: 0.3, saturation: 1.05, contrast: 1.03, lift: new THREE.Vector3(0, 0, 0.004) };
   private readonly gpuProfiling: boolean;
@@ -236,7 +238,7 @@ export class GameRenderer {
     const settings = getSettings();
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const pr = this.effectivePixelRatio() * settings.resolutionScale;
+    const pr = this.effectivePixelRatio() * settings.resolutionScale * this.dynamicScale;
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
     if (this.composer) {
@@ -248,6 +250,26 @@ export class GameRenderer {
     if (this.fxaaPass) {
       (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(1 / (w * pr), 1 / (h * pr));
     }
+  }
+
+  private dynamicScale = 1;
+
+  /**
+   * Adaptive-resolution factor (0.5..1) multiplied into the pixel ratio.
+   * The frame-time watchdog in main steps it down when the rolling average
+   * frame time exceeds the 60 FPS budget and back up when headroom returns —
+   * holding 60 FPS beats holding an authored pixel count. 1 restores the
+   * fully authored resolution.
+   */
+  setDynamicResolutionScale(scale: number): void {
+    const clamped = Math.max(0.5, Math.min(1, scale));
+    if (Math.abs(clamped - this.dynamicScale) < 0.001) return;
+    this.dynamicScale = clamped;
+    this.resize();
+  }
+
+  get dynamicResolutionScale(): number {
+    return this.dynamicScale;
   }
 
   dispose(): void {
@@ -384,6 +406,9 @@ export class GameRenderer {
 
     this.scene.fog = new THREE.FogExp2(sky.fogColor, sky.fogDensity);
     this.renderer.toneMappingExposure = sky.exposure ?? 1.25;
+    // Base values for per-match weather modulation (see applyWeather).
+    this.baseFogDensity = sky.fogDensity;
+    this.baseExposure = sky.exposure ?? 1.25;
 
     const sunDir = new THREE.Vector3(...sky.sunDirection).normalize();
     const sunPos = sunDir.multiplyScalar(300).negate();
@@ -416,6 +441,22 @@ export class GameRenderer {
     const fill = new THREE.DirectionalLight(sky.hemisphereSky, fillIntensity);
     fill.position.copy(sunPos).negate().setY(90);
     this.scene.add(fill);
+  }
+
+  /**
+   * Per-match weather modulation. Fog density, exposure and sky-atmosphere
+   * uniforms are runtime values — no shader recompiles, safe mid-match.
+   * `null` restores the authored base look.
+   */
+  applyWeather(profile: WeatherProfile | null): void {
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      const scale = profile?.fogDensityScale ?? 1;
+      this.scene.fog.density = this.baseFogDensity * scale;
+    }
+    this.renderer.toneMappingExposure = this.baseExposure * (profile?.exposureScale ?? 1);
+    if (this.skyAtmosphere) {
+      this.skyAtmosphere.setWeatherOverrides(profile ?? {});
+    }
   }
 
   private setupGradientSky(sky: SkyConfig): void {
@@ -539,7 +580,7 @@ export class GameRenderer {
     const w = Math.max(8, window.innerWidth);
     const h = Math.max(8, window.innerHeight);
     this.composer = new EffectComposer(this.renderer);
-    this.composer.setPixelRatio(this.effectivePixelRatio() * settings.resolutionScale);
+    this.composer.setPixelRatio(this.effectivePixelRatio() * settings.resolutionScale * this.dynamicScale);
     this.composer.setSize(w, h);
 
     this.renderPass = new RenderPass(this.scene, camera);

@@ -894,10 +894,15 @@ export class WorldBuilder {
     this.platform(minX, maxX, minZ, maxZ, surfaceY, true);
   }
 
-  finish(sky: MapDef['sky'], transportRoute: MapDef['transportRoute'], opts: { wetGround?: boolean } = {}): MapDef {
+  finish(
+    sky: MapDef['sky'],
+    transportRoute: MapDef['transportRoute'],
+    opts: { wetGround?: boolean; weather?: MapDef['weather'] } = {},
+  ): MapDef {
     this.def.sky = sky;
     this.def.transportRoute = transportRoute;
     if (opts.wetGround) this.def.wetGround = true;
+    if (opts.weather && opts.weather.length > 0) this.def.weather = opts.weather;
     applyTerrainCutouts(this.def);
     const authoredTrees = this.def.trees;
     this.def.trees = [];

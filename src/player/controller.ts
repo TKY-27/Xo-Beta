@@ -82,6 +82,7 @@ export class PlayerController implements ActorController {
     onMapToggle: () => void,
     onShoulderSwap: () => void = () => undefined,
     onInventoryToggle: () => void = () => undefined,
+    onInspect: () => void = () => undefined,
   ) {
     window.addEventListener('keydown', (e) => {
       const code = e.code;
@@ -165,6 +166,7 @@ export class PlayerController implements ActorController {
       else if (code === b.spectatePrev) onSpectatePrev();
       else if (code === b.spectateNext) onSpectateNext();
       else if (code === b.mapToggle) onMapToggle();
+      else if (code === b.inspect) onInspect();
       // Prevent page scroll etc.
       if (['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(code)) {
         e.preventDefault();
