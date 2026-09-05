@@ -1670,6 +1670,8 @@ export class Hud {
     this.elimTimer -= uiDt;
     this.hitmarkerTimer -= uiDt;
     if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
+    this.damageDirTimer -= uiDt;
+    if (this.damageDirTimer <= 0) $('damage-direction').classList.remove('show');
     if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
     if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
 
@@ -1712,6 +1714,8 @@ export class Hud {
     this.elimTimer -= uiDt;
     this.hitmarkerTimer -= uiDt;
     if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
+    this.damageDirTimer -= uiDt;
+    if (this.damageDirTimer <= 0) $('damage-direction').classList.remove('show');
     if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
     if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
     if (getSettings().showFps) $('fps-counter').classList.remove('hidden');
@@ -1868,18 +1872,36 @@ export class Hud {
     $('fps-counter').textContent = `${Math.round(fps)} FPS`;
   }
 
+  private hitmarkerAnim: Animation | null = null;
+
   hitmarker(headshot: boolean): void {
     const hm = $('hitmarker');
     hm.classList.toggle('headshot', headshot);
-    hm.classList.add('show');
     // Web Animations API restart — the old remove/`offsetWidth`/add pattern
     // forced a synchronous layout (reflow) on every hit, and bursts land
-    // several hits per frame.
-    hm.animate([{ opacity: 1, transform: 'scale(1.25)' }, { opacity: 1, transform: 'scale(1)' }], {
-      duration: 180,
-      easing: 'ease-out',
-    });
+    // several hits per frame. fill:'forwards' parks the marker faded-out.
+    this.hitmarkerAnim?.cancel();
+    this.hitmarkerAnim = hm.animate(
+      [
+        { opacity: 1, transform: 'translate(-50%, -50%) rotate(45deg) scale(1.35)' },
+        { opacity: 0, transform: 'translate(-50%, -50%) rotate(45deg) scale(0.85)' },
+      ],
+      { duration: 200, easing: 'ease-out', fill: 'forwards' },
+    );
     this.hitmarkerTimer = 0.18;
+  }
+
+  private damageDirTimer = 0;
+
+  /**
+   * Point the damage-direction arc at the attacker. `angleRad` is relative to
+   * the camera forward: 0 = ahead, positive = clockwise (to the right).
+   */
+  showDamageDirection(angleRad: number): void {
+    const el = $('damage-direction');
+    el.style.transform = `rotate(${angleRad}rad)`;
+    el.classList.add('show');
+    this.damageDirTimer = 1.0;
   }
 
   banner(text: string, duration = 3): void {

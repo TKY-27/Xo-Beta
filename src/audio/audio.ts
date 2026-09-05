@@ -26,6 +26,9 @@ interface PlayOpts {
   rolloff?: number;
   /** Intentional layer offset in seconds. */
   delay?: number;
+  /** Acoustic occlusion 0..1 (clear..blocked). Computed by the engine when
+   * an occlusion provider is installed; explicit values win. */
+  occlusion?: number;
 }
 
 const SAMPLES: Array<[string, string]> = [
@@ -286,6 +289,18 @@ export class AudioEngine {
   private hrtfPanners: PannerPool | null = null;
   private farPanners: PannerPool | null = null;
   private voiceStamps = new Map<string, number[]>();
+  private occlusionProvider: ((x: number, y: number, z: number) => number) | null = null;
+
+  /** Install a per-match acoustic occlusion sampler (see OcclusionSampler).
+   * Positional sounds then query it for muffling; `null` disables. */
+  setOcclusionProvider(provider: ((x: number, y: number, z: number) => number) | null): void {
+    this.occlusionProvider = provider;
+  }
+
+  private occlusionAt(x: number | undefined, y: number | undefined, z: number | undefined): number {
+    if (!this.occlusionProvider || x === undefined || z === undefined) return 0;
+    return this.occlusionProvider(x, y ?? 1.2, z);
+  }
 
   /** Sliding-window voice cap per category (see VOICE_CATEGORY_CAPS). */
   private allowVoice(category: string): boolean {
@@ -334,6 +349,7 @@ export class AudioEngine {
     this.matchEffectGeneration++;
     for (const timer of this.matchEffectTimers) window.clearTimeout(timer);
     this.matchEffectTimers.clear();
+    this.updateLowHealth(null);
   }
 
   init(): void {
@@ -442,15 +458,19 @@ export class AudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     src.playbackRate.value = opts.rate ?? 1;
+    const occlusion = opts.occlusion ?? this.occlusionAt(opts.x, opts.y, opts.z);
     const g = this.ctx.createGain();
-    g.gain.value = (opts.vol ?? 1) * sampleGainFor(key);
+    // A blocked path loses energy before it loses spectrum — attenuate
+    // slightly and cut the highs hard.
+    g.gain.value = (opts.vol ?? 1) * sampleGainFor(key) * (1 - 0.55 * occlusion);
     src.connect(g);
     // Chain: source → gain → (lowpass) → (pooled panner | bus).
     let tail: AudioNode = g;
-    if (opts.lp !== undefined) {
+    if (opts.lp !== undefined || occlusion > 0) {
       const f = this.ctx.createBiquadFilter();
       f.type = 'lowpass';
-      f.frequency.value = Math.max(220, opts.lp);
+      const cutoff = opts.lp !== undefined ? opts.lp : 19000;
+      f.frequency.value = Math.max(220, cutoff * (1 - 0.85 * occlusion));
       tail.connect(f);
       tail = f;
     }
@@ -548,6 +568,9 @@ export class AudioEngine {
     // weapons. The layered report/crack/body/tail design is preserved.
     const localSniperBoost = isLocal && kind === 'sniper' ? 1.45 : 1;
     if (localSniperBoost > 1) this.duckAmbience(0.19, 0.55);
+    // One occlusion sample per shot: every layer muffles together, so a shot
+    // behind a wall loses its crack first and keeps only the low tail.
+    const occlusion = isLocal ? 0 : this.occlusionAt(x, y, z);
 
     // The close report is a verified CC0 firearm recording. A very short
     // filtered crack, low body and delayed outdoor tail restore the physical
@@ -559,6 +582,7 @@ export class AudioEngine {
       lp: distanceProfile.reportLp,
       refDist: distanceProfile.reportRefDist,
       rolloff: distanceProfile.reportRolloff,
+      occlusion,
     });
     this.gunCrack(
       x, y, z,
@@ -566,6 +590,7 @@ export class AudioEngine {
       distanceProfile.crackRefDist,
       distanceProfile.crackLp,
       distanceProfile.crackRolloff,
+      occlusion,
     );
     this.play(weaponProfile.body, {
       x, y, z,
@@ -575,6 +600,7 @@ export class AudioEngine {
       refDist: distanceProfile.bodyRefDist,
       rolloff: distanceProfile.bodyRolloff,
       delay: 0.012,
+      occlusion,
     });
     this.play(key, {
       x, y, z,
@@ -584,6 +610,7 @@ export class AudioEngine {
       refDist: distanceProfile.tailRefDist,
       rolloff: distanceProfile.tailRolloff,
       delay: kind === 'sniper' ? 0.085 : 0.055,
+      occlusion,
     });
 
     // Low-end reinforcement for the two weapons whose muzzle blast is felt
@@ -596,12 +623,17 @@ export class AudioEngine {
         refDist: distanceProfile.subRefDist,
         rolloff: distanceProfile.subRolloff,
         delay: 0.018,
+        occlusion,
       });
     }
   }
 
   /** Brief high-frequency muzzle crack layered over recorded firearm reports. */
-  private gunCrack(x: number, y: number, z: number, volume: number, refDist: number, lpFrequency: number, rolloff: number): void {
+  private gunCrack(
+    x: number, y: number, z: number, volume: number,
+    refDist: number, lpFrequency: number, rolloff: number,
+    occlusion = 0,
+  ): void {
     if (!this.ctx || !this.noiseBuffer || !this.hrtfPanners) return;
     const entry = this.hrtfPanners.lease();
     const p = entry.panner;
@@ -618,11 +650,11 @@ export class AudioEngine {
     hp.frequency.value = 1700;
     const lp = this.ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = lpFrequency;
+    lp.frequency.value = Math.max(220, lpFrequency * (1 - 0.85 * occlusion));
     const gain = this.ctx.createGain();
     const now = this.now();
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(volume, now + 0.0015);
+    gain.gain.linearRampToValueAtTime(volume * (1 - 0.55 * occlusion), now + 0.0015);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.032);
     src.connect(hp); hp.connect(lp); lp.connect(gain); gain.connect(p);
     this.hrtfPanners.attach(entry, src);
@@ -683,12 +715,19 @@ export class AudioEngine {
     // few metres. Preserve headroom while keeping nearby movement actionable.
     const vol = (running ? 0.68 : 0.44) * (isSelf ? 0.92 : 1);
     const rate = surface === 'metal' ? 1.12 : 0.94 + Math.random() * 0.14;
-    this.play(key, { x, y, z, vol, rate, refDist: 4.8, rolloff: 1.05, lp: running ? undefined : 6000 });
+    this.play(key, {
+      x, y, z, vol, rate, refDist: 4.8, rolloff: 1.05,
+      lp: running ? undefined : 6000,
+      occlusion: isSelf ? 0 : this.occlusionAt(x, y, z),
+    });
   }
 
   jumpLand(x: number, y: number, z: number, hard: boolean, surface = 'stone', isLocal = false): void {
     this.footstep(x, y, z, true, surface, isLocal);
-    this.play('impact/soft_a', { x, y, z, vol: hard ? 0.8 : 0.4, rate: 0.8 });
+    this.play('impact/soft_a', {
+      x, y, z, vol: hard ? 0.8 : 0.4, rate: 0.8,
+      occlusion: isLocal ? 0 : this.occlusionAt(x, y, z),
+    });
   }
 
   whoosh(x: number, y: number, z: number, pitch = 1): void {
@@ -914,6 +953,47 @@ export class AudioEngine {
 
   headshotTick(): void {
     this.play('ui/headshot', { bus: 'ui', vol: 0.5, rate: 1.6 });
+  }
+
+  // Low-health heartbeat: a "lub-dub" sub pulse whose rate tightens as health
+  // drains. Driven by the presentation loop each frame via updateLowHealth().
+  private lowHealthActive = false;
+  private lowHealthSeverity = 1;
+  private heartbeatTimer: number | null = null;
+
+  /** `health`: local HP (0-100), or null when dead/spectating. */
+  updateLowHealth(health: number | null): void {
+    const active = health !== null && health > 0 && health <= 30;
+    if (active && health !== null) this.lowHealthSeverity = 1 - health / 30;
+    if (active === this.lowHealthActive) return;
+    this.lowHealthActive = active;
+    if (active) this.scheduleHeartbeat();
+    else if (this.heartbeatTimer !== null) {
+      window.clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  private scheduleHeartbeat(): void {
+    if (!this.lowHealthActive || !this.ctx) return;
+    const ctx = this.ctx;
+    const t0 = ctx.currentTime;
+    for (const [offset, vol] of [[0, 0.3], [0.15, 0.2]] as const) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(58, t0 + offset);
+      osc.frequency.exponentialRampToValueAtTime(40, t0 + offset + 0.1);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t0 + offset);
+      g.gain.linearRampToValueAtTime(vol, t0 + offset + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + offset + 0.13);
+      osc.connect(g);
+      g.connect(this.buses.sfx!);
+      osc.start(t0 + offset);
+      osc.stop(t0 + offset + 0.16);
+    }
+    const period = 1150 - 380 * this.lowHealthSeverity;
+    this.heartbeatTimer = window.setTimeout(() => this.scheduleHeartbeat(), period);
   }
 
   explosionFx(x: number, y: number, z: number): void {

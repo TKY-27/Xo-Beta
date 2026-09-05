@@ -72,6 +72,7 @@ import { t, initLang } from './core/i18n';
 import { EventBus } from './core/events';
 import { GamepadInput } from './player/gamepad';
 import { AudioEngine, attachAudio } from './audio/audio';
+import { OcclusionSampler } from './audio/occlusion';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const $canvas = (): HTMLCanvasElement => document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -1807,6 +1808,15 @@ async function startMatchImpl(
   const detachAudio = attachAudio(match as never, audio, match.events);
   registerStartCleanup(generation, detachAudio);
 
+  // Acoustic occlusion: what a wall hides, it muffles. The sampler raycasts
+  // ear→source with a grid cache; guests (no physics world) skip this.
+  const occlusionSampler = new OcclusionSampler(match.phys);
+  audio.setOcclusionProvider((x, y, z) => {
+    const ear = rig.camera.position;
+    return occlusionSampler.occlusion(ear.x, ear.y, ear.z, x, y, z, performance.now());
+  });
+  registerStartCleanup(generation, () => audio.setOcclusionProvider(null));
+
   // Prewarm: build every weapon archetype now (loading screen) so mid-match
   // pickups/swaps only cheap-clone shared geometry, never allocate GPU state.
   weaponFactory.prewarmAll();
@@ -2362,7 +2372,18 @@ function wirePresentation(
         );
       }
     }
-    if (e.targetId === match.localActor?.id) rig.addShake(Math.min(0.5, e.damage / 60));
+    if (e.targetId === match.localActor?.id) {
+      rig.addShake(Math.min(0.5, e.damage / 60));
+      // Directional damage arc: point the HUD ring toward the attacker.
+      const me = match.localActor;
+      const attacker = match.actors.find((a) => a.id === e.attackerId);
+      if (me && attacker) {
+        const dx = attacker.body.position.x - me.body.position.x;
+        const dz = attacker.body.position.z - me.body.position.z;
+        const forwardBearing = Math.atan2(-Math.sin(me.yaw), -Math.cos(me.yaw));
+        hud.showDamageDirection(forwardBearing - Math.atan2(dx, dz));
+      }
+    }
   });
   match.events.on('shieldBroken', (e) => {
     const a = match.actors.find((x) => x.id === e.actorId);
@@ -2647,7 +2668,17 @@ function presentOnlineAuthoritativeEvent(
         payload.killed === true ? 'kill' : headshot ? 'headshot' : number('shieldDamage') > 0 ? 'shield' : 'normal',
       );
     }
-    if (targetId === localActorId) game.rig.addShake(Math.min(0.5, damage / 60));
+    if (targetId === localActorId) {
+      game.rig.addShake(Math.min(0.5, damage / 60));
+      const me = actorView(localActorId);
+      const attacker = actorView(attackerId);
+      if (me && attacker) {
+        const dx = attacker.position.x - me.position.x;
+        const dz = attacker.position.z - me.position.z;
+        const forwardBearing = Math.atan2(-Math.sin(me.yaw), -Math.cos(me.yaw));
+        hud.showDamageDirection(forwardBearing - Math.atan2(dx, dz));
+      }
+    }
     return;
   }
   if (event.type === 'shieldHit' || event.type === 'shieldBroken') {
@@ -3608,6 +3639,8 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
 
   hud.syncPlayerState(m, dtReal);
   hud.syncOnlineState(game.coordinator ? matchOnlineHudState(game) : null);
+  // Low-health heartbeat: HP threshold tracked on the audio engine.
+  audio.updateLowHealth(m.localActor && m.localActor.alive ? m.localActor.health : null);
   hud.drawMinimap(m, () => hud.minimapContext(), dtReal);
   if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
@@ -3822,6 +3855,7 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
 
   hud.syncReplicaState(view, dtReal);
   hud.syncOnlineState(replicaOnlineHudState(game, view));
+  audio.updateLowHealth(local && local.alive ? local.health : null);
   hud.drawMinimapReplica(game.mapDef, view, () => hud.minimapContext(), dtReal);
   if (hud.isTacMapOpen()) hud.drawTacMapReplica(game.mapDef, view);
   const interaction = !spectating && local?.alive && !paused && !hud.isTacMapOpen() && !hud.isInventoryOpen()

@@ -822,14 +822,27 @@ body.scoped #crosshair { display: none; }
   position: absolute; left: 50%; top: 50%; width: 26px; height: 26px;
   transform: translate(-50%, -50%) rotate(45deg); opacity: 0; pointer-events: none;
 }
-#hitmarker.show { animation: hm 0.2s ease-out; }
 #hitmarker::before, #hitmarker::after {
   content: ''; position: absolute; background: white; box-shadow: 0 0 5px rgba(0,0,0,0.8);
 }
 #hitmarker.headshot::before, #hitmarker.headshot::after { background: var(--gold); box-shadow: 0 0 7px rgba(255, 180, 58, 0.9); }
 #hitmarker::before { left: 50%; top: 0; bottom: 0; width: 2px; transform: translateX(-50%); }
 #hitmarker::after { top: 50%; left: 0; right: 0; height: 2px; transform: translateY(-50%); }
-@keyframes hm { 0% { opacity: 1; transform: translate(-50%, -50%) rotate(45deg) scale(1.35); } 100% { opacity: 0; transform: translate(-50%, -50%) rotate(45deg) scale(0.85); } }
+
+/* Damage direction: a short arc orbiting the crosshair, rotated toward the
+ * attacker. Pure transform/opacity — cheap enough to retrigger per hit. */
+#damage-direction {
+  position: absolute; left: 50%; top: 50%;
+  width: 148px; height: 148px; margin: -74px 0 0 -74px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  background: conic-gradient(from -26deg, rgba(255, 66, 48, .95) 0deg, rgba(255, 66, 48, .08) 52deg, transparent 52deg);
+  -webkit-mask: radial-gradient(circle, transparent 56px, #000 58px, #000 70px, transparent 72px);
+  mask: radial-gradient(circle, transparent 56px, #000 58px, #000 70px, transparent 72px);
+  filter: drop-shadow(0 0 6px rgba(255, 66, 48, .55));
+}
+#damage-direction.show { opacity: 1; transition: opacity .1s ease-out; }
 
 /* Bars (bottom-left) */
 #hud-bottom-left { position: absolute; left: 26px; bottom: 24px; width: 320px; }
