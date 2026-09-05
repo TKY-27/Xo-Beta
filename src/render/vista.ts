@@ -246,6 +246,16 @@ function buildSkyline(size: number): THREE.Group {
   const crowns = new THREE.InstancedMesh(box, crownMat, count);
   const antennaCount = Math.ceil(count / 4);
   const antennas = new THREE.InstancedMesh(box, crownMat, antennaCount);
+  // Setback tiers and street-level podiums break the monolithic cuboid mass
+  // the QA ledger flagged: real high-rises step in as they rise and sit on a
+  // wider base. One instance per tower keeps the batched draws.
+  const tiers = new THREE.InstancedMesh(box, crownMat, count);
+  const podiums = new THREE.InstancedMesh(
+    box,
+    new THREE.MeshStandardMaterial({ color: 0x1b2530, roughness: 0.88, metalness: 0.1 }),
+    count,
+  );
+  const zeroScale = new THREE.Vector3(0, 0, 0);
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
@@ -291,6 +301,28 @@ function buildSkyline(size: number): THREE.Group {
       m.compose(mastP, q, new THREE.Vector3(0.32, 9 + random() * 13, 0.32));
       antennas.setMatrixAt(antennaIndex++, m);
     }
+
+    // Roughly half the towers gain one setback tier partway up; every tower
+    // sits on a low wider podium like a real street wall.
+    if (random() < 0.5 && h > 55) {
+      const tierH = 3.5 + random() * 9;
+      const tierY = p.y + h * (0.52 + random() * 0.2);
+      m.compose(
+        new THREE.Vector3(p.x, tierY, p.z),
+        q,
+        new THREE.Vector3(s.x * (0.72 + random() * 0.16), tierH, s.z * (0.72 + random() * 0.16)),
+      );
+    } else {
+      m.compose(p, q, zeroScale);
+    }
+    tiers.setMatrixAt(i, m);
+    const podiumH = 4 + random() * 6;
+    m.compose(
+      new THREE.Vector3(p.x, p.y - 1, p.z),
+      q,
+      new THREE.Vector3(s.x * 1.18, podiumH, s.z * 1.18),
+    );
+    podiums.setMatrixAt(i, m);
   }
   towers.forEach((tower, family) => {
     tower.count = towerIndices[family]!;
@@ -301,9 +333,13 @@ function buildSkyline(size: number): THREE.Group {
   crowns.instanceMatrix.needsUpdate = true;
   antennas.count = antennaIndex;
   antennas.instanceMatrix.needsUpdate = true;
+  tiers.instanceMatrix.needsUpdate = true;
+  podiums.instanceMatrix.needsUpdate = true;
   crowns.frustumCulled = false;
   antennas.frustumCulled = false;
-  group.add(...towers, crowns, antennas);
+  tiers.frustumCulled = false;
+  podiums.frustumCulled = false;
+  group.add(...towers, crowns, antennas, tiers, podiums);
   group.userData.windowTextures = windowTextures;
   return group;
 }
