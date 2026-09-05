@@ -31,6 +31,8 @@ export interface BuildingOpts {
   roofStyle?: 'flat' | 'gable';
   /** Decorative brick chimney on the gable ridge (deterministic per call). */
   chimney?: boolean;
+  /** Material for the exterior fire-escape stair flights (default metal). */
+  stairMat?: MatKey;
 }
 
 /**
@@ -255,6 +257,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   const baseY = o.baseY ?? 0;
   const hw = o.w / 2, hd = o.d / 2;
   const trim = o.trimMat ?? o.wallMat;
+  const stairMat = o.stairMat ?? 'metalExterior';
   const floorMat = o.floorMat ?? 'concreteDark';
   const roofMat = o.roofMat ?? trim;
   const requestedStairSteps = Math.ceil(fh / 0.55);
@@ -661,7 +664,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     // 0.4 m under the first tread: a slab edge exactly at the riser line left
     // the approaching capsule half-supported there and its autostep never
     // completed.
-    b.slab(outerStairX, baseY + 0.04, frontZ + 0.8, stair.width + 0.5, 2.4, 0.2, 'metalExterior');
+    b.slab(outerStairX, baseY + 0.04, frontZ + 0.8, stair.width + 0.5, 2.4, 0.2, stairMat);
     let remainingSteps = stair.steps;
     let currentY = baseY;
     let currentZ = frontZ;

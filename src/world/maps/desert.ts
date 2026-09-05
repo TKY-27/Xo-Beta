@@ -456,7 +456,7 @@ function kestrelCompound(b: WorldBuilder, cx: number, cz: number): void {
   compoundWall(b, cx, cz, 52, 42, y, 'mudbrick');
   addBuilding(b, {
     x: cx - 10, z: cz - 6, baseY: y, w: 18, d: 16, floors: 2,
-    wallMat: 'mudbrick', trimMat: 'metalDark', doors: [[0, 8, 2.6]], roofAccess: true,
+    wallMat: 'mudbrick', trimMat: 'metalDark', doors: [[0, 8, 2.6]], roofAccess: true, stairMat: 'mudbrick',
   });
   // Bare interiors read as black voids — hang working lamps in each room.
   b.light(cx - 10, y + 3.1, cz - 6, 0xffd9a0, 1.3, 13);
