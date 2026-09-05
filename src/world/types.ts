@@ -2,7 +2,7 @@
 
 export type MatKey =
   | 'concrete' | 'concreteDark' | 'asphalt' | 'asphaltDesert' | 'sidewalk' | 'metal' | 'metalDark' | 'metalExterior'
-  | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld'
+  | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld' | 'mudbrick'
   | 'glass' | 'grass' | 'dirt' | 'rock' | 'roofTile' | 'gold'
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
   | 'windowWarm' | 'windowCool' | 'windowDark'

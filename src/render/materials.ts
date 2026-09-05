@@ -339,6 +339,15 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('bricksOld', std('bricksOld', 'bricksOld'));
   mats.set('plaster', std('plaster', 'plaster'));
   mats.set('plasterOld', std('plasterOld', 'plasterOld'));
+  // ASHARA mud-brick: the concrete set under a warm sand tint so desert
+  // compounds stop reading as cool blue-grey slabs against the dunes.
+  mats.set('mudbrick', std('mudbrick', 'concrete', {
+    color: 0xc4a87e,
+    roughness: 0.96,
+    metalness: 0,
+    metersPerTile: 3.2,
+    normalScale: 0.55,
+  }));
   mats.set('grass', std('grass', 'grass'));
   mats.set('dirt', std('dirt', 'dirt'));
   mats.set('rock', std('rock', 'rock'));

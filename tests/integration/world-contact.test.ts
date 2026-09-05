@@ -1608,7 +1608,7 @@ describe('rendered terrain and physics ground alignment', () => {
     for (const compound of compounds) {
       const walls = loaded.def.geo.filter((g) => (
         g.kind === 'box'
-        && g.mat === 'concrete'
+        && (g.mat === 'concrete' || g.mat === 'mudbrick')
         && Math.abs(Math.min(g.sx, g.sz) - 0.55) < 0.001
         && g.sy > 3.2
         && g.x >= compound.x - compound.w / 2 - 0.01
