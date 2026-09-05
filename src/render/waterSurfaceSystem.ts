@@ -708,16 +708,18 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
         ? traceWaterline(this.map.terrainHeight, water, profile.kind === 'river' ? 2 : 3)
         : [];
       if (shoreline.length > 0) {
+        // A wide wet-sand band: the old 0.3-0.5 m strip left the waterline
+        // reading as a hard vector edge against dry terrain.
         const sedimentGeometry = makeRibbonGeometry(
           shoreline,
-          profile.kind === 'river' ? 0.30 : 0.54,
+          profile.kind === 'river' ? 1.1 : 2.1,
           0.012,
         );
         ownedGeometries.add(sedimentGeometry);
         const sedimentMaterial = new THREE.MeshBasicMaterial({
           color: 0x34463b,
           transparent: true,
-          opacity: 0.16,
+          opacity: 0.26,
           depthWrite: false,
           toneMapped: true,
         });
