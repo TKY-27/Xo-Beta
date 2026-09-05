@@ -51,6 +51,8 @@ five cycles.
 
 | 15 | THIRD INDEPENDENT CRITIC (fresh context) | Verified fixed: ashara canal void, toy-blue stairs, night clouds. New/remaining: (1) eden water reads flat from some angles; (2) no contact shadows after AO removal; (3) pure-black unlit props near ashara compound — CORRELATES with the 22 zero-size-uniform WebGPU validation errors (eden/oldfront/neocity 22, ashara 0 — the delta is Quaternius foliage/instancing); (4) canal teleport burial; (5) night-map shadow floors read 0-value black; (6) QA_SKIN probe env not switching lobby label. Verdict: improvement remains; black-prop class is the top render-path bug | backlog reordered — validation errors first |
 
+| 16 | Focused investigation (subagent) | Root cause of the 22 zero-size-uniform validation errors found: MapBuilder.finish filters out all lamps on eden/oldfront/neocity, leaving 5 zero-capacity InstancedMesh lamp pools; three r185 wraps the empty instanceMatrix in a buffer node → device.createBuffer({size:0}) per bind group. Fix: lamp pools only build when lamps survive (worldView.ts). All four maps now 0 errors; renders verified. The 'black prop' near the ashara compound is a lamp fixture in dark metalDark (cosmetic, separate) | eden/oldfront/neocity/ashara: 0 errors |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
