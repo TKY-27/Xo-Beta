@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { CharacterFactory, SKIN_IDS, SKIN_SPECS, skinForName } from '../../src/render/characters';
 
 describe('character skins', () => {
-  it('exposes six distinct deterministic procedural skin specs', () => {
-    expect(SKIN_IDS).toHaveLength(6);
+  it('exposes twelve distinct deterministic procedural skin specs', () => {
+    expect(SKIN_IDS).toHaveLength(12);
     expect(new Set(SKIN_IDS.map((id) => SKIN_SPECS[id].primary)).size).toBe(6);
     expect(skinForName('bot-alpha')).toBe(skinForName('bot-alpha'));
     expect(SKIN_IDS).toContain(skinForName('bot-alpha'));
