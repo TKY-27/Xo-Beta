@@ -6,6 +6,12 @@
  */
 
 import * as THREE from 'three';
+import { MeshStandardNodeMaterial } from 'three/webgpu';
+import type { UniformNode } from 'three/webgpu';
+import {
+  abs, cross, float, normalize, normalWorld, positionWorld, sign, texture,
+  transformNormalToView, uniform, vec2, vec3,
+} from 'three/tsl';
 import { loadTextureSet, type TextureSet } from '../assets/assets';
 import type { MatKey } from '../world/types';
 
@@ -87,81 +93,148 @@ function neutralizeRedVeins(tex: THREE.Texture): void {
 }
 
 /**
- * World-projected Standard material. Side faces project along their own
+ * World-projected Standard node material. Side faces project along their own
  * horizontal tangent (yaw-proof); up/down faces project XZ. Works with
  * InstancedMesh because mapping depends only on world position/normal.
+ *
+ * TSL port of the former onBeforeCompile triplanar injection: runs natively
+ * on the WebGPU renderer and its WebGL2 fallback. The stock `color`,
+ * `roughness`, `normalScale`, `map` and `roughnessMap` properties are routed
+ * into TSL uniforms/nodes via accessors so existing call sites (per-map
+ * retints, weather wetness, polygon-offset clones) keep working unchanged.
  */
-function makeProjectedMaterial(set: TextureSet, opts: {
-  metersPerTile: number;
-  color?: number;
-  roughness?: number;
-  metalness?: number;
-  envMapIntensity?: number;
-  normalScale?: number;
-}): THREE.MeshStandardMaterial {
-  const mat = new THREE.MeshStandardMaterial({
-    color: opts.color ?? 0xffffff,
-    map: set.color ? finalize(set.color.clone()) : null,
-    normalMap: set.normal ? finalize(set.normal.clone()) : null,
-    roughnessMap: set.rough ? finalize(set.rough.clone()) : null,
-    roughness: opts.roughness ?? 1,
-    metalness: opts.metalness ?? 0,
-    envMapIntensity: opts.envMapIntensity ?? 1,
-  });
-  if (opts.normalScale !== undefined) mat.normalScale.set(opts.normalScale, opts.normalScale);
-  const k = 1 / Math.max(0.001, opts.metersPerTile);
-  mat.onBeforeCompile = (shader) => {
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>
-        varying vec3 vWPos;
-        varying vec3 vWNrm;`)
-      .replace('#include <begin_vertex>', `#include <begin_vertex>
-        #ifdef USE_INSTANCING
-          vWPos = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
-          vWNrm = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * objectNormal);
-        #else
-          vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
-          vWNrm = normalize(mat3(modelMatrix) * objectNormal);
-        #endif`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>
-        varying vec3 vWPos;
-        varying vec3 vWNrm;
-        uniform float uProjScale;
-        vec2 projUv(vec3 p, vec3 n) {
-          vec3 an = abs(n);
-          if (an.y >= an.x && an.y >= an.z) return p.xz * uProjScale;
-          if (an.x >= an.z) return vec2(dot(p, vec3(0.0, 0.0, -1.0)), p.y) * uProjScale * vec2(sign(n.x) == 0.0 ? 1.0 : sign(n.x), 1.0);
-          return vec2(dot(p, vec3(1.0, 0.0, 0.0)), p.y) * uProjScale * vec2(n.z == 0.0 ? 1.0 : sign(n.z), 1.0);
-        }`)
-      .replace('#include <map_fragment>', `
-        #ifdef USE_MAP
-          vec2 puv = projUv(vWPos, vWNrm);
-          vec4 sampledDiffuseColor = texture2D( map, puv );
-          diffuseColor *= sampledDiffuseColor;
-        #endif`)
-      .replace('#include <normal_fragment_maps>', `
-        #if defined( USE_NORMALMAP_TANGENTSPACE )
-          vec2 nuv = projUv(vWPos, vWNrm);
-          vec3 mapN = texture2D( normalMap, nuv ).xyz * 2.0 - 1.0;
-          mapN.xy *= normalScale;
-          // perturb along face-tangent frame derived from world normal
-          vec3 T = normalize(cross(vec3(0.0,1.0,0.0), normal));
-          vec3 B = cross(normal, T);
-          if (abs(normal.y) > 0.99) { T = vec3(1.0,0.0,0.0); B = vec3(0.0,0.0,1.0); }
-          normal = normalize(T * mapN.x + B * mapN.y + normal * mapN.z);
-        #endif`)
-      .replace('#include <roughnessmap_fragment>', `
-        float roughnessFactor = roughness;
-        #ifdef USE_ROUGHNESSMAP
-          vec2 ruv = projUv(vWPos, vWNrm);
-          vec4 texelRoughness = texture2D( roughnessMap, ruv );
-          roughnessFactor *= texelRoughness.g;
-        #endif`);
-    shader.uniforms.uProjScale = { value: k };
-  };
-  mat.customProgramCacheKey = () => 'xoproj';
-  return mat;
+class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
+  // Uniform nodes are structurally typed here: the Material
+  // superconstructor invokes the property setters below, so the nodes must be
+  // created lazily, not as class-field initializers.
+  private declare tintUniform?: UniformNode<'color', THREE.Color>;
+  private declare roughUniform?: UniformNode<'float', number>;
+  private declare normalScaleUniform?: UniformNode<'vec2', THREE.Vector2>;
+  private declare colorTex?: THREE.Texture;
+  private declare roughTex?: THREE.Texture;
+
+  private uniforms(): {
+    tint: UniformNode<'color', THREE.Color>;
+    rough: UniformNode<'float', number>;
+    ns: UniformNode<'vec2', THREE.Vector2>;
+  } {
+    if (!this.tintUniform) {
+      this.tintUniform = uniform(new THREE.Color(0xffffff));
+      this.roughUniform = uniform(1);
+      this.normalScaleUniform = uniform(new THREE.Vector2(1, 1));
+    }
+    return {
+      tint: this.tintUniform,
+      rough: this.roughUniform!,
+      ns: this.normalScaleUniform!,
+    };
+  }
+
+  constructor(
+    set?: TextureSet,
+    opts: {
+      metersPerTile?: number;
+      color?: number;
+      roughness?: number;
+      metalness?: number;
+      envMapIntensity?: number;
+      normalScale?: number;
+    } = {},
+  ) {
+    super({ metalness: opts.metalness ?? 0 });
+    const u = this.uniforms();
+    // Material.clone() constructs with zero arguments and then copies state
+    // through the accessors below — the node graph is only built when a real
+    // texture set is provided.
+    if (!set) return;
+    u.tint.value = new THREE.Color(opts.color ?? 0xffffff);
+    u.rough.value = opts.roughness ?? 1;
+    u.ns.value.set(opts.normalScale ?? 1, opts.normalScale ?? 1);
+    this.colorTex = set.color ? finalize(set.color.clone()) : undefined;
+    this.roughTex = set.rough ? finalize(set.rough.clone()) : undefined;
+    if (set.normal) finalize(set.normal.clone());
+    const k = uniform(1 / Math.max(0.001, opts.metersPerTile ?? 4));
+
+    // projUv: single-axis pick from the interpolated world normal — exact for
+    // axis-aligned/yaw-rotated boxes and stable under instancing.
+    const wPos = positionWorld;
+    const wNrm = normalize(normalWorld);
+    const an = abs(wNrm);
+    const uvTop = vec2(wPos.x, wPos.z).mul(k);
+    const signX = sign(wNrm.x).abs().lessThan(0.5).select(float(1), sign(wNrm.x));
+    const signZ = sign(wNrm.z).abs().lessThan(0.5).select(float(1), sign(wNrm.z));
+    const uvSideX = vec2(wPos.z.negate(), wPos.y).mul(k).mul(vec2(signX, float(1)));
+    const uvSideZ = vec2(wPos.x, wPos.y).mul(k).mul(vec2(signZ, float(1)));
+    const puv = an.y.greaterThanEqual(an.x)
+      .and(an.y.greaterThanEqual(an.z))
+      .select(uvTop, an.x.greaterThanEqual(an.z).select(uvSideX, uvSideZ));
+
+    if (this.colorTex) this.colorNode = texture(this.colorTex).sample(puv).mul(u.tint);
+    if (this.roughTex) {
+      this.roughnessNode = u.rough.mul(texture(this.roughTex).sample(puv).g);
+    }
+    if (set.normal) {
+      const mapN = texture(set.normal).sample(puv).xyz.mul(2).sub(1);
+      const mapNxy = mapN.xy.mul(u.ns);
+      // Face-tangent frame derived from the world normal.
+      const T0 = normalize(cross(vec3(0.0, 1.0, 0.0), wNrm));
+      const flat = abs(wNrm.y).greaterThan(0.99);
+      const T = flat.select(vec3(1.0, 0.0, 0.0), T0);
+      const B = flat.select(vec3(0.0, 0.0, 1.0), cross(wNrm, T0));
+      const wPerturbed = normalize(T.mul(mapNxy.x).add(B.mul(mapNxy.y)).add(wNrm.mul(mapN.z)));
+      this.normalNode = transformNormalToView(wPerturbed);
+    }
+    if (opts.envMapIntensity !== undefined) this.envMapIntensity = opts.envMapIntensity;
+  }
+
+  override get color(): THREE.Color {
+    return this.uniforms().tint.value as THREE.Color;
+  }
+
+  override set color(v: THREE.Color) {
+    this.uniforms().tint.value = v;
+  }
+
+  override get roughness(): number {
+    return this.uniforms().rough.value as number;
+  }
+
+  override set roughness(v: number) {
+    this.uniforms().rough.value = v;
+  }
+
+  override get normalScale(): THREE.Vector2 {
+    return this.uniforms().ns.value as THREE.Vector2;
+  }
+
+  override set normalScale(v: THREE.Vector2) {
+    this.uniforms().ns.value = v;
+  }
+
+  override get map(): THREE.Texture | null {
+    return this.colorTex ?? null;
+  }
+
+  override set map(v: THREE.Texture | null) {
+    // The color node already references this material family's texture set;
+    // clone-time reassignments keep the same projection.
+    if (v) this.colorTex = v;
+  }
+
+  override get roughnessMap(): THREE.Texture | null {
+    return this.roughTex ?? null;
+  }
+
+  override set roughnessMap(v: THREE.Texture | null) {
+    // facilityFloor-style overrides clear the map and fall back to the scalar
+    // roughness (kept live through roughUniform).
+    if (v === null) {
+      this.roughTex = undefined;
+      this.roughnessNode = this.uniforms().rough;
+    } else {
+      this.roughTex = v;
+    }
+  }
 }
 
 export async function createMaterials(): Promise<MaterialLibrary> {
@@ -195,7 +268,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
     const set = dir ? sets.get(dir) : undefined;
     if (set?.color) {
       const tint = TINTS[key];
-      const m = makeProjectedMaterial(set, {
+      const m = new ProjectedStandardMaterial(set, {
         metersPerTile: opts.metersPerTile ?? TILE_DENSITY[dir ?? key] ?? 4,
         color: opts.color ?? tint ?? 0xffffff,
         roughness: opts.roughness ?? 1,

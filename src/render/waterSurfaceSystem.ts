@@ -7,6 +7,16 @@
  */
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import type { Node, UniformNode } from 'three/webgpu';
+import {
+  abs, asin, atan, cameraPosition, clamp, cos, Discard, dot, floor, fract,
+  float, frontFacing, max, min, mix, modelWorldMatrixInverse, normalize,
+  positionWorld, pow, reflect, sin, smoothstep, step, texture, uniform, uv,
+  varying, vec2, vec3, vec4,
+} from 'three/tsl';
+import { WebGPURenderer } from 'three/webgpu';
+import { isWebGPUBackend } from './renderer';
 import type { MapDef, WaterVolume, WaterVisualKind } from '../world/types';
 import {
   createWaterVisualProfile,
@@ -17,7 +27,7 @@ import {
 } from './waterWaveField';
 
 export interface WaterSurfaceSystemOptions {
-  renderer?: THREE.WebGLRenderer | null;
+  renderer?: WebGPURenderer | null;
   quality?: WaterQuality;
   skyColor?: THREE.ColorRepresentation;
   sunColor?: THREE.ColorRepresentation;
@@ -167,7 +177,7 @@ interface SurfaceEntry {
   meshes: THREE.Mesh[];
   foam: THREE.Mesh | null;
   sediment: THREE.Mesh | null;
-  materials: THREE.ShaderMaterial[];
+  materials: WaterSurfaceMaterial[];
   waveTexture: THREE.DataTexture;
   depthTexture: THREE.DataTexture;
   ownedTextures: THREE.Texture[];
@@ -181,246 +191,266 @@ const EMPTY_SKY = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1,
 EMPTY_SKY.needsUpdate = true;
 EMPTY_SKY.colorSpace = THREE.SRGBColorSpace;
 
-const WATER_VERTEX = /* glsl */ `
-  uniform sampler2D uWaveTexture;
-  uniform float uTime;
-  uniform float uAmplitude;
-  uniform float uChop;
-  uniform float uPeriod;
-  uniform float uBands;
-  uniform vec2 uWind;
-  varying vec3 vWorldPosition;
-  varying vec3 vWorldNormal;
-  varying float vCrest;
+/**
+ * TSL port of the former GLSL water shaders. The wave field, GGX sun
+ * response, fresnel sky reflection and depth fade all live in node graphs so
+ * the material runs natively on the WebGPU renderer and its WebGL2 fallback.
+ * Uniform shim objects keep the historical per-material update call sites
+ * (`material.uniforms['uTime'].value = ...`) unchanged.
+ */
+const BANDS = [
+  { scale: 0.42, speed: 0.20, axis: [0.98558477, -0.16918235], offset: [0.11, 0.37], height: 0.48, gradient: 0.35, crest: 0.25 },
+  { scale: 0.95, speed: 0.42, axis: [0.95233357, 0.30505864], offset: [0.53, 0.19], height: 0.24, gradient: 0.57, crest: 0.34 },
+  { scale: 2.10, speed: 0.84, axis: [0.74517440, -0.66686964], offset: [0.29, 0.71], height: 0.12, gradient: 1.25, crest: 0.28 },
+  { scale: 4.40, speed: 1.38, axis: [0.60582016, 0.79560162], offset: [0.83, 0.43], height: 0.05, gradient: 1.85, crest: 0.13 },
+  { scale: 7.80, speed: 2.10, axis: [0.90475166, -0.42593947], offset: [0.67, 0.89], height: 0.025, gradient: 2.35, crest: 0.07 },
+  { scale: 13.0, speed: 3.10, axis: [0.77757272, 0.62879302], offset: [0.41, 0.07], height: 0.012, gradient: 2.8, crest: 0.04 },
+] as const;
 
-  vec4 waveSample(
-    vec2 world,
-    float scale,
-    float speed,
-    vec2 localXAxis,
-    vec2 offset,
-    out vec2 worldGradient
-  ) {
-    vec2 localYAxis = vec2(-localXAxis.y, localXAxis.x);
-    vec2 p = vec2(dot(world, localXAxis), dot(world, localYAxis));
-    vec2 uv = p * scale / uPeriod + uWind * speed * uTime + offset;
-    vec4 sampleValue = texture2D(uWaveTexture, uv);
-    vec2 localGradient = sampleValue.gb * 2.0 - 1.0;
-    // p = R * world, so a texture-space gradient returns to world axes as
-    // transpose(R) * gradient. Height, choppiness and highlights now share
-    // one correctly oriented displacement field for every rotated band.
-    worldGradient = localXAxis * localGradient.x + localYAxis * localGradient.y;
-    return sampleValue;
+const DETAIL_BANDS = [
+  { scale: 6.70, speed: 1.85, axis: [0.83205029, 0.55470020], offset: [0.17, 0.61], weight: 0.32, minBands: 2.5 },
+  { scale: 11.30, speed: 2.65, axis: [0.51449576, -0.85749293], offset: [0.73, 0.23], weight: 0.18, minBands: 3.5 },
+] as const;
+
+/**
+ * Every entry is the live node (UniformNode/TextureNode) driving the TSL
+ * graph, so the historical `material.uniforms['uTime'].value = ...` update
+ * sites keep working unchanged.
+ */
+interface WaterUniformShim {
+  [key: string]: { value: unknown };
+}
+
+export class WaterSurfaceMaterial extends MeshBasicNodeMaterial {
+  uniforms!: WaterUniformShim;
+}
+
+export class WaterFoamMaterial extends MeshBasicNodeMaterial {
+  uniforms!: WaterUniformShim;
+}
+
+function makeWaterUniforms(params: {
+  waveTexture: THREE.DataTexture;
+  depthTexture: THREE.DataTexture;
+  skyTexture: THREE.Texture;
+  amplitude: number;
+  chop: number;
+  period: number;
+  bands: number;
+  wind: THREE.Vector2;
+  min: THREE.Vector2;
+  extent: THREE.Vector2;
+  deep: THREE.Color;
+  shallow: THREE.Color;
+  skyColor: THREE.Color;
+  skyRotation: number;
+  skyIntensity: number;
+  sunDirection: THREE.Vector3;
+  sunColor: THREE.Color;
+  clarity: number;
+  roughness: number;
+  hasSkyTexture: boolean;
+}): WaterUniformShim {
+  return {
+    uWaveTexture: texture(params.waveTexture),
+    uDepthTexture: texture(params.depthTexture),
+    uSkyTexture: texture(params.skyTexture),
+    uHasSkyTexture: uniform(params.hasSkyTexture ? 1 : 0),
+    uTime: uniform(0),
+    uAmplitude: uniform(params.amplitude),
+    uChop: uniform(params.chop),
+    uPeriod: uniform(params.period),
+    uBands: uniform(params.bands),
+    uWind: uniform(params.wind),
+    uMin: uniform(params.min),
+    uExtent: uniform(params.extent),
+    uDeepColor: uniform(params.deep),
+    uShallowColor: uniform(params.shallow),
+    uSkyColor: uniform(params.skyColor),
+    uSkyRotation: uniform(params.skyRotation),
+    uSkyIntensity: uniform(params.skyIntensity),
+    uSunDirection: uniform(params.sunDirection),
+    uSunColor: uniform(params.sunColor),
+    uClarity: uniform(params.clarity),
+    uRoughness: uniform(params.roughness),
+  };
+}
+
+/**
+ * Builds the TSL water material: displaced vertex position (world-space wave
+ * sum), wave normal and crest factor as varyings, then GGX sun response,
+ * fresnel sky reflection and depth fade in the fragment stage.
+ */
+function buildWaterMaterial(uniforms: WaterUniformShim): WaterSurfaceMaterial {
+  const U = (key: string) => uniforms[key] as UniformNode<'float', number>;
+  const uTime = U('uTime');
+  const uPeriod = U('uPeriod');
+  const uBands = U('uBands');
+  const uWind = uniforms.uWind as UniformNode<'vec2', THREE.Vector2>;
+  const uAmplitude = U('uAmplitude');
+  const uChop = U('uChop');
+  const uMin = uniforms.uMin as UniformNode<'vec2', THREE.Vector2>;
+  const uExtent = uniforms.uExtent as UniformNode<'vec2', THREE.Vector2>;
+  const uHasSkyTexture = U('uHasSkyTexture');
+  const uSkyColor = uniforms.uSkyColor as UniformNode<'color', THREE.Color>;
+  const uSkyRotation = U('uSkyRotation');
+  const uSkyIntensity = U('uSkyIntensity');
+  const uSunDirection = uniforms.uSunDirection as UniformNode<'vec3', THREE.Vector3>;
+  const uSunColor = uniforms.uSunColor as UniformNode<'color', THREE.Color>;
+  const uClarity = U('uClarity');
+  const uRoughness = U('uRoughness');
+  const uDeepColor = uniforms.uDeepColor as UniformNode<'color', THREE.Color>;
+  const uShallowColor = uniforms.uShallowColor as UniformNode<'color', THREE.Color>;
+  const waveTex = uniforms.uWaveTexture as ReturnType<typeof texture>;
+  const depthTex = uniforms.uDepthTexture as ReturnType<typeof texture>;
+  const skyTex = uniforms.uSkyTexture as ReturnType<typeof texture>;
+
+  // One rotated band of the periodic wave field: the packed sample plus the
+  // world-space gradient (transpose(R) * local gradient).
+  const waveSample = (band: (typeof BANDS)[number], world: Node<'vec2'>): { s: Node<'vec4'>; grad: Node<'vec2'> } => {
+    const axis = vec2(band.axis[0], band.axis[1]);
+    const yAxis = vec2(axis.y.negate(), axis.x);
+    const p = vec2(dot(world, axis), dot(world, yAxis));
+    const uvw = p.mul(band.scale).div(uPeriod).add(uWind.mul(band.speed).mul(uTime)).add(vec2(band.offset[0], band.offset[1]));
+    const s = waveTex.sample(uvw);
+    const localGradient = s.gb.mul(2.0).sub(1.0);
+    const grad = axis.mul(localGradient.x).add(yAxis.mul(localGradient.y));
+    return { s, grad };
+  };
+
+  // Vertex stage: accumulate height/gradient/crest across active bands.
+  // Additive terms with mask gating, built as pure expression trees (TSL
+  // assigns require a stack context, which material construction lacks).
+  const worldPos = positionWorld;
+  let height: Node<'float'> = float(0);
+  let gradient: Node<'vec2'> = vec2(0, 0);
+  let crest: Node<'float'> = float(0);
+  for (let i = 0; i < BANDS.length; i++) {
+    const band = BANDS[i]!;
+    const mask = step(i + 0.5, uBands);
+    const { s, grad } = waveSample(band, worldPos.xz);
+    height = height.add(s.r.mul(2.0).sub(1.0).mul(band.height).mul(mask));
+    gradient = gradient.add(grad.mul(band.gradient).mul(mask));
+    crest = crest.add(s.a.mul(band.crest).mul(mask));
+  }
+  const chopAmount = uAmplitude.mul(uChop);
+  const displacedWorld = worldPos.add(vec3(
+    gradient.x.mul(chopAmount),
+    height.mul(uAmplitude),
+    gradient.y.mul(chopAmount),
+  ));
+  const waveNormal = normalize(vec3(gradient.x.negate().mul(uAmplitude), float(1), gradient.y.negate().mul(uAmplitude)));
+  const vNormal = varying(waveNormal) as unknown as Node<'vec3'>;
+  const vCrest = varying(clamp(crest, 0.0, 1.0)) as unknown as Node<'float'>;
+
+  // Fragment stage.
+  const localPosition = positionWorld.xz.sub(uMin);
+  const boundaryDistance = min(
+    min(localPosition.x, uExtent.x.sub(localPosition.x)),
+    min(localPosition.y, uExtent.y.sub(localPosition.y)),
+  );
+  Discard(boundaryDistance.lessThanEqual(0.0));
+  const boundaryFade = smoothstep(0.0, 0.65, boundaryDistance);
+  const depthUv = clamp(localPosition.div(max(uExtent, vec2(0.001, 0.001))), 0.0, 1.0);
+  const depth = depthTex.sample(depthUv).r;
+  Discard(depth.lessThan(0.003));
+
+  // Sub-triangle capillary normals come from the same deterministic field as
+  // the vertex displacement, decorrelated from the broad bands.
+  let detailGradient: Node<'vec2'> = vec2(0, 0);
+  for (const band of DETAIL_BANDS) {
+    const mask = step(band.minBands, uBands);
+    const axis = vec2(band.axis[0], band.axis[1]);
+    const yAxis = vec2(axis.y.negate(), axis.x);
+    const p = vec2(dot(positionWorld.xz, axis), dot(positionWorld.xz, yAxis));
+    const uvw = p.mul(band.scale).div(uPeriod).add(uWind.mul(band.speed).mul(uTime)).add(vec2(band.offset[0], band.offset[1]));
+    const localGradient = waveTex.sample(uvw).gb.mul(2.0).sub(1.0);
+    detailGradient = detailGradient.add(axis.mul(localGradient.x).add(yAxis.mul(localGradient.y)).mul(band.weight).mul(mask));
   }
 
-  void main() {
-    vec3 world = (modelMatrix * vec4(position, 1.0)).xyz;
-    float height = 0.0;
-    vec2 gradient = vec2(0.0);
-    float crest = 0.0;
-    vec4 s;
-    vec2 bandGradient;
-    if (uBands > 0.5) {
-      s = waveSample(world.xz, 0.42, 0.20, vec2(0.98558477, -0.16918235), vec2(0.11, 0.37), bandGradient);
-      height += (s.r * 2.0 - 1.0) * 0.48;
-      gradient += bandGradient * 0.35;
-      crest += s.a * 0.25;
-    }
-    if (uBands > 1.5) {
-      s = waveSample(world.xz, 0.95, 0.42, vec2(0.95233357, 0.30505864), vec2(0.53, 0.19), bandGradient);
-      height += (s.r * 2.0 - 1.0) * 0.24;
-      gradient += bandGradient * 0.57;
-      crest += s.a * 0.34;
-    }
-    if (uBands > 2.5) {
-      s = waveSample(world.xz, 2.10, 0.84, vec2(0.74517440, -0.66686964), vec2(0.29, 0.71), bandGradient);
-      height += (s.r * 2.0 - 1.0) * 0.12;
-      gradient += bandGradient * 1.25;
-      crest += s.a * 0.28;
-    }
-    if (uBands > 3.5) {
-      s = waveSample(world.xz, 4.40, 1.38, vec2(0.60582016, 0.79560162), vec2(0.83, 0.43), bandGradient);
-      height += (s.r * 2.0 - 1.0) * 0.05;
-      gradient += bandGradient * 1.85;
-      crest += s.a * 0.13;
-    }
-    if (uBands > 4.5) {
-      s = waveSample(world.xz, 7.80, 2.10, vec2(0.90475166, -0.42593947), vec2(0.67, 0.89), bandGradient);
-      height += (s.r * 2.0 - 1.0) * 0.025;
-      gradient += bandGradient * 2.35;
-      crest += s.a * 0.07;
-    }
-    if (uBands > 5.5) {
-      s = waveSample(world.xz, 13.0, 3.10, vec2(0.77757272, 0.62879302), vec2(0.41, 0.07), bandGradient);
-      height += (s.r * 2.0 - 1.0) * 0.012;
-      gradient += bandGradient * 2.8;
-      crest += s.a * 0.04;
-    }
-    height *= uAmplitude;
-    // A bounded choppy term derived from the very same field keeps crests
-    // attached to highlights without folding the finite gameplay surface.
-    world.xz += gradient * uAmplitude * uChop;
-    world.y += height;
-    vWorldPosition = world;
-    vCrest = clamp(crest, 0.0, 1.0);
-    vWorldNormal = normalize(vec3(-gradient.x * uAmplitude, 1.0, -gradient.y * uAmplitude));
-    gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
-  }
-`;
+  const n = normalize(vNormal.add(vec3(detailGradient.x.negate(), float(0), detailGradient.y.negate())));
+  const faceN = frontFacing.select(n, n.negate());
+  const viewDirection = normalize(cameraPosition.sub(positionWorld));
+  const nov = max(dot(faceN, viewDirection), 0.0);
+  const fresnel = float(0.02).add(float(0.98).mul(pow(float(1.0).sub(nov), 5.0)));
+  const sunDirection = normalize(uSunDirection.negate());
+  const halfDirection = normalize(sunDirection.add(viewDirection));
+  const nh = max(dot(faceN, halfDirection), 0.0);
+  const nol = max(dot(faceN, sunDirection), 0.0);
+  const roughness = clamp(uRoughness, 0.08, 0.45);
+  const alphaRoughness = roughness.mul(roughness);
+  const alphaSquared = alphaRoughness.mul(alphaRoughness);
+  const distributionDenominator = nh.mul(nh).mul(alphaSquared.sub(1.0)).add(1.0);
+  const distribution = alphaSquared.div(
+    max(float(3.1415926).mul(distributionDenominator).mul(distributionDenominator), 0.001),
+  );
+  const geometryK = roughness.add(1.0).mul(roughness.add(1.0)).mul(0.125);
+  const geometryView = nov.div(max(nov.mul(float(1.0).sub(geometryK)).add(geometryK), 0.001));
+  const geometryLight = nol.div(max(nol.mul(float(1.0).sub(geometryK)).add(geometryK), 0.001));
+  const ggxSpec = distribution.mul(geometryView).mul(geometryLight).div(max(float(4.0).mul(nov).mul(nol), 0.001));
+  const glint = pow(nh, 180.0).mul(float(0.006).add(vCrest.mul(0.035)));
 
-const WATER_FRAGMENT = /* glsl */ `
-  uniform sampler2D uWaveTexture;
-  uniform sampler2D uDepthTexture;
-  uniform sampler2D uSkyTexture;
-  uniform float uTime;
-  uniform float uPeriod;
-  uniform float uBands;
-  uniform vec2 uWind;
-  uniform float uHasSkyTexture;
-  uniform vec2 uMin;
-  uniform vec2 uExtent;
-  uniform vec3 uDeepColor;
-  uniform vec3 uShallowColor;
-  uniform vec3 uSkyColor;
-  uniform float uSkyRotation;
-  uniform float uSkyIntensity;
-  uniform vec3 uSunDirection;
-  uniform vec3 uSunColor;
-  uniform float uClarity;
-  uniform float uRoughness;
-  varying vec3 vWorldPosition;
-  varying vec3 vWorldNormal;
-  varying float vCrest;
+  // Water is more transparent at a shallow edge, while deep water absorbs
+  // red light first. The depth texture comes from the canonical terrain.
+  const shallow = float(1.0).sub(smoothstep(0.08, 0.56, depth));
+  const asVec3 = (c: UniformNode<'color', THREE.Color>): Node<'vec3'> => c as unknown as Node<'vec3'>;
+  const base = mix(asVec3(uDeepColor), asVec3(uShallowColor), shallow.mul(0.86));
+  // Equirectangular sky reflection with the background rotation applied.
+  const cs = cos(uSkyRotation);
+  const sn = sin(uSkyRotation);
+  const reflectedDir = reflect(viewDirection.negate(), faceN);
+  const rotated = vec3(
+    cs.mul(reflectedDir.x).sub(sn.mul(reflectedDir.z)),
+    reflectedDir.y,
+    sn.mul(reflectedDir.x).add(cs.mul(reflectedDir.z)),
+  );
+  const skyUv = vec2(
+    atan(rotated.z, rotated.x).div(6.2831853).add(0.5),
+    float(0.5).add(asin(clamp(rotated.y, -1.0, 1.0)).div(3.1415926)),
+  );
+  const skySampled = skyTex.sample(skyUv).rgb.mul(uSkyIntensity);
+  const reflected = uHasSkyTexture.lessThan(0.5).select(asVec3(uSkyColor), skySampled);
+  const color = mix(base, reflected, fresnel.mul(float(0.20).add(uClarity.mul(0.28))));
+  const shaded = color
+    .add(asVec3(uSunColor).mul(min(ggxSpec, 1.25).mul(nol).mul(0.07).add(glint)))
+    .add(asVec3(uShallowColor).mul(shallow).mul(0.045));
+  const alpha = mix(0.91, 0.985, fresnel).mul(mix(0.78, 1.0, depth)).mul(boundaryFade);
 
-  vec2 waterDetailGradient(
-    vec2 world,
-    float scale,
-    float speed,
-    vec2 localXAxis,
-    vec2 offset
-  ) {
-    vec2 localYAxis = vec2(-localXAxis.y, localXAxis.x);
-    vec2 p = vec2(dot(world, localXAxis), dot(world, localYAxis));
-    vec2 uv = p * scale / uPeriod + uWind * speed * uTime + offset;
-    vec2 localGradient = texture2D(uWaveTexture, uv).gb * 2.0 - 1.0;
-    return localXAxis * localGradient.x + localYAxis * localGradient.y;
-  }
+  const material = new WaterSurfaceMaterial();
+  material.uniforms = uniforms;
+  material.transparent = true;
+  material.side = THREE.DoubleSide;
+  material.depthTest = true;
+  material.depthWrite = false;
+  material.premultipliedAlpha = false;
+  material.positionNode = modelWorldMatrixInverse.mul(vec4(displacedWorld, 1.0)).xyz;
+  material.colorNode = shaded.max(0.0);
+  material.opacityNode = alpha;
+  return material;
+}
 
-  vec3 skyReflection(vec3 direction) {
-    if (uHasSkyTexture < 0.5) return uSkyColor;
-    float cs = cos(uSkyRotation);
-    float sn = sin(uSkyRotation);
-    vec3 rotated = vec3(
-      cs * direction.x - sn * direction.z,
-      direction.y,
-      sn * direction.x + cs * direction.z
-    );
-    vec2 uv = vec2(atan(rotated.z, rotated.x) / 6.2831853 + 0.5,
-      0.5 + asin(clamp(rotated.y, -1.0, 1.0)) / 3.1415926);
-    return texture2D(uSkyTexture, uv).rgb * uSkyIntensity;
-  }
-
-  void main() {
-    vec2 localPosition = vWorldPosition.xz - uMin;
-    float boundaryDistance = min(
-      min(localPosition.x, uExtent.x - localPosition.x),
-      min(localPosition.y, uExtent.y - localPosition.y)
-    );
-    if (boundaryDistance <= 0.0) discard;
-    float boundaryFade = smoothstep(0.0, 0.65, boundaryDistance);
-    vec2 uv = clamp(localPosition / max(uExtent, vec2(0.001)), 0.0, 1.0);
-    float depth = texture2D(uDepthTexture, uv).r;
-    if (depth < 0.003) discard;
-    // Sub-triangle capillary normals come from the same deterministic field
-    // as vertex displacement. Two decorrelated samples break up broad grazing
-    // reflections without adding meshes, textures, or camera-relative noise.
-    vec2 detailGradient = vec2(0.0);
-    if (uBands > 2.5) {
-      detailGradient += waterDetailGradient(
-        vWorldPosition.xz,
-        6.70,
-        1.85,
-        vec2(0.83205029, 0.55470020),
-        vec2(0.17, 0.61)
-      ) * 0.32;
-    }
-    if (uBands > 3.5) {
-      detailGradient += waterDetailGradient(
-        vWorldPosition.xz,
-        11.30,
-        2.65,
-        vec2(0.51449576, -0.85749293),
-        vec2(0.73, 0.23)
-      ) * 0.18;
-    }
-    vec3 n = normalize(vWorldNormal + vec3(-detailGradient.x, 0.0, -detailGradient.y));
-    if (!gl_FrontFacing) n = -n;
-    vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
-    float nov = max(dot(n, viewDirection), 0.0);
-    float fresnel = 0.02 + 0.98 * pow(1.0 - nov, 5.0);
-    vec3 sunDirection = normalize(-uSunDirection);
-    vec3 halfDirection = normalize(sunDirection + viewDirection);
-    float nh = max(dot(n, halfDirection), 0.0);
-    float nol = max(dot(n, sunDirection), 0.0);
-    float roughness = clamp(uRoughness, 0.08, 0.45);
-    float alphaRoughness = roughness * roughness;
-    float alphaSquared = alphaRoughness * alphaRoughness;
-    float distributionDenominator = nh * nh * (alphaSquared - 1.0) + 1.0;
-    float distribution = alphaSquared
-      / max(3.1415926 * distributionDenominator * distributionDenominator, 0.001);
-    float geometryK = (roughness + 1.0) * (roughness + 1.0) * 0.125;
-    float geometryView = nov / max(nov * (1.0 - geometryK) + geometryK, 0.001);
-    float geometryLight = nol / max(nol * (1.0 - geometryK) + geometryK, 0.001);
-    float ggxSpec = distribution * geometryView * geometryLight
-      / max(4.0 * nov * nol, 0.001);
-    float glint = pow(nh, 180.0) * (0.006 + 0.035 * vCrest);
-    // Water is more transparent at a shallow edge, while deep water absorbs
-    // red light first. The depth texture comes from the canonical terrain.
-    float shallow = 1.0 - smoothstep(0.08, 0.56, depth);
-    vec3 base = mix(uDeepColor, uShallowColor, shallow * 0.86);
-    vec3 reflected = skyReflection(reflect(-viewDirection, n));
-    vec3 color = mix(base, reflected, fresnel * (0.20 + 0.28 * uClarity));
-    color += uSunColor * (min(ggxSpec, 1.25) * nol * 0.07 + glint);
-    color += uShallowColor * shallow * 0.045;
-    float alpha = mix(0.91, 0.985, fresnel) * mix(0.78, 1.0, depth) * boundaryFade;
-    gl_FragColor = vec4(max(color, vec3(0.0)), alpha);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`;
-
-const FOAM_VERTEX = /* glsl */ `
-  varying vec2 vUv;
-  varying vec2 vWorldXZ;
-  void main() {
-    vUv = uv;
-    vec4 world = modelMatrix * vec4(position, 1.0);
-    vWorldXZ = world.xz;
-    gl_Position = projectionMatrix * viewMatrix * world;
-  }
-`;
-
-const FOAM_FRAGMENT = /* glsl */ `
-  uniform float uTime;
-  uniform vec3 uColor;
-  uniform float uStrength;
-  varying vec2 vUv;
-  varying vec2 vWorldXZ;
-  float hash(vec2 p) { return fract(sin(dot(p, vec2(41.7, 113.9))) * 43758.5453); }
-  void main() {
-    float along = dot(vWorldXZ, vec2(0.73, 0.41));
-    float crossWave = sin(dot(vWorldXZ, vec2(-0.19, 0.83)) * 0.47 - uTime * 0.21);
-    float breakup = smoothstep(0.20, 0.78,
-      sin(along * 0.62 + uTime * 0.34 + crossWave * 1.8) * 0.5 + 0.5);
-    breakup *= 0.82 + 0.18 * hash(floor(vWorldXZ * 0.38));
-    float edge = 1.0 - smoothstep(0.0, 0.5, abs(vUv.y - 0.5) * 2.0);
-    float alpha = breakup * edge * uStrength;
-    if (alpha < 0.008) discard;
-    gl_FragColor = vec4(uColor, alpha);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
-  }
-`;
+function buildFoamMaterial(uniforms: WaterUniformShim): WaterFoamMaterial {
+  const uTime = uniforms.uTime as UniformNode<'float', number>;
+  const uColor = uniforms.uColor as UniformNode<'color', THREE.Color>;
+  const uStrength = uniforms.uStrength as UniformNode<'float', number>;
+  const worldXZ = positionWorld.xz;
+  const along = dot(worldXZ, vec2(0.73, 0.41));
+  const crossWave = sin(dot(worldXZ, vec2(-0.19, 0.83)).mul(0.47).sub(uTime.mul(0.21)));
+  const breakup = smoothstep(0.20, 0.78, sin(along.mul(0.62).add(uTime.mul(0.34)).add(crossWave.mul(1.8))).mul(0.5).add(0.5));
+  const hash = fract(sin(dot(floor(worldXZ.mul(0.38)), vec2(41.7, 113.9))).mul(43758.5453));
+  const breakupModulated = breakup.mul(float(0.82).add(hash.mul(0.18)));
+  const edge = float(1.0).sub(smoothstep(0.0, 0.5, abs(uv().y.sub(0.5)).mul(2.0)));
+  const alpha = breakupModulated.mul(edge).mul(uStrength);
+  Discard(alpha.lessThan(0.008));
+  const material = new WaterFoamMaterial();
+  material.uniforms = uniforms;
+  material.transparent = true;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  material.colorNode = uColor as unknown as Node<'vec3'>;
+  material.opacityNode = alpha;
+  return material;
+}
 
 function profileFor(water: WaterVolume, index: number): VisualProfile {
   const kind: WaterVisualKind = water.visual?.kind ?? 'fallback';
@@ -535,11 +565,17 @@ function markOwned(object: THREE.Object3D): void {
   object.userData.xoWaterSystem = true;
 }
 
-function canUseHalfFloat(renderer: THREE.WebGLRenderer | null | undefined): boolean {
-  if (!renderer?.capabilities.isWebGL2) return false;
+function canUseHalfFloat(renderer: WebGPURenderer | null | undefined): boolean {
+  if (renderer === null || renderer === undefined) return false;
+  // Native WebGPU filters 16F textures as a core capability; the WebGL2
+  // fallback needs the classic extension probe.
+  if (isWebGPUBackend(renderer)) return true;
+  const caps = (renderer as unknown as { capabilities?: { isWebGL2?: boolean } }).capabilities;
+  if (!caps?.isWebGL2) return false;
   try {
-    return renderer.extensions.has('OES_texture_float_linear')
-      || renderer.extensions.has('OES_texture_half_float_linear');
+    const glRenderer = renderer as unknown as { extensions: { has(name: string): boolean } };
+    return glRenderer.extensions.has('OES_texture_float_linear')
+      || glRenderer.extensions.has('OES_texture_half_float_linear');
   } catch {
     return false;
   }
@@ -572,7 +608,7 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
   readonly group = new THREE.Group();
   private readonly entries: SurfaceEntry[] = [];
   private readonly map: MapDef;
-  private readonly renderer: THREE.WebGLRenderer | null;
+  private readonly renderer: WebGPURenderer | null;
   private readonly skyTexture: THREE.Texture;
   private readonly skyColor: THREE.Color;
   private readonly skyRotationY: number;
@@ -627,7 +663,7 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
       waveTexture.dispose();
       throw error;
     }
-    const materials: THREE.ShaderMaterial[] = [];
+    const materials: WaterSurfaceMaterial[] = [];
     const meshes: THREE.Mesh[] = [];
     const triangleCounts: number[] = [];
     const ownedGeometries = new Set<THREE.BufferGeometry>();
@@ -691,13 +727,10 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
         sediment.renderOrder = 3.5;
         markOwned(sediment);
         root.add(sediment);
-        const foamMaterial = new THREE.ShaderMaterial({
-          vertexShader: FOAM_VERTEX,
-          fragmentShader: FOAM_FRAGMENT,
-          transparent: true,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-          uniforms: { uTime: { value: this.time }, uColor: { value: profile.foam }, uStrength: { value: config.foam } },
+        const foamMaterial = buildFoamMaterial({
+          uTime: uniform(this.time),
+          uColor: uniform(profile.foam),
+          uStrength: uniform(config.foam),
         });
         ownedMaterials.add(foamMaterial);
         const foamGeometry = makeRibbonGeometry(
@@ -747,43 +780,34 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
     waveTexture: THREE.DataTexture,
     depthTexture: THREE.DataTexture,
     config: QualityConfig,
-  ): THREE.ShaderMaterial {
+  ): WaterSurfaceMaterial {
     const wind = water.visual?.windDirection ?? profile.windDirection;
     const direction = new THREE.Vector2(wind[0], wind[1]);
     if (direction.lengthSq() < 1e-4) direction.set(0.82, 0.32);
     direction.normalize();
-    const material = new THREE.ShaderMaterial({
-      vertexShader: WATER_VERTEX,
-      fragmentShader: WATER_FRAGMENT,
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthTest: true,
-      depthWrite: false,
-      premultipliedAlpha: false,
-      uniforms: {
-        uWaveTexture: { value: waveTexture },
-        uDepthTexture: { value: depthTexture },
-        uSkyTexture: { value: this.skyTexture },
-        uHasSkyTexture: { value: this.skyTexture !== EMPTY_SKY ? 1 : 0 },
-        uTime: { value: this.time },
-        uAmplitude: { value: profile.amplitude * config.displacement },
-        uChop: { value: profile.choppiness * config.chopScale },
-        uPeriod: { value: profile.period },
-        uBands: { value: config.bands },
-        uWind: { value: direction },
-        uMin: { value: new THREE.Vector2(water.minX, water.minZ) },
-        uExtent: { value: new THREE.Vector2(water.maxX - water.minX, water.maxZ - water.minZ) },
-        uDeepColor: { value: profile.deep },
-        uShallowColor: { value: profile.shallow },
-        uSkyColor: { value: this.skyColor },
-        uSkyRotation: { value: this.skyRotationY },
-        uSkyIntensity: { value: this.skyIntensity },
-        uSunDirection: { value: this.sunDirection },
-        uSunColor: { value: this.sunColor },
-        uClarity: { value: profile.clarity },
-        uRoughness: { value: profile.kind === 'lake' ? 0.16 : profile.kind === 'river' ? 0.22 : 0.24 },
-      },
+    const uniforms = makeWaterUniforms({
+      waveTexture,
+      depthTexture,
+      skyTexture: this.skyTexture,
+      amplitude: profile.amplitude * config.displacement,
+      chop: profile.choppiness * config.chopScale,
+      period: profile.period,
+      bands: config.bands,
+      wind: direction,
+      min: new THREE.Vector2(water.minX, water.minZ),
+      extent: new THREE.Vector2(water.maxX - water.minX, water.maxZ - water.minZ),
+      deep: profile.deep,
+      shallow: profile.shallow,
+      skyColor: this.skyColor,
+      skyRotation: this.skyRotationY,
+      skyIntensity: this.skyIntensity,
+      sunDirection: this.sunDirection,
+      sunColor: this.sunColor,
+      clarity: profile.clarity,
+      roughness: profile.kind === 'lake' ? 0.16 : profile.kind === 'river' ? 0.22 : 0.24,
+      hasSkyTexture: this.skyTexture !== EMPTY_SKY,
     });
+    const material = buildWaterMaterial(uniforms);
     material.userData.xoWaterOwned = true;
     material.userData.xoWaterSystem = true;
     return material;
@@ -818,7 +842,7 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
     if (viewPosition) this.viewPosition.copy(viewPosition);
     for (const entry of this.entries) {
       for (const material of entry.materials) material.uniforms['uTime']!.value = this.time * entry.profile.speed;
-      if (entry.foam?.material instanceof THREE.ShaderMaterial) entry.foam.material.uniforms['uTime']!.value = this.time;
+      if (entry.foam?.material instanceof WaterFoamMaterial) entry.foam.material.uniforms['uTime']!.value = this.time;
       this.selectLod(entry);
     }
   }
@@ -847,7 +871,7 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
         material.uniforms['uAmplitude']!.value = entry.profile.amplitude * config.displacement;
         material.uniforms['uChop']!.value = entry.profile.choppiness * config.chopScale;
       }
-      if (entry.foam?.material instanceof THREE.ShaderMaterial) {
+      if (entry.foam?.material instanceof WaterFoamMaterial) {
         entry.foam.material.uniforms['uStrength']!.value = config.foam;
         entry.foam.visible = config.foam > 0;
       }

@@ -1288,7 +1288,7 @@ async function prepareOnlineGuestRuntime(
       await renderer.renderer.compileAsync(renderer.scene, rig.camera);
       ensureCurrentStart(generation);
       renderer.renderer.render(renderer.scene, rig.camera);
-      const aerial = renderer.captureAerial(input.map.size / 2, 1024, [
+      const aerial = await renderer.captureAerial(input.map.size / 2, 1024, [
         world.stormMesh,
         world.transportGroup,
         ...[...rigs.values()].map((character) => character.group),
@@ -1852,7 +1852,7 @@ async function startMatchImpl(
   // One-shot aerial capture for the tactical map while the loading screen is
   // still up (single GPU readback, ~50 ms).
   try {
-    const aerial = renderer.captureAerial(match.mapDef.size / 2, 1024, [
+    const aerial = await renderer.captureAerial(match.mapDef.size / 2, 1024, [
       world.stormMesh,
       world.transportGroup,
       ...[...rigs.values()].map((r) => r.group),

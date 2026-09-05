@@ -7,6 +7,12 @@
  */
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import type { Node, UniformNode } from 'three/webgpu';
+import {
+  abs, clamp, dot, floor, fract, float, mix, normalView, positionLocal,
+  positionViewDirection, pow, sin, smoothstep, step, uniform, uv, vec2,
+} from 'three/tsl';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import {
@@ -58,49 +64,52 @@ function mergeChestParts(parts: THREE.BufferGeometry[], label: string): THREE.Bu
   return merged;
 }
 
-const STORM_VERT = /* glsl */ `
-  varying vec2 vUv;
-  varying vec3 vWPos;
-  void main() {
-    vUv = uv;
-    vec4 wp = modelMatrix * vec4(position, 1.0);
-    vWPos = wp.xyz;
-    gl_Position = projectionMatrix * viewMatrix * wp;
-  }
-`;
+/**
+ * TSL port of the former GLSL storm-wall shader: vertical fade, drifting
+ * murk, scrolling energy bands and hash crackle over a translucent purple
+ * wall. Uniform nodes keep per-frame updates recompile-free.
+ */
+interface StormUniforms {
+  time: UniformNode<'float', number>;
+  intensity: UniformNode<'float', number>;
+  colorA: UniformNode<'color', THREE.Color>;
+  colorB: UniformNode<'color', THREE.Color>;
+}
 
-const STORM_FRAG = /* glsl */ `
-  uniform float uTime;
-  uniform float uIntensity;
-  uniform vec3 uColorA;
-  uniform vec3 uColorB;
-  varying vec2 vUv;
-  varying vec3 vWPos;
-
-  float hash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-  }
-
-  void main() {
-    // vertical fade: solid at eye level, fading toward the top rim
-    float vertFade = smoothstep(1.0, 0.3, vUv.y) * smoothstep(0.0, 0.06, vUv.y);
-    // large-scale wall presence (slow drifting murk so it reads as a volume)
-    float murk = sin(vUv.x * 24.0 + uTime * 0.35 + sin(vUv.y * 9.0 + uTime * 0.2) * 1.4) * 0.5 + 0.5;
-    // scrolling energy bands (two directions)
-    float band = sin(vUv.x * 90.0 - uTime * 2.2 + sin(vUv.y * 22.0)) * 0.5 + 0.5;
-    band *= 0.55 + 0.45 * sin(vUv.y * 34.0 - uTime * 1.4);
-    // crackle noise streaks
-    vec2 cell = vec2(floor(vUv.x * 140.0), floor(vUv.y * 26.0));
-    float n = hash(cell + vec2(floor(uTime * 9.0), 0.0));
-    float crackle = step(0.82, n) * (0.6 + 0.4 * sin(uTime * 22.0));
-    float energy = band * (0.35 + crackle);
-    vec3 col = mix(uColorB, uColorA, clamp(energy * 1.5, 0.0, 1.0));
-    col = mix(col, uColorB * 0.85, murk * 0.35);
-    // readable translucent wall: solid purple body + energetic highlights
-    float alpha = vertFade * (0.27 + murk * 0.08 + energy * 0.24) * uIntensity;
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
+function buildStormMaterial(): { material: MeshBasicNodeMaterial; u: StormUniforms } {
+  const u: StormUniforms = {
+    time: uniform(0),
+    intensity: uniform(1),
+    colorA: uniform(new THREE.Color(0xd2b4ff)),
+    colorB: uniform(new THREE.Color(0x5426bd)),
+  };
+  const uvX = uv().x;
+  const uvY = uv().y;
+  // vertical fade: solid at eye level, fading toward the top rim
+  const vertFade = smoothstep(1.0, 0.3, uvY).mul(smoothstep(0.0, 0.06, uvY));
+  // large-scale wall presence (slow drifting murk so it reads as a volume)
+  const murk = sin(uvX.mul(24.0).add(u.time.mul(0.35)).add(sin(uvY.mul(9.0).add(u.time.mul(0.2))).mul(1.4)))
+    .mul(0.5).add(0.5);
+  // scrolling energy bands (two directions)
+  const band0 = sin(uvX.mul(90.0).sub(u.time.mul(2.2)).add(sin(uvY.mul(22.0)))).mul(0.5).add(0.5);
+  const band = band0.mul(float(0.55).add(float(0.45).mul(sin(uvY.mul(34.0).sub(u.time.mul(1.4))))));
+  // crackle noise streaks
+  const cell = vec2(floor(uvX.mul(140.0)), floor(uvY.mul(26.0)));
+  const n = fract(sin(dot(cell.add(vec2(floor(u.time.mul(9.0)), 0.0)), vec2(127.1, 311.7))).mul(43758.5453));
+  const crackle = step(0.82, n).mul(float(0.6).add(float(0.4).mul(sin(u.time.mul(22.0)))));
+  const energy = band.mul(float(0.35).add(crackle));
+  let col: Node<'vec3'> = mix(u.colorB, u.colorA, clamp(energy.mul(1.5), 0.0, 1.0));
+  col = mix(col, u.colorB.mul(0.85), murk.mul(0.35));
+  // readable translucent wall: solid purple body + energetic highlights
+  const alpha = vertFade.mul(float(0.27).add(murk.mul(0.08)).add(energy.mul(0.24))).mul(u.intensity);
+  const material = new MeshBasicNodeMaterial();
+  material.transparent = true;
+  material.side = THREE.DoubleSide;
+  material.depthWrite = false;
+  material.colorNode = col;
+  material.opacityNode = alpha;
+  return { material, u };
+}
 
 /**
  * WorldItem Y is a lightweight settling centre kept 0.35 m above support.
@@ -132,42 +141,34 @@ const AMMO_BASE_CLEARANCE = 0.16;
  * the hologram a little material character while keeping its brightness
  * deterministic from frame to frame (and therefore free of pickup flicker).
  */
-const RARITY_HOLOGRAM_VERT = /* glsl */ `
-  varying vec3 vNormalV;
-  varying vec3 vViewDirV;
-  varying vec3 vPositionO;
-
-  void main() {
-    vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-    vNormalV = normalize(normalMatrix * normal);
-    vViewDirV = normalize(-viewPosition.xyz);
-    // Keep the small scan pattern in object space.  View-space coordinates
-    // would shimmer as the camera moves even though the item is stationary.
-    vPositionO = position;
-    gl_Position = projectionMatrix * viewPosition;
-  }
-`;
-
-const RARITY_HOLOGRAM_FRAG = /* glsl */ `
-  uniform vec3 uColor;
-  uniform float uOpacity;
-  varying vec3 vNormalV;
-  varying vec3 vViewDirV;
-  varying vec3 vPositionO;
-
-  void main() {
-    vec3 normalV = normalize(vNormalV);
-    vec3 viewDirV = normalize(vViewDirV);
-    // abs() keeps the treatment symmetrical for the double-sided shell.
-    float rim = pow(1.0 - abs(dot(normalV, viewDirV)), 2.35);
-    // A fixed, very low-contrast scan modulation breaks up a flat wash but
-    // never changes over time, unlike the old pulsing beacon.
-    float scan = 0.94 + 0.06 * sin(vPositionO.y * 26.0);
-    float alpha = uOpacity * (0.10 + rim * 0.38) * scan;
-    vec3 color = uColor * (0.42 + rim * 1.05);
-    gl_FragColor = vec4(color, alpha);
-  }
-`;
+/**
+ * TSL port of the former GLSL rarity hologram shader: view-dependent rim
+ * highlight plus a fixed low-contrast object-space scan. There is
+ * deliberately no time uniform — a static spatial scan keeps brightness
+ * deterministic from frame to frame (and therefore free of pickup flicker).
+ */
+function buildHologramMaterial(color: number, opacity: number): MeshBasicNodeMaterial {
+  const uColor = uniform(new THREE.Color(color));
+  const uOpacity = uniform(opacity);
+  // normalView is the view-space normal; positionViewDirection the normalized
+  // view vector. abs() keeps the treatment symmetrical for the double-sided
+  // shell.
+  const rim = pow(float(1.0).sub(abs(dot(normalView, positionViewDirection))), 2.35);
+  // A fixed, very low-contrast scan modulation breaks up a flat wash but
+  // never changes over time, unlike the old pulsing beacon.
+  const scan = float(0.94).add(float(0.06).mul(sin(positionLocal.y.mul(26.0))));
+  const alpha = uOpacity.mul(float(0.10).add(rim.mul(0.38))).mul(scan);
+  const colorNode = uColor.mul(float(0.42).add(rim.mul(1.05)));
+  const material = new MeshBasicNodeMaterial();
+  material.transparent = true;
+  material.depthTest = true;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  material.blending = THREE.AdditiveBlending;
+  material.colorNode = colorNode;
+  material.opacityNode = alpha;
+  return material;
+}
 
 /**
  * Virtualized static-light system. Night maps define far more light sources
@@ -369,6 +370,7 @@ export class WorldView {
   private chestMats = new Map<number, { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial }>();
   private lootViews = new Map<number, { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D }>();
   stormMesh!: THREE.Mesh;
+  private stormU: StormUniforms | null = null;
   readonly transportGroup = new THREE.Group();
   private time = 0;
   private waterVolumes: import('../world/types').WaterVolume[] = [];
@@ -1813,20 +1815,9 @@ export class WorldView {
 
   private buildStorm(): void {
     const geo = new THREE.CylinderGeometry(1, 1, 260, 72, 1, true);
-    const mat = new THREE.ShaderMaterial({
-      vertexShader: STORM_VERT,
-      fragmentShader: STORM_FRAG,
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      blending: THREE.NormalBlending,
-      uniforms: {
-        uTime: { value: 0 },
-        uIntensity: { value: 1 },
-        uColorA: { value: new THREE.Color(0xd2b4ff) },
-        uColorB: { value: new THREE.Color(0x5426bd) },
-      },
-    });
+    const storm = buildStormMaterial();
+    this.stormU = storm.u;
+    const mat = storm.material;
     this.stormMesh = new THREE.Mesh(geo, mat);
     this.stormMesh.position.y = 70;
     this.stormMesh.visible = false;
@@ -1840,7 +1831,7 @@ export class WorldView {
       return;
     }
     const me = match.localActor;
-    const mat = this.stormMesh.material as THREE.ShaderMaterial;
+    const mat = this.stormU!;
     if (!me) {
       this.stormMesh.visible = false;
       return;
@@ -1853,7 +1844,7 @@ export class WorldView {
     this.stormMesh.position.x = match.storm.centerX;
     this.stormMesh.position.z = match.storm.centerZ;
     this.stormMesh.scale.set(match.storm.radius, 1, match.storm.radius);
-    mat.uniforms['uIntensity']!.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
+    mat.intensity.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
   }
 
   syncStormView(storm: GameStateView['storm'], actorPosition?: Readonly<{ x: number; z: number }>): void {
@@ -1861,14 +1852,14 @@ export class WorldView {
       this.stormMesh.visible = false;
       return;
     }
-    const mat = this.stormMesh.material as THREE.ShaderMaterial;
+    const mat = this.stormU!;
     const distOutside = Math.hypot(actorPosition.x - storm.centerX, actorPosition.z - storm.centerZ) - storm.radius;
     const closeness = distOutside >= 0 ? 1 : Math.max(0, Math.min(1, 1 + distOutside / 60));
     this.stormMesh.visible = true;
     this.stormMesh.position.x = storm.centerX;
     this.stormMesh.position.z = storm.centerZ;
     this.stormMesh.scale.set(storm.radius, 1, storm.radius);
-    mat.uniforms['uIntensity']!.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
+    mat.intensity.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
   }
 
   private buildTransport(): void {
@@ -1967,8 +1958,7 @@ export class WorldView {
     this.syncChests(match);
     this.syncDestructibles(match);
     this.syncStorm(match);
-    const stormMat = this.stormMesh.material as THREE.ShaderMaterial;
-    stormMat.uniforms['uTime']!.value = this.time;
+    this.stormU!.time.value = this.time;
 
     if (match.phase === 'transport') {
       this.transportGroup.visible = true;
@@ -2014,8 +2004,7 @@ export class WorldView {
     this.waterSystem.update(view.time, this.viewPos);
     this.rain?.update(dt, this.viewPos);
     this.syncReplica(view);
-    const stormMat = this.stormMesh.material as THREE.ShaderMaterial;
-    stormMat.uniforms['uTime']!.value = this.time;
+    this.stormU!.time.value = this.time;
   }
 
   private rain: RainSystem | null = null;
@@ -2274,7 +2263,7 @@ function retoneRockMap(std: THREE.MeshStandardMaterial, color: number, amount: n
  */
 const RARITY_RANKS = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
 
-const hologramMaterialPool: { shader: THREE.ShaderMaterial[]; basic: THREE.MeshBasicMaterial[] } = {
+const hologramMaterialPool: { shader: MeshBasicNodeMaterial[]; basic: THREE.MeshBasicMaterial[] } = {
   shader: [],
   basic: [],
 };
@@ -2303,20 +2292,7 @@ function hologramMaterialFor(rarityRank: number, hasNormals: boolean): THREE.Mat
   }
   let material = hologramMaterialPool.shader[rank];
   if (!material) {
-    material = new THREE.ShaderMaterial({
-      vertexShader: RARITY_HOLOGRAM_VERT,
-      fragmentShader: RARITY_HOLOGRAM_FRAG,
-      uniforms: {
-        uColor: { value: new THREE.Color(RARITY_COLORS[RARITY_RANKS[rank]!]) },
-        uOpacity: { value: 0.14 + rank * 0.022 },
-      },
-      transparent: true,
-      depthTest: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      toneMapped: false,
-    });
+    material = buildHologramMaterial(RARITY_COLORS[RARITY_RANKS[rank]!], 0.14 + rank * 0.022);
     material.userData.weaponHologram = true;
     material.userData.externalShared = true;
     hologramMaterialPool.shader[rank] = material;

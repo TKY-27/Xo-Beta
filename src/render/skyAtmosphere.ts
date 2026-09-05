@@ -1,7 +1,7 @@
 /**
  * SkyAtmosphereSystem: the visible sky dome.
  *
- * One BackSide sphere with a compact shader provides the atmospheric
+ * One BackSide sphere with a TSL node material provides the atmospheric
  * gradient, sun/moon disc aligned with the directional light, scrolling
  * procedural cloud layers sampled from one generated noise texture, masked
  * stars and a horizon haze band. The existing HDRI/canvas environment map
@@ -12,128 +12,128 @@
  */
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import type { Node, UniformNode } from 'three/webgpu';
+import {
+  abs, clamp, cos, dot, exp, float, max, mix, normalize, positionLocal, pow,
+  sin, smoothstep, step, texture, uniform, vec2, vec3,
+} from 'three/tsl';
 import type { SkyAtmosphereProfile } from '../world/types';
 
 const DOME_RADIUS = 700;
 
-const vertexShader = /* glsl */ `
-  varying vec3 vDirection;
-  void main() {
-    vDirection = normalize(position);
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-
-const fragmentShader = /* glsl */ `
-  uniform vec3 uZenith;
-  uniform vec3 uHorizon;
-  uniform vec3 uSunDirection;
-  uniform vec3 uDiscColor;
-  uniform vec3 uCloudTint;
-  uniform vec3 uCloudShade;
-  uniform vec3 uHazeColor;
-  uniform float uDiscSize;
-  uniform float uDiscGlow;
-  uniform float uCloudCover;
-  uniform float uWindSpeed;
-  uniform float uStarOpacity;
-  uniform float uHazeStrength;
-  uniform float uTime;
-  uniform sampler2D uNoise;
-  varying vec3 vDirection;
-
-  // Two octaves from the packed noise texture (R = low frequency, G = high).
-  float cloudDensity(vec2 uv) {
-    float low = texture2D(uNoise, uv).r;
-    float high = texture2D(uNoise, uv * 3.7).g;
-    float d = low * 0.72 + high * 0.28;
-    // Remap around the coverage control: 0 = clear, 1 = heavy overcast.
-    return smoothstep(1.0 - uCloudCover * 1.15, 1.0 - uCloudCover * 0.35, d);
-  }
-
-  void main() {
-    vec3 dir = normalize(vDirection);
-    float height = clamp(dir.y, -1.0, 1.0);
-
-    // Atmospheric gradient: zenith colour falling to horizon, with a darker
-    // below-horizon band so terrain silhouettes read cleanly.
-    float t = clamp(height * 1.6 + 0.08, 0.0, 1.0);
-    vec3 color = mix(uHorizon, uZenith, pow(t, 0.75));
-
-    // Sun/moon disc and restrained glow, aligned with the directional light.
-    float cosAngle = dot(dir, normalize(uSunDirection));
-    float disc = smoothstep(cos(uDiscSize), cos(uDiscSize * 0.82), cosAngle);
-    float glow = pow(max(cosAngle, 0.0), 46.0) * uDiscGlow;
-
-    // Clouds: project the view direction onto a virtual layer plane and
-    // scroll with the deterministic wind. Two layers, the higher one slower
-    // and fainter, produce parallax without any extra draw.
-    vec2 plane = dir.xz / max(0.14, dir.y + 0.22);
-    float wind = uTime * uWindSpeed;
-    float c1 = cloudDensity(plane * 0.055 + vec2(wind * 0.9, wind * 0.32));
-    float c2 = cloudDensity(plane * 0.11 + vec2(-wind * 0.55, wind * 0.7) + 13.7);
-    float clouds = clamp(c1 * 0.78 + c2 * 0.34, 0.0, 1.0);
-    // Fade clouds toward the horizon line into the haze.
-    clouds *= smoothstep(-0.02, 0.16, height);
-    // Cloud shading: brighter toward the sun, cooler away.
-    vec3 cloudColor = mix(uCloudShade, uCloudTint, 0.45 + 0.55 * glow);
-    color = mix(color, cloudColor, clouds);
-
-    // Stars: high-frequency noise texels, masked by cloud coverage.
-    float star = step(0.9965, texture2D(uNoise, dir.xz * 0.34 + dir.y * 1.7).b);
-    float twinkle = 0.72 + 0.28 * sin(uTime * 1.9 + dot(dir, vec3(31.7, 17.3, 11.1)) * 8.0);
-    color += vec3(star * twinkle * uStarOpacity * (1.0 - clouds));
-
-    // Disc drawn over clouds (moon/sun behind thin cloud reads washed out,
-    // which is the correct look for overcast profiles with a low glow).
-    color = mix(color, uDiscColor, disc);
-    color += uDiscColor * glow;
-
-    // Horizon haze band.
-    float haze = exp(-abs(height) * 9.0) * uHazeStrength;
-    color = mix(color, uHazeColor, haze);
-
-    gl_FragColor = vec4(color, 1.0);
-  }
-`;
+interface SkyUniforms {
+  zenith: UniformNode<'color', THREE.Color>;
+  horizon: UniformNode<'color', THREE.Color>;
+  sunDirection: UniformNode<'vec3', THREE.Vector3>;
+  discColor: UniformNode<'color', THREE.Color>;
+  cloudTint: UniformNode<'color', THREE.Color>;
+  cloudShade: UniformNode<'color', THREE.Color>;
+  hazeColor: UniformNode<'color', THREE.Color>;
+  discSize: UniformNode<'float', number>;
+  discGlow: UniformNode<'float', number>;
+  cloudCover: UniformNode<'float', number>;
+  windSpeed: UniformNode<'float', number>;
+  starOpacity: UniformNode<'float', number>;
+  hazeStrength: UniformNode<'float', number>;
+  time: UniformNode<'float', number>;
+}
 
 export class SkyAtmosphereSystem {
   readonly mesh: THREE.Mesh;
-  private readonly material: THREE.ShaderMaterial;
+  private readonly material: MeshBasicNodeMaterial;
+  private readonly u: SkyUniforms;
+  private readonly noise: ReturnType<typeof texture>;
   private readonly texture: THREE.CanvasTexture;
   private time = 0;
 
   constructor(profile: SkyAtmosphereProfile, sunDirection: [number, number, number]) {
     this.texture = SkyAtmosphereSystem.makeNoiseTexture();
-    this.material = new THREE.ShaderMaterial({
-      vertexShader,
-      fragmentShader,
-      side: THREE.BackSide,
-      depthWrite: false,
-      depthTest: false,
-      fog: false,
-      uniforms: {
-        uZenith: { value: new THREE.Color(profile.zenith) },
-        uHorizon: { value: new THREE.Color(profile.horizon) },
-        uSunDirection: { value: new THREE.Vector3(...sunDirection).normalize() },
-        uDiscColor: { value: new THREE.Color(profile.discColor) },
-        uCloudTint: { value: new THREE.Color(profile.cloudTint) },
-        uCloudShade: { value: new THREE.Color(profile.cloudShade) },
-        uHazeColor: { value: new THREE.Color(profile.hazeColor) },
-        uDiscSize: { value: profile.discSize },
-        uDiscGlow: { value: profile.discGlow },
-        uCloudCover: { value: profile.cloudCover },
-        uWindSpeed: { value: profile.windSpeed },
-        uStarOpacity: { value: profile.starOpacity },
-        uHazeStrength: { value: profile.hazeStrength },
-        uTime: { value: 0 },
-        uNoise: { value: this.texture },
-      },
-    });
+    this.noise = texture(this.texture);
+    this.u = {
+      zenith: uniform(new THREE.Color(profile.zenith)),
+      horizon: uniform(new THREE.Color(profile.horizon)),
+      sunDirection: uniform(new THREE.Vector3(...sunDirection).normalize()),
+      discColor: uniform(new THREE.Color(profile.discColor)),
+      cloudTint: uniform(new THREE.Color(profile.cloudTint)),
+      cloudShade: uniform(new THREE.Color(profile.cloudShade)),
+      hazeColor: uniform(new THREE.Color(profile.hazeColor)),
+      discSize: uniform(profile.discSize),
+      discGlow: uniform(profile.discGlow),
+      cloudCover: uniform(profile.cloudCover),
+      windSpeed: uniform(profile.windSpeed),
+      starOpacity: uniform(profile.starOpacity),
+      hazeStrength: uniform(profile.hazeStrength),
+      time: uniform(0),
+    };
+    this.material = new MeshBasicNodeMaterial();
+    this.material.side = THREE.BackSide;
+    this.material.depthWrite = false;
+    this.material.depthTest = false;
+    this.material.fog = false;
+    this.material.colorNode = this.buildColorNode();
+
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(DOME_RADIUS, 32, 18), this.material);
     this.mesh.name = 'sky-atmosphere';
     this.mesh.renderOrder = -1;
     this.mesh.frustumCulled = false;
+  }
+
+  /**
+   * Atmospheric gradient → clouds → stars → disc → haze, in the same order
+   * as the original GLSL fragment shader.
+   */
+  private buildColorNode(): Node<'vec3'> {
+    const u = this.u;
+    const dir = positionLocal.normalize();
+    const height = clamp(dir.y, -1.0, 1.0);
+
+    // Atmospheric gradient: zenith colour falling to horizon, with a darker
+    // below-horizon band so terrain silhouettes read cleanly.
+    const t = clamp(height.mul(1.6).add(0.08), 0.0, 1.0);
+    let color: Node<'vec3'> = mix(u.horizon, u.zenith, pow(t, 0.75));
+
+    // Sun/moon disc and restrained glow, aligned with the directional light.
+    const cosAngle = dot(dir, normalize(u.sunDirection));
+    const disc = smoothstep(cos(u.discSize), cos(u.discSize.mul(0.82)), cosAngle);
+    const glow = pow(max(cosAngle, 0.0), 46.0).mul(u.discGlow);
+
+    // Clouds: project the view direction onto a virtual layer plane and
+    // scroll with the deterministic wind. Two layers, the higher one slower
+    // and fainter, produce parallax without any extra draw.
+    const density = (uv: Node<'vec2'>): Node<'float'> => {
+      const low = this.noise.sample(uv).r;
+      const high = this.noise.sample(uv.mul(3.7)).g;
+      const d = low.mul(0.72).add(high.mul(0.28));
+      // Remap around the coverage control: 0 = clear, 1 = heavy overcast.
+      return smoothstep(float(1.0).sub(u.cloudCover.mul(1.15)), float(1.0).sub(u.cloudCover.mul(0.35)), d);
+    };
+    const plane = dir.xz.div(max(dir.y.add(0.22), 0.14));
+    const wind = u.time.mul(u.windSpeed);
+    const c1 = density(plane.mul(0.055).add(vec2(wind.mul(0.9), wind.mul(0.32))));
+    const c2 = density(plane.mul(0.11).add(vec2(wind.mul(-0.55), wind.mul(0.7))).add(13.7));
+    const clouds = clamp(c1.mul(0.78).add(c2.mul(0.34)), 0.0, 1.0)
+      // Fade clouds toward the horizon line into the haze.
+      .mul(smoothstep(-0.02, 0.16, height));
+    // Cloud shading: brighter toward the sun, cooler away.
+    const cloudColor = mix(u.cloudShade, u.cloudTint, float(0.45).add(glow.mul(0.55)));
+    color = mix(color, cloudColor, clouds);
+
+    // Stars: high-frequency noise texels, masked by cloud coverage.
+    const star = step(0.9965, this.noise.sample(dir.xz.mul(0.34).add(dir.y.mul(1.7))).b);
+    const twinkle = float(0.72).add(float(0.28).mul(sin(u.time.mul(1.9).add(dot(dir, vec3(31.7, 17.3, 11.1)).mul(8.0)))));
+    color = color.add(vec3(star.mul(twinkle).mul(u.starOpacity).mul(float(1.0).sub(clouds))));
+
+    // Disc drawn over clouds (moon/sun behind thin cloud reads washed out,
+    // which is the correct look for overcast profiles with a low glow).
+    color = mix(color, u.discColor, disc);
+    color = color.add(u.discColor.mul(glow));
+
+    // Horizon haze band.
+    const haze = exp(abs(height).mul(9.0).negate()).mul(u.hazeStrength);
+    color = mix(color, u.hazeColor, haze);
+
+    return color;
   }
 
   /**
@@ -178,16 +178,16 @@ export class SkyAtmosphereSystem {
       }
     }
     ctx.putImageData(image, 0, 0);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.colorSpace = THREE.NoColorSpace;
-    return texture;
+    const textureOut = new THREE.CanvasTexture(canvas);
+    textureOut.wrapS = THREE.RepeatWrapping;
+    textureOut.wrapT = THREE.RepeatWrapping;
+    textureOut.colorSpace = THREE.NoColorSpace;
+    return textureOut;
   }
 
   update(dt: number): void {
     this.time += Math.min(dt, 0.05);
-    this.material.uniforms.uTime!.value = this.time;
+    this.u.time.value = this.time;
   }
 
   /**
@@ -202,13 +202,13 @@ export class SkyAtmosphereSystem {
     starOpacity?: number;
     hazeStrength?: number;
   }): void {
-    const u = this.material.uniforms;
-    if (profile.cloudCover !== undefined) u.uCloudCover!.value = profile.cloudCover;
-    if (profile.cloudTint !== undefined) u.uCloudTint!.value = new THREE.Color(profile.cloudTint);
-    if (profile.cloudShade !== undefined) u.uCloudShade!.value = new THREE.Color(profile.cloudShade);
-    if (profile.windSpeed !== undefined) u.uWindSpeed!.value = profile.windSpeed;
-    if (profile.starOpacity !== undefined) u.uStarOpacity!.value = profile.starOpacity;
-    if (profile.hazeStrength !== undefined) u.uHazeStrength!.value = profile.hazeStrength;
+    const u = this.u;
+    if (profile.cloudCover !== undefined) u.cloudCover.value = profile.cloudCover;
+    if (profile.cloudTint !== undefined) u.cloudTint.value = new THREE.Color(profile.cloudTint);
+    if (profile.cloudShade !== undefined) u.cloudShade.value = new THREE.Color(profile.cloudShade);
+    if (profile.windSpeed !== undefined) u.windSpeed.value = profile.windSpeed;
+    if (profile.starOpacity !== undefined) u.starOpacity.value = profile.starOpacity;
+    if (profile.hazeStrength !== undefined) u.hazeStrength.value = profile.hazeStrength;
   }
 
   dispose(): void {

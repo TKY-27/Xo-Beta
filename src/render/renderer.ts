@@ -1,70 +1,66 @@
 /**
- * GameRenderer: WebGL renderer, HDRI image-based lighting, post-processing
- * composer (bloom / GTAO / SMAA-FXAA / grading), per-map lighting rig and
- * quality settings application.
+ * GameRenderer: WebGPU-first renderer with three.js WebGL2 fallback through
+ * the same WebGPURenderer code path, HDRI image-based lighting, TSL
+ * post-processing chain (GTAO / bloom / SMAA-FXAA / grading / scope optics),
+ * per-map lighting rig and quality settings application.
  */
 
-import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
-import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
-import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
-import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
+import {
+  ACESFilmicToneMapping,
+  AmbientLight,
+  BackSide,
+  CanvasTexture,
+  Color,
+  DirectionalLight,
+  EquirectangularReflectionMapping,
+  Euler,
+  FogExp2,
+  HemisphereLight,
+  MathUtils,
+  Mesh,
+  MeshBasicNodeMaterial,
+  OrthographicCamera,
+  PCFShadowMap,
+  PMREMGenerator,
+  RenderPipeline,
+  RenderTarget,
+  Scene,
+  SphereGeometry,
+  SRGBColorSpace,
+  Vector3,
+  WebGPURenderer,
+} from 'three/webgpu';
+import type { Camera, Node, Object3D, Texture } from 'three/webgpu';
+import {
+  abs,
+  clamp,
+  dot,
+  float,
+  length,
+  Loop,
+  max,
+  mix,
+  mrt,
+  normalView,
+  output,
+  pass,
+  positionLocal,
+  pow,
+  screenUV,
+  smoothstep,
+  uniform,
+  vec2,
+  vec3,
+  vec4,
+} from 'three/tsl';
+import { ao } from 'three/addons/tsl/display/GTAONode.js';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import { smaa } from 'three/addons/tsl/display/SMAANode.js';
+import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import type { SkyConfig, WeatherProfile } from '../world/types';
 import { SkyAtmosphereSystem } from './skyAtmosphere';
 import { getSettings } from '../core/settings';
 import { loadHdri, clampHdriPeaks } from '../assets/assets';
-
-interface DebugRendererInfoExt {
-  UNMASKED_VENDOR_WEBGL: number;
-  UNMASKED_RENDERER_WEBGL: number;
-}
-
-/** Display-referred grading: vignette + gentle saturation/contrast shaping. */
-const GradingShader = {
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    uVignette: { value: 0.32 },
-    uVignetteSoftness: { value: 0.55 },
-    uSaturation: { value: 1.04 },
-    uContrast: { value: 1.02 },
-    uLift: { value: new THREE.Vector3(0.0, 0.0, 0.004) },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }`,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uVignette;
-    uniform float uVignetteSoftness;
-    uniform float uSaturation;
-    uniform float uContrast;
-    uniform vec3 uLift;
-    varying vec2 vUv;
-    void main() {
-      vec4 src = texture2D(tDiffuse, vUv);
-      vec3 c = src.rgb;
-      // contrast around mid gray
-      c = (c - 0.5) * uContrast + 0.5;
-      // saturation
-      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-      c = mix(vec3(l), c, uSaturation);
-      // gentle blue lift in shadows for filmic feel
-      c += uLift * (1.0 - l);
-      // vignette
-      vec2 d = vUv - 0.5;
-      float vig = 1.0 - smoothstep(uVignette, uVignette + uVignetteSoftness, length(d));
-      c *= mix(1.0 - uVignette * 0.35, 1.0, vig);
-      gl_FragColor = vec4(max(c, 0.0), src.a);
-    }`,
-};
 
 /** Supported sniper scope magnification levels (angular-FOV based). */
 export const SCOPE_MAGNIFICATIONS = [1, 2, 4] as const;
@@ -77,161 +73,101 @@ export const SCOPE_DEFAULT_MAGNIFICATION = 2;
  * At 1x this returns the base FOV unchanged (identity of the formula).
  */
 export function scopeFovForMagnification(baseVerticalFov: number, magnification: number): number {
-  const halfTan = Math.tan(THREE.MathUtils.degToRad(baseVerticalFov) / 2);
+  const halfTan = Math.tan(MathUtils.degToRad(baseVerticalFov) / 2);
   const scoped = 2 * Math.atan(halfTan / magnification);
-  return Math.max(1.5, THREE.MathUtils.radToDeg(scoped));
+  return Math.max(1.5, MathUtils.radToDeg(scoped));
 }
 
-const ScopeCompositeShader = {
-  uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    uAspect: { value: 1 },
-    // Match the 72vmin physical lens aperture in the DOM housing.
-    uRadius: { value: 0.36 },
-    /** Continuous ADS progress 0..1: drives mask, bezel and reticle opacity. */
-    uProgress: { value: 0 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uAspect;
-    uniform float uRadius;
-    uniform float uProgress;
-    varying vec2 vUv;
-    void main() {
-      vec4 base = texture2D(tDiffuse, vUv);
-      if (uProgress < 0.001) { gl_FragColor = base; return; }
-      // Single-pass optics: the primary camera already carries the angular
-      // magnification, so this overlay only shapes the lens. The periphery
-      // outside the aperture is the same magnified render, progressively
-      // dimmed — it is visually hidden behind the DOM housing at full ADS.
-      vec2 p = (vUv - vec2(0.5)) * vec2(uAspect, 1.0);
-      float d = length(p);
-      float outside = smoothstep(uRadius - 0.02, uRadius + 0.006, d);
-      vec3 color = mix(base.rgb, base.rgb * 0.12, outside * uProgress);
-      // Fine optical edge marks the aperture boundary.
-      float edge = 1.0 - smoothstep(0.0, 0.012, abs(d - uRadius));
-      color = mix(color, color * 0.52, edge * 0.42 * uProgress);
-      color += vec3(0.16, 0.21, 0.23) * edge * uProgress;
-      // Reticle in lens-space; central gap avoids hiding the target point.
-      float lineX = 1.0 - smoothstep(0.0015, 0.004, abs(p.x));
-      float lineY = 1.0 - smoothstep(0.0015, 0.004, abs(p.y));
-      float gap = smoothstep(0.022, 0.036, d);
-      float reticle = max(lineX, lineY) * gap * (1.0 - outside);
-      for (int i = -8; i <= 8; i++) {
-        float tick = float(i) * 0.045;
-        float horizontal = (1.0 - smoothstep(0.0015, 0.0035, abs(p.x - tick)))
-          * (1.0 - smoothstep(0.0012, 0.0035, abs(p.y - 0.028)));
-        float vertical = (1.0 - smoothstep(0.0015, 0.0035, abs(p.y - tick)))
-          * (1.0 - smoothstep(0.0012, 0.0035, abs(p.x - 0.028)));
-        reticle = max(reticle, (horizontal + vertical) * (1.0 - outside) * 0.85);
-        float rangeTick = (1.0 - smoothstep(0.0014, 0.0035, abs(p.x - tick)))
-          * (1.0 - smoothstep(0.0012, 0.0035, abs(p.y + 0.22)));
-        reticle = max(reticle, rangeTick * (1.0 - outside) * 0.7);
-      }
-      color = mix(color, vec3(0.01, 0.016, 0.014), clamp(reticle, 0.0, 1.0) * 0.92 * uProgress);
-      // A small reflection streak provides a glass cue without hiding the view.
-      float reflection = (1.0 - smoothstep(0.0, 0.035, abs(p.y + p.x * 0.44 - 0.24))) * (1.0 - outside) * 0.055;
-      color += vec3(0.8, 0.93, 1.0) * reflection * uProgress;
-      gl_FragColor = vec4(color, 1.0);
-    }
-  `,
-};
+/** The renderer is created once per page and shared by lobby and match scenes. */
+let sharedRenderer: WebGPURenderer | null = null;
 
-class ScopeCompositePass extends Pass {
-  readonly material = new THREE.ShaderMaterial(ScopeCompositeShader);
-  private readonly quad = new FullScreenQuad(this.material);
-
-  constructor() {
-    super();
-    this.needsSwap = true;
-  }
-
-  setScope(enabled: boolean, progress: number, aspect: number): void {
-    this.material.uniforms['uProgress']!.value = progress;
-    this.material.uniforms['uAspect']!.value = aspect;
-    this.enabled = enabled;
-  }
-
-  override render(renderer: THREE.WebGLRenderer, writeBuffer: THREE.WebGLRenderTarget, readBuffer: THREE.WebGLRenderTarget): void {
-    this.material.uniforms['tDiffuse']!.value = readBuffer.texture;
-    if (this.renderToScreen) {
-      renderer.setRenderTarget(null);
-    } else {
-      renderer.setRenderTarget(writeBuffer);
-      renderer.clear();
-    }
-    this.quad.render(renderer);
-  }
-
-  override dispose(): void {
-    // FullScreenQuad uses Three's process-wide shared triangle geometry; only
-    // this pass's material is owned here.
-    this.material.dispose();
-  }
-}
-
-
-
-export class GameRenderer {
-  readonly renderer: THREE.WebGLRenderer;
-  readonly scene = new THREE.Scene();
-  private readonly onResize = () => this.resize();
-  private composer: EffectComposer | null = null;
-  private renderPass: RenderPass | null = null;
-  private bloomPass: UnrealBloomPass | null = null;
-  private gtaoPass: GTAOPass | null = null;
-  private smaaPass: SMAAPass | null = null;
-  private fxaaPass: ShaderPass | null = null;
-  private gradingPass: ShaderPass | null = null;
-  private outputPass: OutputPass | null = null;
-  private scopePass: ScopeCompositePass | null = null;
-  private scopeActive = false;
-  private scopeProgress = 0;
-  private scopeMagnification: number = SCOPE_DEFAULT_MAGNIFICATION;
-  private sun: THREE.DirectionalLight | null = null;
-  private hemi: THREE.HemisphereLight | null = null;
-  private ambient: THREE.AmbientLight | null = null;
-  private pmrem: THREE.PMREMGenerator | null = null;
-  private envRenderTarget: THREE.WebGLRenderTarget | null = null;
-  private ownedBackground: THREE.Texture | null = null;
-  private fallbackSky: THREE.Mesh | null = null;
-  private skyAtmosphere: SkyAtmosphereSystem | null = null;
-  private baseFogDensity = 0;
-  private baseExposure = 1.25;
-  private sunOffset = new THREE.Vector3(120, 220, 90);
-  private grading = { vignette: 0.3, saturation: 1.05, contrast: 1.03, lift: new THREE.Vector3(0, 0, 0.004) };
-  private readonly gpuProfiling: boolean;
-  private gpuDevice = 'unavailable';
-
-  constructor(canvas: HTMLCanvasElement, gpuProfiling = false) {
-    this.renderer = new THREE.WebGLRenderer({
+export function getSharedGameRenderer(canvas: HTMLCanvasElement): WebGPURenderer {
+  if (!sharedRenderer) {
+    sharedRenderer = new WebGPURenderer({
       canvas,
       antialias: false,
       powerPreference: 'high-performance',
     });
+  }
+  return sharedRenderer;
+}
+
+/** True when the active backend is native WebGPU (not the WebGL2 fallback). */
+export function isWebGPUBackend(renderer: unknown): boolean {
+  const backend = (renderer as { backend?: { isWebGPUBackend?: boolean } } | null)?.backend;
+  return backend?.isWebGPUBackend === true;
+}
+
+export class GameRenderer {
+  readonly renderer: WebGPURenderer;
+  readonly scene = new Scene();
+  /** Resolves once the GPU backend is initialized and the renderer is usable. */
+  readonly ready: Promise<void>;
+  private postProcessing: RenderPipeline | null = null;
+  private camera: Camera | null = null;
+  // TSL uniforms for the display chain (kept so they can be updated live).
+  private gradingU = {
+    vignette: uniform(0.32),
+    vignetteSoftness: uniform(0.55),
+    saturation: uniform(1.04),
+    contrast: uniform(1.02),
+    lift: uniform(new Vector3(0, 0, 0.004)),
+  };
+  private scopeU = {
+    aspect: uniform(1),
+    radius: uniform(0.36),
+    progress: uniform(0),
+  };
+  private scopeActive = false;
+  private scopeProgress = 0;
+  private scopeMagnification: number = SCOPE_DEFAULT_MAGNIFICATION;
+  private sun: DirectionalLight | null = null;
+  private hemi: HemisphereLight | null = null;
+  private ambient: AmbientLight | null = null;
+  private pmrem: PMREMGenerator | null = null;
+  private envRenderTarget: RenderTarget | null = null;
+  private ownedBackground: Texture | null = null;
+  private fallbackSky: Mesh | null = null;
+  private skyAtmosphere: SkyAtmosphereSystem | null = null;
+  private baseFogDensity = 0;
+  private baseExposure = 1.25;
+  private sunOffset = new Vector3(120, 220, 90);
+  private grading = { vignette: 0.3, saturation: 1.05, contrast: 1.03, lift: new Vector3(0, 0, 0.004) };
+  private readonly gpuProfiling: boolean;
+  private gpuDevice = 'unavailable';
+  private readonly onResize = () => this.resize();
+
+  constructor(canvas: HTMLCanvasElement, gpuProfiling = false) {
+    this.renderer = getSharedGameRenderer(canvas);
     this.renderer.shadowMap.enabled = true;
-    // three.js r185 removed the soft alias and falls back with a console
-    // warning. Select the supported filter explicitly so QA logs stay clean.
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.shadowMap.type = PCFShadowMap;
+    this.renderer.toneMapping = ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.25;
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setPixelRatio(this.effectivePixelRatio());
     this.gpuProfiling = gpuProfiling;
     if (gpuProfiling) this.renderer.info.autoReset = false;
-    if (gpuProfiling) {
-      const gl = this.renderer.getContext() as WebGL2RenderingContext;
-      const debug = gl.getExtension('WEBGL_debug_renderer_info') as DebugRendererInfoExt | null;
-      if (debug) {
-        this.gpuDevice = `${String(gl.getParameter(debug.UNMASKED_VENDOR_WEBGL))} / ${String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL))}`;
-      }
-    }
+    // GPU identity resolves asynchronously once the backend reports in.
+    this.ready = this.renderer.init().then(() => this.resolveGpuDevice());
+    this.ready.catch((err) => console.error('renderer init failed', err));
 
     window.addEventListener('resize', this.onResize);
+  }
+
+  private async resolveGpuDevice(): Promise<void> {
+    try {
+      if (isWebGPUBackend(this.renderer)) {
+        const gpu = (navigator as Navigator & {
+          gpu?: { requestAdapter(): Promise<{ info?: { vendor?: string; architecture?: string } | null } | null> };
+        }).gpu;
+        const info = (await gpu?.requestAdapter())?.info;
+        this.gpuDevice = info ? ([info.vendor, info.architecture].filter(Boolean).join(' / ') || 'webgpu') : 'webgpu';
+      } else {
+        this.gpuDevice = 'webgl2';
+      }
+    } catch {
+      this.gpuDevice = isWebGPUBackend(this.renderer) ? 'webgpu' : 'webgl2';
+    }
   }
 
   resize(): void {
@@ -241,15 +177,9 @@ export class GameRenderer {
     const pr = this.effectivePixelRatio() * settings.resolutionScale * this.dynamicScale;
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
-    if (this.composer) {
-      // EffectComposer caches the pixel ratio at construction — keep it in
-      // sync or its render targets silently keep the stale resolution.
-      this.composer.setPixelRatio(pr);
-      this.composer.setSize(w, h);
-    }
-    if (this.fxaaPass) {
-      (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(1 / (w * pr), 1 / (h * pr));
-    }
+    this.scopeU.aspect.value = w / Math.max(1, h);
+    // Post-processing pass targets derive from the renderer's drawing buffer
+    // every frame, so no per-pass resize is needed.
   }
 
   private dynamicScale = 1;
@@ -274,24 +204,21 @@ export class GameRenderer {
 
   dispose(): void {
     window.removeEventListener('resize', this.onResize);
-    this.composer?.dispose();
-    this.scopePass?.dispose();
-    this.scopePass = null;
+    this.postProcessing?.dispose();
+    this.postProcessing = null;
     this.disposeEnvironment();
-    this.renderer.dispose();
+    // The underlying renderer is a page-lifetime singleton shared with the
+    // lobby — it must survive per-match teardown.
   }
 
   gpuDeviceLabel(): string {
     return this.gpuDevice;
   }
 
-  /** QA-only one-shot GPU completion measurement; intentionally stalls this frame. */
+  /** QA-only one-shot frame cost measurement. */
   measureSynchronousFrame(dt = 0): number {
-    const gl = this.renderer.getContext() as WebGL2RenderingContext;
-    gl.finish();
     const start = performance.now();
     this.render(dt);
-    gl.finish();
     return performance.now() - start;
   }
 
@@ -310,28 +237,26 @@ export class GameRenderer {
   }
 
   /**
-   * Enable the optical sniper view. Single-pass optics: this only flips a
-   * uniform-gated overlay pass — no render target, camera or scene-compile
-   * work happens here, so right-click can never allocate GPU resources.
-   * Overlay weights track continuous ADS progress via setScopeUniforms().
+   * Enable the optical sniper view. Single-pass optics: this only updates a
+   * uniform-gated overlay in the display chain — no render target, camera or
+   * scene-compile work happens here, so right-click can never allocate GPU
+   * resources. Overlay weights track continuous ADS progress via
+   * setScopeUniforms().
    */
-  setScopeActive(active: boolean, _sourceCamera?: THREE.PerspectiveCamera): void {
+  setScopeActive(active: boolean, _sourceCamera?: Camera): void {
     this.scopeActive = active;
-    this.syncScopePass();
+    this.syncScopeUniforms();
   }
 
   /** Continuous ADS progress for the scope overlay weights (0..1). */
   setScopeUniforms(progress: number): void {
-    this.scopeProgress = THREE.MathUtils.clamp(progress, 0, 1);
-    this.syncScopePass();
+    this.scopeProgress = MathUtils.clamp(progress, 0, 1);
+    this.syncScopeUniforms();
   }
 
-  private syncScopePass(): void {
-    this.scopePass?.setScope(
-      this.scopeActive && this.scopeProgress > 0.001,
-      this.scopeProgress,
-      window.innerWidth / Math.max(1, window.innerHeight),
-    );
+  private syncScopeUniforms(): void {
+    this.scopeU.progress.value = this.scopeActive ? this.scopeProgress : 0;
+    this.scopeU.aspect.value = window.innerWidth / Math.max(1, window.innerHeight);
   }
 
   /**
@@ -353,8 +278,9 @@ export class GameRenderer {
    * radiance source (PMREM), giving real image-based lighting.
    */
   async setupSkyAndLights(sky: SkyConfig): Promise<void> {
+    await this.ready;
     if (this.pmrem) this.disposeEnvironment();
-    this.pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.pmrem = new PMREMGenerator(this.renderer);
 
     if (sky.preset === 'bluehour') {
       // Authored competitive blue-hour city sky: bright enough to fight in,
@@ -392,7 +318,7 @@ export class GameRenderer {
           // bearing was measured in-engine per asset (radians, atan2(x, z)).
           const discYaw = sky.hdri.includes('qwantani') ? -2.2 : 0.4;
           const sunYaw = Math.atan2(sky.sunDirection[0], sky.sunDirection[2]);
-          const rot = new THREE.Euler(0, sunYaw - discYaw, 0);
+          const rot = new Euler(0, sunYaw - discYaw, 0);
           this.scene.backgroundRotation = rot;
           this.scene.environmentRotation = rot;
         }
@@ -404,16 +330,16 @@ export class GameRenderer {
       this.setupGradientSky(sky);
     }
 
-    this.scene.fog = new THREE.FogExp2(sky.fogColor, sky.fogDensity);
+    this.scene.fog = new FogExp2(sky.fogColor, sky.fogDensity);
     this.renderer.toneMappingExposure = sky.exposure ?? 1.25;
     // Base values for per-match weather modulation (see applyWeather).
     this.baseFogDensity = sky.fogDensity;
     this.baseExposure = sky.exposure ?? 1.25;
 
-    const sunDir = new THREE.Vector3(...sky.sunDirection).normalize();
+    const sunDir = new Vector3(...sky.sunDirection).normalize();
     const sunPos = sunDir.multiplyScalar(300).negate();
     sunPos.y = Math.abs(sunPos.y) + 60;
-    this.sun = new THREE.DirectionalLight(sky.sunColor, sky.sunIntensity);
+    this.sun = new DirectionalLight(sky.sunColor, sky.sunIntensity);
     this.sun.position.copy(sunPos);
     // Shadow light must travel with the same direction as the visible sun,
     // otherwise shadows fall the wrong way on every map but one.
@@ -431,14 +357,14 @@ export class GameRenderer {
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
-    this.hemi = new THREE.HemisphereLight(sky.hemisphereSky, sky.hemisphereGround, sky.hemisphereIntensity);
+    this.hemi = new HemisphereLight(sky.hemisphereSky, sky.hemisphereGround, sky.hemisphereIntensity);
     this.scene.add(this.hemi);
-    this.ambient = new THREE.AmbientLight(sky.ambientColor, sky.ambientIntensity);
+    this.ambient = new AmbientLight(sky.ambientColor, sky.ambientIntensity);
     this.scene.add(this.ambient);
     // Sky-fill from the opposite side of the sun: keeps sun-facing contrast but
     // lifts shaded facades so north walls don't read as near-black slabs.
     const fillIntensity = sky.preset === 'bluehour' ? 0.92 : sky.preset === 'overcast' ? 0.22 : 0.72;
-    const fill = new THREE.DirectionalLight(sky.hemisphereSky, fillIntensity);
+    const fill = new DirectionalLight(sky.hemisphereSky, fillIntensity);
     fill.position.copy(sunPos).negate().setY(90);
     this.scene.add(fill);
   }
@@ -449,7 +375,7 @@ export class GameRenderer {
    * `null` restores the authored base look.
    */
   applyWeather(profile: WeatherProfile | null): void {
-    if (this.scene.fog instanceof THREE.FogExp2) {
+    if (this.scene.fog instanceof FogExp2) {
       const scale = profile?.fogDensityScale ?? 1;
       this.scene.fog.density = this.baseFogDensity * scale;
     }
@@ -460,18 +386,16 @@ export class GameRenderer {
   }
 
   private setupGradientSky(sky: SkyConfig): void {
-    const geo = new THREE.SphereGeometry(800, 24, 16);
-    const top = new THREE.Color(sky.preset === 'night' ? 0x0b1022 : sky.preset === 'bluehour' ? 0x050b1c : sky.preset === 'overcast' ? 0x9fb0bd : 0x8fc4e8);
-    const bottom = new THREE.Color(sky.preset === 'night' ? 0x141a2e : sky.preset === 'bluehour' ? 0x24406e : sky.preset === 'overcast' ? 0xc4cdd5 : 0xd8ecf6);
-    const mat = new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      depthWrite: false,
-      uniforms: { topColor: { value: top }, bottomColor: { value: bottom } },
-      vertexShader: `varying vec3 vPos; void main(){ vPos=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);} `,
-      fragmentShader: `varying vec3 vPos; uniform vec3 topColor; uniform vec3 bottomColor;
-        void main(){ float h=normalize(vPos).y*0.5+0.5; gl_FragColor=vec4(mix(bottomColor,topColor,pow(clamp(h,0.0,1.0),0.7)),1.0); }`,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
+    const geo = new SphereGeometry(800, 24, 16);
+    const top = new Color(sky.preset === 'night' ? 0x0b1022 : sky.preset === 'bluehour' ? 0x050b1c : sky.preset === 'overcast' ? 0x9fb0bd : 0x8fc4e8);
+    const bottom = new Color(sky.preset === 'night' ? 0x141a2e : sky.preset === 'bluehour' ? 0x24406e : sky.preset === 'overcast' ? 0xc4cdd5 : 0xd8ecf6);
+    const topU = uniform(top);
+    const bottomU = uniform(bottom);
+    const mat = new MeshBasicNodeMaterial();
+    mat.side = BackSide;
+    mat.depthWrite = false;
+    mat.colorNode = mix(bottomU, topU, pow(clamp(positionLocal.normalize().y.mul(0.5).add(0.5), 0, 1), 0.7));
+    const mesh = new Mesh(geo, mat);
     mesh.frustumCulled = false;
     mesh.name = 'fallback-sky';
     this.scene.add(mesh);
@@ -500,7 +424,7 @@ export class GameRenderer {
   }
 
   /** Keep the shadow frustum centered near the viewer for crisp shadows. */
-  followSunTarget(pos: THREE.Vector3): void {
+  followSunTarget(pos: Vector3): void {
     if (!this.sun) return;
     this.sun.target.position.copy(pos);
     this.sun.position.copy(pos).add(this.sunOffset);
@@ -512,7 +436,7 @@ export class GameRenderer {
   }
 
   /** Legacy no-op retained for API stability (background is infinite). */
-  followViewer(_pos: THREE.Vector3): void {
+  followViewer(_pos: Vector3): void {
     void _pos;
   }
 
@@ -520,40 +444,43 @@ export class GameRenderer {
    * One-shot top-down aerial render of the world for the tactical map.
    * Renders orthographically from above into an offscreen target and returns
    * it as a 2D canvas (north = -Z up, +X right — matches map coordinate math).
-   * Call once during match load; costs a single GPU readback (~50 ms).
+   * Call once during match load; costs a single async GPU readback.
    */
-  captureAerial(half: number, size = 1024, hide: THREE.Object3D[] = []): HTMLCanvasElement | null {
-    const cam = new THREE.OrthographicCamera(-half, half, half, -half, 1, 800);
+  async captureAerial(half: number, size = 1024, hide: Object3D[] = []): Promise<HTMLCanvasElement | null> {
+    await this.ready;
+    const cam = new OrthographicCamera(-half, half, half, -half, 1, 800);
     cam.position.set(0, 380, 0);
     cam.up.set(0, 0, -1);
     cam.lookAt(0, 0, 0);
     cam.updateMatrixWorld(true);
-    const rt = new THREE.WebGLRenderTarget(size, size, { colorSpace: THREE.SRGBColorSpace });
+    const rt = new RenderTarget(size, size);
     const saved = hide.map((o) => o.visible);
     hide.forEach((o) => { o.visible = false; });
     const prevFog = this.scene.fog;
-    const prevTarget = this.renderer.getRenderTarget();
     try {
       this.scene.fog = null;
       this.renderer.setRenderTarget(rt);
       this.renderer.render(this.scene, cam);
-      const buf = new Uint8Array(size * size * 4);
-      this.renderer.readRenderTargetPixels(rt, 0, 0, size, size, buf);
+      const buf = await this.renderer.readRenderTargetPixelsAsync(rt, 0, 0, size, size);
+      const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
       const canvas = document.createElement('canvas');
       canvas.width = size;
       canvas.height = size;
       const ctx = canvas.getContext('2d');
       if (!ctx) return null;
-      // Render targets receive linear color (tone mapping / sRGB encode only run
-      // for the default framebuffer) — encode to sRGB while flipping rows.
+      // The render target receives linear color (tone mapping / sRGB encode
+      // only run for the default framebuffer) — encode to sRGB. Copy origins
+      // differ per backend: WebGPU copies are top-down, WebGL readbacks
+      // address from the bottom-left.
+      const flip = !isWebGPUBackend(this.renderer);
       const img = ctx.createImageData(size, size);
       const out = img.data;
       for (let y = 0; y < size; y++) {
-        const src = (size - 1 - y) * size * 4;
+        const src = (flip ? size - 1 - y : y) * size * 4;
         const dst = y * size * 4;
         for (let x = 0; x < size; x++) {
           for (let c = 0; c < 3; c++) {
-            const v = buf[src + x * 4 + c]! / 255;
+            const v = bytes[src + x * 4 + c]! / 255;
             out[dst + x * 4 + c] = (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055) * 255;
           }
           out[dst + x * 4 + 3] = 255;
@@ -565,113 +492,141 @@ export class GameRenderer {
       console.warn('aerial capture failed', err);
       return null;
     } finally {
-      this.renderer.setRenderTarget(prevTarget);
+      this.renderer.setRenderTarget(null);
       this.scene.fog = prevFog;
       hide.forEach((o, i) => { o.visible = saved[i]!; });
       rt.dispose();
     }
   }
 
-  buildComposer(camera: THREE.Camera): void {
-    this.scopePass?.dispose();
-    this.scopePass = null;
-    this.composer?.dispose();
-    const settings = getSettings();
-    const w = Math.max(8, window.innerWidth);
-    const h = Math.max(8, window.innerHeight);
-    this.composer = new EffectComposer(this.renderer);
-    this.composer.setPixelRatio(this.effectivePixelRatio() * settings.resolutionScale * this.dynamicScale);
-    this.composer.setSize(w, h);
+  /** Wire the display chain for the given camera (rebuilt on quality changes). */
+  buildComposer(camera: Camera): void {
+    this.camera = camera;
+    this.postProcessing?.dispose();
+    this.postProcessing = null;
 
-    this.renderPass = new RenderPass(this.scene, camera);
-    this.composer.addPass(this.renderPass);
+    const settings = getSettings();
+    const pp = new RenderPipeline(this.renderer);
+    const scenePass = pass(this.scene, camera);
 
     const cinematic = settings.quality === 'cinematic';
     const wantAO = settings.ao && (settings.quality === 'ultra' || cinematic) && settings.postProcessing;
-    if (wantAO && !this.gtaoPass) {
-      this.gtaoPass = new GTAOPass(this.scene, camera, w, h);
-      this.gtaoPass.updateGtaoMaterial({
-        radius: cinematic ? 0.35 : 0.28,
-        distanceExponent: 1.4,
-        thickness: 1,
-        scale: 1.1,
-        samples: cinematic ? 24 : 12,
-        screenSpaceRadius: false,
-      });
-      this.gtaoPass.output = GTAOPass.OUTPUT.Default;
-      // AO is a low-frequency effect — render its depth/normal + compute at
-      // half resolution and let the composite bilinearly upsample. ~4x cheaper
-      // with no visible difference at gameplay camera distances.
-      if (!cinematic) {
-        const origSetSize = this.gtaoPass.setSize.bind(this.gtaoPass);
-        this.gtaoPass.setSize = (w: number, h: number) => origSetSize(Math.max(8, Math.round(w / 2)), Math.max(8, Math.round(h / 2)));
-      }
-      this.composer.addPass(this.gtaoPass);
-    } else if (!wantAO && this.gtaoPass) {
-      this.gtaoPass.dispose();
-      this.gtaoPass = null;
+    let color: Node<'vec4'> = scenePass.getTextureNode('output');
+    if (wantAO) {
+      scenePass.setMRT(mrt({ output, normal: normalView }));
+      color = scenePass.getTextureNode('output');
+      const aoPass = ao(scenePass.getTextureNode('depth'), scenePass.getTextureNode('normal'), camera);
+      // AO is a low-frequency effect — compute at reduced resolution and let
+      // the composite bilinearly upsample. Cheap, with no visible difference
+      // at gameplay camera distances.
+      aoPass.resolutionScale = cinematic ? 1 : 0.5;
+      aoPass.radius.value = cinematic ? 0.35 : 0.28;
+      aoPass.distanceExponent.value = 1.4;
+      aoPass.thickness.value = 1;
+      aoPass.scale.value = 1.1;
+      aoPass.samples.value = cinematic ? 24 : 12;
+      // GTAONode emits the occlusion factor as a float in the red channel.
+      color = color.mul(vec4(vec3(aoPass.getTextureNode().r), 1.0));
     }
 
-    // Composite the linear optical image before bloom, AA and grading so the
-    // lens receives the same display treatment as the primary view. GTAO is
-    // camera-depth dependent and therefore remains on the primary view only.
-    this.scopePass = new ScopeCompositePass();
-    // The disabled shader returns the input unchanged, but executing it still
-    // costs a full-resolution draw and buffer swap. Skip the pass entirely
-    // until the optical scope is actually active.
-    this.scopePass.enabled = this.scopeActive;
-    this.scopePass.setScope(this.scopeActive, this.scopeProgress, w / Math.max(1, h));
-    this.composer.addPass(this.scopePass);
+    // Composite the linear optical scope image before bloom, AA and grading so
+    // the lens receives the same display treatment as the primary view.
+    color = this.applyScopeComposite(color);
 
     if (settings.bloom && settings.postProcessing) {
-      this.bloomPass = new UnrealBloomPass(
-        new THREE.Vector2(w, h),
+      // BloomNode emits only the bloom layer — add it on top of the scene.
+      color = color.add(bloom(
+        color,
         cinematic ? 0.42 : 0.5,
         cinematic ? 0.75 : 0.62,
         // Threshold above 1.0 keeps daylight albedo (even white walls) out of
         // the bloom; only true emitters (neon, muzzle flashes, sun) bloom.
         cinematic ? 1.32 : 1.62,
-      );
-      this.composer.addPass(this.bloomPass);
-    } else {
-      this.bloomPass = null;
+      ));
     }
 
     if (settings.aa === 'smaa') {
-      this.smaaPass = new SMAAPass();
-      this.composer.addPass(this.smaaPass);
-      this.fxaaPass = null;
+      // The SMAA/FXAA node types are declared vec3 in the type package but
+      // sample and emit vec4 at runtime — normalize at the boundary.
+      color = smaa(color) as unknown as Node<'vec4'>;
     } else if (settings.aa === 'fxaa') {
-      this.fxaaPass = new ShaderPass(FXAAShader);
-      this.resize();
-      this.composer.addPass(this.fxaaPass);
-      this.smaaPass = null;
-    } else {
-      this.smaaPass = null;
-      this.fxaaPass = null;
+      color = fxaa(color) as unknown as Node<'vec4'>;
     }
 
     if (settings.postProcessing) {
-      this.gradingPass = new ShaderPass(GradingShader);
-      const u = this.gradingPass.uniforms as Record<string, { value: unknown }> | undefined;
-      if (u) {
-        u['uVignette']!.value = this.grading.vignette;
-        u['uSaturation']!.value = this.grading.saturation;
-        u['uContrast']!.value = this.grading.contrast;
-        (u['uLift']!.value as THREE.Vector3).copy(this.grading.lift);
-      }
-      this.composer.addPass(this.gradingPass);
+      // All scene and optical passes remain linear until the PostProcessing
+      // output transform applies tone mapping + sRGB.
+      pp.outputNode = this.applyGrading(color);
     } else {
-      this.gradingPass = null;
+      pp.outputNode = color;
     }
-
-    // All scene and optical passes remain linear until the final display
-    // conversion.
-    this.outputPass = new OutputPass();
-    this.composer.addPass(this.outputPass);
-
-    this.renderPass.camera = camera;
+    this.postProcessing = pp;
     this.resize();
+  }
+
+  /** Vignette + gentle saturation/contrast shaping over the linear image. */
+  private applyGrading(src: Node<'vec4'>): Node<'vec3'> {
+    const u = this.gradingU;
+    u.vignette.value = this.grading.vignette;
+    u.vignetteSoftness.value = 0.55;
+    u.saturation.value = this.grading.saturation;
+    u.contrast.value = this.grading.contrast;
+    u.lift.value.copy(this.grading.lift);
+
+    const c = src.rgb;
+    // contrast around mid gray
+    const contrasted = c.sub(0.5).mul(u.contrast).add(0.5);
+    // saturation
+    const l = dot(contrasted, vec3(0.2126, 0.7152, 0.0722));
+    const saturated = mix(vec3(l), contrasted, u.saturation);
+    // gentle blue lift in shadows for filmic feel
+    const lifted = saturated.add(u.lift.mul(float(1.0).sub(l)));
+    // vignette
+    const d = screenUV.sub(0.5);
+    const vig = float(1.0).sub(smoothstep(u.vignette, u.vignette.add(u.vignetteSoftness), length(d)));
+    return lifted.mul(mix(float(1.0).sub(u.vignette.mul(0.35)), float(1.0), vig)).max(0.0);
+  }
+
+  /**
+   * Single-pass scope optics: the primary camera already carries the angular
+   * magnification, so this overlay only shapes the lens. The periphery outside
+   * the aperture is the same magnified render, progressively dimmed — it is
+   * visually hidden behind the DOM housing at full ADS. With the scope fully
+   * inactive every overlay term collapses to the source image.
+   */
+  private applyScopeComposite(src: Node<'vec4'>): Node<'vec4'> {
+    const u = this.scopeU;
+    const progress = u.progress;
+    const p = screenUV.sub(vec2(0.5, 0.5)).mul(vec2(u.aspect, float(1.0)));
+    const d = length(p);
+    const outside = smoothstep(u.radius.sub(0.02), u.radius.add(0.006), d);
+    let color = mix(src, src.mul(0.12), outside.mul(progress));
+    // Fine optical edge marks the aperture boundary.
+    const edge = float(1.0).sub(smoothstep(0.0, 0.012, abs(d.sub(u.radius))));
+    color = mix(color, color.mul(0.52), edge.mul(0.42).mul(progress));
+    color = color.add(vec3(0.16, 0.21, 0.23).mul(edge).mul(progress));
+    // Reticle in lens-space; central gap avoids hiding the target point.
+    const lineX = float(1.0).sub(smoothstep(0.0015, 0.004, abs(p.x)));
+    const lineY = float(1.0).sub(smoothstep(0.0015, 0.004, abs(p.y)));
+    const gap = smoothstep(0.022, 0.036, d);
+    const reticle = max(lineX, lineY).mul(gap).mul(float(1.0).sub(outside)).toVar();
+    Loop(17, ({ i }) => {
+      const tick = float(i).sub(8).mul(0.045);
+      const horizontal = float(1.0).sub(smoothstep(0.0015, 0.0035, abs(p.x.sub(tick))))
+        .mul(float(1.0).sub(smoothstep(0.0012, 0.0035, abs(p.y.sub(0.028)))));
+      const vertical = float(1.0).sub(smoothstep(0.0015, 0.0035, abs(p.y.sub(tick))))
+        .mul(float(1.0).sub(smoothstep(0.0012, 0.0035, abs(p.x.sub(0.028)))));
+      reticle.assign(max(reticle, horizontal.add(vertical).mul(float(1.0).sub(outside)).mul(0.85)));
+      const rangeTick = float(1.0).sub(smoothstep(0.0014, 0.0035, abs(p.x.sub(tick))))
+        .mul(float(1.0).sub(smoothstep(0.0012, 0.0035, abs(p.y.add(0.22)))));
+      reticle.assign(max(reticle, rangeTick.mul(float(1.0).sub(outside)).mul(0.7)));
+    });
+    color = mix(color, vec3(0.01, 0.016, 0.014), clamp(reticle, 0, 1).mul(0.92).mul(progress));
+    // A small reflection streak provides a glass cue without hiding the view.
+    const reflection = float(1.0).sub(smoothstep(0.0, 0.035, abs(p.y.add(p.x.mul(0.44)).sub(0.24))))
+      .mul(float(1.0).sub(outside)).mul(0.055);
+    color = color.add(vec3(0.8, 0.93, 1.0).mul(reflection).mul(progress));
+    return color;
   }
 
   applyQuality(): void {
@@ -698,13 +653,10 @@ export class GameRenderer {
       cam.left = -ext; cam.right = ext; cam.top = ext; cam.bottom = -ext;
       cam.updateProjectionMatrix();
     }
-    const needsRebuild = !this.composer ||
-      (this.bloomPass === null) !== !(settings.bloom && settings.postProcessing) ||
-      (this.smaaPass === null) !== !(settings.aa === 'smaa') ||
-      (this.fxaaPass === null) !== !(settings.aa === 'fxaa') ||
-      (this.gradingPass === null) !== !(settings.postProcessing);
-    if (needsRebuild && this.renderPass) {
-      this.buildComposer(this.renderPass.camera);
+    // The TSL graph is cheap to rebuild and branch positions depend on every
+    // display setting, so rebuild the whole chain on each quality application.
+    if (this.camera) {
+      this.buildComposer(this.camera);
     }
     this.resize();
   }
@@ -717,15 +669,15 @@ export class GameRenderer {
     if (grade.lift) this.grading.lift.set(...grade.lift);
   }
 
-  render(dt: number): void {
+  render(_dt: number): void {
     const settings = getSettings();
-    const usePost = settings.postProcessing || settings.aa !== 'off';
+    const usePost = settings.postProcessing || settings.aa !== 'off' || this.scopeActive;
     if (this.gpuProfiling) this.renderer.info.reset();
-    if (this.composer && (usePost || this.scopeActive) && this.renderPass) {
-      this.composer.render(dt);
+    if (!this.camera) return;
+    if (this.postProcessing && usePost) {
+      this.postProcessing.render();
     } else {
-      const cam = (this.renderPass?.camera ?? undefined) as THREE.Camera | undefined;
-      if (cam) this.renderer.render(this.scene, cam);
+      this.renderer.render(this.scene, this.camera);
     }
   }
 }
@@ -735,7 +687,7 @@ export class GameRenderer {
  * horizon with a warm sodium band, high cirrus streaks and sparse stars.
  * Bright enough for readable night combat while clearly reading as night.
  */
-function makeBlueHourSkyTexture(): THREE.CanvasTexture {
+function makeBlueHourSkyTexture(): CanvasTexture {
   const w = 1024;
   const h = 512;
   const c = document.createElement('canvas');
@@ -787,14 +739,14 @@ function makeBlueHourSkyTexture(): THREE.CanvasTexture {
     ctx.fillRect(x - rw - w, h * 0.53 - rw, rw * 2, rw * 2);
   }
 
-  const tex = new THREE.CanvasTexture(c);
-  tex.mapping = THREE.EquirectangularReflectionMapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
+  const tex = new CanvasTexture(c);
+  tex.mapping = EquirectangularReflectionMapping;
+  tex.colorSpace = SRGBColorSpace;
   return tex;
 }
 
 /** Authored night-sky backdrop: deep gradient, stars, subtle milky band. */
-function makeNightSkyTexture(): THREE.CanvasTexture {
+function makeNightSkyTexture(): CanvasTexture {
   const w = 1024;
   const h = 1024;
   const c = document.createElement('canvas');
@@ -843,8 +795,8 @@ function makeNightSkyTexture(): THREE.CanvasTexture {
       ctx.fillRect(x - 0.4, y - r * 3.2, 0.8, r * 6.4);
     }
   }
-  const tex = new THREE.CanvasTexture(c);
-  tex.mapping = THREE.EquirectangularReflectionMapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
+  const tex = new CanvasTexture(c);
+  tex.mapping = EquirectangularReflectionMapping;
+  tex.colorSpace = SRGBColorSpace;
   return tex;
 }
