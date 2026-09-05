@@ -60,6 +60,8 @@ five cycles.
 
 | 20 | FOURTH INDEPENDENT CRITIC (fresh context) | Verified fixed: ashara void, eden stairs, night clouds; shore band works at ground level. Remaining top items: (1) no contact shadows/AO anywhere — props float; (2) water still reads painted (uniform cyan from above, no depth tint); (3) ashara ground corduroy tiling striation; (4) pure-black unlit faces on boulder bases/poles; (5) oldfront plaza reads as polished marble; (6) toy-blue remains on some ashara compound rails. Verdict: improvement remains — grounding is the biggest gap | blob-shadow grounding + stair rails queued (cycles 21-22) |
 
+| 21 | neocity night capture | Vehicles floated on asphalt (no contact grounding after AO removal) → soft dark contact-shadow discs under every vehicle bucket | verified in capture |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
