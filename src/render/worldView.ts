@@ -1024,69 +1024,77 @@ export class WorldView {
       this.group.add(scree);
     }
 
-    // Lamps: authored street fixtures, instanced per part (draw-call budget)
-    const poolGeo = new THREE.CircleGeometry(7, 20);
-    poolGeo.rotateX(-Math.PI / 2);
-    const poolTex = makeGlowTexture('rgba(255,235,190,', 128);
-    const maxLamps = Math.min(def.lamps.length, 84);
-    const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 1, 8);
-    poleGeo.translate(0, 0.5, 0);
-    const armGeo = new THREE.BoxGeometry(0.9, 0.08, 0.08);
-    const headGeo = new THREE.BoxGeometry(0.52, 0.14, 0.3);
-    const lensGeo = new THREE.PlaneGeometry(0.42, 0.2);
-    lensGeo.rotateX(-Math.PI / 2.6);
-    const poleMat = this.mats.get('metalDark');
-    const poles = new THREE.InstancedMesh(poleGeo, poleMat, maxLamps);
-    const arms = new THREE.InstancedMesh(armGeo, poleMat, maxLamps);
-    const heads = new THREE.InstancedMesh(headGeo, poleMat, maxLamps);
-    const lensInst = new THREE.InstancedMesh(lensGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), maxLamps);
-    const pools = new THREE.InstancedMesh(
-      poolGeo,
-      new THREE.MeshBasicMaterial({
-        map: poolTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.85,
-      }),
-      Math.min(maxLamps, 60),
-    );
-    pools.renderOrder = 1;
-    const headTilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0.18));
-    const idQ = new THREE.Quaternion();
-    const oneS = new THREE.Vector3(1, 1, 1);
-    let poolIdx = 0;
-    for (let i = 0; i < maxLamps; i++) {
-      const l = def.lamps[i]!;
-      const m4 = new THREE.Matrix4();
-      m4.compose(new THREE.Vector3(l.x, l.y, l.z), idQ, new THREE.Vector3(1, l.h, 1));
-      poles.setMatrixAt(i, m4);
-      m4.compose(new THREE.Vector3(l.x + 0.42, l.y + l.h - 0.06, l.z), idQ, oneS);
-      arms.setMatrixAt(i, m4);
-      m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.12, l.z), headTilt, oneS);
-      heads.setMatrixAt(i, m4);
-      m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.21, l.z), headTilt, oneS);
-      lensInst.setMatrixAt(i, m4);
-      lensInst.setColorAt(i, new THREE.Color(l.color));
-      // Real light comes from the shared pool; the fixture itself is emissive.
-      this.lightPool.add(l.x + 0.78, l.y + l.h - 0.35, l.z, l.color, l.intensity * 1.35, l.range);
-      if (poolIdx < pools.count) {
-        m4.compose(
-          new THREE.Vector3(l.x + 0.78, l.y + 0.07, l.z),
-          idQ,
-          new THREE.Vector3().setScalar(0.9 + Math.min(0.5, l.range / 60)),
-        );
-        pools.setMatrixAt(poolIdx, m4);
-        pools.setColorAt(poolIdx, new THREE.Color(l.color));
-        poolIdx++;
+    // Lamps: authored street fixtures, instanced per part (draw-call budget).
+    // Maps can finish with zero surviving lamps (eden/oldfront/neocity reject
+    // every authored lamp in MapBuilder.finish). Creating the fixture pools
+    // with capacity 0 gives them an empty instanceMatrix array, and three's
+    // WebGPU backend then binds a zero-byte uniform buffer for the instance
+    // matrices — a GPUValidationError per pool per pass ("Binding size ... is
+    // zero") that also knocks those draws out of the frame. Skip the pools.
+    if (def.lamps.length > 0) {
+      const poolGeo = new THREE.CircleGeometry(7, 20);
+      poolGeo.rotateX(-Math.PI / 2);
+      const poolTex = makeGlowTexture('rgba(255,235,190,', 128);
+      const maxLamps = Math.min(def.lamps.length, 84);
+      const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 1, 8);
+      poleGeo.translate(0, 0.5, 0);
+      const armGeo = new THREE.BoxGeometry(0.9, 0.08, 0.08);
+      const headGeo = new THREE.BoxGeometry(0.52, 0.14, 0.3);
+      const lensGeo = new THREE.PlaneGeometry(0.42, 0.2);
+      lensGeo.rotateX(-Math.PI / 2.6);
+      const poleMat = this.mats.get('metalDark');
+      const poles = new THREE.InstancedMesh(poleGeo, poleMat, maxLamps);
+      const arms = new THREE.InstancedMesh(armGeo, poleMat, maxLamps);
+      const heads = new THREE.InstancedMesh(headGeo, poleMat, maxLamps);
+      const lensInst = new THREE.InstancedMesh(lensGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), maxLamps);
+      const pools = new THREE.InstancedMesh(
+        poolGeo,
+        new THREE.MeshBasicMaterial({
+          map: poolTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.85,
+        }),
+        Math.min(maxLamps, 60),
+      );
+      pools.renderOrder = 1;
+      const headTilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0.18));
+      const idQ = new THREE.Quaternion();
+      const oneS = new THREE.Vector3(1, 1, 1);
+      let poolIdx = 0;
+      for (let i = 0; i < maxLamps; i++) {
+        const l = def.lamps[i]!;
+        const m4 = new THREE.Matrix4();
+        m4.compose(new THREE.Vector3(l.x, l.y, l.z), idQ, new THREE.Vector3(1, l.h, 1));
+        poles.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(l.x + 0.42, l.y + l.h - 0.06, l.z), idQ, oneS);
+        arms.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.12, l.z), headTilt, oneS);
+        heads.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.21, l.z), headTilt, oneS);
+        lensInst.setMatrixAt(i, m4);
+        lensInst.setColorAt(i, new THREE.Color(l.color));
+        // Real light comes from the shared pool; the fixture itself is emissive.
+        this.lightPool.add(l.x + 0.78, l.y + l.h - 0.35, l.z, l.color, l.intensity * 1.35, l.range);
+        if (poolIdx < pools.count) {
+          m4.compose(
+            new THREE.Vector3(l.x + 0.78, l.y + 0.07, l.z),
+            idQ,
+            new THREE.Vector3().setScalar(0.9 + Math.min(0.5, l.range / 60)),
+          );
+          pools.setMatrixAt(poolIdx, m4);
+          pools.setColorAt(poolIdx, new THREE.Color(l.color));
+          poolIdx++;
+        }
       }
+      poles.instanceMatrix.needsUpdate = true;
+      arms.instanceMatrix.needsUpdate = true;
+      heads.instanceMatrix.needsUpdate = true;
+      lensInst.instanceMatrix.needsUpdate = true;
+      if (lensInst.instanceColor) lensInst.instanceColor.needsUpdate = true;
+      if (pools.instanceColor) pools.instanceColor.needsUpdate = true;
+      pools.instanceMatrix.needsUpdate = true;
+      poles.castShadow = true;
+      poles.receiveShadow = true;
+      this.group.add(poles, arms, heads, lensInst, pools);
     }
-    poles.instanceMatrix.needsUpdate = true;
-    arms.instanceMatrix.needsUpdate = true;
-    heads.instanceMatrix.needsUpdate = true;
-    lensInst.instanceMatrix.needsUpdate = true;
-    if (lensInst.instanceColor) lensInst.instanceColor.needsUpdate = true;
-    if (pools.instanceColor) pools.instanceColor.needsUpdate = true;
-    pools.instanceMatrix.needsUpdate = true;
-    poles.castShadow = true;
-    poles.receiveShadow = true;
-    this.group.add(poles, arms, heads, lensInst, pools);
 
     for (const l of def.lights) {
       this.lightPool.add(l.x, l.y, l.z, l.color, l.intensity, l.range);
