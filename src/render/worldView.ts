@@ -1183,12 +1183,22 @@ export class WorldView {
     const vehiclePosition = new THREE.Vector3();
     const sourceScale = new THREE.Vector3();
 
+    // Contact-shadow blobs: the shadow map alone leaves props floating on
+    // overcast maps — a soft dark disc under each vehicle grounds it.
+    const blobTex = makeGlowTexture('rgba(6,8,10,', 128);
+    const blobMat = new THREE.MeshBasicMaterial({
+      map: blobTex, transparent: true, opacity: 0.5, depthWrite: false, fog: true,
+    });
+    const blobGeo = new THREE.CircleGeometry(1, 18);
+    blobGeo.rotateX(-Math.PI / 2);
     for (const [bucketName, entries] of buckets) {
       const key = entries[0]!.key;
       const tmpl = props.cloneTemplate(`vehicle/${key}`);
       if (!tmpl) continue;
       tmpl.updateMatrixWorld(true);
       rootInverse.copy(tmpl.matrixWorld).invert();
+      const blobs = new THREE.InstancedMesh(blobGeo, blobMat, entries.length);
+      let blobIdx = 0;
       tmpl.traverse((o) => {
         const sourceMesh = o as THREE.Mesh;
         if (!sourceMesh.isMesh || !sourceMesh.material || !sourceMesh.geometry) return;
@@ -1229,6 +1239,23 @@ export class WorldView {
         instanced.receiveShadow = true;
         instanced.name = `vehicle:${bucketName}`;
         this.group.add(instanced);
+        for (let i = 0; i < entries.length; i++) {
+          const v = entries[i]!.vehicle;
+          const vs = vehicleRenderSpec(v.variant, v.x, v.z).scale;
+          const gy = this.mapDef.terrainHeight
+            ? this.mapDef.terrainHeight(v.x, v.z)
+            : v.y;
+          vehiclePosition.set(v.x, gy + 0.045, v.z);
+          vehicleQuaternion.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, v.yaw);
+          const blobSpan = vs * 3.1;
+          vehicleMatrix.compose(vehiclePosition, vehicleQuaternion, new THREE.Vector3(blobSpan, 1, blobSpan * 0.72));
+          blobs.setMatrixAt(blobIdx++, vehicleMatrix);
+        }
+        blobs.count = blobIdx;
+        blobs.instanceMatrix.needsUpdate = true;
+        blobs.frustumCulled = true;
+        blobs.name = `vehicle-blob:${bucketName}`;
+        this.group.add(blobs);
       });
     }
   }
