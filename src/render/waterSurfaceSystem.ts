@@ -410,7 +410,7 @@ function buildWaterMaterial(uniforms: WaterUniformShim): WaterSurfaceMaterial {
   );
   const skySampled = skyTex.sample(skyUv).rgb.mul(uSkyIntensity);
   const reflected = uHasSkyTexture.lessThan(0.5).select(asVec3(uSkyColor), skySampled);
-  const color = mix(base, reflected, fresnel.mul(float(0.20).add(uClarity.mul(0.28))));
+  const color = mix(base, reflected, fresnel.mul(float(0.42).add(uClarity.mul(0.3))));
   const shaded = color
     .add(asVec3(uSunColor).mul(min(ggxSpec, 1.25).mul(nol).mul(0.07).add(glint)))
     .add(asVec3(uShallowColor).mul(shallow).mul(0.045));

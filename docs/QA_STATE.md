@@ -55,6 +55,9 @@ five cycles.
 
 | 17 | ashara canals post-fix verification | Zero-error fix regression pass: canal region renders clean (lit beds, terrain variation, no void, no black props in view) | verified |
 
+| 18 | eden lake capture | Water base color dominated at most view angles → sky-reflection fresnel weight raised (0.20+0.28·clarity → 0.42+0.30·clarity) | visible sky reflection + wave texture; hard shoreline still queued |
+
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
