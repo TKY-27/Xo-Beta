@@ -885,6 +885,20 @@ export class WaterSurfaceSystem implements WaterSurfaceHandle {
     };
   }
 
+  /** Every water shader material across all volumes and LOD tiers. Water
+   * meshes only become visible near a shoreline, so without an explicit
+   * warmup their (large) GLSL programs would compile on the player's first
+   * approach to water mid-match. */
+  warmupMaterials(): THREE.Material[] {
+    const materials: THREE.Material[] = [];
+    for (const entry of this.entries) {
+      for (const material of entry.materials) materials.push(material);
+      if (entry.foam) materials.push(entry.foam.material as THREE.Material);
+      if (entry.sediment) materials.push(entry.sediment.material as THREE.Material);
+    }
+    return materials;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

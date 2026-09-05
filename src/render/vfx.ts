@@ -247,6 +247,10 @@ export class VfxSystem {
       const inst = new THREE.InstancedMesh(pgeo, mat, MAX_PARTICLES / 8);
       inst.count = 0;
       inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      // Allocate instanceColor now, not on the first mid-match spawn: a lazy
+      // setColorAt flips the program's USE_INSTANCING_COLOR define and the
+      // first burst pays a shader compile.
+      for (let slot = 0; slot < MAX_PARTICLES / 8; slot++) inst.setColorAt(slot, _col.setHex(0xffffff));
       this.group.add(inst);
       this.particleMeshes.push(inst);
     }

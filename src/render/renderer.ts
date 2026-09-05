@@ -236,7 +236,7 @@ export class GameRenderer {
     const settings = getSettings();
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const pr = this.effectivePixelRatio() * settings.resolutionScale;
+    const pr = this.effectivePixelRatio() * settings.resolutionScale * this.dynamicScale;
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
     if (this.composer) {
@@ -248,6 +248,26 @@ export class GameRenderer {
     if (this.fxaaPass) {
       (this.fxaaPass.material.uniforms['resolution']!.value as THREE.Vector2).set(1 / (w * pr), 1 / (h * pr));
     }
+  }
+
+  private dynamicScale = 1;
+
+  /**
+   * Adaptive-resolution factor (0.5..1) multiplied into the pixel ratio.
+   * The frame-time watchdog in main steps it down when the rolling average
+   * frame time exceeds the 60 FPS budget and back up when headroom returns —
+   * holding 60 FPS beats holding an authored pixel count. 1 restores the
+   * fully authored resolution.
+   */
+  setDynamicResolutionScale(scale: number): void {
+    const clamped = Math.max(0.5, Math.min(1, scale));
+    if (Math.abs(clamped - this.dynamicScale) < 0.001) return;
+    this.dynamicScale = clamped;
+    this.resize();
+  }
+
+  get dynamicResolutionScale(): number {
+    return this.dynamicScale;
   }
 
   dispose(): void {
@@ -539,7 +559,7 @@ export class GameRenderer {
     const w = Math.max(8, window.innerWidth);
     const h = Math.max(8, window.innerHeight);
     this.composer = new EffectComposer(this.renderer);
-    this.composer.setPixelRatio(this.effectivePixelRatio() * settings.resolutionScale);
+    this.composer.setPixelRatio(this.effectivePixelRatio() * settings.resolutionScale * this.dynamicScale);
     this.composer.setSize(w, h);
 
     this.renderPass = new RenderPass(this.scene, camera);

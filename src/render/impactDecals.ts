@@ -199,14 +199,20 @@ export class ImpactDecalSystem {
     if (!this.prewarmed) this.prewarmed = true;
   }
 
-  /** Advance ages and rewrite the instance buffers. */
+  /** Advance ages and rewrite the instance buffers. Compaction happens in
+   * place — the old per-frame `filter()` + fresh Vector3 allocated every
+   * frame while any decal was alive. */
   update(dt: number): void {
     const frameDt = Math.min(dt, 0.05);
-    let writeIndex = 0;
-    for (const record of this.records) {
+    let liveCount = 0;
+    for (let i = 0; i < this.records.length; i++) {
+      const record = this.records[i]!;
       record.age += frameDt;
+      if (record.age >= record.life) continue;
+      this.records[liveCount++] = record;
     }
-    this.records = this.records.filter((record) => record.age < record.life);
+    this.records.length = liveCount;
+    let writeIndex = 0;
     for (const record of this.records) {
       const remaining = record.life - record.age;
       const fade = Math.min(1, remaining / DECAL_FADE);
@@ -214,7 +220,7 @@ export class ImpactDecalSystem {
       this.scratchMatrix.compose(
         record.position,
         record.quaternion,
-        new THREE.Vector3(scale, scale, scale),
+        this.scratchScale.set(scale, scale, scale),
       );
       this.mesh.setMatrixAt(writeIndex, this.scratchMatrix);
       this.mesh.setColorAt(writeIndex, this.scratchColor.copy(record.tint).multiplyScalar(fade));
@@ -226,6 +232,7 @@ export class ImpactDecalSystem {
   }
 
   private readonly scratchColor = new THREE.Color();
+  private readonly scratchScale = new THREE.Vector3();
 
   /**
    * Force the decal shader program to compile during match setup instead of
@@ -236,6 +243,9 @@ export class ImpactDecalSystem {
     if (this.prewarmed) return;
     this.scratchMatrix.makeScale(0.0001, 0.0001, 0.0001);
     this.mesh.setMatrixAt(0, this.scratchMatrix);
+    // Allocate instanceColor up front too — the first real decal must not
+    // flip USE_INSTANCING_COLOR on the program mid-combat.
+    this.mesh.setColorAt(0, this.scratchColor.setHex(0xffffff));
     this.mesh.count = 1;
     this.mesh.instanceMatrix.needsUpdate = true;
     this.prewarmed = true;

@@ -22,7 +22,7 @@ import { WeaponModelFactory } from './weaponModels';
 import { buildVista, type VistaHandle } from './vista';
 import type { Match } from '../sim/match';
 import type { ChestView, GameStateView, LootView } from '../sim/gameStateView';
-import { RARITY_COLORS } from '../core/balance';
+import { RARITY_COLORS, type AmmoType } from '../core/balance';
 import { buildTerrainRibbonIndices } from '../world/terrainMesh';
 import { getSettings } from '../core/settings';
 import {
@@ -108,6 +108,15 @@ const STORM_FRAG = /* glsl */ `
 export function lootRenderY(itemY: number, kind: 'weapon' | 'consumable'): number {
   return itemY + (kind === 'weapon' ? -0.30 : -0.17);
 }
+
+/**
+ * Cartridge clusters are authored with their origin at the floor contact
+ * point, while the consumable loot Y is a settling *centre* 0.17 m below the
+ * simulation clearance. Sink the cluster base to just above the support
+ * surface (item Y sits 0.35 m above it) so rounds read as resting on the
+ * ground, not floating at box-centre height.
+ */
+const AMMO_BASE_CLEARANCE = 0.16;
 
 /**
  * A restrained rarity treatment for floor weapons.  The old presentation
@@ -346,6 +355,11 @@ const _Y_AXIS = new THREE.Vector3(0, 1, 0);
  */
 const CHEST_RENDER_SINK = 0.015;
 
+/**
+ * Consumable loot pool kinds: one calibre per ammo type plus the two heals.
+ */
+type LootPoolKind = AmmoType | 'med' | 'shield';
+
 export class WorldView {
   readonly group = new THREE.Group();
   private destructibleMeshes = new Map<number, THREE.Object3D>();
@@ -415,6 +429,8 @@ export class WorldView {
       // No dropship in practice mode (spawn is already on the ground).
       if (!match.practice) this.buildTransport();
     }
+    // Loot pools carry GPU state — always resident, never built mid-match.
+    this.precreateLootPools();
   }
 
   /**
@@ -1214,6 +1230,18 @@ export class WorldView {
     return this.waterSystem.getQaStats();
   }
 
+  /** Resident hologram materials for the prewarm stage (see WARMUP). */
+  hologramMaterialsForWarmup(): THREE.Material[] {
+    return hologramWarmupMaterials();
+  }
+
+  /** Water shaders for the prewarm stage. Water LOD meshes stay invisible
+   * until the viewer approaches a shoreline; without this they compile their
+   * large programs mid-match on first approach. */
+  waterMaterialsForWarmup(): THREE.Material[] {
+    return this.waterSystem.warmupMaterials();
+  }
+
   // -------------------------------------------------------------------------
   // Destructibles — real material + slight damage tint
   // -------------------------------------------------------------------------
@@ -1576,24 +1604,38 @@ export class WorldView {
 
   // -------------------------------------------------------------------------
   // Loot presentation: grounded items and model-attached rarity highlights.
-  // Ammo/heals render through shared instanced pools (draw-call budget);
-  // weapons keep individual models with a subtle geometry-following shell.
+  // Ammo renders through per-calibre instanced pools of realistic cartridges;
+  // heals/shields share one pool each. Weapons keep individual models with a
+  // subtle geometry-following shell.
   // -------------------------------------------------------------------------
 
-  private lootInst: Partial<Record<'ammo' | 'med' | 'shield', THREE.InstancedMesh>> = {};
+  /** Consumable loot pool kinds: one calibre per ammo type + two heals. */
+  private lootInst: Partial<Record<LootPoolKind, THREE.InstancedMesh>> = {};
+  private lootSeen = new Set<number>();
+  /** Flattened per-frame instance buffers (x, y, z, yaw per item) — reused
+   * every frame so streaming loot state allocates nothing. */
+  private lootBuckets = new Map<LootPoolKind, number[]>();
+  private lootM4 = new THREE.Matrix4();
+  private lootQ = new THREE.Quaternion();
+  private lootOne = new THREE.Vector3(1, 1, 1);
+  private lootPos = new THREE.Vector3();
+  private lootUp = new THREE.Vector3(0, 1, 0);
 
-  private lootInstMesh(kind: 'ammo' | 'med' | 'shield'): THREE.InstancedMesh {
+  private lootBucket(kind: LootPoolKind): number[] {
+    let bucket = this.lootBuckets.get(kind);
+    if (!bucket) {
+      bucket = [];
+      this.lootBuckets.set(kind, bucket);
+    }
+    return bucket;
+  }
+
+  private lootInstMesh(kind: LootPoolKind): THREE.InstancedMesh {
     const existing = this.lootInst[kind];
     if (existing) return existing;
-    const cap = 128;
+    const cap = 96;
     let mesh: THREE.InstancedMesh;
-    if (kind === 'ammo') {
-      const box = new THREE.BoxGeometry(0.42, 0.3, 0.3);
-      const stripe = new THREE.BoxGeometry(0.44, 0.06, 0.32);
-      stripe.translate(0, 0.12, 0);
-      const geo = mergeGeometries([box, stripe], true)!;
-      mesh = new THREE.InstancedMesh(geo, [lootMats.ammoBox, lootMats.ammoStripe], cap);
-    } else {
+    if (kind === 'med' || kind === 'shield') {
       const box = new THREE.BoxGeometry(0.48, 0.34, 0.34);
       const c1 = new THREE.BoxGeometry(0.3, 0.08, 0.02);
       c1.translate(0, 0.05, 0.18);
@@ -1606,6 +1648,9 @@ export class WorldView {
         ? [lootMats.medBox, lootMats.crossMed, lootMats.crossMed, lootMats.glowMed]
         : [lootMats.shieldBox, lootMats.crossShield, lootMats.crossShield, lootMats.glowShield];
       mesh = new THREE.InstancedMesh(geo, mats, cap);
+    } else {
+      const visual = ammoGroundVisual(kind);
+      mesh = new THREE.InstancedMesh(visual.geometry, visual.materials, cap);
     }
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.count = 0;
@@ -1615,12 +1660,20 @@ export class WorldView {
     return mesh;
   }
 
+  /** Create every loot pool up front. Pool geometry/material are GPU state —
+   * building them lazily on the first mid-match ammo drop would compile a
+   * (small) shader program at the worst possible moment. */
+  private precreateLootPools(): void {
+    for (const kind of ['light', 'medium', 'shells', 'heavy', 'med', 'shield'] as LootPoolKind[]) {
+      this.lootInstMesh(kind);
+    }
+  }
+
   private lootViewFor(
     item: Pick<import('../sim/loot').WorldItem, 'kind' | 'rarity' | 'weapon'>,
   ): { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D } {
     const root = new THREE.Group();
     const rarityRank = ['common', 'uncommon', 'rare', 'epic', 'legendary'].indexOf(item.rarity);
-    const glowHex = RARITY_COLORS[item.rarity];
 
     // Weapons only — consumables render through the shared instanced pools.
     let inner: THREE.Object3D | null = null;
@@ -1632,7 +1685,7 @@ export class WorldView {
         root.add(inner);
         // Keep the shell just outside the real model.  The slight scale
         // expansion avoids depth ties while preserving the authored shape.
-        hologram = buildWeaponHologram(wm.group, glowHex, rarityRank);
+        hologram = buildWeaponHologram(wm.group, rarityRank);
         if (hologram) root.add(hologram);
       }
     }
@@ -1640,16 +1693,17 @@ export class WorldView {
   }
 
   syncLoot(match: Match): void {
-    const seen = new Set<number>();
+    const seen = this.lootSeen;
+    seen.clear();
     const farSqr = 48 * 48;
-    const instBuckets: Record<'ammo' | 'med' | 'shield', Array<{ x: number; y: number; z: number; spin: number }>> = {
-      ammo: [], med: [], shield: [],
-    };
+    for (const bucket of this.lootBuckets.values()) bucket.length = 0;
     for (const item of match.loot.items) {
       seen.add(item.id);
       if (item.kind !== 'weapon') {
-        const key = item.kind === 'ammo' ? 'ammo' : item.heal?.itemId === 'medkit' ? 'med' : 'shield';
-        instBuckets[key]!.push({ x: item.x, y: lootRenderY(item.y, 'consumable'), z: item.z, spin: item.yaw });
+        const key: LootPoolKind = item.kind === 'ammo'
+          ? item.ammo?.type ?? 'light'
+          : item.heal?.itemId === 'medkit' ? 'med' : 'shield';
+        this.lootBucket(key).push(item.x, lootRenderY(item.y, 'consumable') - AMMO_BASE_CLEARANCE, item.z, item.yaw);
         continue;
       }
       let view = this.lootViews.get(item.id);
@@ -1676,52 +1730,48 @@ export class WorldView {
       // its moving world position.
       view.root.position.set(item.x, lootRenderY(item.y, 'weapon'), item.z);
     }
-    // Flush consumable loot into the shared instanced pools.
-    const m4 = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const one = new THREE.Vector3(1, 1, 1);
-    const pos = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-    for (const key of ['ammo', 'med', 'shield'] as const) {
-      const mesh = this.lootInst[key] ?? this.lootInstMesh(key);
-      const items = instBuckets[key]!;
-      const n = Math.min(items.length, mesh.instanceMatrix.count);
-      for (let i = 0; i < n; i++) {
-        const it = items[i]!;
-        q.setFromAxisAngle(up, it.spin);
-        m4.compose(pos.set(it.x, it.y, it.z), q, one);
-        mesh.setMatrixAt(i, m4);
-      }
-      mesh.count = n;
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.visible = n > 0;
-    }
+    this.flushLootBuckets();
     for (const [id, view] of this.lootViews) {
       if (!seen.has(id)) {
-        disposeWeaponHologram(view.hologram);
+        // Hologram materials are a resident shared pool — shells detach
+        // without releasing the GLSL program.
         this.group.remove(view.root);
         this.lootViews.delete(id);
       }
     }
   }
 
+  /** Push the flattened per-frame loot buffers into the instanced pools. */
+  private flushLootBuckets(): void {
+    for (const [kind, bucket] of this.lootBuckets) {
+      const mesh = this.lootInst[kind] ?? this.lootInstMesh(kind);
+      const count = Math.min(bucket.length / 4, mesh.instanceMatrix.count);
+      for (let i = 0; i < count; i++) {
+        const x = bucket[i * 4]!;
+        const y = bucket[i * 4 + 1]!;
+        const z = bucket[i * 4 + 2]!;
+        const yaw = bucket[i * 4 + 3]!;
+        this.lootQ.setFromAxisAngle(this.lootUp, yaw);
+        this.lootM4.compose(this.lootPos.set(x, y, z), this.lootQ, this.lootOne);
+        mesh.setMatrixAt(i, this.lootM4);
+      }
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.visible = count > 0;
+    }
+  }
+
   /** Replica loot uses the host-advertised public world identity. Actor
    * inventories remain owner-scoped elsewhere in GameStateView. */
   syncReplicaLoot(items: readonly LootView[]): void {
-    const seen = new Set<number>();
-    const instBuckets: Record<'ammo' | 'med' | 'shield', Array<{ x: number; y: number; z: number; spin: number }>> = {
-      ammo: [], med: [], shield: [],
-    };
+    const seen = this.lootSeen;
+    seen.clear();
+    for (const bucket of this.lootBuckets.values()) bucket.length = 0;
     for (const item of items) {
       seen.add(item.id);
       if (item.kind !== 'weapon') {
-        const key = item.kind === 'ammo' ? 'ammo' : item.itemId === 'medkit' ? 'med' : 'shield';
-        instBuckets[key].push({
-          x: item.x,
-          y: lootRenderY(item.y, 'consumable'),
-          z: item.z,
-          spin: item.yaw,
-        });
+        const key: LootPoolKind = item.kind === 'ammo' ? item.ammoType : item.itemId === 'medkit' ? 'med' : 'shield';
+        this.lootBucket(key).push(item.x, lootRenderY(item.y, 'consumable') - AMMO_BASE_CLEARANCE, item.z, item.yaw);
         continue;
       }
       let view = this.lootViews.get(item.id);
@@ -1747,28 +1797,9 @@ export class WorldView {
       view.root.position.set(item.x, lootRenderY(item.y, 'weapon'), item.z);
       view.root.rotation.y = item.yaw;
     }
-    const matrix = new THREE.Matrix4();
-    const rotation = new THREE.Quaternion();
-    const scale = new THREE.Vector3(1, 1, 1);
-    const position = new THREE.Vector3();
-    const up = new THREE.Vector3(0, 1, 0);
-    for (const key of ['ammo', 'med', 'shield'] as const) {
-      const mesh = this.lootInst[key] ?? this.lootInstMesh(key);
-      const bucket = instBuckets[key];
-      const count = Math.min(bucket.length, mesh.instanceMatrix.count);
-      for (let index = 0; index < count; index++) {
-        const item = bucket[index]!;
-        rotation.setFromAxisAngle(up, item.spin);
-        matrix.compose(position.set(item.x, item.y, item.z), rotation, scale);
-        mesh.setMatrixAt(index, matrix);
-      }
-      mesh.count = count;
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.visible = count > 0;
-    }
+    this.flushLootBuckets();
     for (const [id, view] of this.lootViews) {
       if (seen.has(id)) continue;
-      disposeWeaponHologram(view.hologram);
       this.group.remove(view.root);
       this.lootViews.delete(id);
     }
@@ -2189,17 +2220,84 @@ function retoneRockMap(std: THREE.MeshStandardMaterial, color: number, amount: n
 }
 
 /**
- * Clone only the scene graph for the visual shell; the weapon factory owns
- * the source geometries and materials.  The shell gets per-loot materials so
- * each world item can be released when it is picked up without touching the
- * shared weapon archetypes.
+ * Persistent per-rarity hologram materials. Building (and, on pickup,
+ * disposing) a ShaderMaterial set per world item evicted the shared GLSL
+ * program whenever the last hologram left the field, so the next chest or
+ * kill drop paid a full shader recompile — the recurring hitch on loot
+ * transitions. Color and opacity are fixed per rarity rank, so one resident
+ * material set per rank removes the eviction cycle entirely. The set is
+ * module-level and marked externalShared: match teardown must not release it.
  */
-function buildWeaponHologram(source: THREE.Object3D, colorHex: number, rarityRank: number): THREE.Object3D | undefined {
+const RARITY_RANKS = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
+
+const hologramMaterialPool: { shader: THREE.ShaderMaterial[]; basic: THREE.MeshBasicMaterial[] } = {
+  shader: [],
+  basic: [],
+};
+
+function hologramMaterialFor(rarityRank: number, hasNormals: boolean): THREE.Material {
+  const rank = Math.max(0, Math.min(RARITY_RANKS.length - 1, rarityRank));
+  if (!hasNormals) {
+    // A malformed/very small imported mesh may not carry normals.  Keep it
+    // visible as a quiet silhouette instead of failing the whole shell.
+    let fallback = hologramMaterialPool.basic[rank];
+    if (!fallback) {
+      fallback = new THREE.MeshBasicMaterial({
+        color: RARITY_COLORS[RARITY_RANKS[rank]!],
+        transparent: true,
+        opacity: (0.14 + rank * 0.022) * 0.28,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      fallback.userData.weaponHologram = true;
+      fallback.userData.externalShared = true;
+      hologramMaterialPool.basic[rank] = fallback;
+    }
+    return fallback;
+  }
+  let material = hologramMaterialPool.shader[rank];
+  if (!material) {
+    material = new THREE.ShaderMaterial({
+      vertexShader: RARITY_HOLOGRAM_VERT,
+      fragmentShader: RARITY_HOLOGRAM_FRAG,
+      uniforms: {
+        uColor: { value: new THREE.Color(RARITY_COLORS[RARITY_RANKS[rank]!]) },
+        uOpacity: { value: 0.14 + rank * 0.022 },
+      },
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    material.userData.weaponHologram = true;
+    material.userData.externalShared = true;
+    hologramMaterialPool.shader[rank] = material;
+  }
+  return material;
+}
+
+/** All resident hologram materials, for renderer shader warmup. */
+export function hologramWarmupMaterials(): THREE.Material[] {
+  const materials: THREE.Material[] = [];
+  for (let rank = 0; rank < RARITY_RANKS.length; rank++) {
+    materials.push(hologramMaterialFor(rank, true), hologramMaterialFor(rank, false));
+  }
+  return materials;
+}
+
+/**
+ * Clone only the scene graph for the visual shell; the weapon factory owns
+ * the source geometries and materials.  Materials come from the resident
+ * per-rarity pool, so shells can be added and removed freely without ever
+ * releasing the hologram GLSL program.
+ */
+function buildWeaponHologram(source: THREE.Object3D, rarityRank: number): THREE.Object3D | undefined {
   const shell = source.clone(true);
   shell.name = 'weapon-rarity-hologram';
-  // Common weapons stay readable but do not look like a beacon.  Higher
-  // tiers gain a little more edge energy, never a separate light source.
-  const opacity = 0.14 + Math.max(0, rarityRank) * 0.022;
   shell.scale.multiplyScalar(1.018);
   shell.renderOrder = 1;
   shell.traverse((object) => {
@@ -2207,7 +2305,7 @@ function buildWeaponHologram(source: THREE.Object3D, colorHex: number, rarityRan
     if (!mesh.isMesh) return;
     const hasNormals = mesh.geometry.getAttribute('normal') !== undefined;
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    mesh.material = materials.map(() => makeWeaponHologramMaterial(colorHex, opacity, hasNormals));
+    mesh.material = materials.map(() => hologramMaterialFor(rarityRank, hasNormals));
     mesh.renderOrder = 1;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
@@ -2215,58 +2313,8 @@ function buildWeaponHologram(source: THREE.Object3D, colorHex: number, rarityRan
   return shell;
 }
 
-function makeWeaponHologramMaterial(colorHex: number, opacity: number, hasNormals: boolean): THREE.Material {
-  if (!hasNormals) {
-    // A malformed/very small imported mesh may not carry normals.  Keep it
-    // visible as a quiet silhouette instead of failing the whole shell.
-    const fallback = new THREE.MeshBasicMaterial({
-      color: colorHex,
-      transparent: true,
-      opacity: opacity * 0.28,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      toneMapped: false,
-    });
-    fallback.userData.weaponHologram = true;
-    return fallback;
-  }
-  const material = new THREE.ShaderMaterial({
-    vertexShader: RARITY_HOLOGRAM_VERT,
-    fragmentShader: RARITY_HOLOGRAM_FRAG,
-    uniforms: {
-      uColor: { value: new THREE.Color(colorHex) },
-      uOpacity: { value: opacity },
-    },
-    transparent: true,
-    depthTest: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    blending: THREE.AdditiveBlending,
-    toneMapped: false,
-  });
-  material.userData.weaponHologram = true;
-  return material;
-}
-
-function disposeWeaponHologram(root: THREE.Object3D | undefined): void {
-  if (!root) return;
-  const materials = new Set<THREE.Material>();
-  root.traverse((object) => {
-    const mesh = object as THREE.Mesh;
-    if (!mesh.isMesh) return;
-    const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    for (const material of list) {
-      if (material.userData.weaponHologram) materials.add(material);
-    }
-  });
-  for (const material of materials) material.dispose();
-}
-
 /** Shared ground-loot materials (one instance per look — draw-call/GC budget). */
 const lootMats = {
-  ammoBox: new THREE.MeshStandardMaterial({ color: 0x4a5038, roughness: 0.7, metalness: 0.2 }),
-  ammoStripe: new THREE.MeshStandardMaterial({ color: 0x101114, emissive: 0xd8c86a, emissiveIntensity: 0.8 }),
   medBox: new THREE.MeshStandardMaterial({
     color: 0xe8ecef, roughness: 0.5, metalness: 0.3, emissive: 0x882030, emissiveIntensity: 0.5,
   }),
@@ -2277,7 +2325,87 @@ const lootMats = {
   crossShield: new THREE.MeshBasicMaterial({ color: 0x53d8ff }),
   glowMed: new THREE.MeshBasicMaterial({ color: 0xff8088 }),
   glowShield: new THREE.MeshBasicMaterial({ color: 0x53d8ff }),
+  // Cartridge metals — bright brass cases with per-calibre projectile tips so
+  // floor ammo reads by colour at gameplay distances (see ammoGroundVisual).
+  ammoBrass: new THREE.MeshStandardMaterial({ color: 0xcaa13d, roughness: 0.34, metalness: 0.88 }),
+  ammoCopperTip: new THREE.MeshStandardMaterial({ color: 0xb06a35, roughness: 0.4, metalness: 0.75 }),
+  ammoGreenTip: new THREE.MeshStandardMaterial({ color: 0x486f46, roughness: 0.48, metalness: 0.35 }),
+  ammoSteelTip: new THREE.MeshStandardMaterial({ color: 0x565b63, roughness: 0.34, metalness: 0.85 }),
+  // Shotgun shells: red plastic tube over a brass head, like a 12-gauge hull.
+  ammoShellTube: new THREE.MeshStandardMaterial({ color: 0x8e1f1f, roughness: 0.55, metalness: 0.08 }),
 };
+
+/**
+ * A small cluster of realistic cartridges for one ammo calibre, instanced per
+ * ground pickup. Each round is a brass cylinder (base rim + case) with a
+ * conical projectile; shotgun shells are a red plastic tube over a brass
+ * head, like a 12-gauge hull. Geometry origin sits at the floor contact
+ * point. Clusters mix upright rounds and one lying round, like a spilled
+ * handful of ammunition.
+ */
+function ammoGroundVisual(type: AmmoType): { geometry: THREE.BufferGeometry; materials: THREE.Material[] } {
+  const calibres: Record<AmmoType, {
+    caseR: number; caseH: number; tipH: number; rounds: number;
+    tipMat: THREE.Material; bodyMat: THREE.Material; shell: boolean;
+  }> = {
+    // SMG/pistol: small copper-nosed rounds. AR: green-tip rifle cartridges.
+    // Sniper: large boat-tail rounds with a steel tip. Shells: 12-gauge hulls.
+    light: { caseR: 0.017, caseH: 0.09, tipH: 0.035, rounds: 6, tipMat: lootMats.ammoCopperTip, bodyMat: lootMats.ammoBrass, shell: false },
+    medium: { caseR: 0.019, caseH: 0.13, tipH: 0.055, rounds: 4, tipMat: lootMats.ammoGreenTip, bodyMat: lootMats.ammoBrass, shell: false },
+    heavy: { caseR: 0.026, caseH: 0.185, tipH: 0.08, rounds: 3, tipMat: lootMats.ammoSteelTip, bodyMat: lootMats.ammoBrass, shell: false },
+    shells: { caseR: 0.032, caseH: 0.15, tipH: 0, rounds: 4, tipMat: lootMats.ammoBrass, bodyMat: lootMats.ammoShellTube, shell: true },
+  };
+  const cal = calibres[type];
+  const primaries: THREE.BufferGeometry[] = [];
+  const accents: THREE.BufferGeometry[] = [];
+  const ringR = cal.caseR * (cal.rounds > 4 ? 1.8 : 2.6);
+  const baseLift = 0.004;
+  for (let i = 0; i < cal.rounds; i++) {
+    const lying = i === cal.rounds - 1 && cal.rounds > 2;
+    const angle = (i / Math.max(1, cal.rounds - 1)) * Math.PI * 1.9;
+    const x = Math.cos(angle) * ringR;
+    const z = Math.sin(angle) * ringR;
+    const yaw = angle * 0.3;
+
+    // Primary hull: case + base rim (cartridges) or the full red tube (shells).
+    const caseStart = cal.shell ? 0 : 0.014;
+    const parts: THREE.BufferGeometry[] = [];
+    if (!cal.shell) {
+      const rim = new THREE.CylinderGeometry(cal.caseR * 1.12, cal.caseR * 1.12, 0.014, 10);
+      rim.translate(0, 0.007, 0);
+      parts.push(rim);
+    }
+    const tube = new THREE.CylinderGeometry(cal.caseR, cal.caseR, cal.caseH, 10);
+    tube.translate(0, caseStart + cal.caseH / 2, 0);
+    parts.push(tube);
+    const primary = mergeGeometries(parts, false)!;
+
+    // Accent: the projectile cone, or the brass head of a shotgun hull.
+    let accent: THREE.BufferGeometry;
+    if (cal.shell) {
+      accent = new THREE.CylinderGeometry(cal.caseR * 1.05, cal.caseR * 1.05, cal.caseH * 0.24, 10);
+      accent.translate(0, cal.caseH * 0.12, 0);
+    } else {
+      accent = new THREE.ConeGeometry(cal.caseR, cal.tipH, 10);
+      accent.translate(0, caseStart + cal.caseH + cal.tipH / 2, 0);
+    }
+
+    for (const geo of [primary, accent]) {
+      if (lying) {
+        geo.rotateZ(Math.PI / 2);
+        geo.rotateY(0.5);
+        geo.translate(cal.caseR * 3.1, cal.caseR + baseLift, ringR * 0.4);
+      } else {
+        geo.rotateY(yaw);
+        geo.translate(x, baseLift, z);
+      }
+    }
+    primaries.push(primary);
+    accents.push(accent);
+  }
+  const geometry = mergeGeometries([...primaries, ...accents], true)!;
+  return { geometry, materials: [cal.bodyMat, cal.tipMat] };
+}
 for (const m of Object.values(lootMats)) {
   (m.userData as { shared?: boolean }).shared = true;
   m.userData.externalShared = true;

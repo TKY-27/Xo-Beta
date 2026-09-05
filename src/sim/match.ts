@@ -114,7 +114,7 @@ export interface MatchEventsMap {
   headshotFeedback: { attackerId: number };
   eliminated: { victimId: number; killerId: number; weaponId: WeaponId | null; headshot: boolean; storm: boolean; placement: number };
   itemSpawned: { itemId: number };
-  itemPickedUp: { itemId: number; actorId: number; rare?: boolean };
+  itemPickedUp: { itemId: number; actorId: number; rare?: boolean; kind?: 'weapon' | 'ammo' | 'heal' };
   chestOpened: { chestId: number; actorId: number; kind: string; tier: number; x: number; y: number; z: number };
   stormWaiting: { index: number; waitTime: number; targetRadius: number };
   stormShrinking: { index: number; shrinkTime: number };
@@ -887,7 +887,12 @@ export class Match {
   private lootEvents(): LootEvents {
     return {
       onSpawn: (item) => this.events.emit('itemSpawned', { itemId: item.id }),
-      onPickup: (item, actor) => this.events.emit('itemPickedUp', { itemId: item.id, actorId: actor.id, rare: item.kind === 'weapon' && (item.rarity === 'epic' || item.rarity === 'legendary') }),
+      onPickup: (item, actor) => this.events.emit('itemPickedUp', {
+        itemId: item.id,
+        actorId: actor.id,
+        rare: item.kind === 'weapon' && (item.rarity === 'epic' || item.rarity === 'legendary'),
+        kind: item.kind,
+      }),
     };
   }
 

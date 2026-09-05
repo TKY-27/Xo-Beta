@@ -42,7 +42,15 @@ export class ViewModel {
   private adsSmooth = 0;
   private sprintBlend = 0;
   private lastSpeed = 0;
-  private muzzleFlashLight: THREE.PointLight;
+  /**
+   * Muzzle flash light. Deliberately NOT a child of `group`: the group is
+   * hidden during sniper scope, spectator and transport phases, and an
+   * invisible light changes the renderer's NUM_POINT_LIGHTS — forcing every
+   * material in the scene through a full shader recompile (the "first scope
+   * entry freeze"). The light is parked in the scene root with intensity 0
+   * instead, so the light count never varies.
+   */
+  readonly muzzleFlashLight: THREE.PointLight;
 
   constructor(factory: WeaponModelFactory) {
     this.factory = factory;
@@ -52,7 +60,6 @@ export class ViewModel {
     this.buildFists();
 
     this.muzzleFlashLight = new THREE.PointLight(0xffc878, 0, 7, 2);
-    this.group.add(this.muzzleFlashLight);
   }
 
   private buildArms(): void {
@@ -165,11 +172,14 @@ export class ViewModel {
     this.punchHand ^= 1;
   }
 
-  /** Muzzle flash light pulse at the barrel tip. */
+  /** Muzzle flash light pulse at the barrel tip. The position is resolved
+   * through the group's last rendered world matrix — during a pulse the
+   * intensity decays in ~100 ms, so one frame of staleness is invisible. */
   muzzlePulse(strength: number): void {
     this.muzzleFlashLight.intensity = 5 * strength;
     if (this.currentModel) {
       this.muzzleFlashLight.position.copy(this.currentModel.muzzle);
+      this.muzzleFlashLight.position.applyMatrix4(this.group.matrixWorld);
     }
   }
 

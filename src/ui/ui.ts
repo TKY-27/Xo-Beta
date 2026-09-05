@@ -700,6 +700,11 @@ export class Menus {
       s.quality, (v) => { updateSettings({ quality: v as never }); },
     )));
     graphics.appendChild(this.row(t('set.resScale'), this.slider(0.5, 1.5, 0.05, s.resolutionScale, (v) => updateSettings({ resolutionScale: v }), (v) => `${Math.round(v * 100)}%`)));
+    graphics.appendChild(this.row(t('set.dynamicRes'), this.checkbox(s.dynamicResolution, (v) => updateSettings({ dynamicResolution: v }))));
+    graphics.appendChild(this.row(t('set.fpsLimit'), this.select(
+      [['0', t('fps.off')], ['60', '60'], ['120', '120'], ['144', '144']],
+      String(s.fpsLimit), (v) => updateSettings({ fpsLimit: Number(v) as never }),
+    )));
     graphics.appendChild(this.row(t('set.shadows'), this.checkbox(s.shadows, (v) => updateSettings({ shadows: v }))));
     graphics.appendChild(this.row(t('set.shadowQuality'), this.select(
       [['low', t('q.low')], ['medium', t('q.medium')], ['high', t('q.high')], ['cinematic', t('q.cinematic')]],
@@ -1865,10 +1870,15 @@ export class Hud {
 
   hitmarker(headshot: boolean): void {
     const hm = $('hitmarker');
-    hm.classList.remove('show', 'headshot');
-    void hm.offsetWidth;
+    hm.classList.toggle('headshot', headshot);
     hm.classList.add('show');
-    if (headshot) hm.classList.add('headshot');
+    // Web Animations API restart — the old remove/`offsetWidth`/add pattern
+    // forced a synchronous layout (reflow) on every hit, and bursts land
+    // several hits per frame.
+    hm.animate([{ opacity: 1, transform: 'scale(1.25)' }, { opacity: 1, transform: 'scale(1)' }], {
+      duration: 180,
+      easing: 'ease-out',
+    });
     this.hitmarkerTimer = 0.18;
   }
 

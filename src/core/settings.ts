@@ -60,6 +60,8 @@ export interface Settings {
   motionBlur: boolean;
   dof: boolean;
   fpsLimit: 0 | 60 | 120 | 144; // 0 = uncapped/vsync
+  /** Frame-time watchdog: trade internal resolution for a stable 60 FPS. */
+  dynamicResolution: boolean;
 
   // Audio
   masterVolume: number;
@@ -122,6 +124,7 @@ export const DEFAULT_SETTINGS: Settings = {
   motionBlur: false,
   dof: false,
   fpsLimit: 0,
+  dynamicResolution: true,
 
   masterVolume: 0.8,
   musicVolume: 0.6,
@@ -233,6 +236,7 @@ function mergeSettings(base: Settings, patch: unknown): Settings {
     motionBlur: bool(patch.motionBlur, base.motionBlur),
     dof: bool(patch.dof, base.dof),
     fpsLimit: choice(patch.fpsLimit, base.fpsLimit, [0, 60, 120, 144]),
+    dynamicResolution: bool(patch.dynamicResolution, base.dynamicResolution),
 
     masterVolume: bounded(patch.masterVolume, base.masterVolume, 0, 1),
     musicVolume: bounded(patch.musicVolume, base.musicVolume, 0, 1),

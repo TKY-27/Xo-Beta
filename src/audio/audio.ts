@@ -191,6 +191,73 @@ export const REMOTE_GUNSHOT_VOICE_LIMITS: Readonly<Record<Exclude<GunshotDistanc
 
 const MAX_REMOTE_GUNSHOT_VOICES = 6;
 
+/** Panning model switch distance: past this the HRTF cross-feed detail it
+ * preserves is imperceptible, so far sources get the cheap equalpower model. */
+const HRTF_MAX_DISTANCE = 45;
+
+interface PooledPanner {
+  readonly panner: PannerNode;
+  /** Currently playing source routed through this panner, if any. */
+  live: AudioBufferSourceNode | null;
+}
+
+/**
+ * Fixed pool of spatial panners. HRTF PannerNode *construction* is expensive
+ * (Chrome allocates a convolution per node), and combat used to build 70-100
+ * of them per second — a main-thread stall every burst. Panners are now
+ * allocated once and leased round-robin; only when every slot is busy does a
+ * lease steal the oldest still-playing voice. Far sources lease from a
+ * separate equalpower pool.
+ */
+class PannerPool {
+  private readonly entries: PooledPanner[] = [];
+  private cursor = 0;
+
+  constructor(ctx: AudioContext, count: number, model: PanningModelType, destination: AudioNode) {
+    for (let i = 0; i < count; i++) {
+      const panner = ctx.createPanner();
+      panner.panningModel = model;
+      panner.distanceModel = 'exponential';
+      panner.connect(destination);
+      this.entries.push({ panner, live: null });
+    }
+  }
+
+  lease(): PooledPanner {
+    const n = this.entries.length;
+    for (let i = 0; i < n; i++) {
+      const entry = this.entries[(this.cursor + i) % n]!;
+      if (!entry.live) {
+        this.cursor = (this.cursor + i + 1) % n;
+        return entry;
+      }
+    }
+    // Every slot busy: steal the next slot in rotation (the oldest voice).
+    const stolen = this.entries[this.cursor % n]!;
+    stolen.live?.stop();
+    stolen.live = null;
+    this.cursor = (this.cursor + 1) % n;
+    return stolen;
+  }
+
+  /** Track a source so its slot frees automatically when playback ends. */
+  attach(entry: PooledPanner, source: AudioBufferSourceNode): void {
+    entry.live = source;
+    source.addEventListener('ended', () => {
+      if (entry.live === source) entry.live = null;
+    });
+  }
+}
+
+/** Per-category sliding-window rate caps. Bursts fire more impact/ricochet/
+ * footstep events per second than the mix can meaningfully present; the
+ * extras were pure node churn. Local-player footsteps are never capped. */
+const VOICE_CATEGORY_CAPS: Readonly<Record<string, { limit: number; windowSec: number }>> = Object.freeze({
+  impact: { limit: 6, windowSec: 0.1 },
+  ricochet: { limit: 2, windowSec: 0.12 },
+  footstep: { limit: 5, windowSec: 0.15 },
+});
+
 export class AudioEngine {
   private static listenerInstance: AudioEngine | null = null;
   private ctx: AudioContext | null = null;
@@ -216,6 +283,25 @@ export class AudioEngine {
   private matchEffectGeneration = 0;
   private matchEffectTimers = new Set<number>();
   private remoteGunshotVoices: Array<{ band: Exclude<GunshotDistanceBand, 'local'>; until: number }> = [];
+  private hrtfPanners: PannerPool | null = null;
+  private farPanners: PannerPool | null = null;
+  private voiceStamps = new Map<string, number[]>();
+
+  /** Sliding-window voice cap per category (see VOICE_CATEGORY_CAPS). */
+  private allowVoice(category: string): boolean {
+    const cap = VOICE_CATEGORY_CAPS[category];
+    if (!cap || !this.ctx) return true;
+    const now = this.now();
+    let stamps = this.voiceStamps.get(category);
+    if (!stamps) {
+      stamps = [];
+      this.voiceStamps.set(category, stamps);
+    }
+    while (stamps.length > 0 && stamps[0]! <= now - cap.windowSec) stamps.shift();
+    if (stamps.length >= cap.limit) return false;
+    stamps.push(now);
+    return true;
+  }
 
   private reserveRemoteGunshotVoice(profile: GunshotPresentationProfile): boolean {
     const band = profile.band;
@@ -277,6 +363,11 @@ export class AudioEngine {
     this.masterLimiter.connect(this.master);
     this.master.connect(ctx.destination);
 
+    // Pooled spatial voices: allocated once here instead of per one-shot
+    // (see PannerPool). The split point is HRTF_MAX_DISTANCE.
+    this.hrtfPanners = new PannerPool(ctx, 28, 'HRTF', this.buses.sfx!);
+    this.farPanners = new PannerPool(ctx, 12, 'equalpower', this.buses.sfx!);
+
     const len = ctx.sampleRate * 1.0;
     this.noiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate);
     const d = this.noiseBuffer.getChannelData(0);
@@ -331,7 +422,7 @@ export class AudioEngine {
     return this.ctx!.currentTime;
   }
 
-  /** Spatial one-shot buffer playback through a panner. */
+  /** Spatial one-shot buffer playback through a pooled panner. */
   play(key: string, opts: PlayOpts = {}): void {
     const buf = this.buffers.get(key);
     if (!this.ctx) return;
@@ -348,38 +439,38 @@ export class AudioEngine {
       void this.ctx.resume().catch((err) => console.warn('audio resume failed', err));
     }
     const bus = this.buses[opts.bus ?? 'sfx']!;
-    let node: AudioNode = bus;
-
-    if (opts.lp !== undefined) {
-      const f = this.ctx.createBiquadFilter();
-      f.type = 'lowpass';
-      f.frequency.value = Math.max(220, opts.lp);
-      f.connect(bus);
-      node = f;
-    }
-
-    let out: AudioNode = node;
-    const hasPos = opts.x !== undefined;
-    if (hasPos) {
-      const p = this.ctx.createPanner();
-      p.panningModel = 'HRTF';
-      p.distanceModel = 'exponential';
-      p.refDistance = opts.refDist ?? 5;
-      p.rolloffFactor = opts.rolloff ?? 1.25;
-      p.positionX.value = opts.x!;
-      p.positionY.value = opts.y ?? 1.2;
-      p.positionZ.value = opts.z!;
-      p.connect(node);
-      out = p;
-    }
-
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     src.playbackRate.value = opts.rate ?? 1;
     const g = this.ctx.createGain();
     g.gain.value = (opts.vol ?? 1) * sampleGainFor(key);
-    g.connect(out);
     src.connect(g);
+    // Chain: source → gain → (lowpass) → (pooled panner | bus).
+    let tail: AudioNode = g;
+    if (opts.lp !== undefined) {
+      const f = this.ctx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = Math.max(220, opts.lp);
+      tail.connect(f);
+      tail = f;
+    }
+    const hasPos = opts.x !== undefined;
+    if (hasPos) {
+      const distance = Math.hypot(opts.x! - cameraCenter.x, opts.z! - cameraCenter.z);
+      const pool = distance > HRTF_MAX_DISTANCE ? this.farPanners : this.hrtfPanners;
+      if (!pool) return;
+      const entry = pool.lease();
+      const p = entry.panner;
+      p.refDistance = opts.refDist ?? 5;
+      p.rolloffFactor = opts.rolloff ?? 1.25;
+      p.positionX.value = opts.x!;
+      p.positionY.value = opts.y ?? 1.2;
+      p.positionZ.value = opts.z!;
+      tail.connect(p);
+      pool.attach(entry, src);
+    } else {
+      tail.connect(bus);
+    }
     src.start(this.now() + (opts.delay ?? 0) + Math.random() * 0.008);
   }
 
@@ -511,16 +602,14 @@ export class AudioEngine {
 
   /** Brief high-frequency muzzle crack layered over recorded firearm reports. */
   private gunCrack(x: number, y: number, z: number, volume: number, refDist: number, lpFrequency: number, rolloff: number): void {
-    if (!this.ctx || !this.noiseBuffer) return;
-    const p = this.ctx.createPanner();
-    p.panningModel = 'HRTF';
-    p.distanceModel = 'exponential';
+    if (!this.ctx || !this.noiseBuffer || !this.hrtfPanners) return;
+    const entry = this.hrtfPanners.lease();
+    const p = entry.panner;
     p.refDistance = refDist;
     p.rolloffFactor = rolloff;
     p.positionX.value = x;
     p.positionY.value = y;
     p.positionZ.value = z;
-    p.connect(this.buses.sfx!);
 
     const src = this.ctx.createBufferSource();
     src.buffer = this.noiseBuffer;
@@ -536,10 +625,12 @@ export class AudioEngine {
     gain.gain.linearRampToValueAtTime(volume, now + 0.0015);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.032);
     src.connect(hp); hp.connect(lp); lp.connect(gain); gain.connect(p);
+    this.hrtfPanners.attach(entry, src);
     src.start(now); src.stop(now + 0.038);
   }
 
   impact(x: number, y: number, z: number, material: string): void {
+    if (!this.allowVoice('impact')) return;
     const table: Record<string, string[]> = {
       metal: ['impact/metal_a', 'impact/metal_b', 'impact/plate_a'],
       glass: ['impact/glass_a', 'impact/glass_b'],
@@ -558,6 +649,7 @@ export class AudioEngine {
   }
 
   ricochet(x: number, y: number, z: number): void {
+    if (!this.allowVoice('ricochet')) return;
     this.play('impact/metal_a', { x, y, z, vol: 0.45, rate: 1.7 + Math.random() * 0.5, refDist: 3 });
   }
 
@@ -570,7 +662,10 @@ export class AudioEngine {
     this.play('impact/wood_b', { x, y, z, vol: 0.9, rate: 0.85 + Math.random() * 0.2 });
   }
 
-  footstep(x: number, y: number, z: number, running: boolean, surface: string): void {
+  footstep(x: number, y: number, z: number, running: boolean, surface: string, isLocal = false): void {
+    // Remote steps are rate-capped: ten combatants sprinting used to push
+    // ~27 step events per second through the spatial mixer.
+    if (!isLocal && !this.allowVoice('footstep')) return;
     const table: Record<string, string[]> = {
       stone: ['step/concrete_a', 'step/concrete_b', 'step/concrete_c'],
       metal: ['step/concrete_a', 'step/concrete_c'],
@@ -591,8 +686,8 @@ export class AudioEngine {
     this.play(key, { x, y, z, vol, rate, refDist: 4.8, rolloff: 1.05, lp: running ? undefined : 6000 });
   }
 
-  jumpLand(x: number, y: number, z: number, hard: boolean, surface = 'stone'): void {
-    this.footstep(x, y, z, true, surface);
+  jumpLand(x: number, y: number, z: number, hard: boolean, surface = 'stone', isLocal = false): void {
+    this.footstep(x, y, z, true, surface, isLocal);
     this.play('impact/soft_a', { x, y, z, vol: hard ? 0.8 : 0.4, rate: 0.8 });
   }
 
@@ -601,16 +696,16 @@ export class AudioEngine {
     // Distance attenuation so distant actors' movement layers stay local.
     const d = Math.hypot(x - cameraCenter.x, z - cameraCenter.z);
     if (d > 55) return;
+    const pool = d > HRTF_MAX_DISTANCE ? this.farPanners : this.hrtfPanners;
+    if (!pool) return;
     const att = 1 / (1 + (d * d) / 420);
-    const p = this.ctx.createPanner();
-    p.panningModel = 'HRTF';
-    p.distanceModel = 'exponential';
+    const entry = pool.lease();
+    const p = entry.panner;
     p.refDistance = 3;
     p.rolloffFactor = 1.15;
     p.positionX.value = x;
     p.positionY.value = y;
     p.positionZ.value = z;
-    p.connect(this.buses.sfx!);
     const n = this.ctx.createBufferSource();
     n.buffer = this.noiseBuffer;
     n.loop = true;
@@ -626,6 +721,7 @@ export class AudioEngine {
     g.gain.linearRampToValueAtTime(0.1 * att, this.now() + 0.03);
     g.gain.exponentialRampToValueAtTime(0.0001, this.now() + 0.24);
     n.connect(bp); bp.connect(g); g.connect(p);
+    pool.attach(entry, n);
     n.start(); n.stop(this.now() + 0.26);
   }
 
@@ -636,16 +732,14 @@ export class AudioEngine {
 
   /** Positional punch swing: short filtered-noise "fwip". */
   meleeSwing(x: number, y: number, z: number): void {
-    if (!this.ctx || !this.noiseBuffer) return;
-    const p = this.ctx.createPanner();
-    p.panningModel = 'HRTF';
-    p.distanceModel = 'exponential';
+    if (!this.ctx || !this.noiseBuffer || !this.hrtfPanners) return;
+    const entry = this.hrtfPanners.lease();
+    const p = entry.panner;
     p.refDistance = 4;
     p.rolloffFactor = 1.3;
     p.positionX.value = x;
     p.positionY.value = y;
     p.positionZ.value = z;
-    p.connect(this.buses.sfx!);
     const n = this.ctx.createBufferSource();
     n.buffer = this.noiseBuffer;
     n.loop = true;
@@ -660,6 +754,7 @@ export class AudioEngine {
     g.gain.linearRampToValueAtTime(0.16, this.now() + 0.025);
     g.gain.exponentialRampToValueAtTime(0.0001, this.now() + 0.18);
     n.connect(bp); bp.connect(g); g.connect(p);
+    this.hrtfPanners.attach(entry, n);
     n.start(); n.stop(this.now() + 0.2);
   }
 
@@ -708,6 +803,91 @@ export class AudioEngine {
 
   pickupUi(rare: boolean): void {
     this.play(rare ? 'ui/confirm' : 'pickup/item', { bus: 'ui', vol: 0.75, rate: rare ? 1.05 : 1 });
+  }
+
+  /**
+   * Physical pickup feedback: a cloth rustle plus a material clink. The old
+   * electronic `ui/open_001` blip broke the foley layer the rest of the mix
+   * builds. Rare (epic+ weapon) adds a faint crystalline shimmer on top of
+   * the same physical base.
+   */
+  pickupFx(kind: 'weapon' | 'ammo' | 'heal' | undefined, rare: boolean): void {
+    if (!this.ctx || !this.noiseBuffer) return;
+    const bus = this.buses.ui!;
+    const ctx = this.ctx;
+    const now = this.now();
+    // Cloth rustle: two quick noise bursts through a bright bandpass read as
+    // a hand brushing webbing/cloth while grabbing the item.
+    for (const [offset, vol] of [[0, 0.16], [0.05, 0.1]] as const) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      src.playbackRate.value = 1.1 + Math.random() * 0.3;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.Q.value = 0.8;
+      bp.frequency.value = 2100 + Math.random() * 700;
+      const g = ctx.createGain();
+      const t = now + offset;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(vol, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+      src.connect(bp); bp.connect(g); g.connect(bus);
+      src.start(t); src.stop(t + 0.13);
+    }
+    if (kind === 'heal') {
+      this.play('impact/glass_a', { bus: 'ui', vol: 0.12, rate: 1.85 });
+    } else {
+      // Magazine/weapon metal settling into the hands.
+      this.play('impact/metal_a', { bus: 'ui', vol: 0.2, rate: 1.55 + Math.random() * 0.25 });
+    }
+    if (rare) {
+      this.play('chest/bell', { bus: 'ui', vol: 0.16, rate: 2.3, delay: 0.09 });
+      this.play('impact/glass_a', { bus: 'ui', vol: 0.1, rate: 2.1, delay: 0.1 });
+    }
+  }
+
+  /**
+   * Painful hard landing: floor impact, a pitch-dropping body thud and a
+   * cloth/pad scuff. `severity` (0..1, derived from fall damage) scales gain
+   * and low-end weight. Remote landings play positionally through the pooled
+   * panner.
+   */
+  fallDamageFx(x: number, y: number, z: number, severity: number, isLocal = false): void {
+    if (!this.ctx) return;
+    this.play('impact/soft_a', { x, y, z, vol: 0.55 + 0.55 * severity, rate: 0.72 });
+    const ctx = this.ctx;
+    const now = this.now();
+    const bus = this.buses.sfx!;
+    // Position remote landings; a local landing sits at the listener anyway.
+    let destination: AudioNode = bus;
+    const pool = isLocal ? null : this.hrtfPanners;
+    if (pool) {
+      const leased = pool.lease();
+      leased.panner.refDistance = 5;
+      leased.panner.rolloffFactor = 1.2;
+      leased.panner.positionX.value = x;
+      leased.panner.positionY.value = y;
+      leased.panner.positionZ.value = z;
+      destination = leased.panner;
+      if (this.noiseBuffer) {
+        // Keep the panner slot tracked so it frees as soon as the thud ends.
+        const src = ctx.createBufferSource();
+        src.buffer = this.noiseBuffer;
+        pool.attach(leased, src);
+        src.start(now); src.stop(now + 0.3);
+      }
+    }
+    // Body thud: sub sine dropping two octaves reads as torso compression.
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(115 - 35 * severity, now);
+    osc.frequency.exponentialRampToValueAtTime(38, now + 0.18);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.linearRampToValueAtTime(0.45 + 0.5 * severity, now + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.27);
+    osc.connect(g); g.connect(destination);
+    osc.start(now); osc.stop(now + 0.3);
   }
 
   uiClick(kind: 'click' | 'hover' | 'back' | 'confirm' | 'error' = 'click'): void {
@@ -950,10 +1130,19 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
   on('ricochet', (e) => audio.ricochet(e.x, e.y, e.z));
   on('glassBreak', (e) => audio.glassBreak(e.x, e.y, e.z));
   on('destructibleDestroyed', (e) => audio.debrisCrack(e.x, e.y, e.z));
-  on('footstep', (e) => audio.footstep(e.x, e.y, e.z, e.running, e.surface));
+  on('footstep', (e) => audio.footstep(e.x, e.y, e.z, e.running, e.surface, isLocalActor(e.actorId, localActor)));
   on('land', (e) => {
     const a = match.actors.find((x) => x.id === e.actorId);
-    if (a) audio.jumpLand(a.body.position.x, a.body.position.y, a.body.position.z, e.fallDamage > 0 || e.impactSpeed > 20, e.surface);
+    if (a) {
+      audio.jumpLand(
+        a.body.position.x, a.body.position.y, a.body.position.z,
+        e.fallDamage > 0 || e.impactSpeed > 20, e.surface,
+        isLocalActor(e.actorId, localActor),
+      );
+      if (e.fallDamage > 0) {
+        audio.fallDamageFx(a.body.position.x, a.body.position.y, a.body.position.z, Math.min(1, e.fallDamage / 80), isLocalActor(e.actorId, localActor));
+      }
+    }
   });
   // A normal jump has no synthetic air-sweep layer. With several bots this
   // event used to fill ordinary firefights with repeated electronic whooshes;
@@ -970,7 +1159,7 @@ export function attachAudio(match: MatchLike, audio: AudioEngine, bus: EventBus<
   on('splash', (e) => audio.splashFx(e.x, e.y, e.z, e.heavy));
   on('chestOpened', (e) => audio.chestOpen(e.x, e.y, e.z, e.tier ?? 0));
   on('itemPickedUp', (e) => {
-    if (isLocalActor(e.actorId, localActor)) audio.pickupUi(e.rare ?? false);
+    if (isLocalActor(e.actorId, localActor)) audio.pickupFx(e.kind, e.rare ?? false);
   });
   on('healDone', (e) => {
     if (isLocalActor(e.actorId, localActor)) audio.healComplete();
