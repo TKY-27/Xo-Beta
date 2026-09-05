@@ -49,7 +49,8 @@ if (process.env.QA_FORCE_WEBGL === '1') {
   });
 }
 const qaHide = process.env.QA_HIDE ?? '';
-const qaQuery = qaHide ? `&qaHide=${qaHide}` : '';
+const seed = process.env.QA_SEED ?? '42042';
+const qaQuery = `${qaHide ? `&qaHide=${qaHide}` : ''}&seed=${seed}`;
 await page.goto(`http://localhost:5199/?qa=1${qaQuery}`, { waitUntil: 'networkidle' });
 // Fresh profiles land on the first-run onboarding overlay; its handlers only
 // attach once boot completes, so poll for whichever screen appears first and
@@ -108,15 +109,22 @@ try {
   // Optional teleport (env QA_TP="x,z[,yaw]") for POI-targeted captures.
   const tp = process.env.QA_TP;
   if (tp) {
-    const [x, z, yaw] = tp.split(',').map((v) => parseFloat(v));
+    const [x, z, yaw, pitch, mode] = tp.split(',').map((v) => v.trim());
     await page.evaluate((pos) => {
       const input = document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null;
       if (input) {
-        input.value = JSON.stringify({ nonce: `tp-${Date.now()}`, x: pos.x, z: pos.z, yaw: pos.yaw ?? 0 });
+        input.value = JSON.stringify({
+          nonce: `tp-${Date.now()}`,
+          x: Number(pos.x),
+          z: Number(pos.z),
+          yaw: pos.yaw === undefined || pos.yaw === '' ? 0 : Number(pos.yaw),
+          pitch: pos.pitch === undefined || pos.pitch === '' ? -0.12 : Number(pos.pitch),
+          mode: pos.mode === 'swim' ? 'swim' : 'standing',
+        });
         input.dispatchEvent(new Event('change', { bubbles: true }));
         input.dispatchEvent(new Event('input', { bubbles: true }));
       }
-    }, { x, z, yaw }).catch(() => undefined);
+    }, { x, z, yaw, pitch, mode }).catch(() => undefined);
     await page.waitForTimeout(2500);
     await page.screenshot({ path: `${OUT}/05-teleport.png` });
   }

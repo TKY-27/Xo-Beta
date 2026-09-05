@@ -174,6 +174,8 @@ export interface SkyGrade {
   contrast?: number;
   /** Shadow lift color (linear RGB offsets). */
   lift?: [number, number, number];
+  /** Display transform for this map. Default ACES filmic. */
+  toneMapping?: 'aces' | 'agx' | 'neutral';
 }
 
 /**

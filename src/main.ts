@@ -1061,7 +1061,8 @@ async function prepareOnlineGuestRuntime(
     registerStartCleanup(generation, () => renderer.dispose());
     await renderer.setupSkyAndLights(input.map.sky);
     ensureCurrentStart(generation);
-    if (input.map.sky.grade) renderer.setGrading(input.map.sky.grade);
+    const qaToneOverride = QA_PARAMS.get('qaTone');
+    if (input.map.sky.grade) renderer.setGrading(qaToneOverride ? { ...input.map.sky.grade, toneMapping: qaToneOverride as 'aces' | 'agx' | 'neutral' } : input.map.sky.grade);
     const worldStart = performance.now();
     const guestSkyTexture = (renderer.scene.background as THREE.Texture | null)?.isTexture
       ? renderer.scene.background as THREE.Texture
@@ -1584,7 +1585,8 @@ async function startMatchImpl(
   registerStartCleanup(generation, () => renderer.dispose());
   await renderer.setupSkyAndLights(loaded.def.sky);
   ensureCurrentStart(generation);
-  if (loaded.def.sky.grade) renderer.setGrading(loaded.def.sky.grade);
+  const qaToneOverride2 = QA_PARAMS.get('qaTone');
+  if (loaded.def.sky.grade) renderer.setGrading(qaToneOverride2 ? { ...loaded.def.sky.grade, toneMapping: qaToneOverride2 as 'aces' | 'agx' | 'neutral' } : loaded.def.sky.grade);
   const worldStart = performance.now();
   const hostSkyTexture = (renderer.scene.background as THREE.Texture | null)?.isTexture
     ? renderer.scene.background as THREE.Texture

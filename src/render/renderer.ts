@@ -7,6 +7,7 @@
 
 import {
   ACESFilmicToneMapping,
+  AgXToneMapping,
   AmbientLight,
   BackSide,
   CanvasTexture,
@@ -20,6 +21,7 @@ import {
   Mesh,
   MeshBasicNodeMaterial,
   OrthographicCamera,
+  NeutralToneMapping,
   PCFShadowMap,
   PMREMGenerator,
   RenderPipeline,
@@ -328,6 +330,15 @@ export class GameRenderer {
       }
     } else {
       this.setupGradientSky(sky);
+    }
+
+    // Authored visible-sky dome: overrides the photographic background when
+    // the map defines an atmosphere profile (weather then drives the visible
+    // sky at runtime). The HDRI/canvas texture remains the IBL source.
+    if (sky.atmosphere) {
+      this.skyAtmosphere?.dispose();
+      this.skyAtmosphere = new SkyAtmosphereSystem(sky.atmosphere, sky.sunDirection);
+      this.scene.add(this.skyAtmosphere.mesh);
     }
 
     this.scene.fog = new FogExp2(sky.fogColor, sky.fogDensity);
@@ -662,11 +673,17 @@ export class GameRenderer {
   }
 
   /** Set the per-map display grade (called when a map loads). */
-  setGrading(grade: { vignette?: number; saturation?: number; contrast?: number; lift?: [number, number, number] }): void {
+  setGrading(grade: { vignette?: number; saturation?: number; contrast?: number; lift?: [number, number, number]; toneMapping?: 'aces' | 'agx' | 'neutral' }): void {
     if (grade.vignette !== undefined) this.grading.vignette = grade.vignette;
     if (grade.saturation !== undefined) this.grading.saturation = grade.saturation;
     if (grade.contrast !== undefined) this.grading.contrast = grade.contrast;
     if (grade.lift) this.grading.lift.set(...grade.lift);
+    if (grade.toneMapping) {
+      this.renderer.toneMapping =
+        grade.toneMapping === 'agx' ? AgXToneMapping
+        : grade.toneMapping === 'neutral' ? NeutralToneMapping
+        : ACESFilmicToneMapping;
+    }
   }
 
   render(_dt: number): void {
