@@ -1888,7 +1888,9 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
       // a texture is present (the albedo already provides detail).
       const patch = fbm(x * 0.013 + 40.7, z * 0.013 - 17.3);
       const patch2 = fbm(x * 0.045 - 9.1, z * 0.045 + 23.8);
-      const varAmt = texMode ? 0.4 : 1;
+      // Full-strength macro variation even with the albedo texture: the
+      // critic pass showed 0.4 leaves open fields reading as one flat color.
+      const varAmt = 1;
       tmp.offsetHSL(
         patch2 * 0.014 * varAmt,
         patch * 0.05 * varAmt,
