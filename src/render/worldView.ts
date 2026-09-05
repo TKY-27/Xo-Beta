@@ -1644,16 +1644,22 @@ export class WorldView {
     let mesh: THREE.InstancedMesh;
     if (kind === 'med' || kind === 'shield') {
       const box = new THREE.BoxGeometry(0.48, 0.34, 0.34);
+      // Cross markings on both visible faces so the kit reads as a medkit
+      // from every loot-bob rotation.
       const c1 = new THREE.BoxGeometry(0.3, 0.08, 0.02);
       c1.translate(0, 0.05, 0.18);
       const c2 = new THREE.BoxGeometry(0.08, 0.02, 0.3);
       c2.translate(0, 0.05, 0.18);
+      const c1b = new THREE.BoxGeometry(0.3, 0.08, 0.02);
+      c1b.translate(0, 0.05, -0.18);
+      const c2b = new THREE.BoxGeometry(0.08, 0.02, 0.3);
+      c2b.translate(0, 0.05, -0.18);
       const glow = new THREE.SphereGeometry(0.05, 8, 6);
       glow.translate(0, 0.24, 0);
-      const geo = mergeGeometries([box, c1, c2, glow], true)!;
+      const geo = mergeGeometries([box, c1, c2, c1b, c2b, glow], true)!;
       const mats = kind === 'med'
-        ? [lootMats.medBox, lootMats.crossMed, lootMats.crossMed, lootMats.glowMed]
-        : [lootMats.shieldBox, lootMats.crossShield, lootMats.crossShield, lootMats.glowShield];
+        ? [lootMats.medBox, lootMats.crossMed, lootMats.crossMed, lootMats.crossMed, lootMats.crossMed, lootMats.glowMed]
+        : [lootMats.shieldBox, lootMats.crossShield, lootMats.crossShield, lootMats.crossShield, lootMats.crossShield, lootMats.glowShield];
       mesh = new THREE.InstancedMesh(geo, mats, cap);
     } else {
       const visual = ammoGroundVisual(kind);
