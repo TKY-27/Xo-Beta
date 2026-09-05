@@ -325,12 +325,13 @@ function weaponViewmodelKick(weaponId: string): number {
   // Scale to the ViewModel.kick impulse range the old table used.
   return (profile?.viewmodel ?? 0.5) * 2.2;
 }
+/** Inline SVG killfeed silhouettes: the Unicode stand-ins read as placeholder glyphs. */
 const WEAPON_ICONS: Record<string, string> = {
-  pistol: '⌐',
-  smg: '⁝⁝',
-  ar: '⟋',
-  shotgun: '≡',
-  sniper: '⌇',
+  pistol: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M2 3h15v3h-6l-1 4H6l1.5-4H4v2H2z" fill="currentColor"/></svg>`,
+  smg: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M1 3h17v2h-4v2h-3V5H8l-1 5H4l1-5H1zM13 7h4v1h-4z" fill="currentColor"/></svg>`,
+  ar: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M0 4h19v2h-2v1h-3V6H8l-1.5 5h-3L5 6H3v2H0z" fill="currentColor"/></svg>`,
+  shotgun: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M0 4h20v2H9l-1 4H5l1-4H0zM10 6h6v1h-6z" fill="currentColor"/></svg>`,
+  sniper: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M0 5h20v1H8l-1.5 5h-3L5 6H3v2H0zM6 2h6v2H6z" fill="currentColor"/></svg>`,
 };
 
 // Powerful browser-inspection hooks must never be reachable from a production

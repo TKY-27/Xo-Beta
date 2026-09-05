@@ -1766,7 +1766,7 @@ export class Hud {
     else $('fps-counter').classList.add('hidden');
 
     // Live-update damage number positions
-    this.updateDamageNumbers();
+    this.updateDamageNumbers(dt);
   }
 
   /** Replica HUD path. Only the local actor's owner-scoped inventory is
@@ -1807,7 +1807,7 @@ export class Hud {
     if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
     if (getSettings().showFps) $('fps-counter').classList.remove('hidden');
     else $('fps-counter').classList.add('hidden');
-    this.updateDamageNumbers();
+    this.updateDamageNumbers(dt);
   }
 
   private syncReplicaInventory(inventory: InventoryView | null): void {
@@ -2027,7 +2027,9 @@ export class Hud {
     if (weaponIcon) {
       const wpn = document.createElement('span');
       wpn.className = 'wpn';
-      wpn.textContent = `[${weaponIcon}]`;
+      // Weapon icons arrive as inline SVG silhouettes (never user-derived
+      // strings), so innerHTML is safe here.
+      wpn.innerHTML = weaponIcon;
       entry.appendChild(wpn);
     }
     if (headshot) {
@@ -2114,11 +2116,11 @@ export class Hud {
     }
   }
 
-  private updateDamageNumbers(): void {
+  private updateDamageNumbers(dt = 1 / 60): void {
     if (!this.projector) return;
     for (let i = this.dmgNumbers.length - 1; i >= 0; i--) {
       const n = this.dmgNumbers[i]!;
-      n.age += 1 / 60;
+      n.age += dt;
       if (n.age >= n.life) {
         n.el.remove();
         this.dmgNumbers.splice(i, 1);
