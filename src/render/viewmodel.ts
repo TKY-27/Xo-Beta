@@ -42,6 +42,53 @@ export class ViewModel {
   private adsSmooth = 0;
   private sprintBlend = 0;
   private lastSpeed = 0;
+  // Inspect flourish: <0 inactive, else elapsed seconds into the sweep.
+  private inspectT = -1;
+  private static readonly INSPECT_DURATION = 2.2;
+
+  /**
+   * Begin (or restart) the weapon-inspect flourish. Fails while unarmed or
+   * mid-swap — the arms have nothing to show and the swap dip owns the pose.
+   */
+  startInspect(): boolean {
+    if (!this.currentId) return false;
+    if (this.swapT > 0) return false;
+    this.inspectT = 0;
+    return true;
+  }
+
+  /** Hard-cancel (firing, reloading). */
+  cancelInspect(): void {
+    this.inspectT = -1;
+  }
+
+  /**
+   * Advance the inspect timeline and return its additive pose contribution.
+   * Auto-cancels when the player aims, sprints or fires — the flourish never
+   * fights gameplay poses.
+   */
+  private inspectPose(dt: number, ads: number, sprinting: number, reloading: boolean): {
+    weight: number; pitch: number; yaw: number; roll: number; lift: number;
+  } {
+    if (this.inspectT >= 0) {
+      if (ads > 0.25 || sprinting || reloading) this.inspectT = -1;
+      else this.inspectT += dt;
+      if (this.inspectT >= ViewModel.INSPECT_DURATION) this.inspectT = -1;
+    }
+    const weight = (1 - ads) * (1 - sprinting);
+    if (this.inspectT < 0 || weight < 0.05) {
+      return { weight: 0, pitch: 0, yaw: 0, roll: 0, lift: 0 };
+    }
+    const p = Math.min(1, this.inspectT / ViewModel.INSPECT_DURATION);
+    const env = Math.sin(p * Math.PI);
+    // Rotate the receiver toward the camera, roll it to read the far side,
+    // then a slight top tilt before returning to the hip pose.
+    const yaw = env * 1.05;
+    const roll = env * 0.5 * Math.sin(p * Math.PI * 2 + 0.7);
+    const pitch = env * 0.16;
+    const lift = env;
+    return { weight, pitch, yaw, roll, lift };
+  }
   /**
    * Muzzle flash light. Deliberately NOT a child of `group`: the group is
    * hidden during sniper scope, spectator and transport phases, and an
@@ -271,24 +318,26 @@ export class ViewModel {
     }
 
     // Compose position: hip → ADS → sprint offsets
+    const inspect = this.inspectPose(dt, ads, this.sprintBlend, reloading);
+    const iw = inspect.weight;
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
-      bobX + this.swayX;
+      bobX + this.swayX - 0.17 * inspect.lift * iw;
     const py =
       HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - reloadDrop - swapDip;
+      bobY + this.swayY - reloadDrop - swapDip + 0.05 * inspect.lift * iw;
     const pz =
       HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
-      this.recoilZ;
+      this.recoilZ + 0.07 * inspect.lift * iw;
 
     this.group.position.set(px, py, pz);
     this.group.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads),
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads),
-      reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4,
+      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
+      reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
     );
   }
 
@@ -359,24 +408,26 @@ export class ViewModel {
 
     // Replica views intentionally do not animate reload/bolt state: those
     // timers are private combat authority and are absent from ActorView.
+    const inspect = this.inspectPose(dt, ads, this.sprintBlend, false);
+    const iw = inspect.weight;
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
-      bobX + this.swayX;
+      bobX + this.swayX - 0.17 * inspect.lift * iw;
     const py =
       HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - swapDip;
+      bobY + this.swayY - swapDip + 0.05 * inspect.lift * iw;
     const pz =
       HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
-      this.recoilZ;
+      this.recoilZ + 0.07 * inspect.lift * iw;
 
     this.group.position.set(px, py, pz);
     this.group.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + this.sprintBlend * 0.32 * (1 - ads),
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads),
-      this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4,
+      -this.swayY * 2.1 + this.recoilPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
+      this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
     );
   }
 

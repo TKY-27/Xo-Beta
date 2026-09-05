@@ -74,6 +74,7 @@ import { GamepadInput } from './player/gamepad';
 import { AudioEngine, attachAudio } from './audio/audio';
 import { OcclusionSampler } from './audio/occlusion';
 import { pickWeather } from './world/weather';
+import { recordMatch } from './core/statsStore';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const $canvas = (): HTMLCanvasElement => document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -872,6 +873,7 @@ function activateOnlinePresentation(role: 'host' | 'guest', payload: MatchStartP
   menus.hideAll();
   menus.setPlayEnabled(true);
   hud.show(true);
+  hud.clearKillfeed();
   hud.applyCrosshair();
   game.player.enabled = true;
   game.player.requestLock();
@@ -1209,6 +1211,9 @@ async function prepareOnlineGuestRuntime(
         tpsCharacterSide: getSettings().tpsCharacterSide === 'left' ? 'right' : 'left',
       }),
       () => toggleInventory(),
+      () => {
+        if (viewmodel.startInspect()) audio.play('impact/metal_a', { bus: 'ui', vol: 0.12, rate: 1.9 });
+      },
     );
     player.scopedZoom = getSettings().scopeMagnification;
     registerStartCleanup(generation, () => player.dispose());
@@ -1652,6 +1657,9 @@ async function startMatchImpl(
       tpsCharacterSide: getSettings().tpsCharacterSide === 'left' ? 'right' : 'left',
     }),
     () => toggleInventory(),
+    () => {
+      if (viewmodel.startInspect()) audio.play('impact/metal_a', { bus: 'ui', vol: 0.12, rate: 1.9 });
+    },
   );
   player.scopedZoom = getSettings().scopeMagnification;
   registerStartCleanup(generation, () => player.dispose());
@@ -2173,6 +2181,7 @@ async function startMatchImpl(
     if (live?.generation !== generation || generation !== matchGeneration) return;
     $('loading-screen').classList.add('hidden');
     hud.show(true);
+    hud.clearKillfeed();
     hud.applyCrosshair();
     player.enabled = true;
     player.requestLock();
@@ -2436,6 +2445,7 @@ function wirePresentation(
   });
   match.events.on('shotFired', (e) => {
     if (e.actorId === match.localActor?.id && !e.dry && match.localActor) {
+      viewmodel.cancelInspect();
       const a = match.localActor;
       // Eject toward the camera-right side, slightly back
       const rx = Math.cos(a.yaw);
@@ -4097,6 +4107,19 @@ function showResults(m: Match): void {
   live?.player.releaseLock();
   audio.setMusicState(won ? 'victory' : 'defeat');
   audio.victoryFanfare(won);
+  recordMatch({
+    at: Date.now(),
+    map: m.mapDef.id,
+    mode: m.mode,
+    won,
+    placement: p?.placement ?? m.actors.length,
+    players: m.actors.length,
+    kills: p?.stats.kills ?? 0,
+    damage: p?.stats.damageDealt ?? 0,
+    accuracy: p && p.stats.shotsFired > 0 ? p.stats.shotsHit / p.stats.shotsFired : 0,
+    headshots: p?.stats.headshots ?? 0,
+    survivalTime: p?.stats.survivalTime ?? 0,
+  });
   menus.showResults({
     won,
     winnerName: m.winnerView?.kind === 'team'
@@ -4118,6 +4141,19 @@ function showReplicaResults(view: GameStateView, localActorId: number): void {
   live?.player.releaseLock();
   audio.setMusicState(won ? 'victory' : 'defeat');
   audio.victoryFanfare(won);
+  recordMatch({
+    at: Date.now(),
+    map: live?.mapDef.id ?? 'unknown',
+    mode: view.mode,
+    won,
+    placement: actor?.placement ?? view.actors.length,
+    players: view.actors.length,
+    kills: actor?.stats.kills ?? 0,
+    damage: actor?.stats.damageDealt ?? 0,
+    accuracy: actor && actor.stats.shotsFired > 0 ? actor.stats.shotsHit / actor.stats.shotsFired : 0,
+    headshots: actor?.stats.headshots ?? 0,
+    survivalTime: actor?.stats.survivalTime ?? 0,
+  });
   menus.showResults({
     won,
     winnerName: view.winner?.kind === 'team'

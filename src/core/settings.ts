@@ -23,6 +23,8 @@ export interface KeyBindings {
   shoulderSwap: string;
   /** Cycles sniper scope magnification (1x/2x/4x) while scoped. */
   scopeZoom: string;
+  /** Weapon-inspect flourish (presentation only). */
+  inspect: string;
 }
 
 export const DEFAULT_BINDINGS: KeyBindings = {
@@ -35,6 +37,7 @@ export const DEFAULT_BINDINGS: KeyBindings = {
   spectatePrev: 'ArrowLeft', spectateNext: 'ArrowRight', mapToggle: 'KeyM',
   shoulderSwap: 'KeyZ',
   scopeZoom: 'KeyT',
+  inspect: 'KeyB',
 };
 
 export interface Settings {

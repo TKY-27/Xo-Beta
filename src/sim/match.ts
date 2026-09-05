@@ -1354,9 +1354,12 @@ export class Match {
 
   private autoPickupAmmo(a: Actor): void {
     const p = a.body.position;
+    // Measure from the soles, matching interactableItems: the capsule-centre
+    // basis let ammo hovering at head height out-range ground items.
+    const feetY = feetYFromBodyCenter(p.y);
     for (const it of [...this.loot.items]) {
       if (it.kind !== 'ammo') continue;
-      const dx = it.x - p.x, dy = it.y - p.y, dz = it.z - p.z;
+      const dx = it.x - p.x, dy = it.y - feetY, dz = it.z - p.z;
       if (dx * dx + dy * dy + dz * dz < GAMEPLAY.pickupRadius * GAMEPLAY.pickupRadius) {
         this.loot.pickup(it, a);
       }

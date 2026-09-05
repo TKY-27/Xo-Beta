@@ -12,6 +12,7 @@ import {
   type PreferredItemSlots,
 } from '../core/preferredSlots';
 import { getSettings, onSettingsChanged, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
+import { clearMatchRecords, loadMatchRecords, summarize } from '../core/statsStore';
 import { SKIN_IDS } from '../render/characters';
 import { SkinSelector, skinTextKey } from './skinSelector';
 import {
@@ -120,8 +121,7 @@ export class Menus {
   /** Fired whenever a menu screen becomes active (id may be '' for none). */
   onScreenChanged: (id: string) => void = () => undefined;
 
-  private show(id: string): void {
-    const ids = [
+  private show(id: string): void {    const ids = [
       'main-menu', 'play-menu', 'create-room-menu', 'join-room-menu', 'online-lobby-menu',
       'settings-menu', 'skin-customization-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
     ];
@@ -300,6 +300,12 @@ export class Menus {
     click('btn-settings', () => { this.onOpenSettingsFromPause = false; this.show('settings-menu'); });
     click('btn-credits', () => this.show('credits-menu'));
     click('btn-credits-back', () => this.show('main-menu'), 'back');
+    click('btn-stats', () => { this.renderStatsScreen(); this.show('stats-menu'); });
+    click('btn-stats-back', () => this.show('main-menu'), 'back');
+    click('btn-stats-clear', () => {
+      clearMatchRecords();
+      this.renderStatsScreen();
+    }, 'back');
     click('btn-play-back', () => this.show('main-menu'), 'back');
     click('btn-skin-customization-back', () => this.show('main-menu'), 'back');
     click('btn-play-start', () => {
@@ -494,7 +500,7 @@ export class Menus {
     panel.append(label, preview, content);
 
     const start = $('btn-play-start') as HTMLButtonElement;
-    start.textContent = t('menu.startMatchMap', { name: title.textContent ?? selected.name });
+    start.textContent = t('common.startMatch');
     $('btn-practice-start').textContent = t('menu.practice');
     $('play-selection-error').textContent = '';
     $('play-selection-error').classList.add('hidden');
@@ -528,6 +534,70 @@ export class Menus {
       return;
     }
     this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty, practice });
+  }
+
+  /** Fill the career-stats screen from the local match history. */
+  private renderStatsScreen(): void {
+    const records = loadMatchRecords();
+    const s = summarize(records);
+    const summary = $('stats-summary');
+    summary.innerHTML = '';
+    const cell = (labelKey: string, value: string): void => {
+      const c = document.createElement('div');
+      c.className = 'stats-cell';
+      const v = document.createElement('strong');
+      v.textContent = value;
+      const l = document.createElement('span');
+      l.textContent = t(labelKey as TextKey);
+      c.append(v, l);
+      summary.appendChild(c);
+    };
+    cell('stats.matches', String(s.matches));
+    cell('stats.wins', String(s.wins));
+    cell('stats.winRate', `${Math.round(s.winRate * 100)}%`);
+    cell('stats.bestPlacement', s.bestPlacement > 0 ? `#${s.bestPlacement}` : '—');
+    cell('stats.avgKills', s.matches > 0 ? s.avgKills.toFixed(1) : '—');
+    cell('stats.avgDamage', s.matches > 0 ? String(Math.round(s.avgDamage)) : '—');
+    cell('stats.totalKills', String(s.totalKills));
+    cell('stats.headshots', String(s.headshots));
+    cell('stats.playtime', formatTime(s.totalSurvivalTime));
+
+    const recent = $('stats-recent');
+    recent.innerHTML = '';
+    if (records.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'stats-empty dim';
+      empty.textContent = t('stats.noMatches');
+      recent.appendChild(empty);
+      return;
+    }
+    const table = document.createElement('div');
+    table.className = 'stats-table';
+    table.setAttribute('role', 'table');
+    for (const r of records.slice(0, 15)) {
+      const row = document.createElement('div');
+      row.className = `stats-row${r.won ? ' won' : ''}`;
+      row.setAttribute('role', 'row');
+      const when = new Date(r.at);
+      const place = `${r.won ? '🏆' : ''}#${r.placement}/${r.players}`;
+      const fields: Array<[string, string]> = [
+        [place, 'place'],
+        [t(`map.${r.map}.name` as TextKey), 'map'],
+        [`${r.kills} ${t('stats.killsShort')}`, 'kills'],
+        [String(Math.round(r.damage)), 'damage'],
+        [`${Math.round(r.accuracy * 100)}%`, 'accuracy'],
+        [formatTime(r.survivalTime), 'survival'],
+        [when.toLocaleDateString() + ' ' + when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 'date'],
+      ];
+      for (const [text, cls] of fields) {
+        const span = document.createElement('span');
+        span.className = `stats-${cls}`;
+        span.textContent = text;
+        row.appendChild(span);
+      }
+      table.appendChild(row);
+    }
+    recent.appendChild(table);
   }
 
   private buildSkinCustomization(): void {
@@ -854,6 +924,10 @@ export class Menus {
     for (const kb of this.keybindRows) kb.el.remove();
     this.keybindRows = [];
     const b = getSettings().bindings;
+    // Re-clicking a button while it is already listening used to stack a
+    // second capture-phase keydown listener, so one keypress updated the
+    // binding (and the row) twice. Dismiss any active listener first.
+    let cancelActive: (() => void) | null = null;
     const labels: Partial<Record<keyof KeyBindings, TextKey | string>> = {
       forward: 'bind.forward', back: 'bind.back', left: 'bind.left', right: 'bind.right',
       jump: 'bind.jump', sprint: 'bind.sprint', crouch: 'bind.crouch',
@@ -861,6 +935,7 @@ export class Menus {
       grapple: 'bind.grapple', groundPound: 'bind.groundPound',
       useMedkit: 'bind.useMedkit', useShield: 'bind.useShield',
       dropWeapon: 'bind.dropWeapon', cameraToggle: 'bind.cameraToggle', mapToggle: 'bind.mapToggle',
+      inspect: 'bind.inspect',
     };
     labels.shoulderSwap = 'Shoulder swap / 肩切替';
     for (const [code, labelKey] of Object.entries(labels)) {
@@ -869,12 +944,14 @@ export class Menus {
       btn.className = 'keybind';
       btn.textContent = prettyKey(b[key]);
       btn.addEventListener('click', () => {
+        cancelActive?.();
         btn.classList.add('listening');
         btn.textContent = t('bind.pressKey');
         const done = (label: string) => {
           btn.textContent = label;
           btn.classList.remove('listening');
           window.removeEventListener('keydown', handler, true);
+          cancelActive = null;
         };
         const handler = (e: KeyboardEvent) => {
           e.preventDefault();
@@ -887,6 +964,7 @@ export class Menus {
           done(prettyKey(e.code));
         };
         window.addEventListener('keydown', handler, true);
+        cancelActive = () => done(prettyKey(b[key]));
       });
       const rowEl = document.createElement('div');
       rowEl.className = 'setting-row';
@@ -1964,6 +2042,13 @@ export class Hud {
       entry.style.opacity = '0';
       window.setTimeout(() => entry.remove(), 520);
     }, 6000);
+  }
+
+  /** Drop every killfeed entry immediately — a fresh match must not inherit
+   * the previous one's feed (per-entry timers keep running after teardown). */
+  clearKillfeed(): void {
+    $('killfeed').innerHTML = '';
+    this.killfeedEntries.length = 0;
   }
 
   interactPrompt(text: string | null): void {
