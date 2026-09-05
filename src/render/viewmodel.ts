@@ -15,7 +15,17 @@ const ADS_POS = new THREE.Vector3(0, -0.075, -0.14);
 const SPRINT_POS = new THREE.Vector3(0.12, -0.26, -0.1);
 
 export class ViewModel {
+  /**
+   * Scene-child root. It carries NO pose of its own: `syncCamera` glues it to
+   * the camera every frame. (Historical bug: this group once sat at the scene
+   * origin while `update()` wrote view-space hip offsets into it, so the
+   * first-person weapon rendered ~at the map spawn and the player simply
+   * never saw a weapon.)
+   */
   readonly group = new THREE.Group();
+  /** Pose space: every authored offset (hip/ADS/sprint/bob/recoil/inspect)
+   * and all attached models/arms live here, relative to the camera. */
+  private readonly pivot = new THREE.Group();
   private factory: WeaponModelFactory;
   private models = new Map<string, WeaponModel>();
   private armMat: THREE.MeshStandardMaterial;
@@ -81,11 +91,13 @@ export class ViewModel {
     }
     const p = Math.min(1, this.inspectT / ViewModel.INSPECT_DURATION);
     const env = Math.sin(p * Math.PI);
-    // Rotate the receiver toward the camera, roll it to read the far side,
-    // then a slight top tilt before returning to the hip pose.
-    const yaw = env * 1.05;
-    const roll = env * 0.5 * Math.sin(p * Math.PI * 2 + 0.7);
-    const pitch = env * 0.16;
+    // Rotate the receiver toward the camera and roll it to read the far
+    // side, then a slight top tilt before returning to the hip pose. Yaw is
+    // deliberately moderate: the pivot sits at the eye, so large swings
+    // carry the weapon off-frame.
+    const yaw = env * 0.5;
+    const roll = env * 0.34 * Math.sin(p * Math.PI * 2 + 0.7);
+    const pitch = env * 0.12;
     const lift = env;
     return { weight, pitch, yaw, roll, lift };
   }
@@ -103,10 +115,21 @@ export class ViewModel {
     this.factory = factory;
     this.armMat = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.62, metalness: 0.22 });
     this.gloveMat = new THREE.MeshStandardMaterial({ color: 0x191d22, roughness: 0.55, metalness: 0.3 });
+    this.group.add(this.pivot);
     this.buildArms();
     this.buildFists();
 
     this.muzzleFlashLight = new THREE.PointLight(0xffc878, 0, 7, 2);
+  }
+
+  /**
+   * Glue the pose root to the camera. Call once per frame before
+   * update()/updateView(); the pivot then positions the weapon relative to
+   * the view, exactly as the HIP/ADS/SPRINT constants are authored.
+   */
+  syncCamera(camera: THREE.Camera): void {
+    this.group.position.copy(camera.position);
+    this.group.quaternion.copy(camera.quaternion);
   }
 
   private buildArms(): void {
@@ -129,7 +152,7 @@ export class ViewModel {
     guardR.position.set(0.09, -0.19, -0.24);
     guardR.rotation.x = 1.25;
     for (const m of [armR, armL, gloveR, gloveL, guardR]) m.castShadow = false;
-    this.group.add(armR, armL, gloveR, gloveL, guardR);
+    this.pivot.add(armR, armL, gloveR, gloveL, guardR);
   }
 
   private buildFists(): void {
@@ -152,11 +175,17 @@ export class ViewModel {
       group.add(forearm, wrap);
       for (const m of [forearm, fist, ridge, plate]) m.castShadow = false;
       group.visible = false;
-      this.group.add(group);
+      this.pivot.add(group);
     };
     mkHand(1, this.fistsR);
     mkHand(-1, this.fistsL);
   }
+
+  /** View-space scale for the hand-held weapon. The factory builds to real
+   * canonical length (~1 m AR) for world/loot presentation; at the hip offset
+   * (~6 cm from the eye) that fills half the screen, so the viewmodel carries
+   * its own presentation scale, like every shipped FPS does. */
+  private static readonly WEAPON_VIEW_SCALE = 0.55;
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
     const key = `${id}:${rarity}`;
@@ -165,6 +194,7 @@ export class ViewModel {
       const built = this.factory.build(id, rarity);
       if (!built) return null;
       m = built;
+      m.group.scale.setScalar(ViewModel.WEAPON_VIEW_SCALE);
       // viewmodel render tuning: draw over world, no shadow casting
       m.group.traverse((o) => {
         const mesh = o as THREE.Mesh;
@@ -174,7 +204,7 @@ export class ViewModel {
       });
       m.group.visible = false;
       this.models.set(key, m);
-      this.group.add(m.group);
+      this.pivot.add(m.group);
     }
     return m;
   }
@@ -219,14 +249,14 @@ export class ViewModel {
     this.punchHand ^= 1;
   }
 
-  /** Muzzle flash light pulse at the barrel tip. The position is resolved
-   * through the group's last rendered world matrix — during a pulse the
+  /** Muzzle flash light pulse at the barrel tip. Resolved through the
+   * model's world matrix (camera→pivot→weapon chain) — during a pulse the
    * intensity decays in ~100 ms, so one frame of staleness is invisible. */
   muzzlePulse(strength: number): void {
     this.muzzleFlashLight.intensity = 5 * strength;
-    if (this.currentModel) {
-      this.muzzleFlashLight.position.copy(this.currentModel.muzzle);
-      this.muzzleFlashLight.position.applyMatrix4(this.group.matrixWorld);
+    const m = this.currentModel;
+    if (m) {
+      m.group.localToWorld(this.muzzleFlashLight.position.copy(m.muzzle));
     }
   }
 
@@ -323,18 +353,18 @@ export class ViewModel {
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
-      bobX + this.swayX - 0.17 * inspect.lift * iw;
+      bobX + this.swayX - 0.1 * inspect.lift * iw;
     const py =
       HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - reloadDrop - swapDip + 0.05 * inspect.lift * iw;
+      bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
     const pz =
       HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
-      this.recoilZ + 0.07 * inspect.lift * iw;
+      this.recoilZ + 0.14 * inspect.lift * iw;
 
-    this.group.position.set(px, py, pz);
-    this.group.rotation.set(
+    this.pivot.position.set(px, py, pz);
+    this.pivot.rotation.set(
       -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
       reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
@@ -413,18 +443,18 @@ export class ViewModel {
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
-      bobX + this.swayX - 0.17 * inspect.lift * iw;
+      bobX + this.swayX - 0.1 * inspect.lift * iw;
     const py =
       HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - swapDip + 0.05 * inspect.lift * iw;
+      bobY + this.swayY - swapDip + 0.04 * inspect.lift * iw;
     const pz =
       HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
-      this.recoilZ + 0.07 * inspect.lift * iw;
+      this.recoilZ + 0.14 * inspect.lift * iw;
 
-    this.group.position.set(px, py, pz);
-    this.group.rotation.set(
+    this.pivot.position.set(px, py, pz);
+    this.pivot.rotation.set(
       -this.swayY * 2.1 + this.recoilPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
       this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
@@ -471,13 +501,13 @@ export class ViewModel {
     drive(this.fistsR, 1);
     drive(this.fistsL, -1);
 
-    this.group.position.set(
+    this.pivot.position.set(
       HIP_POS.x * 0.55 + (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * 0.6 + this.swayX,
       HIP_POS.y + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
       HIP_POS.z + this.recoilZ * 0.4,
     );
-    if (crouched) this.group.position.y += 0.02;
-    this.group.rotation.set(
+    if (crouched) this.pivot.position.y += 0.02;
+    this.pivot.rotation.set(
       -this.swayY * 1.4 + this.sprintBlend * 0.26,
       this.swayX * 1.5 - this.sprintBlend * 0.34,
       this.swayRoll + this.sprintBlend * 0.14 - bobX * 1.2,
@@ -486,7 +516,9 @@ export class ViewModel {
 
   /** Muzzle world position for effects. */
   muzzleWorld(_camera: THREE.Camera): THREE.Vector3 {
-    const v = this.currentModel?.muzzle.clone() ?? new THREE.Vector3(0, 0.02, -0.62);
+    const m = this.currentModel;
+    if (m) return m.group.localToWorld(m.muzzle.clone());
+    const v = new THREE.Vector3(0, 0.02, -0.62);
     return this.group.localToWorld(v);
   }
 }

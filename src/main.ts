@@ -3642,6 +3642,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   // scope where the scope overlay replaces the world view).
   if (m.localActor?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(m.localActor.body.velocity.x, m.localActor.body.velocity.z);
+    viewmodel.syncCamera(rig.camera);
     viewmodel.update(m.localActor, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
     viewmodel.group.visible = true;
   } else {
@@ -3852,6 +3853,7 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
 
   if (local?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(local.velocity.x, local.velocity.z);
+    viewmodel.syncCamera(rig.camera);
     viewmodel.updateView(
       local,
       dtReal,

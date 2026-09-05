@@ -121,9 +121,10 @@ export class Menus {
   /** Fired whenever a menu screen becomes active (id may be '' for none). */
   onScreenChanged: (id: string) => void = () => undefined;
 
-  private show(id: string): void {    const ids = [
+  private show(id: string): void {
+    const ids = [
       'main-menu', 'play-menu', 'create-room-menu', 'join-room-menu', 'online-lobby-menu',
-      'settings-menu', 'skin-customization-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
+      'settings-menu', 'skin-customization-menu', 'credits-menu', 'stats-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
     ];
     for (const other of ids) $(other).classList.add('hidden');
     if (id) $(id).classList.remove('hidden');
