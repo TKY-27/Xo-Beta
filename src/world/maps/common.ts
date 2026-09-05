@@ -310,34 +310,39 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   ) => {
     const paneH = 1.42;
     const paneY = y0 + sillH + paneH / 2;
-    const surfaceOffset = t / 2 + 0.025;
+    // Recessed reveal: the pane sits just inside the outer wall face so the
+    // opening casts a real shadow line instead of a pasted-on card.
+    const paneOffset = t / 2 - 0.06;
+    const frameOffset = t / 2 - 0.02;
     const family = windowFamily(side, offset, 0);
     const mat = windowMaterial(family);
     if (side === 2) {
       const paneX = x - hw + offset + width / 2;
-      const paneZ = z - hd - surfaceOffset;
-      b.box(paneX, paneY, paneZ, width, paneH, 0.045, mat, 0, { noCollide: true });
+      const paneZ = z - hd - paneOffset;
+      const frameZ = z - hd - frameOffset;
+      b.box(paneX, paneY, paneZ, width, paneH, 0.05, mat, 0, { noCollide: true });
       // Head and sill trims every window shares.
-      b.box(paneX, paneY, paneZ - 0.026, width + 0.08, 0.075, 0.055, trim, 0, { noCollide: true });
-      b.box(paneX, paneY - paneH / 2 - 0.02, paneZ - 0.026, width + 0.08, 0.075, 0.055, trim, 0, { noCollide: true });
+      b.box(paneX, paneY, frameZ, width + 0.08, 0.075, t + 0.08, trim, 0, { noCollide: true });
+      b.box(paneX, paneY - paneH / 2 - 0.02, frameZ, width + 0.08, 0.075, t + 0.08, trim, 0, { noCollide: true });
       if (family === 'dual') {
         // Mullion split into two sashes.
-        b.box(paneX, paneY, paneZ - 0.026, 0.075, paneH + 0.08, 0.055, trim, 0, { noCollide: true });
+        b.box(paneX, paneY, paneZ, 0.075, paneH + 0.08, 0.055, trim, 0, { noCollide: true });
       } else if (family === 'transom') {
         // Horizontal transom bar at two-thirds height.
-        b.box(paneX, paneY + paneH / 6, paneZ - 0.026, width + 0.08, 0.06, 0.055, trim, 0, { noCollide: true });
+        b.box(paneX, paneY + paneH / 6, paneZ, width + 0.08, 0.06, 0.055, trim, 0, { noCollide: true });
       }
       // 'single': one uninterrupted pane.
     } else {
-      const paneX = x + (side === 1 ? hw + surfaceOffset : -hw - surfaceOffset);
+      const paneX = x + (side === 1 ? hw + paneOffset : -hw - paneOffset);
+      const frameX = x + (side === 1 ? hw + frameOffset : -hw - frameOffset);
       const paneZ = z - hd + offset + width / 2;
-      b.box(paneX, paneY, paneZ, 0.045, paneH, width, mat, 0, { noCollide: true });
-      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, 0.075, width + 0.08, trim, 0, { noCollide: true });
-      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY - paneH / 2 - 0.02, paneZ, 0.055, 0.075, width + 0.08, trim, 0, { noCollide: true });
+      b.box(paneX, paneY, paneZ, 0.05, paneH, width, mat, 0, { noCollide: true });
+      b.box(frameX, paneY, paneZ, t + 0.08, 0.075, width + 0.08, trim, 0, { noCollide: true });
+      b.box(frameX, paneY - paneH / 2 - 0.02, paneZ, t + 0.08, 0.075, width + 0.08, trim, 0, { noCollide: true });
       if (family === 'dual') {
-        b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, paneH + 0.08, 0.075, trim, 0, { noCollide: true });
+        b.box(paneX, paneY, paneZ, 0.055, paneH + 0.08, 0.075, trim, 0, { noCollide: true });
       } else if (family === 'transom') {
-        b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY + paneH / 6, paneZ, 0.055, 0.06, width + 0.08, trim, 0, { noCollide: true });
+        b.box(paneX, paneY + paneH / 6, paneZ, 0.055, 0.06, width + 0.08, trim, 0, { noCollide: true });
       }
     }
   };
