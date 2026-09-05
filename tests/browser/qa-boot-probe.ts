@@ -21,19 +21,24 @@ const errors: string[] = [];
 const browser = await chromium.launch({ channel: 'chrome', headless: process.env.HEADLESS === '1' });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 page.on('console', (msg) => {
-  if (msg.type() === 'error') errors.push(msg.text());
+  if (msg.type() === 'error') {
+    const text = msg.text();
+    const phaseMatch = text.match(/PHASE=(\S+)/);
+    errors.push(`[${phaseMatch?.[1] ?? 'unknown'}] ${text.split('\n')[0]!.slice(0, 170)}`);
+  }
 });
 page.on('pageerror', (err) => errors.push(String(err)));
 
 const gfx = process.env.QA_GFX ?? 'full';
-const gfxSettings: Record<string, unknown> = {
+const gfxConfigs: Record<string, Record<string, unknown>> = {
   raw: { quality: 'high', postProcessing: false, bloom: false, ao: false, aa: 'off', resolutionScale: 1 },
   post: { quality: 'high', postProcessing: true, bloom: false, ao: false, aa: 'off', resolutionScale: 1 },
   bloom: { quality: 'high', postProcessing: true, bloom: true, ao: false, aa: 'off', resolutionScale: 1 },
   ao: { quality: 'ultra', postProcessing: true, bloom: false, ao: true, aa: 'off', resolutionScale: 1 },
   smaa: { quality: 'high', postProcessing: true, bloom: false, ao: false, aa: 'smaa', resolutionScale: 1 },
   full: { quality: 'ultra', postProcessing: true, bloom: true, ao: true, aa: 'smaa', resolutionScale: 1 },
-}[gfx] ?? {};
+};
+const gfxSettings: Record<string, unknown> = gfxConfigs[gfx] ?? {};
 await page.addInitScript((settings) => {
   window.localStorage.setItem('xo-beta-settings-v1', JSON.stringify(settings));
 }, gfxSettings);
@@ -43,7 +48,9 @@ if (process.env.QA_FORCE_WEBGL === '1') {
     Object.defineProperty(navigator, 'gpu', { value: undefined });
   });
 }
-await page.goto('http://localhost:5199/?qa=1', { waitUntil: 'networkidle' });
+const qaHide = process.env.QA_HIDE ?? '';
+const qaQuery = qaHide ? `&qaHide=${qaHide}` : '';
+await page.goto(`http://localhost:5199/?qa=1${qaQuery}`, { waitUntil: 'networkidle' });
 // Fresh profiles land on the first-run onboarding overlay; its handlers only
 // attach once boot completes, so poll for whichever screen appears first and
 // clear onboarding before waiting for the menu.
@@ -98,6 +105,21 @@ try {
   await page.mouse.move(800, 340);
   await page.waitForTimeout(1500);
   await page.screenshot({ path: `${OUT}/04-look.png` });
+  // Optional teleport (env QA_TP="x,z[,yaw]") for POI-targeted captures.
+  const tp = process.env.QA_TP;
+  if (tp) {
+    const [x, z, yaw] = tp.split(',').map((v) => parseFloat(v));
+    await page.evaluate((pos) => {
+      const input = document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null;
+      if (input) {
+        input.value = JSON.stringify({ nonce: `tp-${Date.now()}`, x: pos.x, z: pos.z, yaw: pos.yaw ?? 0 });
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }, { x, z, yaw }).catch(() => undefined);
+    await page.waitForTimeout(2500);
+    await page.screenshot({ path: `${OUT}/05-teleport.png` });
+  }
 } catch (err) {
   errors.push(`match entry failed: ${err}`);
 }

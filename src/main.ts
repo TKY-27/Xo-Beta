@@ -1447,6 +1447,30 @@ interface WarmupStageInput {
  * multi-second freeze when walking up to loot or water. The stage is placed
  * far below the map, rendered once, and fully detached afterwards.
  */
+function qaHidePredicate(kind: string): ((o: THREE.Object3D) => boolean) | null {
+  switch (kind) {
+    case 'instanced': return (o) => (o as THREE.InstancedMesh).isInstancedMesh === true;
+    case 'lambert': return (o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      return Boolean(m && (m as { isMeshLambertMaterial?: boolean }).isMeshLambertMaterial);
+    };
+    case 'skinned': return (o) => (o as THREE.SkinnedMesh).isSkinnedMesh === true;
+    case 'terrain': return (o) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
+    case 'points': return (o) => (o as THREE.Points).isPoints === true;
+    case 'lines': return (o) => (o as THREE.Line).isLine === true;
+    case 'transparent': return (o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      return Boolean(m && m.transparent);
+    };
+    case 'standard': return (o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      return Boolean(m && (m as { isMeshStandardMaterial?: boolean }).isMeshStandardMaterial);
+    };
+    case 'mesh': return (o) => (o as THREE.Mesh).isMesh === true;
+    default: return null;
+  }
+}
+
 async function runShaderWarmupStage({ renderer, camera, world, weaponFactory }: WarmupStageInput): Promise<void> {
   const warmup = new THREE.Group();
   warmup.name = 'shader-warmup-stage';
@@ -1482,6 +1506,13 @@ async function runShaderWarmupStage({ renderer, camera, world, weaponFactory }: 
   }
   renderer.scene.add(warmup);
   try {
+    // QA attribution: apply any ?qaHide predicate before pipeline creation so
+    // the warmup render skips the hidden subsystem's pipelines entirely.
+    const qaHide = QA_PARAMS.get('qaHide');
+    if (qaHide) {
+      const hidePred = qaHidePredicate(qaHide);
+      if (hidePred) renderer.scene.traverse((o) => { if (hidePred(o)) o.visible = false; });
+    }
     await renderer.renderer.compileAsync(renderer.scene, camera);
     renderer.renderer.render(renderer.scene, camera);
   } catch {
@@ -3088,6 +3119,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       resetPerf: resetPerfStats,
       worldGroup: world.group,
       threeRenderer: renderer.renderer,
+      gameScene: renderer.scene,
       sceneInfo: {
         children: renderer.scene.children.length,
         lights: renderer.scene.children
@@ -3293,6 +3325,45 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       return true;
     };
     (window as unknown as Record<string, unknown>).__xoTeleport = performQaTeleport;
+
+    // QA: hide object subsets before their GPU pipelines are created so
+    // render-side issues (e.g. WebGPU validation errors) can be attributed
+    // to a subsystem. Applies for the first seconds of a match.
+    const qaHide = QA_PARAMS.get('qaHide');
+    if (qaHide) {
+      let hideFrames = 600;
+      const predicate = (() => {
+        switch (qaHide) {
+          case 'instanced': return (o: THREE.Object3D) => (o as THREE.InstancedMesh).isInstancedMesh === true;
+          case 'lambert': return (o: THREE.Object3D) => {
+            const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+            return Boolean(m && (m as { isMeshLambertMaterial?: boolean }).isMeshLambertMaterial);
+          };
+          case 'skinned': return (o: THREE.Object3D) => (o as THREE.SkinnedMesh).isSkinnedMesh === true;
+          case 'terrain': return (o: THREE.Object3D) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
+          case 'points': return (o: THREE.Object3D) => (o as THREE.Points).isPoints === true;
+          case 'lines': return (o: THREE.Object3D) => (o as THREE.Line).isLine === true;
+          case 'transparent': return (o: THREE.Object3D) => {
+            const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+            return Boolean(m && m.transparent);
+          };
+          case 'standard': return (o: THREE.Object3D) => {
+            const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+            return Boolean(m && (m as { isMeshStandardMaterial?: boolean }).isMeshStandardMaterial);
+          };
+          case 'mesh': return (o: THREE.Object3D) => (o as THREE.Mesh).isMesh === true;
+          default: return () => false;
+        }
+      })();
+      const hideTick = () => {
+        if (hideFrames-- <= 0) return;
+        renderer.scene.traverse((o) => {
+          if (predicate(o)) o.visible = false;
+        });
+        requestAnimationFrame(hideTick);
+      };
+      hideTick();
+    }
 
     // The headed Codex browser runs evaluation in an isolated JS world, so
     // window expandos and direct dataset writes are intentionally unavailable.
