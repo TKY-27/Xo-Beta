@@ -182,6 +182,12 @@ export class SkyAtmosphereSystem {
     textureOut.wrapS = THREE.RepeatWrapping;
     textureOut.wrapT = THREE.RepeatWrapping;
     textureOut.colorSpace = THREE.NoColorSpace;
+    // Explicit smooth filtering: without it the WebGPU backend samples the
+    // 256px canvas nearest-neighbour and clouds break into hard texel squares.
+    textureOut.magFilter = THREE.LinearFilter;
+    textureOut.minFilter = THREE.LinearMipmapLinearFilter;
+    textureOut.generateMipmaps = true;
+    textureOut.anisotropy = 4;
     return textureOut;
   }
 

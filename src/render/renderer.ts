@@ -545,7 +545,12 @@ export class GameRenderer {
     const scenePass = pass(this.scene, camera);
 
     const cinematic = settings.quality === 'cinematic';
-    const wantAO = settings.ao && (settings.quality === 'ultra' || cinematic) && settings.postProcessing;
+    // AO grounds every prop and wall seam — the critic pass flagged the
+    // default-quality chain as visibly unanchored, and the WebGPU budget
+    // covers it on high too (reduced samples).
+    const wantAO = settings.ao
+      && (settings.quality === 'high' || settings.quality === 'ultra' || cinematic)
+      && settings.postProcessing;
     let color: Node<'vec4'> = scenePass.getTextureNode('output');
     if (wantAO) {
       scenePass.setMRT(mrt({ output, normal: normalView }));
@@ -559,7 +564,7 @@ export class GameRenderer {
       aoPass.distanceExponent.value = 1.4;
       aoPass.thickness.value = 1;
       aoPass.scale.value = 1.1;
-      aoPass.samples.value = cinematic ? 24 : 12;
+      aoPass.samples.value = cinematic ? 24 : settings.quality === 'ultra' ? 16 : 10;
       // GTAONode emits the occlusion factor as a float in the red channel.
       color = color.mul(vec4(vec3(aoPass.getTextureNode().r), 1.0));
     }
