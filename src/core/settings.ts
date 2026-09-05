@@ -1,5 +1,6 @@
 /** Persistent user settings with safe fallbacks when storage is unavailable. */
 
+import { SKIN_IDS } from '../render/characters';
 import {
   DEFAULT_PREFERRED_ITEM_SLOTS,
   safePreferredItemSlots,
@@ -9,7 +10,7 @@ import {
 export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra' | 'cinematic';
 export type CameraMode = 'fps' | 'tps';
 export type TpsCharacterSide = 'left' | 'right';
-export type SkinId = 'vanguard' | 'pathfinder' | 'specter' | 'striker' | 'warden' | 'nova';
+export type SkinId = 'vanguard' | 'pathfinder' | 'specter' | 'striker' | 'warden' | 'nova' | 'seraph' | 'corsair' | 'vesper' | 'dragoon' | 'tempest' | 'reaper';
 
 export interface KeyBindings {
   forward: string; back: string; left: string; right: string;
@@ -250,7 +251,7 @@ function mergeSettings(base: Settings, patch: unknown): Settings {
 
     cameraMode: choice(patch.cameraMode, base.cameraMode, ['fps', 'tps']),
     tpsCharacterSide: choice(patch.tpsCharacterSide, base.tpsCharacterSide, ['left', 'right']),
-    playerSkin: choice(patch.playerSkin, base.playerSkin, ['vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova']),
+    playerSkin: choice(patch.playerSkin, base.playerSkin, [...SKIN_IDS]),
     preferredItemSlots: safePreferredItemSlots(patch.preferredItemSlots, base.preferredItemSlots),
     crosshairColor,
     crosshairSize: bounded(patch.crosshairSize, base.crosshairSize, 4, 20),

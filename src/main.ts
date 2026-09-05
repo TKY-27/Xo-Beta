@@ -30,6 +30,7 @@ import { createMaterials, type MaterialLibrary } from './render/materials';
 import { preloadAll } from './assets/assets';
 import { PropLibrary } from './render/props';
 import { LobbyScene } from './render/lobby';
+import { SKIN_SPECS } from './render/characters';
 import { GameRenderer } from './render/renderer';
 import { WorldView } from './render/worldView';
 import { VfxSystem } from './render/vfx';
@@ -1140,13 +1141,12 @@ async function prepareOnlineGuestRuntime(
     renderer.scene.add(characterFill);
     registerStartCleanup(generation, () => renderer.scene.remove(characterFill));
 
-    const females = new Set(['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX']);
     const rigs = new Map<number, CharacterRig>();
     for (const entry of input.payload.roster) {
       const character = charFactory.create(
         entry.displayName,
         entry.accentColor,
-        females.has(entry.displayName),
+        false, // body now derives from the actor's skin
         null,
         entry.skinId,
       );
@@ -1809,15 +1809,18 @@ async function startMatchImpl(
   }
 
   // Character rigs (skinned GLB combatants)
-  const females = ['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX'];
   const deathPipelineActors = new Set<number>();
-  const firstFemaleBot = match.actors.find((actor) => match.isBotActor(actor) && females.includes(actor.name));
-  const firstMaleBot = match.actors.find((actor) => match.isBotActor(actor) && !females.includes(actor.name));
+  const skinIsFemale = (actorId: number): boolean => {
+    const actor = match.actors.find((candidate) => candidate.id === actorId);
+    return actor ? SKIN_SPECS[actor.skinId]?.female ?? false : false;
+  };
+  const firstFemaleBot = match.actors.find((actor) => match.isBotActor(actor) && skinIsFemale(actor.id));
+  const firstMaleBot = match.actors.find((actor) => match.isBotActor(actor) && !skinIsFemale(actor.id));
   if (firstFemaleBot) deathPipelineActors.add(firstFemaleBot.id);
   if (firstMaleBot) deathPipelineActors.add(firstMaleBot.id);
   const rigs = new Map<number, CharacterRig>();
   for (const actor of match.actors) {
-    const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name), null, actor.skinId);
+    const charRig = charFactory.create(actor.name, actor.accentColor, false, null, actor.skinId);
     // Keep one representative of each body archetype on the death pipeline
     // from loading onward. Opacity 1 remains visually opaque, while avoiding
     // transparent sorting overhead on every living actor.

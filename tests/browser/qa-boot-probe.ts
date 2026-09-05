@@ -39,7 +39,7 @@ const gfxConfigs: Record<string, Record<string, unknown>> = {
   smaa: { quality: 'high', postProcessing: true, bloom: false, ao: false, aa: 'smaa', resolutionScale: 1 },
   full: { quality: 'ultra', postProcessing: true, bloom: true, ao: true, aa: 'smaa', resolutionScale: 1 },
 };
-const gfxSettings: Record<string, unknown> = { cameraMode: 'fps', ...gfxConfigs[gfx] };
+const gfxSettings: Record<string, unknown> = { cameraMode: 'fps', playerSkin: process.env.QA_SKIN ?? 'vanguard', ...gfxConfigs[gfx] };
 await page.addInitScript((settings) => {
   window.localStorage.setItem('xo-beta-settings-v1', JSON.stringify(settings));
 }, gfxSettings);
