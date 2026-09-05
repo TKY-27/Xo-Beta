@@ -3635,6 +3635,14 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
     hud.hideSpectate();
   }
   wasInTransport = inTransport && m.phase === 'transport';
+  const eyeY = rig.camera.position.y;
+  const local = m.localActor;
+  const groundY = local && m.isLocalActor(local) && m.mapDef.terrainHeight
+    ? m.mapDef.terrainHeight(local.body.position.x, local.body.position.z)
+    : 0;
+  if (rig.setAltitude(eyeY, groundY)) {
+    renderer.buildComposer(rig.camera);
+  }
   rig.tick(dtReal);
   applyQaWaterView(rig, world, false);
 
@@ -3866,6 +3874,10 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
     hud.hideSpectate();
   }
   wasInTransport = inTransport;
+  const replicaLocal = view.actors.find((a) => a.id === game.localActorId);
+  if (rig.setAltitude(rig.camera.position.y, replicaLocal && game.mapDef.terrainHeight ? game.mapDef.terrainHeight(replicaLocal.position.x, replicaLocal.position.z) : 0)) {
+    renderer.buildComposer(rig.camera);
+  }
   rig.tick(dtReal);
   applyQaWaterView(rig, world, false);
 

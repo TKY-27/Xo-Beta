@@ -47,8 +47,11 @@ five cycles.
 | 11 | ashara med-kit pickup capture | Cross marking only on one face vanished at some bob angles → double-sided cross geometry, material groups updated | loot reads as medkit from any angle |
 | 12 | ashara compound street-level | Mudbrick walls verified warm against dunes; residual: concreteDark roofs read pitch-black on unlit sides (queued — roof ambient lift) | compound color harmony improved |
 
+| 13 | ashara dry-canals black-plain investigation | A whole terrain region rendered void-black under the post chain. Bisected across raw/post/bloom/noshadow configs: the r185 GTAONode returns ~0 occlusion on the WebGPU backend (whole terrain multiplies to black). AO pass removed from the shipped chain per the evidence-based-decision clause; contact grounding stays with the shadow map. Also: dynamic camera near plane replaced with discrete bands + post-chain rebuild (a continuously sliding near broke depth-derived passes). Revisit GTAO on a three.js upgrade | canal region renders correctly; no black void |
+
 ## Known open items
 
+- GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
 - Engine-level WebGPU validation warnings (`Binding size … is zero`) from
   three r185 node-material instancing: non-fatal, renders correctly, tracked
   upstream; qa-perf filters them from the fatal-error gate.

@@ -33,6 +33,7 @@ const gfx = process.env.QA_GFX ?? 'full';
 const gfxConfigs: Record<string, Record<string, unknown>> = {
   // (cameraMode forced separately below)
   raw: { quality: 'high', postProcessing: false, bloom: false, ao: false, aa: 'off', resolutionScale: 1 },
+  noshadow: { quality: 'high', postProcessing: false, bloom: false, ao: false, aa: 'off', shadows: false, shadowQuality: 'low', resolutionScale: 1 },
   post: { quality: 'high', postProcessing: true, bloom: false, ao: true, aa: 'off', resolutionScale: 1 },
   bloom: { quality: 'high', postProcessing: true, bloom: true, ao: false, aa: 'off', resolutionScale: 1 },
   ao: { quality: 'ultra', postProcessing: true, bloom: false, ao: true, aa: 'off', resolutionScale: 1 },

@@ -458,10 +458,14 @@ function kestrelCompound(b: WorldBuilder, cx: number, cz: number): void {
     x: cx - 10, z: cz - 6, baseY: y, w: 18, d: 16, floors: 2,
     wallMat: 'mudbrick', trimMat: 'metalDark', doors: [[0, 8, 2.6]], roofAccess: true,
   });
+  // Bare interiors read as black voids — hang working lamps in each room.
+  b.light(cx - 10, y + 3.1, cz - 6, 0xffd9a0, 1.3, 13);
+  b.light(cx - 10, y + 6.7, cz - 6, 0xffd9a0, 1.1, 11);
   addBuilding(b, {
     x: cx + 12, z: cz + 9, baseY: y, w: 14, d: 12, floors: 1,
     wallMat: 'plasterOld', trimMat: 'concrete', doors: [[2, 5, 2.4]], interiorDividers: false,
   });
+  b.light(cx + 12, y + 2.6, cz + 9, 0xffd9a0, 1.2, 12);
   for (let i = -3; i <= 3; i++) b.box(cx + i * 4.6, y + 0.55, cz + 18, 3.7, 1.1, 0.8, 'sandbag');
   chestPad(b, cx - 4, cz + 8, y, 'vault');
   b.loot(cx + 14, y + 0.4, cz - 8, 'heal');

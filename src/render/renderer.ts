@@ -42,9 +42,6 @@ import {
   Loop,
   max,
   mix,
-  mrt,
-  normalView,
-  output,
   pass,
   positionLocal,
   pow,
@@ -53,9 +50,7 @@ import {
   uniform,
   vec2,
   vec3,
-  vec4,
 } from 'three/tsl';
-import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
@@ -94,10 +89,11 @@ export function getSharedGameRenderer(canvas: HTMLCanvasElement): WebGPURenderer
       canvas,
       antialias: false,
       powerPreference: 'high-performance',
-      // Logarithmic depth: the 500 m maps are viewed from a 0.08 m camera
-      // near plane out to transport altitude; a linear buffer z-fights ground
-      // planes at altitude (flickering terrain seen from the transport).
-      logarithmicDepthBuffer: true,
+      // NOTE: logarithmicDepthBuffer is deliberately OFF — the GTAO depth
+      // reconstruction assumes a linear buffer and renders mid/far geometry
+      // fully occluded (black) with log depth enabled. Transport-altitude
+      // z-fighting is solved with a dynamic camera near plane instead
+      // (see CameraRig.setAltitude).
     });
   }
   return sharedRenderer;
@@ -366,6 +362,9 @@ export class GameRenderer {
     this.sunOffset.copy(sunPos).setLength(260);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
+    // Ortho depth range matched to the sunOffset distance (260) plus the
+    // ±160 frustum reach: a tight range preserves depth precision and kills
+    // terrain self-shadow acne (whole plains rendering as shadow).
     this.sun.shadow.camera.near = 10;
     this.sun.shadow.camera.far = 560;
     this.sun.shadow.camera.left = -110;
@@ -545,29 +544,12 @@ export class GameRenderer {
     const scenePass = pass(this.scene, camera);
 
     const cinematic = settings.quality === 'cinematic';
-    // AO grounds every prop and wall seam — the critic pass flagged the
-    // default-quality chain as visibly unanchored, and the WebGPU budget
-    // covers it on high too (reduced samples).
-    const wantAO = settings.ao
-      && (settings.quality === 'high' || settings.quality === 'ultra' || cinematic)
-      && settings.postProcessing;
+    // NOTE on ambient occlusion: the r185 GTAONode returns ~0 occlusion on
+    // the WebGPU backend with this scene (in-engine verified — the whole
+    // terrain multiplies to black; see docs/QA_STATE.md cycle 13). The pass
+    // is therefore not wired; contact grounding comes from the shadow map.
+    // Revisit on a three.js upgrade.
     let color: Node<'vec4'> = scenePass.getTextureNode('output');
-    if (wantAO) {
-      scenePass.setMRT(mrt({ output, normal: normalView }));
-      color = scenePass.getTextureNode('output');
-      const aoPass = ao(scenePass.getTextureNode('depth'), scenePass.getTextureNode('normal'), camera);
-      // AO at native resolution: half-res compute + bilinear upsample haloed
-      // around distant geometry and read as grain. Samples stay moderate so
-      // the fill cost stays bounded.
-      aoPass.resolutionScale = 1;
-      aoPass.radius.value = cinematic ? 0.35 : 0.28;
-      aoPass.distanceExponent.value = 1.4;
-      aoPass.thickness.value = 1;
-      aoPass.scale.value = 1.1;
-      aoPass.samples.value = cinematic ? 24 : settings.quality === 'ultra' ? 16 : 10;
-      // GTAONode emits the occlusion factor as a float in the red channel.
-      color = color.mul(vec4(vec3(aoPass.getTextureNode().r), 1.0));
-    }
 
     // Composite the linear optical scope image before bloom, AA and grading so
     // the lens receives the same display treatment as the primary view.

@@ -1964,6 +1964,10 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   mesh.receiveShadow = true;
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
+  // One mesh spans the whole playable area plus the skirt — it is always
+  // potentially visible, and a stale aggregate bound showed up as the entire
+  // terrain vanishing (black void) from some ground-level camera positions.
+  mesh.frustumCulled = false;
 
   return {
     mesh,
