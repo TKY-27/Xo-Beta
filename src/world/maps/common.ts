@@ -27,6 +27,10 @@ export interface BuildingOpts {
   roofAccess?: boolean;
   interiorDividers?: boolean;
   parapet?: boolean;
+  /** Cosmetic pitched shell over the flat gameplay roof (silhouette only). */
+  roofStyle?: 'flat' | 'gable';
+  /** Decorative brick chimney on the gable ridge (deterministic per call). */
+  chimney?: boolean;
 }
 
 /**
@@ -563,6 +567,64 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       b.box(x - hw - 0.25, roofY + ph / 2, z, 0.25, ph, o.d + 0.5, trim);
     }
     b.platform(x - hw - 0.4, x + hw + 0.4, z - hd - 0.4, z + hd + 0.4, roofY);
+  }
+
+  // Pitched-roof shell: pure silhouette dressing floated above the flat
+  // gameplay roof — traversal, nav and roof platforms are untouched.
+  if (o.roofStyle === 'gable') {
+    const ridgeAlongX = o.w >= o.d;
+    const span = ridgeAlongX ? o.d : o.w;
+    const half = span / 2 + 0.35;
+    const rise = Math.min(2.2, span * 0.42);
+    const run = half;
+    const slopeLen = Math.hypot(run, rise) + 0.3;
+    const slopeAngle = Math.atan2(rise, run);
+    const longLen = (ridgeAlongX ? o.w : o.d) + 0.55;
+    const shellY = roofY + 0.22;
+    // Gable ends: stacked shrinking slabs approximate the triangle.
+    const gableSlabs = 5;
+    for (const endSide of [-1, 1]) {
+      const endX = ridgeAlongX ? x + endSide * (o.w / 2 + 0.16) : x;
+      const endZ = ridgeAlongX ? z : z + endSide * (o.d / 2 + 0.16);
+      for (let i = 0; i < gableSlabs; i++) {
+        const f = (i + 0.5) / gableSlabs;
+        const slabW = (span + 0.3) * (1 - f);
+        const slabY = shellY + rise * f;
+        const sizeX = ridgeAlongX ? 0.32 : slabW;
+        const sizeZ = ridgeAlongX ? slabW : 0.32;
+        b.box(endX, slabY, endZ, sizeX, rise / gableSlabs + 0.06, sizeZ, trim, 0, {
+          noCollide: true,
+        });
+      }
+    }
+    // Two slopes as rotated slabs.
+    for (const side of [-1, 1] as const) {
+      const slopeY = shellY + rise / 2;
+      const off = side * (half / 2);
+      if (ridgeAlongX) {
+        b.box(x, slopeY, z + off, longLen, 0.14, slopeLen, roofMat, 0, {
+          noCollide: true, pitch: side * slopeAngle,
+        });
+      } else {
+        b.box(x + off, slopeY, z, slopeLen, 0.14, longLen, roofMat, 0, {
+          noCollide: true, roll: -side * slopeAngle,
+        });
+      }
+    }
+    // Ridge cap.
+    if (ridgeAlongX) {
+      b.box(x, shellY + rise + 0.05, z, longLen, 0.1, 0.24, trim, 0, { noCollide: true });
+    } else {
+      b.box(x, shellY + rise + 0.05, z, 0.24, 0.1, longLen, trim, 0, { noCollide: true });
+    }
+    // Brick chimney with cap.
+    if (o.chimney) {
+      const chX = ridgeAlongX ? x + o.w * 0.22 : x + o.d * 0.18;
+      const chZ = ridgeAlongX ? z + o.d * 0.18 : z + o.d * 0.22;
+      const chH = rise + 0.85;
+      b.box(chX, shellY + chH / 2, chZ, 0.55, chH, 0.55, 'bricksOld', 0, { noCollide: true });
+      b.box(chX, shellY + chH + 0.06, chZ, 0.72, 0.14, 0.72, trim, 0, { noCollide: true });
+    }
   }
 
   // Exterior access staircase to the roof (along the left wall)

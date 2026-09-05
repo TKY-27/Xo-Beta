@@ -131,7 +131,7 @@ try {
   // Optional teleport (env QA_TP="x,z[,yaw]") for POI-targeted captures.
   const tp = process.env.QA_TP;
   if (tp) {
-    const [x, z, yaw, pitch, mode] = tp.split(',').map((v) => v.trim());
+    const [x, z, yaw, pitch, mode, refY] = tp.split(',').map((v) => v.trim());
     await page.evaluate((pos) => {
       const input = document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null;
       if (input) {
@@ -141,13 +141,20 @@ try {
           z: Number(pos.z),
           yaw: pos.yaw === undefined || pos.yaw === '' ? 0 : Number(pos.yaw),
           pitch: pos.pitch === undefined || pos.pitch === '' ? -0.12 : Number(pos.pitch),
-          mode: pos.mode === 'swim' ? 'swim' : 'standing',
+          mode: pos.mode === 'swim' ? 'swim' : undefined,
+          refY: pos.refY === undefined || pos.refY === '' ? undefined : Number(pos.refY),
         });
         input.dispatchEvent(new Event('change', { bubbles: true }));
         input.dispatchEvent(new Event('input', { bubbles: true }));
       }
-    }, { x, z, yaw, pitch, mode }).catch(() => undefined);
+    }, { x, z, yaw, pitch, mode, refY }).catch(() => undefined);
     await page.waitForTimeout(2500);
+    const posNow = await page.evaluate(() => ({
+      pos: document.documentElement.dataset.xoQaPosition ?? 'unknown',
+      result: document.documentElement.dataset.xoQaTeleportResult ?? 'no-result',
+      inputVal: (document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null)?.value ?? 'no-input',
+    }));
+    console.log(`after teleport: ${JSON.stringify(posNow)}`);
     await page.screenshot({ path: `${OUT}/05-teleport.png` });
   }
 } catch (err) {

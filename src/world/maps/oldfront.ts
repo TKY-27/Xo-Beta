@@ -392,6 +392,7 @@ function townHouse(b: WorldBuilder, cx: number, cz: number, doorSide: 0 | 1 | 2 
   addBuilding(b, {
     x: cx, z: cz, baseY: gy, w: 13, d: 15, floors: 2, wallMat: mat, trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[doorSide, 5, 1.9]],
+    roofStyle: 'gable', chimney: (hash2(cx, cz) & 3) !== 0,
   });
   b.loot(cx + 3, gy + 0.4, cz + 3);
   // Chest tucked against the door wall of some homes — never mid-street.
@@ -413,6 +414,7 @@ function shopHouse(b: WorldBuilder, cx: number, cz: number): void {
   addBuilding(b, {
     x: cx, z: cz, baseY: gy, w: 16, d: 14, floors: 1, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[0, 4, 2.6], [0, 11, 2.6]], interiorDividers: false,
+    roofStyle: 'gable',
   });
   // The enterable shop used to be a bare plaster room containing only loot.
   // Shallow wall shelves and a warm suspended service light add purpose while
