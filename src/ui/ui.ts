@@ -1181,14 +1181,22 @@ function replicaMapState(view: GameStateView): HudMapState {
 
 function matchMapState(match: Match): HudMapState {
   const local = match.localActor;
+  // While riding the transport the sim parks the actor body; track the moving
+  // transport instead so the minimap/tactical map stay live during the ride.
+  const ridingTransport = match.phase === 'transport' && local;
   return {
     actors: local ? [{
       id: local.id,
       teamId: match.teamForActor(local),
       alive: local.alive,
-      x: local.body.position.x,
-      z: local.body.position.z,
-      yaw: local.yaw,
+      x: ridingTransport ? match.transportPos.x : local.body.position.x,
+      z: ridingTransport ? match.transportPos.z : local.body.position.z,
+      yaw: ridingTransport
+        ? Math.atan2(
+            match.transportTo[0] - match.transportFrom[0],
+            match.transportTo[1] - match.transportFrom[1],
+          )
+        : local.yaw,
       accentColor: local.accentColor,
     }] : [],
     aliveCount: match.actors.filter((actor) => actor.alive).length,

@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>weapon bisect</title>
+<style>body{margin:0;background:#888}canvas{display:block}</style>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { RenderPipeline, WebGPURenderer } from 'three/webgpu';
+import { pass } from 'three/tsl';
+
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fa3b5);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 20);
+camera.position.set(0.3, 0.2, 0.6);
+camera.lookAt(0, 0, -0.3);
+
+const key = new THREE.DirectionalLight(0xffffff, 2.6);
+key.position.set(1, 2, 1);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xbfd4e8, 1.4);
+fill.position.set(-1.5, 0.4, 0.6);
+scene.add(fill);
+
+const { buildProceduralWeapon, makeGunMaterials } = await import('/src/render/weaponGeometry.ts');
+const mats = makeGunMaterials();
+const gun = buildProceduralWeapon('ar', mats);
+// Each top-level child gets its own color so we can name the offender.
+const palette = [0xff4444, 0x44ff44, 0x4488ff, 0xffcc44, 0xff44cc, 0x44ffff, 0xffffff, 0xaaaaaa];
+let ci = 0;
+gun.group.traverse((child) => {
+  const mesh = child;
+  if (mesh.isMesh) {
+    mesh.material = new THREE.MeshStandardMaterial({ color: palette[ci % palette.length], roughness: 0.6 });
+    mesh.userData.ci = ci;
+    ci += 1;
+  }
+});
+const inventory = [];
+gun.group.traverse((child) => {
+  if (child.isMesh) {
+    inventory.push({ ci: child.userData.ci, geo: child.geometry.type, dim: [child.geometry.parameters?.width, child.geometry.parameters?.height, child.geometry.parameters?.depth, child.geometry.parameters?.radius].map(v => v === undefined ? null : v) });
+  }
+});
+window.__inventory = inventory;
+gun.group.scale.setScalar(1.4);
+scene.add(gun.group);
+
+const grid = new THREE.Mesh(new THREE.BoxGeometry(2, 0.005, 2), new THREE.MeshStandardMaterial({ color: 0x6a7480, roughness: 0.9 }));
+grid.position.y = -0.22;
+scene.add(grid);
+
+// Report child inventory to the console for the harness to read.
+
+
+const pp = new RenderPipeline(renderer);
+pp.outputNode = pass(scene, camera);
+setInterval(() => pp.render(), 16);
+console.log('WEAPON_READY');
+</script>
+</body>
+</html>

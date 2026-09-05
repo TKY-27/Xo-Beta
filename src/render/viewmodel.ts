@@ -1,6 +1,6 @@
 /**
  * First-person viewmodel: composed weapon models (CC0 Kenney blaster parts),
- * arms, sway, inertia, walking bob, procedural recoil, ADS transition,
+ * sway, inertia, walking bob, procedural recoil, ADS transition,
  * sprint lowering, tactical/empty reload animation, bolt cycling.
  */
 
@@ -10,9 +10,9 @@ import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
 
-const HIP_POS = new THREE.Vector3(0.185, -0.17, -0.06);
-const ADS_POS = new THREE.Vector3(0, -0.075, -0.14);
-const SPRINT_POS = new THREE.Vector3(0.12, -0.26, -0.1);
+const HIP_POS = new THREE.Vector3(0.13, -0.15, -0.38);
+const ADS_POS = new THREE.Vector3(0, -0.062, -0.2);
+const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
 
 export class ViewModel {
   /**
@@ -115,8 +115,8 @@ export class ViewModel {
     this.factory = factory;
     this.armMat = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.62, metalness: 0.22 });
     this.gloveMat = new THREE.MeshStandardMaterial({ color: 0x191d22, roughness: 0.55, metalness: 0.3 });
+    this.group.name = 'viewmodel-root';
     this.group.add(this.pivot);
-    this.buildArms();
     this.buildFists();
 
     this.muzzleFlashLight = new THREE.PointLight(0xffc878, 0, 7, 2);
@@ -130,29 +130,6 @@ export class ViewModel {
   syncCamera(camera: THREE.Camera): void {
     this.group.position.copy(camera.position);
     this.group.quaternion.copy(camera.quaternion);
-  }
-
-  private buildArms(): void {
-    // Right arm (trigger hand)
-    const armR = new THREE.Mesh(new THREE.CapsuleGeometry(0.047, 0.3, 4, 10), this.armMat);
-    armR.position.set(0.175, -0.235, -0.16);
-    armR.rotation.set(1.25, -0.12, 0.1);
-    const gloveR = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.085, 0.115), this.gloveMat);
-    gloveR.position.set(0.055, -0.145, -0.31);
-    gloveR.rotation.x = 0.35;
-    // Left support arm
-    const armL = new THREE.Mesh(new THREE.CapsuleGeometry(0.044, 0.27, 4, 10), this.armMat);
-    armL.position.set(-0.135, -0.255, -0.4);
-    armL.rotation.set(1.32, 0.42, 0);
-    const gloveL = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.082, 0.11), this.gloveMat);
-    gloveL.position.set(-0.062, -0.185, -0.545);
-    gloveL.rotation.set(0.3, 0, -0.15);
-    // Forearm guard accent
-    const guardR = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.02, 0.14), this.gloveMat);
-    guardR.position.set(0.09, -0.19, -0.24);
-    guardR.rotation.x = 1.25;
-    for (const m of [armR, armL, gloveR, gloveL, guardR]) m.castShadow = false;
-    this.pivot.add(armR, armL, gloveR, gloveL, guardR);
   }
 
   private buildFists(): void {
@@ -364,10 +341,14 @@ export class ViewModel {
       this.recoilZ + 0.14 * inspect.lift * iw;
 
     this.pivot.position.set(px, py, pz);
+    // Base hip stance angles the receiver inward across the lower-right
+    // frame (muzzle toward center) like a real ready position; ADS removes it.
+    const hipYaw = 0.16 * (1 - ads);
+    const hipRoll = -0.1 * (1 - ads);
     this.pivot.rotation.set(
       -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
-      reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
+      reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
     );
   }
 

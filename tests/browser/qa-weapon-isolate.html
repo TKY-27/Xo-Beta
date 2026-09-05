@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>weapon isolate</title>
+<style>body{margin:0;background:#888}canvas{display:block}</style>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { RenderPipeline, WebGPURenderer } from 'three/webgpu';
+import { pass } from 'three/tsl';
+
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fa3b5);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 20);
+camera.position.set(0.25, 0.18, 0.55);
+camera.lookAt(0, 0, -0.3);
+
+const key = new THREE.DirectionalLight(0xffffff, 2.4);
+key.position.set(1, 2, 1);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xbfd4e8, 1.2);
+fill.position.set(-1.5, 0.4, 0.6);
+scene.add(fill);
+
+const { WeaponModelFactory } = await import('/src/render/weaponModels.ts');
+const factory = new WeaponModelFactory(null);
+const model = factory.build('ar', 'epic');
+const group = model.group;
+group.scale.setScalar(1.4);
+scene.add(group);
+window.__ready = true;
+
+// Floor grid for scale reference
+const grid = new THREE.Mesh(new THREE.BoxGeometry(2, 0.005, 2), new THREE.MeshStandardMaterial({ color: 0x6a7480, roughness: 0.9 }));
+grid.position.y = -0.22;
+scene.add(grid);
+
+const pp = new RenderPipeline(renderer);
+pp.outputNode = pass(scene, camera);
+setInterval(() => pp.render(), 16);
+console.log('WEAPON_READY');
+</script>
+</body>
+</html>

@@ -1468,6 +1468,7 @@ function qaHidePredicate(kind: string): ((o: THREE.Object3D) => boolean) | null 
       return Boolean(m && (m as { isMeshStandardMaterial?: boolean }).isMeshStandardMaterial);
     };
     case 'mesh': return (o) => (o as THREE.Mesh).isMesh === true;
+    case 'viewmodel': return (o) => o.name === 'viewmodel-root';
     default: return null;
   }
 }

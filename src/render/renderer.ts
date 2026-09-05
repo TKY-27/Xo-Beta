@@ -64,6 +64,11 @@ import { SkyAtmosphereSystem } from './skyAtmosphere';
 import { getSettings } from '../core/settings';
 import { loadHdri, clampHdriPeaks } from '../assets/assets';
 
+const _sunDirection = new Vector3();
+const _lightRight = new Vector3();
+const _lightUp = new Vector3();
+const _snappedTarget = new Vector3();
+
 /** Supported sniper scope magnification levels (angular-FOV based). */
 export const SCOPE_MAGNIFICATIONS = [1, 2, 4] as const;
 /** Default when scoping in. */
@@ -89,6 +94,10 @@ export function getSharedGameRenderer(canvas: HTMLCanvasElement): WebGPURenderer
       canvas,
       antialias: false,
       powerPreference: 'high-performance',
+      // Logarithmic depth: the 500 m maps are viewed from a 0.08 m camera
+      // near plane out to transport altitude; a linear buffer z-fights ground
+      // planes at altitude (flickering terrain seen from the transport).
+      logarithmicDepthBuffer: true,
     });
   }
   return sharedRenderer;
@@ -437,8 +446,23 @@ export class GameRenderer {
   /** Keep the shadow frustum centered near the viewer for crisp shadows. */
   followSunTarget(pos: Vector3): void {
     if (!this.sun) return;
-    this.sun.target.position.copy(pos);
-    this.sun.position.copy(pos).add(this.sunOffset);
+    // Snap the target to shadow-map texel increments in light space: without
+    // this the shadow camera slides continuously with the viewer and every
+    // shadow edge shimmers as texels resample frame to frame.
+    const cam = this.sun.shadow.camera;
+    const extent = cam.right - cam.left;
+    const texel = extent / this.sun.shadow.mapSize.x;
+    const sunDir = _sunDirection.copy(this.sunOffset).normalize();
+    // Light-space right axis: perpendicular to the sun direction, horizontal.
+    _lightRight.set(0, 1, 0).cross(sunDir).normalize();
+    _lightUp.copy(sunDir).cross(_lightRight).normalize();
+    const dx = pos.dot(_lightRight);
+    const dy = pos.dot(_lightUp);
+    const snappedX = Math.round(dx / texel) * texel - dx;
+    const snappedY = Math.round(dy / texel) * texel - dy;
+    _snappedTarget.copy(pos).addScaledVector(_lightRight, snappedX).addScaledVector(_lightUp, snappedY);
+    this.sun.target.position.copy(_snappedTarget);
+    this.sun.position.copy(_snappedTarget).add(this.sunOffset);
   }
 
   /** Azimuth (atan2(x, z)) pointing toward the visible sun, for camera framing. */
@@ -527,10 +551,10 @@ export class GameRenderer {
       scenePass.setMRT(mrt({ output, normal: normalView }));
       color = scenePass.getTextureNode('output');
       const aoPass = ao(scenePass.getTextureNode('depth'), scenePass.getTextureNode('normal'), camera);
-      // AO is a low-frequency effect — compute at reduced resolution and let
-      // the composite bilinearly upsample. Cheap, with no visible difference
-      // at gameplay camera distances.
-      aoPass.resolutionScale = cinematic ? 1 : 0.5;
+      // AO at native resolution: half-res compute + bilinear upsample haloed
+      // around distant geometry and read as grain. Samples stay moderate so
+      // the fill cost stays bounded.
+      aoPass.resolutionScale = 1;
       aoPass.radius.value = cinematic ? 0.35 : 0.28;
       aoPass.distanceExponent.value = 1.4;
       aoPass.thickness.value = 1;

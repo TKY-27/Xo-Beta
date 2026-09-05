@@ -112,11 +112,12 @@ export const DEFAULT_SETTINGS: Settings = {
   bindings: { ...DEFAULT_BINDINGS },
 
   quality: 'high',
-  // 0.5 made every default install render at half resolution and upscale —
-  // the single biggest reason the game read soft rather than AAA-sharp. 0.7
-  // keeps a safe fill-rate margin on integrated GPUs while preserving most
-  // of the detail; ultra/cinematic users should raise it further.
-  resolutionScale: 0.7,
+  // Native-resolution rendering by default: the WebGPU pipeline on the
+  // reference machine holds 60 FPS at scale 1.0, and upscaling from 0.7 was
+  // the single biggest reason the game read soft rather than AAA-sharp.
+  // Lower-end machines can still step down via settings; the adaptive
+  // resolution watchdog remains the dynamic safety net.
+  resolutionScale: 1,
   shadows: true,
   shadowQuality: 'high',
   postProcessing: true,

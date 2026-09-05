@@ -116,13 +116,6 @@ export class PropLibrary {
     for (const v of ['sedan', 'suv', 'van', 'truck', 'taxi', 'police', 'delivery-flat', 'hatchback-sports', 'race-future']) {
       jobs.push(loadGltf(`vehicles/${v}.glb`).then((a) => { this.templates.set(`vehicle/${v}`, a.scene); }));
     }
-    for (const w of [
-      'blaster-a', 'blaster-d', 'blaster-e', 'blaster-f', 'blaster-p',
-      'scope-large-a', 'silencer-small', 'clip-large', 'clip-small',
-    ]) {
-      jobs.push(loadGltf(`weapons/${w}.glb`).then((a) => { this.templates.set(`weapon/${w}`, a.scene); }));
-    }
-
     await Promise.all(jobs);
     for (const variant of this.variants.values()) {
       for (const geometry of variant.geoms) geometry.userData.externalShared = true;

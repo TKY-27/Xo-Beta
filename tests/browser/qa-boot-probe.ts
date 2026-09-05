@@ -31,6 +31,7 @@ page.on('pageerror', (err) => errors.push(String(err)));
 
 const gfx = process.env.QA_GFX ?? 'full';
 const gfxConfigs: Record<string, Record<string, unknown>> = {
+  // (cameraMode forced separately below)
   raw: { quality: 'high', postProcessing: false, bloom: false, ao: false, aa: 'off', resolutionScale: 1 },
   post: { quality: 'high', postProcessing: true, bloom: false, ao: false, aa: 'off', resolutionScale: 1 },
   bloom: { quality: 'high', postProcessing: true, bloom: true, ao: false, aa: 'off', resolutionScale: 1 },
@@ -38,7 +39,7 @@ const gfxConfigs: Record<string, Record<string, unknown>> = {
   smaa: { quality: 'high', postProcessing: true, bloom: false, ao: false, aa: 'smaa', resolutionScale: 1 },
   full: { quality: 'ultra', postProcessing: true, bloom: true, ao: true, aa: 'smaa', resolutionScale: 1 },
 };
-const gfxSettings: Record<string, unknown> = gfxConfigs[gfx] ?? {};
+const gfxSettings: Record<string, unknown> = { cameraMode: 'fps', ...gfxConfigs[gfx] };
 await page.addInitScript((settings) => {
   window.localStorage.setItem('xo-beta-settings-v1', JSON.stringify(settings));
 }, gfxSettings);
@@ -102,6 +103,15 @@ try {
     if (phase?.grounded && phase.state !== 'freefall' && phase.state !== 'glide') break;
   }
   await page.screenshot({ path: `${OUT}/03-grounded.png` });
+  // Optional loadout (env QA_GIVE="weaponId:rarity") before the look shot.
+  const give = process.env.QA_GIVE;
+  if (give) {
+    const [wid, rar] = give.split(':');
+    await page.evaluate((args) => {
+      (window as unknown as { __xoGive?: (id: string, rarity: string) => void }).__xoGive?.(args[0]!, args[1] ?? 'common');
+    }, [wid, rar]).catch(() => undefined);
+    await page.waitForTimeout(900);
+  }
   // Pointer lock is unavailable headless-ish; force a ground-level view via
   // the QA teleport (same position, pitched down).
   await page.evaluate(() => {
