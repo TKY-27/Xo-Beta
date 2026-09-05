@@ -102,9 +102,21 @@ try {
     if (phase?.grounded && phase.state !== 'freefall' && phase.state !== 'glide') break;
   }
   await page.screenshot({ path: `${OUT}/03-grounded.png` });
-  await page.mouse.move(640, 360);
-  await page.mouse.move(800, 340);
-  await page.waitForTimeout(1500);
+  // Pointer lock is unavailable headless-ish; force a ground-level view via
+  // the QA teleport (same position, pitched down).
+  await page.evaluate(() => {
+    const pos = document.documentElement.dataset.xoQaPosition ?? '';
+    const m = pos.match(/x=([-\d.]+),y=([-\d.]+),z=([-\d.]+)/) ?? pos.match(/([-\d.]+),([-\d.]+),([-\d.]+)/);
+    const input = document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null;
+    if (!input) return;
+    const cur = (window as unknown as { __xoState?: { camera?: { position?: { x: number; z: number } } } }).__xoState?.camera?.position;
+    const x = m ? parseFloat(m[1]!) : (cur?.x ?? 0);
+    const z = m ? parseFloat(m[3]!) : (cur?.z ?? 0);
+    input.value = JSON.stringify({ nonce: `look-${Date.now()}`, x, z, yaw: 0, pitch: -0.28 });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }).catch(() => undefined);
+  await page.waitForTimeout(1200);
   await page.screenshot({ path: `${OUT}/04-look.png` });
   // Optional teleport (env QA_TP="x,z[,yaw]") for POI-targeted captures.
   const tp = process.env.QA_TP;
