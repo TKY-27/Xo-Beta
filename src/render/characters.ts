@@ -135,7 +135,7 @@ export const SKIN_SPECS: Readonly<Record<SkinId, SkinSpec>> = {
   striker: { id: 'striker', label: 'Striker', primary: 0x5b2d2d, secondary: 0x241316, accent: 0xff6b55, helmetKind: 0, armorHeavy: true, hasPack: false, female: false },
   warden: { id: 'warden', label: 'Warden', primary: 0x4b5142, secondary: 0x20231c, accent: 0xd6e890, helmetKind: 1, armorHeavy: true, hasPack: true, female: false },
   nova: { id: 'nova', label: 'Nova', primary: 0x3d2a58, secondary: 0x1b122c, accent: 0x66d8ff, helmetKind: 3, armorHeavy: false, hasPack: true, female: true },
-  seraph: { id: 'seraph', label: 'Seraph', primary: 0xb8a67e, secondary: 0x4a4232, accent: 0xffe9b0, helmetKind: 1, armorHeavy: true, hasPack: true, female: true },
+  seraph: { id: 'seraph', label: 'Seraph', primary: 0x8d8468, secondary: 0x3c382c, accent: 0xffe9b0, helmetKind: 1, armorHeavy: true, hasPack: true, female: true },
   corsair: { id: 'corsair', label: 'Corsair', primary: 0x1f5f66, secondary: 0x0d2b30, accent: 0x53e0d8, helmetKind: 0, armorHeavy: false, hasPack: true, female: true },
   vesper: { id: 'vesper', label: 'Vesper', primary: 0x5e2438, secondary: 0x26101a, accent: 0xff9ec2, helmetKind: 2, armorHeavy: false, hasPack: false, female: true },
   dragoon: { id: 'dragoon', label: 'Dragoon', primary: 0x4c5230, secondary: 0x22261a, accent: 0xff9d3c, helmetKind: 0, armorHeavy: true, hasPack: true, female: false },
@@ -384,8 +384,8 @@ export class CharacterFactory {
     if (!armorHeavy && (bones['spine_02'] || bones['spine_03'])) {
       const anchor = bones['spine_03'] ?? bones['spine_02']!;
       const rig = new THREE.Group();
-      const panel = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.2, 0.09), costumeMat);
-      panel.position.z = 0.02;
+      const panel = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.27, 0.14), costumeMat);
+      panel.position.z = 0.05;
       for (const strapX of [-0.075, 0.075]) {
         const strap = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.26, 0.075), costumeMat);
         strap.position.set(strapX, 0.02, 0.0);
@@ -393,8 +393,8 @@ export class CharacterFactory {
         rig.add(strap);
       }
       for (const pouchX of [-0.08, 0.02]) {
-        const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.07, 0.045), costumeMat);
-        pouch.position.set(pouchX, -0.06, 0.062);
+        const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.08, 0.05), costumeMat);
+        pouch.position.set(pouchX, -0.06, 0.085);
         rig.add(pouch);
       }
       const buckle = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.035, 0.02), trimMat);
@@ -418,9 +418,12 @@ export class CharacterFactory {
       if (bones['spine_02'] || bones['spine_03']) {
         const anchor = bones['spine_03'] ?? bones['spine_02']!;
         const plate = new THREE.Group();
-        const main = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.26, 0.14), costumeMat);
-        const glow = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.06, 0.03), trimMat);
-        glow.position.set(0, 0.03, 0.075);
+        // Oversized relative to the torso so the plate reads as worn armor
+        // sitting OUTSIDE the body mesh, not as an inset patch.
+        const main = new THREE.Mesh(new THREE.BoxGeometry(0.33, 0.27, 0.16), costumeMat);
+        main.position.z = 0.055;
+        const glow = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.07, 0.03), trimMat);
+        glow.position.set(0, 0.03, 0.14);
         plate.add(main, glow);
         anchor.add(plate);
         plate.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = true; });

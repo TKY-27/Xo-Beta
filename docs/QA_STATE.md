@@ -41,6 +41,9 @@ five cycles.
 | 7 | rain on ashara + streak quality | Desert rain implausible + streaks read as scratches → dryStorm drops the rain field (thunder/clouds carry it); streaks longer/softer (0.85m, opacity 0.2) | rain reads as weather where it remains |
 | 8 | oldfront meadow macro variation | Open fields read as one flat color at default quality → terrain vertex variation to full strength (verified in capture) | visible dry/green patchwork |
 
+| 9 | drop transport close-ups | Toy blue/cyan/orange palette undermined the most-watched object → muted military gunship materials | verified in transport captures |
+| 10 | SECOND INDEPENDENT CRITIC (fresh context) | Verified fixed: night clouds, transport palette (partial). Probe artifact: 'post' config disabled AO explicitly (game ships AO at high+; probe fixed). New findings adopted: lobby rig attachments buried in body → chest plate/rig enlarged to read as worn armor; Seraph palette shifted off skin-tone; killfeed SVGs + damage-number dt landed; transport white canopy still glossy (queued) | gear visible on all skins at lobby close-up |
+
 ## Known open items
 
 - Engine-level WebGPU validation warnings (`Binding size … is zero`) from
