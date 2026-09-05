@@ -23,6 +23,8 @@ five cycles.
 | Cycle | Evidence | Defect → fix | Result |
 |---|---|---|---|
 | 1 | oldfront town/field captures (g1) | OldFront read near-black (exposure 0.79, contrast 1.07) while paving blew out → exposure 0.95, ambient 0.55, hemi 1.0, vignette 0.26, contrast 1.0 | meadows/landmarks readable, paving balanced |
+| 2 | neocity intersection + block cores | Mid-block cores sat empty and unlit → per-block lamp posts, crates, kiosks (16 blocks, deterministic) | minimap shows lit block cores; street props richer |
+| 3 | eden lake shore (water verification) | Ported TSL water needed in-engine verification → verified: sky reflection, wave detail, boundary fade, foam, dock scene all correct | no fix required; highest-risk port confirmed good |
 
 ## Pre-loop user-report fixes (verified in-engine)
 
