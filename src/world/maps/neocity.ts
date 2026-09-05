@@ -124,10 +124,12 @@ export function buildNeoCity(): MapDef {
         b.box(c + s * 11.5, 0.21, c + k * 0.28, 5.2, 0.06, 0.5, 'paint', 0, { noCollide: true });
       }
     }
-    // manhole covers + storm drains for street credibility
+    // manhole covers + storm drains for street credibility. Manhole tops sit
+    // at 0.14 — a millimetre-exact tie with the drain boxes' 0.15 tops flickers
+    // where their footprints touch (round-vs-box coplanar guard).
     for (let d = -S / 2 + 22; d < S / 2 - 22; d += 47) {
-      b.cyl(c + 4.2, 0.13, d + ((i + 2) % 3) * 13, 0.55, 0.04, 'metalDark');
-      b.cyl(d + ((i + 3) % 4) * 11, 0.13, c - 4.2, 0.55, 0.04, 'metalDark');
+      b.cyl(c + 4.2, 0.12, d + ((i + 2) % 3) * 13, 0.55, 0.04, 'metalDark');
+      b.cyl(d + ((i + 3) % 4) * 11, 0.12, c - 4.2, 0.55, 0.04, 'metalDark');
       b.box(c + 6.1, 0.12, d, 0.7, 0.06, 1.35, 'metalDark', 0, { noCollide: true, castShadow: false });
       b.box(d, 0.12, c - 6.1, 1.35, 0.06, 0.7, 'metalDark', 0, { noCollide: true, castShadow: false });
       b.box(c - 2.8, 0.1, d + 9, 3.8, 0.086, 6.2, 'concreteDark', ((i * 17 + d) % 5) * 0.045 - 0.09, {
@@ -149,7 +151,9 @@ export function buildNeoCity(): MapDef {
   // POI: SPIRE PLAZA (center) — fountain, surrounding arcade, tall spire
   // ------------------------------------------------------------------
   b.poi('Spire Plaza', 0, 0, 55);
-  b.cyl(0, 0.5, 0, 9, 1, 'marble');
+  // Fountain base clears street furniture that shares the 1.0 m plane at the
+  // plaza edge — a 1 cm lip beats a coplanar flicker across a 9 m disc.
+  b.cyl(0, 0.51, 0, 9, 1.0, 'marble');
   b.cyl(0, 1.4, 0, 3.2, 2.6, 'marble');
   b.sphere(0, 3.4, 0, 1.4, 'neonCyan', { noCollide: true });
   b.light(0, 5, 0, 0x66e0ff, 3.2, 40);
@@ -411,7 +415,15 @@ export function buildNeoCity(): MapDef {
       },
     },
     { from: [-330, -80], to: [330, 60] },
-    { wetGround: true },
+    { wetGround: true,
+      weather: [
+        // Usual: rain-slicked neon night with a chance of thunder.
+        { id: 'rainyNight', rain: 0.75, wetGround: true, thunder: true, cloudCover: 0.8, windSpeed: 0.02 },
+        // Light drizzle: quieter rain, thinner clouds.
+        { id: 'drizzle', rain: 0.35, wetGround: true, cloudCover: 0.66, fogDensityScale: 1.15 },
+        // Dry night: the city after the rain stopped — starrier, sharper fog.
+        { id: 'dryNight', cloudCover: 0.5, starOpacity: 0.6, fogDensityScale: 0.85 },
+      ] },
   );
 }
 

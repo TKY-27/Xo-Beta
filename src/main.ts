@@ -73,6 +73,7 @@ import { EventBus } from './core/events';
 import { GamepadInput } from './player/gamepad';
 import { AudioEngine, attachAudio } from './audio/audio';
 import { OcclusionSampler } from './audio/occlusion';
+import { pickWeather } from './world/weather';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const $canvas = (): HTMLCanvasElement => document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -1082,6 +1083,15 @@ async function prepareOnlineGuestRuntime(
       renderer.scene.remove(world.group);
       world.dispose();
     });
+    // Same seed-derived weather as the host — both peers see the same sky.
+    const weather = pickWeather(input.map, input.payload.seed);
+    renderer.applyWeather(weather);
+    world.applyWeather(weather);
+    if (weather && (weather.rain ?? 0) > 0) audio.startRain(weather.rain ?? 0);
+    registerStartCleanup(generation, () => {
+      audio.stopRain();
+      renderer.applyWeather(null);
+    });
     const bootstrapView = initialReplicaPresentationView(input, predictionWorld);
     world.initializeReplica(bootstrapView);
 
@@ -1561,6 +1571,16 @@ async function startMatchImpl(
   registerStartCleanup(generation, () => {
     renderer.scene.remove(world.group);
     world.dispose();
+  });
+
+  // Per-match weather, deterministic from the seed (replays share weather).
+  const weather = pickWeather(loaded.def, matchSeed);
+  renderer.applyWeather(weather);
+  world.applyWeather(weather);
+  if (weather && (weather.rain ?? 0) > 0) audio.startRain(weather.rain ?? 0);
+  registerStartCleanup(generation, () => {
+    audio.stopRain();
+    renderer.applyWeather(null);
   });
   const vfx = new VfxSystem();
   renderer.scene.add(vfx.group);

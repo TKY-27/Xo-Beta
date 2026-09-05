@@ -974,6 +974,75 @@ export class AudioEngine {
     }
   }
 
+  // Rain bed + thunder: one looping filtered-noise source for the whole
+  // match, thunder as sparse scheduled bursts. No per-frame audio work.
+  private rainNodes: { src: AudioBufferSourceNode; gain: GainNode } | null = null;
+  private rainLevel = 0;
+  private thunderTimer: number | null = null;
+
+  /** Start (or adjust) the rain ambience bed. `intensity` 0..1. */
+  startRain(intensity: number): void {
+    if (!this.ctx || !this.noiseBuffer) return;
+    this.rainLevel = Math.max(0.15, Math.min(1, intensity));
+    if (this.rainNodes) {
+      this.rainNodes.gain.gain.setTargetAtTime(this.rainGain(), this.now(), 0.5);
+      return;
+    }
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    src.loop = true;
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 400;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 2600;
+    bp.Q.value = 0.4;
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0.0001;
+    src.connect(hp); hp.connect(bp); bp.connect(gain); gain.connect(this.buses.ambience!);
+    src.start();
+    gain.gain.setTargetAtTime(this.rainGain(), this.now() + 0.05, 1.2);
+    this.rainNodes = { src, gain };
+    this.scheduleThunder();
+  }
+
+  stopRain(): void {
+    if (this.rainNodes) {
+      const { src, gain } = this.rainNodes;
+      gain.gain.setTargetAtTime(0.0001, this.now(), 0.4);
+      const timer = window.setTimeout(() => {
+        try { src.stop(); } catch { /* already stopped */ }
+      }, 1500);
+      this.matchEffectTimers.add(timer);
+      this.rainNodes = null;
+    }
+    if (this.thunderTimer !== null) {
+      window.clearTimeout(this.thunderTimer);
+      this.thunderTimer = null;
+    }
+    this.rainLevel = 0;
+  }
+
+  private rainGain(): number {
+    return 0.05 + 0.13 * this.rainLevel;
+  }
+
+  private scheduleThunder(): void {
+    if (!this.rainNodes) return;
+    this.thunderTimer = window.setTimeout(() => {
+      this.thunderBurst();
+      this.scheduleThunder();
+    }, 14000 + Math.random() * 26000);
+  }
+
+  /** Distant rolling thunder behind the rain bed. */
+  private thunderBurst(): void {
+    const vol = 0.08 + 0.22 * this.rainLevel;
+    this.play('boom/a', { vol: vol * 0.8, rate: 0.55, lp: 900, refDist: 40, rolloff: 0.55, delay: Math.random() * 0.4 });
+    this.play('boom/sub', { vol, rate: 0.7, lp: 400, delay: 0.2 + Math.random() * 0.6 });
+  }
+
   private scheduleHeartbeat(): void {
     if (!this.lowHealthActive || !this.ctx) return;
     const ctx = this.ctx;

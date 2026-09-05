@@ -15,7 +15,9 @@ import {
   type GeoBox,
   type MapDef,
   type MatKey,
+  type WeatherProfile,
 } from '../world/types';
+import { RainSystem } from './rain';
 import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
 import { WeaponModelFactory } from './weaponModels';
@@ -1960,6 +1962,7 @@ export class WorldView {
     this.vista.update(this.viewPos, this.time);
     this.lightPool.update(dt, this.viewPos);
     this.waterSystem.update(match.time, this.viewPos);
+    this.rain?.update(dt, this.viewPos);
     this.syncLoot(match);
     this.syncChests(match);
     this.syncDestructibles(match);
@@ -2009,9 +2012,49 @@ export class WorldView {
     this.vista.update(this.viewPos, this.time);
     this.lightPool.update(dt, this.viewPos);
     this.waterSystem.update(view.time, this.viewPos);
+    this.rain?.update(dt, this.viewPos);
     this.syncReplica(view);
     const stormMat = this.stormMesh.material as THREE.ShaderMaterial;
     stormMat.uniforms['uTime']!.value = this.time;
+  }
+
+  private rain: RainSystem | null = null;
+
+  /**
+   * Apply the match's weather to the world: wet-ground material treatment and
+   * the rain particle field. Sky/fog/exposure live on the renderer (they are
+   * camera-global), materials and particles live here.
+   */
+  applyWeather(profile: WeatherProfile | null): void {
+    // Wet ground: profile override when present, otherwise the authored map
+    // treatment (so a dry-variant profile on a wet map dries the streets and
+    // a rainy profile on a dry map wets them).
+    const wet = profile ? profile.wetGround === true : this.mapDef.wetGround === true;
+    const groundMats: MatKey[] = ['asphalt', 'sidewalk', 'concreteDark'];
+    for (const key of groundMats) {
+      const m = this.mats.get(key) as THREE.MeshStandardMaterial;
+      if (!m || !m.isMeshStandardMaterial) continue;
+      if (wet) {
+        if (m.userData.baseRoughness === undefined) m.userData.baseRoughness = m.roughness;
+        m.roughness = Math.min(0.58, (m.userData.baseRoughness as number) * 0.62);
+        m.envMapIntensity = 0.85;
+        m.needsUpdate = true;
+      } else if (m.userData.baseRoughness !== undefined) {
+        m.roughness = m.userData.baseRoughness as number;
+        m.envMapIntensity = 1;
+        m.needsUpdate = true;
+      }
+    }
+    // Rain field.
+    const intensity = profile?.rain ?? 0;
+    if (intensity > 0 && !this.rain) {
+      this.rain = new RainSystem(intensity);
+      this.group.add(this.rain.group);
+    } else if (intensity <= 0 && this.rain) {
+      this.rain.dispose();
+      this.group.remove(this.rain.group);
+      this.rain = null;
+    }
   }
 
   /** Release only resources owned by this match view. Shared libraries and
@@ -2022,6 +2065,7 @@ export class WorldView {
     this.group.remove(this.waterSystem.group);
     this.waterSystem.dispose();
     this.weaponFactory.dispose();
+    this.rain = null;
 
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();
