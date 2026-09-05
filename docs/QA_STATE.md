@@ -44,6 +44,9 @@ five cycles.
 | 9 | drop transport close-ups | Toy blue/cyan/orange palette undermined the most-watched object → muted military gunship materials | verified in transport captures |
 | 10 | SECOND INDEPENDENT CRITIC (fresh context) | Verified fixed: night clouds, transport palette (partial). Probe artifact: 'post' config disabled AO explicitly (game ships AO at high+; probe fixed). New findings adopted: lobby rig attachments buried in body → chest plate/rig enlarged to read as worn armor; Seraph palette shifted off skin-tone; killfeed SVGs + damage-number dt landed; transport white canopy still glossy (queued) | gear visible on all skins at lobby close-up |
 
+| 11 | ashara med-kit pickup capture | Cross marking only on one face vanished at some bob angles → double-sided cross geometry, material groups updated | loot reads as medkit from any angle |
+| 12 | ashara compound street-level | Mudbrick walls verified warm against dunes; residual: concreteDark roofs read pitch-black on unlit sides (queued — roof ambient lift) | compound color harmony improved |
+
 ## Known open items
 
 - Engine-level WebGPU validation warnings (`Binding size … is zero`) from
