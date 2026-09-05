@@ -95,6 +95,7 @@
       <button id="btn-play" class="btn-play" data-i18n="menu.soloPlay">SOLO PLAY</button>
       <button id="btn-create-room" class="btn-quiet" data-i18n="room.createPrivate">CREATE PRIVATE ROOM</button>
       <button id="btn-join-room" class="btn-quiet" data-i18n="room.joinPrivate">JOIN PRIVATE ROOM</button>
+      <button id="btn-stats" class="btn-quiet" data-i18n="menu.stats">CAREER STATS</button>
       <button id="btn-settings" class="btn-quiet" data-i18n="common.settings">SETTINGS</button>
       <button id="btn-credits" class="btn-quiet" data-i18n="common.credits">CREDITS</button>
     </nav>
@@ -271,6 +272,21 @@
   </div>
 
   <!-- Credits -->
+  <!-- Career stats: locally persisted match history -->
+  <div id="stats-menu" class="screen hidden">
+    <div class="menu-shade full"></div>
+    <header class="screen-head">
+      <button id="btn-stats-back" class="btn-quiet back" data-i18n="common.back">BACK</button>
+      <h2 data-i18n="stats.title">CAREER STATS</h2>
+      <button id="btn-stats-clear" class="btn-quiet stats-clear" data-i18n="stats.clear">CLEAR</button>
+    </header>
+    <div class="stats-body">
+      <section id="stats-summary" class="stats-summary" aria-live="polite"></section>
+      <h3 class="stats-recent-title" data-i18n="stats.recent">RECENT MATCHES</h3>
+      <section id="stats-recent" class="stats-recent" aria-live="polite"></section>
+    </div>
+  </div>
+
   <div id="credits-menu" class="screen hidden">
     <div class="menu-shade full"></div>
     <header class="screen-head">
@@ -300,6 +316,7 @@
   <!-- HUD -->
   <div id="hud" class="hidden">
     <div id="crosshair"><span class="ch-t"></span><span class="ch-b"></span><span class="ch-l"></span><span class="ch-r"></span><span class="ch-dot"></span><span id="ch-ring"></span><span id="hitmarker"></span></div>
+    <div id="damage-direction" aria-hidden="true"></div>
     <div id="scope-overlay" aria-hidden="true">
       <div class="scope-housing"></div>
       <div class="scope-lens-glass"></div>

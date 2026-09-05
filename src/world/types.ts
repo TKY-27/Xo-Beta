@@ -224,6 +224,33 @@ export interface SkyConfig {
   grade?: SkyGrade;
 }
 
+/**
+ * Per-match weather variant. Every optional field overrides the map's base
+ * look; the profile itself is chosen deterministically from the match seed
+ * (see src/world/weather.ts), so replays of one seed share weather.
+ */
+export interface WeatherProfile {
+  /** Stable id; display name resolved via i18n key `weather.${id}`. */
+  id: string;
+  /** Sky atmosphere overrides (see SkyAtmosphereProfile field semantics). */
+  cloudCover?: number;
+  cloudTint?: number;
+  cloudShade?: number;
+  windSpeed?: number;
+  starOpacity?: number;
+  hazeStrength?: number;
+  /** Fog density multiplier over the map base (1 = unchanged). */
+  fogDensityScale?: number;
+  /** Tone-mapping exposure multiplier over the map base. */
+  exposureScale?: number;
+  /** Rain intensity 0..1 — enables the rain particle field + rain audio. */
+  rain?: number;
+  /** Apply the wet-road treatment (lowered roughness, stronger env sheen). */
+  wetGround?: boolean;
+  /** Occasional distant thunder bursts while raining. */
+  thunder?: boolean;
+}
+
 /** Rectangular opening removed from the rendered and physical terrain. */
 export interface TerrainCutout {
   minX: number;
@@ -297,6 +324,9 @@ export interface MapDef {
   transportRoute: { from: [number, number]; to: [number, number] };
   /** Rain-slicked streets: ground materials get reflective wet treatment. */
   wetGround?: boolean;
+  /** Per-match weather variants, picked by match seed (first entry = most
+   * common). Omit for a fixed, unvarying sky. */
+  weather?: WeatherProfile[];
 }
 
 /**

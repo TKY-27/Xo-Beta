@@ -98,6 +98,19 @@ export class WeaponModelFactory {
     }
   }
 
+  /**
+   * The cached archetype roots for the renderer warmup stage. Building an
+   * archetype is CPU-only; its materials and geometry still compile/upload on
+   * first render, and floor loot stays 48 m-culled (invisible) until the
+   * player walks up to it. Rendering each template once during the loading
+   * screen uploads every part material + geometry, so mid-match loot
+   * encounters never stall. Callers must detach the returned objects after
+   * the warmup render — they stay owned by the factory cache.
+   */
+  warmupTemplates(): WeaponModel[] {
+    return [...this.templates.values()];
+  }
+
   private buildUnique(weaponId: WeaponId, rarity: Rarity): WeaponModel | null {
     const recipe = RECIPES[weaponId];
     if (!recipe) return null;

@@ -86,15 +86,24 @@ export class BotController {
       aimError: this.params.aimError,
       trackSpeed: this.params.trackSpeed,
     });
-    // Subscribe to relevant world events for hearing
+    // Subscribe to relevant world events for hearing. Walls muffle what they
+    // hide: a blocked sound path keeps ~35% loudness (and Perception's
+    // loudness scaling shrinks its effective range), so bots do not wallhack
+    // with their ears. One cheap raycast per event, distance-gated first.
     match.events.on('shotFired', (e) => {
       if (e.actorId !== actor.id && !e.dry && match.areHostile(actor.id, e.actorId)) {
-        this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: 1, kind: 'shot', actorId: e.actorId }, this.params.awareness);
+        this.perception.hear(
+          this.sampleHeardSound(e.x, e.y, e.z, 1, 'shot', e.actorId, 90),
+          this.params.awareness,
+        );
       }
     });
     match.events.on('footstep', (e) => {
       if (e.actorId !== actor.id && match.areHostile(actor.id, e.actorId)) {
-        this.perception.hear({ x: e.x, y: e.y, z: e.z, loudness: e.running ? 0.75 : 0.45, kind: 'footstep', actorId: e.actorId }, this.params.awareness);
+        this.perception.hear(
+          this.sampleHeardSound(e.x, e.y, e.z, e.running ? 0.75 : 0.45, 'footstep', e.actorId, 40),
+          this.params.awareness,
+        );
       }
     });
     match.events.on('chestOpened', (e) => {
@@ -188,6 +197,26 @@ export class BotController {
   private failSafeX = 0;
   private failSafeZ = 0;
   private failSafeTimer = 0;
+
+  /**
+   * Hearing pre-pass: wall-check a sound before handing it to Perception.
+   * Blocked paths keep ~35% loudness; beyond `gate` metres the raycast is
+   * skipped (a beyond-gate sound is already marginal for detection).
+   */
+  private sampleHeardSound(
+    x: number, y: number, z: number,
+    loudness: number,
+    kind: 'shot' | 'footstep',
+    actorId: number,
+    gate: number,
+  ): { x: number; y: number; z: number; loudness: number; kind: 'shot' | 'footstep'; actorId: number } {
+    const p = this.actor.body.position;
+    if (Math.hypot(x - p.x, z - p.z) < gate
+      && this.match.phys.losBlocked(p.x, p.y + 1.4, p.z, x, y, z)) {
+      loudness *= 0.35;
+    }
+    return { x, y, z, loudness, kind, actorId };
+  }
 
   private stuckCheckTick(cmd: InputCommand, dt: number): void {
     const p = this.actor.body.position;

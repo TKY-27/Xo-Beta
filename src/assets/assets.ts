@@ -175,10 +175,6 @@ export async function loadGltf(rel: string): Promise<GltfAsset> {
 }
 
 /** Fetch raw audio bytes (decode happens in the AudioEngine). */
-export async function loadAudioBytes(_rel: string): Promise<AudioBuffer> {
-  throw Object.assign(new Error('use AudioEngine.loadSample'), { code: 'use-audio-engine' });
-}
-
 export function fetchAudio(rel: string): Promise<ArrayBuffer> {
   const key = rel;
   const cached = state.audio.get(key);

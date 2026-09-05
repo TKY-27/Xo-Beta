@@ -205,6 +205,14 @@ export function buildEdenFacility(): MapDef {
       },
     },
     { from: [-330, -140], to: [330, 130] },
+    { weather: [
+      // Usual: bright lake day, scattered cumulus.
+      { id: 'lakeDay', cloudCover: 0.42 },
+      // Overcast: grey lid, still air.
+      { id: 'greyNoon', cloudCover: 0.82, fogDensityScale: 1.15, exposureScale: 0.92, starOpacity: 0 },
+      // Rain shower: warm rain sweeping the research campus.
+      { id: 'rainShower', rain: 0.65, wetGround: true, cloudCover: 0.75, windSpeed: 0.03 },
+    ] },
   );
 }
 

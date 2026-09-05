@@ -12,6 +12,7 @@ import {
   type PreferredItemSlots,
 } from '../core/preferredSlots';
 import { getSettings, onSettingsChanged, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
+import { clearMatchRecords, loadMatchRecords, summarize } from '../core/statsStore';
 import { SKIN_IDS } from '../render/characters';
 import { SkinSelector, skinTextKey } from './skinSelector';
 import {
@@ -123,7 +124,7 @@ export class Menus {
   private show(id: string): void {
     const ids = [
       'main-menu', 'play-menu', 'create-room-menu', 'join-room-menu', 'online-lobby-menu',
-      'settings-menu', 'skin-customization-menu', 'credits-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
+      'settings-menu', 'skin-customization-menu', 'credits-menu', 'stats-menu', 'pause-menu', 'results-screen', 'loading-screen', 'onboarding-screen',
     ];
     for (const other of ids) $(other).classList.add('hidden');
     if (id) $(id).classList.remove('hidden');
@@ -300,6 +301,12 @@ export class Menus {
     click('btn-settings', () => { this.onOpenSettingsFromPause = false; this.show('settings-menu'); });
     click('btn-credits', () => this.show('credits-menu'));
     click('btn-credits-back', () => this.show('main-menu'), 'back');
+    click('btn-stats', () => { this.renderStatsScreen(); this.show('stats-menu'); });
+    click('btn-stats-back', () => this.show('main-menu'), 'back');
+    click('btn-stats-clear', () => {
+      clearMatchRecords();
+      this.renderStatsScreen();
+    }, 'back');
     click('btn-play-back', () => this.show('main-menu'), 'back');
     click('btn-skin-customization-back', () => this.show('main-menu'), 'back');
     click('btn-play-start', () => {
@@ -494,7 +501,7 @@ export class Menus {
     panel.append(label, preview, content);
 
     const start = $('btn-play-start') as HTMLButtonElement;
-    start.textContent = t('menu.startMatchMap', { name: title.textContent ?? selected.name });
+    start.textContent = t('common.startMatch');
     $('btn-practice-start').textContent = t('menu.practice');
     $('play-selection-error').textContent = '';
     $('play-selection-error').classList.add('hidden');
@@ -528,6 +535,70 @@ export class Menus {
       return;
     }
     this.onPlayRequested({ map: this.selectedMap, difficulty: this.selectedDifficulty, practice });
+  }
+
+  /** Fill the career-stats screen from the local match history. */
+  private renderStatsScreen(): void {
+    const records = loadMatchRecords();
+    const s = summarize(records);
+    const summary = $('stats-summary');
+    summary.innerHTML = '';
+    const cell = (labelKey: string, value: string): void => {
+      const c = document.createElement('div');
+      c.className = 'stats-cell';
+      const v = document.createElement('strong');
+      v.textContent = value;
+      const l = document.createElement('span');
+      l.textContent = t(labelKey as TextKey);
+      c.append(v, l);
+      summary.appendChild(c);
+    };
+    cell('stats.matches', String(s.matches));
+    cell('stats.wins', String(s.wins));
+    cell('stats.winRate', `${Math.round(s.winRate * 100)}%`);
+    cell('stats.bestPlacement', s.bestPlacement > 0 ? `#${s.bestPlacement}` : '—');
+    cell('stats.avgKills', s.matches > 0 ? s.avgKills.toFixed(1) : '—');
+    cell('stats.avgDamage', s.matches > 0 ? String(Math.round(s.avgDamage)) : '—');
+    cell('stats.totalKills', String(s.totalKills));
+    cell('stats.headshots', String(s.headshots));
+    cell('stats.playtime', formatTime(s.totalSurvivalTime));
+
+    const recent = $('stats-recent');
+    recent.innerHTML = '';
+    if (records.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'stats-empty dim';
+      empty.textContent = t('stats.noMatches');
+      recent.appendChild(empty);
+      return;
+    }
+    const table = document.createElement('div');
+    table.className = 'stats-table';
+    table.setAttribute('role', 'table');
+    for (const r of records.slice(0, 15)) {
+      const row = document.createElement('div');
+      row.className = `stats-row${r.won ? ' won' : ''}`;
+      row.setAttribute('role', 'row');
+      const when = new Date(r.at);
+      const place = `${r.won ? '🏆' : ''}#${r.placement}/${r.players}`;
+      const fields: Array<[string, string]> = [
+        [place, 'place'],
+        [t(`map.${r.map}.name` as TextKey), 'map'],
+        [`${r.kills} ${t('stats.killsShort')}`, 'kills'],
+        [String(Math.round(r.damage)), 'damage'],
+        [`${Math.round(r.accuracy * 100)}%`, 'accuracy'],
+        [formatTime(r.survivalTime), 'survival'],
+        [when.toLocaleDateString() + ' ' + when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), 'date'],
+      ];
+      for (const [text, cls] of fields) {
+        const span = document.createElement('span');
+        span.className = `stats-${cls}`;
+        span.textContent = text;
+        row.appendChild(span);
+      }
+      table.appendChild(row);
+    }
+    recent.appendChild(table);
   }
 
   private buildSkinCustomization(): void {
@@ -700,6 +771,11 @@ export class Menus {
       s.quality, (v) => { updateSettings({ quality: v as never }); },
     )));
     graphics.appendChild(this.row(t('set.resScale'), this.slider(0.5, 1.5, 0.05, s.resolutionScale, (v) => updateSettings({ resolutionScale: v }), (v) => `${Math.round(v * 100)}%`)));
+    graphics.appendChild(this.row(t('set.dynamicRes'), this.checkbox(s.dynamicResolution, (v) => updateSettings({ dynamicResolution: v }))));
+    graphics.appendChild(this.row(t('set.fpsLimit'), this.select(
+      [['0', t('fps.off')], ['60', '60'], ['120', '120'], ['144', '144']],
+      String(s.fpsLimit), (v) => updateSettings({ fpsLimit: Number(v) as never }),
+    )));
     graphics.appendChild(this.row(t('set.shadows'), this.checkbox(s.shadows, (v) => updateSettings({ shadows: v }))));
     graphics.appendChild(this.row(t('set.shadowQuality'), this.select(
       [['low', t('q.low')], ['medium', t('q.medium')], ['high', t('q.high')], ['cinematic', t('q.cinematic')]],
@@ -849,6 +925,10 @@ export class Menus {
     for (const kb of this.keybindRows) kb.el.remove();
     this.keybindRows = [];
     const b = getSettings().bindings;
+    // Re-clicking a button while it is already listening used to stack a
+    // second capture-phase keydown listener, so one keypress updated the
+    // binding (and the row) twice. Dismiss any active listener first.
+    let cancelActive: (() => void) | null = null;
     const labels: Partial<Record<keyof KeyBindings, TextKey | string>> = {
       forward: 'bind.forward', back: 'bind.back', left: 'bind.left', right: 'bind.right',
       jump: 'bind.jump', sprint: 'bind.sprint', crouch: 'bind.crouch',
@@ -856,6 +936,7 @@ export class Menus {
       grapple: 'bind.grapple', groundPound: 'bind.groundPound',
       useMedkit: 'bind.useMedkit', useShield: 'bind.useShield',
       dropWeapon: 'bind.dropWeapon', cameraToggle: 'bind.cameraToggle', mapToggle: 'bind.mapToggle',
+      inspect: 'bind.inspect',
     };
     labels.shoulderSwap = 'Shoulder swap / 肩切替';
     for (const [code, labelKey] of Object.entries(labels)) {
@@ -864,12 +945,14 @@ export class Menus {
       btn.className = 'keybind';
       btn.textContent = prettyKey(b[key]);
       btn.addEventListener('click', () => {
+        cancelActive?.();
         btn.classList.add('listening');
         btn.textContent = t('bind.pressKey');
         const done = (label: string) => {
           btn.textContent = label;
           btn.classList.remove('listening');
           window.removeEventListener('keydown', handler, true);
+          cancelActive = null;
         };
         const handler = (e: KeyboardEvent) => {
           e.preventDefault();
@@ -882,6 +965,7 @@ export class Menus {
           done(prettyKey(e.code));
         };
         window.addEventListener('keydown', handler, true);
+        cancelActive = () => done(prettyKey(b[key]));
       });
       const rowEl = document.createElement('div');
       rowEl.className = 'setting-row';
@@ -1665,6 +1749,8 @@ export class Hud {
     this.elimTimer -= uiDt;
     this.hitmarkerTimer -= uiDt;
     if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
+    this.damageDirTimer -= uiDt;
+    if (this.damageDirTimer <= 0) $('damage-direction').classList.remove('show');
     if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
     if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
 
@@ -1707,6 +1793,8 @@ export class Hud {
     this.elimTimer -= uiDt;
     this.hitmarkerTimer -= uiDt;
     if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
+    this.damageDirTimer -= uiDt;
+    if (this.damageDirTimer <= 0) $('damage-direction').classList.remove('show');
     if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
     if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
     if (getSettings().showFps) $('fps-counter').classList.remove('hidden');
@@ -1863,13 +1951,36 @@ export class Hud {
     $('fps-counter').textContent = `${Math.round(fps)} FPS`;
   }
 
+  private hitmarkerAnim: Animation | null = null;
+
   hitmarker(headshot: boolean): void {
     const hm = $('hitmarker');
-    hm.classList.remove('show', 'headshot');
-    void hm.offsetWidth;
-    hm.classList.add('show');
-    if (headshot) hm.classList.add('headshot');
+    hm.classList.toggle('headshot', headshot);
+    // Web Animations API restart — the old remove/`offsetWidth`/add pattern
+    // forced a synchronous layout (reflow) on every hit, and bursts land
+    // several hits per frame. fill:'forwards' parks the marker faded-out.
+    this.hitmarkerAnim?.cancel();
+    this.hitmarkerAnim = hm.animate(
+      [
+        { opacity: 1, transform: 'translate(-50%, -50%) rotate(45deg) scale(1.35)' },
+        { opacity: 0, transform: 'translate(-50%, -50%) rotate(45deg) scale(0.85)' },
+      ],
+      { duration: 200, easing: 'ease-out', fill: 'forwards' },
+    );
     this.hitmarkerTimer = 0.18;
+  }
+
+  private damageDirTimer = 0;
+
+  /**
+   * Point the damage-direction arc at the attacker. `angleRad` is relative to
+   * the camera forward: 0 = ahead, positive = clockwise (to the right).
+   */
+  showDamageDirection(angleRad: number): void {
+    const el = $('damage-direction');
+    el.style.transform = `rotate(${angleRad}rad)`;
+    el.classList.add('show');
+    this.damageDirTimer = 1.0;
   }
 
   banner(text: string, duration = 3): void {
@@ -1932,6 +2043,13 @@ export class Hud {
       entry.style.opacity = '0';
       window.setTimeout(() => entry.remove(), 520);
     }, 6000);
+  }
+
+  /** Drop every killfeed entry immediately — a fresh match must not inherit
+   * the previous one's feed (per-entry timers keep running after teardown). */
+  clearKillfeed(): void {
+    $('killfeed').innerHTML = '';
+    this.killfeedEntries.length = 0;
   }
 
   interactPrompt(text: string | null): void {

@@ -195,6 +195,14 @@ export function buildOldFront(): MapDef {
       },
     },
     { from: [-330, 120], to: [330, -110] },
+    { weather: [
+      // Usual: thick overcast with valley mist rolling off the moor.
+      { id: 'mistOvercast', cloudCover: 0.9, hazeStrength: 0.7, fogDensityScale: 1.3, exposureScale: 0.97 },
+      // Rain squall: sweeping rain bands over the keep.
+      { id: 'rainSquall', rain: 0.8, wetGround: true, thunder: true, windSpeed: 0.05, cloudCover: 0.95 },
+      // Clearing skies: cloud breaks, distance opens up.
+      { id: 'clearing', cloudCover: 0.62, fogDensityScale: 0.8, hazeStrength: 0.35, exposureScale: 1.04 },
+    ] },
   );
 }
 

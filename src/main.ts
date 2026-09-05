@@ -72,6 +72,9 @@ import { t, initLang } from './core/i18n';
 import { EventBus } from './core/events';
 import { GamepadInput } from './player/gamepad';
 import { AudioEngine, attachAudio } from './audio/audio';
+import { OcclusionSampler } from './audio/occlusion';
+import { pickWeather } from './world/weather';
+import { recordMatch } from './core/statsStore';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const $canvas = (): HTMLCanvasElement => document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -611,7 +614,7 @@ async function boot(): Promise<void> {
         startLoop();
       },
       onActivated: (role, payload) => activateOnlinePresentation(role, payload),
-      onAuthoritativeEvent: presentOnlineAuthoritativeEvent,
+      onAuthoritativeEvent: presentOnlineAuthoritativeEventQueued,
       onPresenceNotice: (kind, displayName) => hud.showPresenceNotice(kind, displayName),
       onHostVisibilityChange: (hidden) => {
         if (hidden) hud.showPresenceNotice('hostInactive', '', HOST_INACTIVITY_GRACE_MS / 1000 + 1);
@@ -746,6 +749,7 @@ async function boot(): Promise<void> {
   const GFX_KEYS = [
     'quality', 'resolutionScale', 'shadows', 'shadowQuality', 'postProcessing',
     'bloom', 'reflections', 'ao', 'aa', 'motionBlur', 'dof', 'fpsLimit',
+    'dynamicResolution',
   ] as const;
   let lastGfxKey = '';
   onSettingsChanged((s) => {
@@ -869,6 +873,7 @@ function activateOnlinePresentation(role: 'host' | 'guest', payload: MatchStartP
   menus.hideAll();
   menus.setPlayEnabled(true);
   hud.show(true);
+  hud.clearKillfeed();
   hud.applyCrosshair();
   game.player.enabled = true;
   game.player.requestLock();
@@ -1080,6 +1085,15 @@ async function prepareOnlineGuestRuntime(
       renderer.scene.remove(world.group);
       world.dispose();
     });
+    // Same seed-derived weather as the host — both peers see the same sky.
+    const weather = pickWeather(input.map, input.payload.seed);
+    renderer.applyWeather(weather);
+    world.applyWeather(weather);
+    if (weather && (weather.rain ?? 0) > 0) audio.startRain(weather.rain ?? 0);
+    registerStartCleanup(generation, () => {
+      audio.stopRain();
+      renderer.applyWeather(null);
+    });
     const bootstrapView = initialReplicaPresentationView(input, predictionWorld);
     world.initializeReplica(bootstrapView);
 
@@ -1111,14 +1125,17 @@ async function prepareOnlineGuestRuntime(
     const viewmodel = new ViewModel(weaponFactory);
     viewmodel.group.visible = rig.mode === 'fps';
     renderer.scene.add(viewmodel.group);
+    // Scene-root resident so hiding the viewmodel never changes the light
+    // count (NUM_POINT_LIGHTS) — see ViewModel.muzzleFlashLight.
+    renderer.scene.add(viewmodel.muzzleFlashLight);
     registerStartCleanup(generation, () => {
       renderer.scene.remove(viewmodel.group);
+      renderer.scene.remove(viewmodel.muzzleFlashLight);
       viewmodel.dispose();
     });
     viewmodel.setWeapon(null, 'common');
 
-    const characterFill = new THREE.PointLight(0xcfe0ff, 2, 4.8, 2);
-    characterFill.visible = false;
+    const characterFill = new THREE.PointLight(0xcfe0ff, 0, 4.8, 2);
     renderer.scene.add(characterFill);
     registerStartCleanup(generation, () => renderer.scene.remove(characterFill));
 
@@ -1194,6 +1211,9 @@ async function prepareOnlineGuestRuntime(
         tpsCharacterSide: getSettings().tpsCharacterSide === 'left' ? 'right' : 'left',
       }),
       () => toggleInventory(),
+      () => {
+        if (viewmodel.startInspect()) audio.play('impact/metal_a', { bus: 'ui', vol: 0.12, rate: 1.9 });
+      },
     );
     player.scopedZoom = getSettings().scopeMagnification;
     registerStartCleanup(generation, () => player.dispose());
@@ -1259,6 +1279,9 @@ async function prepareOnlineGuestRuntime(
 
     weaponFactory.prewarmAll();
     await setLoad(0.78, t('load.warming'));
+    await runShaderWarmupStage({ renderer, camera: rig.camera, world, weaponFactory }).catch((error) => {
+      console.warn('guest shader warmup failed', error);
+    });
     try {
       for (const character of rigs.values()) character.group.visible = true;
       viewmodel.group.visible = true;
@@ -1405,6 +1428,78 @@ async function startMatch(
   }
 }
 
+interface WarmupStageInput {
+  renderer: GameRenderer;
+  camera: THREE.PerspectiveCamera;
+  world: WorldView;
+  weaponFactory: WeaponModelFactory;
+}
+
+/**
+ * Render a degenerate "warmup stage" once during the loading screen.
+ *
+ * `compileAsync` only traverses *visible* objects, and several resident
+ * resource sets are invisible during setup: weapon archetypes live in the
+ * factory cache while floor loot is 48 m-culled, water LOD meshes only appear
+ * near a shoreline, and the hologram pool only materializes when a weapon
+ * drop spawns. Without this stage their (sometimes large) GLSL programs and
+ * GPU uploads would land on the player's first mid-match encounter — the
+ * multi-second freeze when walking up to loot or water. The stage is placed
+ * far below the map, rendered once, and fully detached afterwards.
+ */
+async function runShaderWarmupStage({ renderer, camera, world, weaponFactory }: WarmupStageInput): Promise<void> {
+  const warmup = new THREE.Group();
+  warmup.name = 'shader-warmup-stage';
+  const quad = new THREE.PlaneGeometry(0.6, 0.6);
+  let cursor = 0;
+  const place = (object: THREE.Object3D, spread: number): void => {
+    const cols = 6;
+    object.position.set((cursor % cols) * spread - cols * spread / 2, -600, Math.floor(cursor / cols) * spread);
+    cursor++;
+  };
+  for (const material of [...world.hologramMaterialsForWarmup(), ...world.waterMaterialsForWarmup()]) {
+    const mesh = new THREE.Mesh(quad, material);
+    mesh.frustumCulled = false;
+    place(mesh, 1);
+    mesh.lookAt(camera.position);
+    warmup.add(mesh);
+  }
+  const templates = weaponFactory.warmupTemplates();
+  const unculled: THREE.Mesh[] = [];
+  for (const template of templates) {
+    template.group.visible = true;
+    place(template.group, 2.5);
+    template.group.lookAt(camera.position.x, -600, camera.position.z);
+    warmup.add(template.group);
+    // Frustum culling would otherwise skip the one warmup render and defer
+    // the part-geometry GPU uploads to the first real loot encounter.
+    template.group.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh || mesh.frustumCulled) return;
+      mesh.frustumCulled = false;
+      unculled.push(mesh);
+    });
+  }
+  renderer.scene.add(warmup);
+  try {
+    await renderer.renderer.compileAsync(renderer.scene, camera);
+    renderer.renderer.render(renderer.scene, camera);
+  } catch {
+    /* parallel compile unsupported — runtime compile still works */
+  } finally {
+    for (const mesh of unculled) mesh.frustumCulled = true;
+    for (const template of templates) {
+      warmup.remove(template.group);
+      template.group.visible = false;
+      template.group.position.set(0, 0, 0);
+      template.group.rotation.set(0, 0, 0);
+    }
+    renderer.scene.remove(warmup);
+    warmup.clear();
+    quad.dispose();
+  }
+}
+
 async function startMatchImpl(
   sel: PlaySelection,
   sharedMats: MaterialLibrary,
@@ -1482,6 +1577,16 @@ async function startMatchImpl(
     renderer.scene.remove(world.group);
     world.dispose();
   });
+
+  // Per-match weather, deterministic from the seed (replays share weather).
+  const weather = pickWeather(loaded.def, matchSeed);
+  renderer.applyWeather(weather);
+  world.applyWeather(weather);
+  if (weather && (weather.rain ?? 0) > 0) audio.startRain(weather.rain ?? 0);
+  registerStartCleanup(generation, () => {
+    audio.stopRain();
+    renderer.applyWeather(null);
+  });
   const vfx = new VfxSystem();
   renderer.scene.add(vfx.group);
   registerStartCleanup(generation, () => {
@@ -1552,6 +1657,9 @@ async function startMatchImpl(
       tpsCharacterSide: getSettings().tpsCharacterSide === 'left' ? 'right' : 'left',
     }),
     () => toggleInventory(),
+    () => {
+      if (viewmodel.startInspect()) audio.play('impact/metal_a', { bus: 'ui', vol: 0.12, rate: 1.9 });
+    },
   );
   player.scopedZoom = getSettings().scopeMagnification;
   registerStartCleanup(generation, () => player.dispose());
@@ -1704,8 +1812,7 @@ async function startMatchImpl(
   // NeoCity's dark streets. It is a real inverse-square light (not an unlit
   // character shader), affects only the immediate player area, and is hidden
   // in FPS/spectator views.
-  const characterFill = new THREE.PointLight(0xcfe0ff, 2.0, 4.8, 2);
-  characterFill.visible = false;
+  const characterFill = new THREE.PointLight(0xcfe0ff, 0, 4.8, 2);
   renderer.scene.add(characterFill);
   registerStartCleanup(generation, () => renderer.scene.remove(characterFill));
 
@@ -1713,8 +1820,11 @@ async function startMatchImpl(
   const viewmodel = new ViewModel(weaponFactory);
   viewmodel.group.visible = rig.mode === 'fps';
   renderer.scene.add(viewmodel.group);
+  // Scene-root resident: hiding the group must not change NUM_POINT_LIGHTS.
+  renderer.scene.add(viewmodel.muzzleFlashLight);
   registerStartCleanup(generation, () => {
     renderer.scene.remove(viewmodel.group);
+    renderer.scene.remove(viewmodel.muzzleFlashLight);
     viewmodel.dispose();
   });
   {
@@ -1725,6 +1835,15 @@ async function startMatchImpl(
 
   const detachAudio = attachAudio(match as never, audio, match.events);
   registerStartCleanup(generation, detachAudio);
+
+  // Acoustic occlusion: what a wall hides, it muffles. The sampler raycasts
+  // ear→source with a grid cache; guests (no physics world) skip this.
+  const occlusionSampler = new OcclusionSampler(match.phys);
+  audio.setOcclusionProvider((x, y, z) => {
+    const ear = rig.camera.position;
+    return occlusionSampler.occlusion(ear.x, ear.y, ear.z, x, y, z, performance.now());
+  });
+  registerStartCleanup(generation, () => audio.setOcclusionProvider(null));
 
   // Prewarm: build every weapon archetype now (loading screen) so mid-match
   // pickups/swaps only cheap-clone shared geometry, never allocate GPU state.
@@ -1747,6 +1866,14 @@ async function startMatchImpl(
     console.error('aerial capture failed', err);
     /* aerial capture is cosmetic — fall back to the drawn map */
   }
+
+  // Warm the resources compileAsync cannot reach while they are invisible:
+  // weapon archetypes (floor loot is distance-culled), water shaders
+  // (shoreline-gated) and the resident hologram pool. This is the fix for
+  // the multi-second hitch on the first mid-match loot/water encounter.
+  await setLoad(0.62, t('load.warming'));
+  ensureCurrentStart(generation);
+  await runShaderWarmupStage({ renderer, camera: rig.camera, world, weaponFactory });
 
   // Compile all shader programs before gameplay starts. Rigs are made visible
   // for the pass so first TPS reveal never stalls on program compilation
@@ -2054,6 +2181,7 @@ async function startMatchImpl(
     if (live?.generation !== generation || generation !== matchGeneration) return;
     $('loading-screen').classList.add('hidden');
     hud.show(true);
+    hud.clearKillfeed();
     hud.applyCrosshair();
     player.enabled = true;
     player.requestLock();
@@ -2087,6 +2215,9 @@ function teardownMatch(disposeOnline = true): void {
   menus?.setPlayEnabled(true);
   const ending = live;
   live = null;
+  // Presentation tasks reference `live` implicitly; queued work for an ended
+  // match must never leak into the next one.
+  guestPresentationQueue.length = 0;
   ending?.rig.resetAimState();
   ending?.renderer.setScopeActive(false);
   if (import.meta.env.DEV) {
@@ -2270,7 +2401,18 @@ function wirePresentation(
         );
       }
     }
-    if (e.targetId === match.localActor?.id) rig.addShake(Math.min(0.5, e.damage / 60));
+    if (e.targetId === match.localActor?.id) {
+      rig.addShake(Math.min(0.5, e.damage / 60));
+      // Directional damage arc: point the HUD ring toward the attacker.
+      const me = match.localActor;
+      const attacker = match.actors.find((a) => a.id === e.attackerId);
+      if (me && attacker) {
+        const dx = attacker.body.position.x - me.body.position.x;
+        const dz = attacker.body.position.z - me.body.position.z;
+        const forwardBearing = Math.atan2(-Math.sin(me.yaw), -Math.cos(me.yaw));
+        hud.showDamageDirection(forwardBearing - Math.atan2(dx, dz));
+      }
+    }
   });
   match.events.on('shieldBroken', (e) => {
     const a = match.actors.find((x) => x.id === e.actorId);
@@ -2303,6 +2445,7 @@ function wirePresentation(
   });
   match.events.on('shotFired', (e) => {
     if (e.actorId === match.localActor?.id && !e.dry && match.localActor) {
+      viewmodel.cancelInspect();
       const a = match.localActor;
       // Eject toward the camera-right side, slightly back
       const rx = Math.cos(a.yaw);
@@ -2361,6 +2504,57 @@ function wirePresentation(
 
   // Keep unused handler signature referenced (typed event bus)
   on('matchWon' as never, (() => undefined) as never);
+}
+
+/** ---------------------------------------------------------------------------
+ * Guest presentation budget.
+ *
+ * Authoritative events arrive on the network task; when a burst of packets
+ * lands in one message-loop turn, running every presentation inline turned
+ * that single task into dozens of audio graphs + VFX spawns + DOM writes —
+ * the "enemy burst freezes the game" guest-side stall. Replica *state*
+ * application stays synchronous; only presentation goes through this FIFO,
+ * drained a few events per rendered frame. Under sustained flooding the
+ * oldest transient one-shots are shed; ordering and gameplay-meaningful
+ * events are never dropped.
+ * ------------------------------------------------------------------------- */
+const GUEST_PRESENTATION_BUDGET_PER_FRAME = 4;
+const GUEST_PRESENTATION_QUEUE_CAP = 96;
+const GUEST_SHEDDABLE_EVENTS = new Set(['impact', 'shieldHit', 'itemPickedUp', 'chestOpened', 'reloadStarted']);
+
+interface GuestPresentationTask {
+  event: AuthoritativeMatchEvent;
+  matchedLocalPrediction: boolean;
+}
+
+const guestPresentationQueue: GuestPresentationTask[] = [];
+
+function presentOnlineAuthoritativeEventQueued(
+  event: AuthoritativeMatchEvent,
+  matchedLocalPrediction: boolean,
+): void {
+  const game = live;
+  if (!game || game.kind !== 'replica') {
+    presentOnlineAuthoritativeEvent(event, matchedLocalPrediction);
+    return;
+  }
+  const queue = guestPresentationQueue;
+  if (queue.length >= GUEST_PRESENTATION_QUEUE_CAP) {
+    const shedIndex = queue.findIndex((task) => GUEST_SHEDDABLE_EVENTS.has(task.event.type));
+    if (shedIndex >= 0) queue.splice(shedIndex, 1);
+    else queue.shift();
+  }
+  queue.push({ event, matchedLocalPrediction });
+}
+
+function drainGuestPresentations(): void {
+  if (guestPresentationQueue.length === 0) return;
+  let budget = GUEST_PRESENTATION_BUDGET_PER_FRAME;
+  while (budget > 0 && guestPresentationQueue.length > 0) {
+    const task = guestPresentationQueue.shift()!;
+    presentOnlineAuthoritativeEvent(task.event, task.matchedLocalPrediction);
+    budget--;
+  }
 }
 
 function presentOnlineAuthoritativeEvent(
@@ -2504,7 +2698,17 @@ function presentOnlineAuthoritativeEvent(
         payload.killed === true ? 'kill' : headshot ? 'headshot' : number('shieldDamage') > 0 ? 'shield' : 'normal',
       );
     }
-    if (targetId === localActorId) game.rig.addShake(Math.min(0.5, damage / 60));
+    if (targetId === localActorId) {
+      game.rig.addShake(Math.min(0.5, damage / 60));
+      const me = actorView(localActorId);
+      const attacker = actorView(attackerId);
+      if (me && attacker) {
+        const dx = attacker.position.x - me.position.x;
+        const dz = attacker.position.z - me.position.z;
+        const forwardBearing = Math.atan2(-Math.sin(me.yaw), -Math.cos(me.yaw));
+        hud.showDamageDirection(forwardBearing - Math.atan2(dx, dz));
+      }
+    }
     return;
   }
   if (event.type === 'shieldHit' || event.type === 'shieldBroken') {
@@ -2642,6 +2846,72 @@ let fpsAccum = 0;
 let fpsCount = 0;
 let musicTimer = 0;
 
+// ---------------------------------------------------------------------------
+// Frame pacing: fps limit + adaptive resolution watchdog
+// ---------------------------------------------------------------------------
+
+/** Frames skipped so far in this rAF callback when an fps limit is set. */
+function frameLimitSkip(now: number): boolean {
+  const limit = getSettings().fpsLimit;
+  if (limit === 0) return false;
+  const minInterval = 1000 / limit;
+  return now - lastTime < minInterval - 1.5;
+}
+
+const ADAPTIVE_WINDOW_FRAMES = 45;
+const ADAPTIVE_WARMUP_FRAMES = 150;
+const ADAPTIVE_MIN_SCALE = 0.5;
+let adaptiveFrameCount = 0;
+let adaptiveFrameTimeSum = 0;
+let adaptiveDownStreak = 0;
+let adaptiveUpStreak = 0;
+let adaptiveCooldown = 0;
+let adaptiveWarmupLeft = ADAPTIVE_WARMUP_FRAMES;
+
+/**
+ * Hold ~60 FPS by trading internal resolution instead of dropping frames.
+ * A 45-frame rolling average over budget (with 2 consecutive windows to
+ * confirm) steps the render scale down; sustained headroom steps it back up
+ * slowly. Disabled entirely when the user turns dynamic resolution off.
+ */
+function updateAdaptiveResolution(dtMs: number, game: LiveGame): void {
+  if (!getSettings().dynamicResolution) return;
+  if (adaptiveWarmupLeft > 0) {
+    adaptiveWarmupLeft--;
+    return;
+  }
+  adaptiveFrameCount++;
+  adaptiveFrameTimeSum += dtMs;
+  if (adaptiveCooldown > 0) adaptiveCooldown--;
+  if (adaptiveFrameCount < ADAPTIVE_WINDOW_FRAMES) return;
+  const avg = adaptiveFrameTimeSum / adaptiveFrameCount;
+  adaptiveFrameCount = 0;
+  adaptiveFrameTimeSum = 0;
+  const scale = game.renderer.dynamicResolutionScale;
+  // Budget 60 FPS with a small guard band; recovery needs a longer streak so
+  // the scale does not oscillate around the threshold.
+  if (avg > 15.9 && scale > ADAPTIVE_MIN_SCALE) {
+    adaptiveDownStreak++;
+    adaptiveUpStreak = 0;
+    if (adaptiveDownStreak >= 2 && adaptiveCooldown === 0) {
+      game.renderer.setDynamicResolutionScale(Math.max(ADAPTIVE_MIN_SCALE, scale - 0.1));
+      adaptiveCooldown = 90;
+      adaptiveDownStreak = 0;
+    }
+  } else if (avg < 13.0 && scale < 1) {
+    adaptiveUpStreak++;
+    adaptiveDownStreak = 0;
+    if (adaptiveUpStreak >= 6 && adaptiveCooldown === 0) {
+      game.renderer.setDynamicResolutionScale(Math.min(1, scale + 0.05));
+      adaptiveCooldown = 240;
+      adaptiveUpStreak = 0;
+    }
+  } else {
+    adaptiveDownStreak = 0;
+    adaptiveUpStreak = 0;
+  }
+}
+
 function startLoop(): void {
   if (loopRunning) return;
   loopRunning = true;
@@ -2661,6 +2931,7 @@ function frame(now: number): void {
   // sampled by startLoop. Never feed that impossible negative delta into the
   // fixed-step online coordinator.
   const dtReal = Math.max(0, Math.min(SIM.maxFrameDt, (now - lastTime) / 1000));
+  if (frameLimitSkip(now)) return;
   lastTime = now;
   recordFrameMs(dtReal * 1000);
 
@@ -2671,6 +2942,7 @@ function frame(now: number): void {
     fpsAccum = 0;
     fpsCount = 0;
   }
+  updateAdaptiveResolution(dtReal * 1000, live);
 
   // Production match simulation never freezes: ESC opens the in-game menu over
   // the still-running world. The development-only water benchmark freezes a
@@ -3341,9 +3613,11 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       feetYFromBodyCenter(p.y) + 1.65,
       p.z + towardCamera.z * 1.5,
     );
-    characterFill.visible = true;
+    // Intensity, never visibility — an invisible light changes the renderer's
+    // light count and forces a full-scene shader recompile.
+    characterFill.intensity = 2;
   } else {
-    characterFill.visible = false;
+    characterFill.intensity = 0;
   }
 
   // Grapple ropes
@@ -3368,6 +3642,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   // scope where the scope overlay replaces the world view).
   if (m.localActor?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(m.localActor.body.velocity.x, m.localActor.body.velocity.z);
+    viewmodel.syncCamera(rig.camera);
     viewmodel.update(m.localActor, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
     viewmodel.group.visible = true;
   } else {
@@ -3395,6 +3670,8 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
 
   hud.syncPlayerState(m, dtReal);
   hud.syncOnlineState(game.coordinator ? matchOnlineHudState(game) : null);
+  // Low-health heartbeat: HP threshold tracked on the audio engine.
+  audio.updateLowHealth(m.localActor && m.localActor.alive ? m.localActor.health : null);
   hud.drawMinimap(m, () => hud.minimapContext(), dtReal);
   if (hud.isTacMapOpen()) hud.drawTacMap(m);
   {
@@ -3417,10 +3694,12 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
 
 function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
   const { renderer, world, vfx, decals, rig, viewmodel, rigs, player, characterFill } = game;
+  // Apply this frame's slice of queued network presentations before drawing.
+  drainGuestPresentations();
   const view = game.replica.update(performance.now());
   game.view = view;
   if (!view) {
-    characterFill.visible = false;
+    characterFill.intensity = 0;
     viewmodel.group.visible = false;
     for (const character of rigs.values()) character.group.visible = false;
     hud.syncOnlineState(replicaOnlineHudState(game, null));
@@ -3557,8 +3836,8 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
       feetYFromBodyCenter(local.position.y) + 1.65,
       local.position.z + towardCamera.z * 1.5,
     );
-    characterFill.visible = true;
-  } else characterFill.visible = false;
+    characterFill.intensity = 2;
+  } else characterFill.intensity = 0;
 
   if (local && view.localMovement?.actorId === local.id && view.localMovement.grappleActive) {
     vfx.setGrappleRope(
@@ -3574,6 +3853,7 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
 
   if (local?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(local.velocity.x, local.velocity.z);
+    viewmodel.syncCamera(rig.camera);
     viewmodel.updateView(
       local,
       dtReal,
@@ -3607,6 +3887,7 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
 
   hud.syncReplicaState(view, dtReal);
   hud.syncOnlineState(replicaOnlineHudState(game, view));
+  audio.updateLowHealth(local && local.alive ? local.health : null);
   hud.drawMinimapReplica(game.mapDef, view, () => hud.minimapContext(), dtReal);
   if (hud.isTacMapOpen()) hud.drawTacMapReplica(game.mapDef, view);
   const interaction = !spectating && local?.alive && !paused && !hud.isTacMapOpen() && !hud.isInventoryOpen()
@@ -3828,6 +4109,19 @@ function showResults(m: Match): void {
   live?.player.releaseLock();
   audio.setMusicState(won ? 'victory' : 'defeat');
   audio.victoryFanfare(won);
+  recordMatch({
+    at: Date.now(),
+    map: m.mapDef.id,
+    mode: m.mode,
+    won,
+    placement: p?.placement ?? m.actors.length,
+    players: m.actors.length,
+    kills: p?.stats.kills ?? 0,
+    damage: p?.stats.damageDealt ?? 0,
+    accuracy: p && p.stats.shotsFired > 0 ? p.stats.shotsHit / p.stats.shotsFired : 0,
+    headshots: p?.stats.headshots ?? 0,
+    survivalTime: p?.stats.survivalTime ?? 0,
+  });
   menus.showResults({
     won,
     winnerName: m.winnerView?.kind === 'team'
@@ -3849,6 +4143,19 @@ function showReplicaResults(view: GameStateView, localActorId: number): void {
   live?.player.releaseLock();
   audio.setMusicState(won ? 'victory' : 'defeat');
   audio.victoryFanfare(won);
+  recordMatch({
+    at: Date.now(),
+    map: live?.mapDef.id ?? 'unknown',
+    mode: view.mode,
+    won,
+    placement: actor?.placement ?? view.actors.length,
+    players: view.actors.length,
+    kills: actor?.stats.kills ?? 0,
+    damage: actor?.stats.damageDealt ?? 0,
+    accuracy: actor && actor.stats.shotsFired > 0 ? actor.stats.shotsHit / actor.stats.shotsFired : 0,
+    headshots: actor?.stats.headshots ?? 0,
+    survivalTime: actor?.stats.survivalTime ?? 0,
+  });
   menus.showResults({
     won,
     winnerName: view.winner?.kind === 'team'

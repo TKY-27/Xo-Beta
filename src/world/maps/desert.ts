@@ -121,6 +121,16 @@ export function buildAsharaReach(): MapDef {
   }, {
     from: [-345, -120],
     to: [345, 150],
+  }, {
+    weather: [
+      // Usual: hard clear desert light.
+      { id: 'clearHeat', cloudCover: 0.22 },
+      // Dust haze: fine grit suspended on the wind, horizon dissolves.
+      { id: 'dustHaze', hazeStrength: 0.85, fogDensityScale: 1.7, exposureScale: 0.94, windSpeed: 0.06 },
+      // Dry storm: towering clouds, electric wind, rare rain that never
+      // reaches the ground.
+      { id: 'dryStorm', cloudCover: 0.7, cloudShade: 0x4a4335, windSpeed: 0.08, thunder: true, rain: 0.2 },
+    ],
   });
 }
 
