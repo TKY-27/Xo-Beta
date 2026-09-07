@@ -34,8 +34,10 @@ const TILE_DENSITY: Record<string, number> = {
 /** Tints applied on top of base color maps (white = untouched). */
 const TINTS: Partial<Record<MatKey, number>> = {
   grass: 0xb9c4a9,
-  wood: 0x857d6e,
-  woodDark: 0x6e675c,
+  // CYCLE 31: lifted one step — the old values read as black silhouette
+  // rods under backlight (round-6 critic).
+  wood: 0x9a9284,
+  woodDark: 0x7d766a,
   rust: 0xcfc0b6,
   plaster: 0xb3a892,
   plasterOld: 0xd8d2c6,

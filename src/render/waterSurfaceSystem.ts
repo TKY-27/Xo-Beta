@@ -412,7 +412,7 @@ function buildWaterMaterial(uniforms: WaterUniformShim): WaterSurfaceMaterial {
   const reflected = uHasSkyTexture.lessThan(0.5).select(asVec3(uSkyColor), skySampled);
   // CYCLE 28: a small always-on sky term — real water never shows pure
   // scatter colour from overhead; ambient sky fills even near-normal views.
-  const color = mix(base, reflected, fresnel.mul(float(0.42).add(uClarity.mul(0.3)))).add(reflected.mul(0.08));
+  const color = mix(base, reflected, fresnel.mul(float(0.42).add(uClarity.mul(0.3)))).add(reflected.mul(0.12));
   const shaded = color
     .add(asVec3(uSunColor).mul(min(ggxSpec, 1.25).mul(nol).mul(0.07).add(glint)))
     .add(asVec3(uShallowColor).mul(shallow).mul(0.045));
@@ -459,13 +459,15 @@ function profileFor(water: WaterVolume, index: number): VisualProfile {
   const profile = createWaterVisualProfile(kind, {
     windDirection: water.visual?.windDirection,
   });
+  // CYCLE 31: one more desaturation step — the shallow-end bed still read as
+  // saturated turquoise through the 70-78% surface alpha at some angles.
   const colors = kind === 'river'
-    ? [0x2f6f74, 0x0a2f3c, 0xb1d1c7, 50]
+    ? [0x3c6a6b, 0x0c2c36, 0xb1d1c7, 50]
     : kind === 'pond'
-      ? [0x3d7272, 0x0d3138, 0x9ebeb4, 42]
+      ? [0x476c6a, 0x0f2e33, 0x9ebeb4, 42]
       : kind === 'lake'
-        ? [0x3d7472, 0x0a2a36, 0xa9c9bf, 66]
-        : [0x3d6f72, 0x0c2e38, 0x9db9b0, 48 + (index % 3) * 4];
+        ? [0x466e6b, 0x0e2a31, 0xa9c9bf, 66]
+        : [0x466b6a, 0x0e2c34, 0x9db9b0, 48 + (index % 3) * 4];
   return {
     ...profile,
     shallow: new THREE.Color(colors[0]),

@@ -83,6 +83,8 @@ five cycles.
 
 | 30 | SIXTH INDEPENDENT CRITIC (fresh context, self-captured, all 4 maps) | Verified fixed: dropship transport, ash wreck (runtime pick: #4a423a matte), lake water muted with glint, denser rain + wet-street sheen, contact discs under all casters. Refuted/partial: roadside poles still read near-black against sky; eden canal/pool bodies still turquoise while the lake is fixed (per-body profile inconsistency). Score 5/10 (was 4): "clean stylized low-poly, not bodycam — near-field clay, paper foliage, toy vehicles". New P0s: vehicle PBR response, near-field terrain grain, foliage card quality. P1s: eden water consistency, dropship weathering, wreck scorch story, boulder texture, oldfront flat overcast sheet. P2s: road decal seam, night window grids, skyline fog fade, eden path brightness, rain uniformity, night minimap legibility | pole tint + per-body water profiles queued (cycle 31); vehicle paint/glass response (cycle 32) |
 
+| 31 | eden lake capture | Round-6 refutations: (1) water profiles desaturated another step (shallow scatter toward slate 0x466e6b-family) + sky-ambient floor 0.08→0.12 — the lake reads slate-blue at all sampled angles; (2) wood/woodDark tints lifted one step (0x9a9284 / 0x7d766a) for backlit pole legibility | zero console errors |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
