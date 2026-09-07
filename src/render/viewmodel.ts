@@ -10,8 +10,8 @@ import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
 
-const HIP_POS = new THREE.Vector3(0.13, -0.15, -0.38);
-const ADS_POS = new THREE.Vector3(0, -0.062, -0.2);
+const HIP_POS = new THREE.Vector3(0.115, -0.125, -0.42);
+const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
 const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
 
 export class ViewModel {
@@ -47,6 +47,7 @@ export class ViewModel {
   private swayRoll = 0;
   private recoilZ = 0;
   private recoilPitch = 0;
+  private recoilRoll = 0;
   private reloadT = 0;
   private swapT = 0;
   private adsSmooth = 0;
@@ -162,7 +163,7 @@ export class ViewModel {
    * canonical length (~1 m AR) for world/loot presentation; at the hip offset
    * (~6 cm from the eye) that fills half the screen, so the viewmodel carries
    * its own presentation scale, like every shipped FPS does. */
-  private static readonly WEAPON_VIEW_SCALE = 0.55;
+  private static readonly WEAPON_VIEW_SCALE = 0.6;
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
     const key = `${id}:${rarity}`;
@@ -259,7 +260,8 @@ export class ViewModel {
 
     // Recoil recovery (spring)
     this.recoilZ *= Math.exp(-8.5 * dt);
-    this.recoilPitch *= Math.exp(-7 * dt);
+    this.recoilPitch *= Math.exp(-6.5 * dt);
+    this.recoilRoll *= Math.exp(-9 * dt);
 
     // Swap-in dip
     this.swapT = Math.max(0, this.swapT - dt);
@@ -297,16 +299,23 @@ export class ViewModel {
       reloadRoll = curve * 0.38;
       reloadDrop = curve * 0.055;
       if (mag) {
-        if (mag.userData.baseY === undefined) mag.userData.baseY = mag.position.y;
+        if (mag.userData.baseY === undefined) {
+          mag.userData.baseY = mag.position.y;
+          mag.userData.baseRot = mag.rotation.z;
+        }
         const baseY = mag.userData.baseY as number;
         const dropPhase = Math.min(1, phase * 2.4);
         mag.position.y = baseY - dropPhase * 0.2 * (phase < 0.52 ? 1 : -1);
+        // CYCLE 33: rock the magazine out/in around its base like a real
+        // reload instead of a pure vertical slide.
+        mag.rotation.z = (mag.userData.baseRot as number) + (phase < 0.52 ? 1 : -1) * dropPhase * 0.35;
         mag.visible = !(phase < 0.44 && actor.wpn.reloadingEmpty);
       }
     } else {
       if (mag && mag.userData.baseY !== undefined) {
         mag.visible = true;
         mag.position.y = mag.userData.baseY;
+        mag.rotation.z = mag.userData.baseRot as number;
       }
     }
 
@@ -348,7 +357,7 @@ export class ViewModel {
     this.pivot.rotation.set(
       -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
-      reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
+      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
     );
   }
 
@@ -395,7 +404,8 @@ export class ViewModel {
     // Recoil is a local presentation spring. Replica state does not invent
     // or reconstruct authoritative fire/combat timing.
     this.recoilZ *= Math.exp(-8.5 * dt);
-    this.recoilPitch *= Math.exp(-7 * dt);
+    this.recoilPitch *= Math.exp(-6.5 * dt);
+    this.recoilRoll *= Math.exp(-9 * dt);
 
     // Swap-in dip is presentation-only and remains valid for replica views.
     this.swapT = Math.max(0, this.swapT - dt);
@@ -438,13 +448,16 @@ export class ViewModel {
     this.pivot.rotation.set(
       -this.swayY * 2.1 + this.recoilPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
-      this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
+      this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
     );
   }
 
   kick(strength: number): void {
-    this.recoilZ += strength * 0.055;
-    this.recoilPitch += strength * 0.03;
+    // CYCLE 33: reference-feel recoil — a sharp backward+up kick with a
+    // randomized roll flick, recovering on the existing springs.
+    this.recoilZ += strength * 0.085;
+    this.recoilPitch += strength * 0.05;
+    this.recoilRoll += (Math.random() - 0.5) * strength * 0.05;
   }
 
   private updateFists(crouched: boolean, dt: number, movingSpeed: number, swapDip: number): void {

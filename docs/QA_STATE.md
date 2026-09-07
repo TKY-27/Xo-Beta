@@ -87,6 +87,8 @@ five cycles.
 
 | 32 | eden FP AR capture (epic rarity) | Reference-footage pass 1 — weapon material/skin system: procedural PBR detail maps (brushed-metal roughness grain, polymer grip stipple bump), brightened gun palette so silhouettes read at gameplay range, and per-rarity full-panel SKIN graphics (uncommon stripes / rare circuit / epic shards / legendary filigree) applied to receiver/handguard/stock via shared cached materials — the reference footage carries full-body weapon skins; the former thin accent strip read as a black blob at hip | epic AR shows purple shard skin + material contrast; zero console errors |
 
+| 33 | eden FP AR capture | Reference-footage pass 2 — viewmodel handling: hip pose raised/closer (0.115,-0.125,-0.42) showing the full weapon profile with the muzzle toward the crosshair; viewmodel scale 0.55→0.6; reference-feel recoil kick (deeper Z+pitch, randomized roll flick, slightly slower pitch recovery); magazine now rocks out/in around its base during reloads instead of a pure vertical slide | pose framing matches the reference; zero console errors |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
