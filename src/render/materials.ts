@@ -366,7 +366,10 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('dirt', std('dirt', 'dirt'));
   mats.set('rock', std('rock', 'rock'));
   mats.set('roofTile', std('roofTile', 'roofTile'));
-  mats.set('marble', std('marble', 'marble', { roughness: 0.45 }));
+  // CYCLE 24: roughness 0.45 made oldfront's trims/pier decks read as
+  // polished marble under the overcast rig (round-4 critic). Weathered
+  // outdoor stone: mostly diffuse, just a hint of sheen.
+  mats.set('marble', std('marble', 'marble', { roughness: 0.78 }));
   mats.set('facadeA', std('facadeA', 'facadeA'));
   mats.set('facadeB', std('facadeB', 'bricksOld'));
   mats.set('facadeC', std('facadeC', 'corrugated', { metalness: 0.15 }));

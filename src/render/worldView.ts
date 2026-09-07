@@ -483,6 +483,10 @@ export class WorldView {
       concreteDark: 'concrete',
       metalDark: 'metal',
       woodDark: 'wood',
+      // CYCLE 24: the cool blue-grey fire-escape steel read as toy-plastic
+      // against warm mudbrick (round-4 critic) — substitute the warm metal
+      // scan for every exterior steel part on the desert map.
+      metalExterior: 'metal',
     };
     for (const g of def.geo) {
       if (g.noRender) continue;
@@ -516,10 +520,30 @@ export class WorldView {
     // instanced draw instead of allocating a mesh per bale.
     const hayBox = new RoundedBoxGeometry(1, 1, 1, 3, 0.12);
 
+    // Warm steel for the desert map: the shared metal scan's blue-grey tint
+    // read as toy plastic against mudbrick (round-4 critic). Instance colours
+    // multiply the base albedo, so the tint is the warm/cool channel ratio
+    // (>1 warms) rather than an absolute colour — no projected-material
+    // cloning needed (their graphs only build at construction).
+    const coolSteelBase = new THREE.Color(0x6b7580);
+    const warmSteelTarget = new THREE.Color(0x96826a);
+    const steelWarmTint = new THREE.Color(
+      warmSteelTarget.r / coolSteelBase.r,
+      warmSteelTarget.g / coolSteelBase.g,
+      warmSteelTarget.b / coolSteelBase.b,
+    );
+
     for (const { kind, mat, castShadow, matrices } of batches.values()) {
       const geometry = kind === 'box' && mat === 'hay' ? hayBox : geos[kind]!;
-      const inst = new THREE.InstancedMesh(geometry, this.mats.get(mat), matrices.length);
+      const material = this.mats.get(mat);
+      const inst = new THREE.InstancedMesh(geometry, material, matrices.length);
       matrices.forEach((m, i) => inst.setMatrixAt(i, m));
+      if (def.id === 'ashara' && (mat === 'metal' || mat === 'metalExterior')) {
+        for (let i = 0; i < matrices.length; i++) {
+          inst.setColorAt(i, steelWarmTint);
+        }
+        if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+      }
       inst.instanceMatrix.needsUpdate = true;
       inst.frustumCulled = false;
       inst.castShadow = castShadow;
