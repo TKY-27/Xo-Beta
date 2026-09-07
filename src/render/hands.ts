@@ -184,7 +184,7 @@ function smooth(t: number): number {
 }
 
 export function createHandRig(): HandRig {
-  const mats = makeHandMats();
+  const mats = getHandMaterialSet();
 
   // Left hand: the mirror lives in a WRAPPER so pose rotations can never
   // undo it (v1 clobbered rotation.y = Math.PI on the first frame).
@@ -239,8 +239,8 @@ export function createHandRig(): HandRig {
       if (pumpHand || supportStyle === 'pump') {
         // Shotgun: fingers wrap UNDER the pump (v2's flat palm lay on top
         // and vanished into the pump box).
-        left.position.set(gripL.x, gripL.y - 0.022, gripL.z + pumpOffset);
-        leftWrap.rotation.set(-0.6, Math.PI, 0);
+        left.position.set(gripL.x, gripL.y - 0.065, gripL.z + pumpOffset);
+        leftWrap.rotation.set(2.8, Math.PI, 0);
         return;
       }
       if (reloadPhase >= 0 && magLocal) {
@@ -268,8 +268,8 @@ export function createHandRig(): HandRig {
       const tuck = ads * 0.035;
       if (supportStyle === 'side') {
         // SMG: horizontal wrap around the vertical foregrip.
-        left.position.set(gripL.x - 0.03, gripL.y - 0.01 - tuck, gripL.z);
-        leftWrap.rotation.set(-0.2, Math.PI, 1.15);
+        left.position.set(gripL.x - 0.03, gripL.y - 0.02 - tuck, gripL.z);
+        leftWrap.rotation.set(-0.2, Math.PI, 1.35);
         return;
       }
       if (supportStyle === 'over') {
@@ -280,7 +280,7 @@ export function createHandRig(): HandRig {
       }
       // 'under' (AR/sniper): fingers run forward along the bottom face.
       left.position.set(gripL.x, gripL.y - 0.035 - tuck, gripL.z);
-      leftWrap.rotation.set(-0.3 - ads * 0.15, Math.PI, 0.15);
+      leftWrap.rotation.set(2.55 - ads * 0.15, Math.PI, 0.12);
     },
   };
 }
@@ -302,11 +302,11 @@ export class ArmSolver {
   // for the worst-case reach (sniper support hand) — v2's left sleeve ended
   // 20-40 cm short of the hand in EVERY long-gun frame by construction.
   private readonly shoulders = [
-    new THREE.Vector3(0.18, -0.28, 0.05),
-    new THREE.Vector3(-0.18, -0.28, 0.05),
+    new THREE.Vector3(0.18, -0.24, -0.02),
+    new THREE.Vector3(-0.18, -0.24, -0.02),
   ];
-  private readonly upperLen = 0.34;
-  private readonly foreLen = 0.32;
+  private readonly upperLen = 0.38;
+  private readonly foreLen = 0.35;
   private readonly bends = [new THREE.Vector3(1.2, -0.9, 0.1), new THREE.Vector3(-1.2, -0.9, 0.1)];
   private readonly sleeves: Array<{ upper: THREE.Mesh; fore: THREE.Mesh }> = [];
   private joints: THREE.Mesh[] = [];
@@ -330,10 +330,13 @@ export class ArmSolver {
       // +Y to the SECOND joint, so rTop is the far end — v2 had it inverted).
       this.sleeves.push({ upper: make(0.044, 0.054), fore: make(0.032, 0.044) });
     }
-    // Joint spheres close the open cylinder ends at elbow and wrist.
+    // Elbow joint spheres close the open cylinder ends; wrist spheres cover
+    // the forearm-to-cuff seam (round-3: hollow tube rims showed on clamp).
     this.joints = [
       new THREE.Mesh(new THREE.SphereGeometry(0.042, 10, 8), shell),
       new THREE.Mesh(new THREE.SphereGeometry(0.042, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), shell),
     ];
     void this.joints;
     for (const j of this.joints) {
@@ -390,8 +393,12 @@ export class ArmSolver {
         .addScaledVector(bend, this.upperLen * sinA);
 
       this.aim(upper, shoulder, this.tmpElbow);
-      this.aim(fore, this.tmpElbow, wristC);
+      // Clamp safety: when the chain cannot reach, aim the forearm at the
+      // TRUE wrist (never render a floating open tube end short of the hand).
+      const short = wrist.distanceTo(shoulder) > maxReach + 1e-3;
+      this.aim(fore, this.tmpElbow, short ? wrist : wristC);
       this.joints[i]!.position.copy(this.tmpElbow);
+      this.joints[this.joints.length - 2 + i]!.position.copy(short ? wrist : wristC);
     }
   }
 

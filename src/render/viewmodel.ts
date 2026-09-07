@@ -16,7 +16,7 @@ function smooth(t: number): number {
   return c * c * (3 - 2 * c);
 }
 
-const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.33);
+const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.3);
 const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
 const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
 
