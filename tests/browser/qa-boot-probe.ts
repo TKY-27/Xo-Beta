@@ -168,6 +168,12 @@ try {
       inputVal: (document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null)?.value ?? 'no-input',
     }));
     console.log(`after teleport: ${JSON.stringify(posNow)}`);
+    // Attribute what the crosshair sits on (object/material identity).
+    const picked = await page.evaluate(() => {
+      const pick = (window as unknown as { __xoPick?: () => unknown }).__xoPick;
+      return pick ? pick() : 'no-pick-bridge';
+    });
+    console.log(`center pick: ${JSON.stringify(picked)}`);
     await page.screenshot({ path: `${OUT}/05-teleport.png` });
   }
 } catch (err) {

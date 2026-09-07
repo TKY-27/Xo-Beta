@@ -287,7 +287,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
       rock: 0x76736c, roofTile: 0x8a4a3a, marble: 0xd9d6cf, facadeA: 0x9fb2c0,
       facilityFloor: 0x9aa2ac,
     };
-    return new THREE.MeshStandardMaterial({
+    return new MeshStandardNodeMaterial({
       color: fallback[key] ?? 0x888888,
       roughness: opts.roughness ?? 0.9,
       metalness: opts.metalness ?? 0.05,
@@ -314,25 +314,39 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // its highway collapse to a featureless black ribbon. Keep this surface
   // untextured and matte so it retains a warm aggregate value under direct
   // sun; road wear and lane breakup are authored as separate geometry.
-  mats.set('asphaltDesert', new THREE.MeshStandardMaterial({
+  mats.set('asphaltDesert', new MeshStandardNodeMaterial({
     color: 0x4f4a43,
     roughness: 0.97,
     metalness: 0,
     envMapIntensity: 0.24,
   }));
   mats.set('sidewalk', std('sidewalk', 'sidewalk', { roughness: 1 }));
-  mats.set('metal', std('metal', 'metal', { metalness: 0.85, roughness: 0.65 }));
-  mats.set('metalDark', std('metalDark', 'metalDark', { metalness: 0.8, roughness: 0.7 }));
-  mats.set('metalExterior', new THREE.MeshStandardMaterial({
+  // Outdoor steel family: weathered, painted or corroded — not clean metal.
+  // Metalness ≥0.8 here made every shadowed face crush to near-black (no
+  // diffuse term, weak env fill), which the round-3/4 critics flagged as
+  // "pure-black unlit faces" on poles, boulder bases and sign panels. Lower
+  // metalness keeps the specular character while letting ambient/fill light
+  // actually model the shaded side.
+  mats.set('metal', std('metal', 'metal', { metalness: 0.55, roughness: 0.68 }));
+  mats.set('metalDark', std('metalDark', 'metalDark', { metalness: 0.5, roughness: 0.72 }));
+  mats.set('metalExterior', new MeshStandardNodeMaterial({
     color: 0x78838c,
     emissive: 0x151b20,
     emissiveIntensity: 0.12,
     roughness: 0.74,
-    metalness: 0.62,
+    metalness: 0.38,
     envMapIntensity: 0.72,
   }));
-  mats.set('rust', std('rust', 'rust', { metalness: 0.45 }));
-  mats.set('corrugated', std('corrugated', 'corrugated', { metalness: 0.55 }));
+  // CYCLE 23: rust skips the projected scan. Its instanced pool rendered
+  // pure black on WebGPU regardless of albedo/roughness/metalness edits or
+  // pipeline rebuilds (healthy scan data verified: color ~(93,45,19), rough
+  // ~0.83, textbook normal) — a draw-level r185 instancing fault in the same
+  // family as the zero-size uniform-buffer errors recorded in QA_STATE. The
+  // flat fallback under the same key renders correctly and reads as painted
+  // rusted steel at the distances rust props appear. Retry the scan when
+  // three fixes the instancing binding family.
+  mats.set('rust', std('rust', undefined, { metalness: 0.2, roughness: 0.88 }));
+  mats.set('corrugated', std('corrugated', 'corrugated', { metalness: 0.28 }));
   mats.set('wood', std('wood', 'wood'));
   mats.set('woodDark', std('woodDark', 'woodDark'));
   mats.set('stoneBrick', std('stoneBrick', 'stoneBrick'));
@@ -381,7 +395,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // black checker/grid at grazing angles. Keep this finish matte and mostly
   // untextured, with only a restrained ambient lift; authored beams still
   // carry the building's structural material and provide the visible rhythm.
-  mats.set('interiorCeiling', new THREE.MeshStandardMaterial({
+  mats.set('interiorCeiling', new MeshStandardNodeMaterial({
     color: 0xb8b1a5,
     emissive: 0x2f2c27,
     emissiveIntensity: 0.34,
@@ -398,21 +412,21 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('paving', paving);
   // Crisp traffic paint for lane markings / crosswalks (no texture so dashes
   // stay readable at grazing angles).
-  mats.set('paint', new THREE.MeshStandardMaterial({ color: 0xd9dbd2, roughness: 0.82, metalness: 0 }));
-  mats.set('sandbag', new THREE.MeshStandardMaterial({ color: 0x9c8b62, roughness: 0.98 }));
-  mats.set('hay', new THREE.MeshStandardMaterial({ color: 0xb89a55, roughness: 1, metalness: 0 }));
-  mats.set('gold', new THREE.MeshStandardMaterial({ color: 0xd8b45a, roughness: 0.32, metalness: 0.95 }));
+  mats.set('paint', new MeshStandardNodeMaterial({ color: 0xd9dbd2, roughness: 0.82, metalness: 0 }));
+  mats.set('sandbag', new MeshStandardNodeMaterial({ color: 0x9c8b62, roughness: 0.98 }));
+  mats.set('hay', new MeshStandardNodeMaterial({ color: 0xb89a55, roughness: 1, metalness: 0 }));
+  mats.set('gold', new MeshStandardNodeMaterial({ color: 0xd8b45a, roughness: 0.32, metalness: 0.95 }));
   // NOTE: plain alpha-blend glass. MeshPhysicalMaterial.transmission forces
   // three.js to re-render the whole scene into a refraction buffer every
   // frame (~14ms on the reference GPU) — never worth it at game scale.
-  mats.set('glass', new THREE.MeshStandardMaterial({
+  mats.set('glass', new MeshStandardNodeMaterial({
     color: 0x6fa3bd, roughness: 0.3, metalness: 0.1, transparent: true, opacity: 0.42,
     envMapIntensity: 0.55, depthWrite: false,
   }));
 
   // Neon emissive accents
   const neon = (color: number, intensity: number) =>
-    new THREE.MeshStandardMaterial({
+    new MeshStandardNodeMaterial({
       color: 0x111111, emissive: color, emissiveIntensity: intensity, roughness: 0.4, metalness: 0.1,
     });
   mats.set('neonCyan', neon(0x53e0ff, 2.6));
@@ -423,14 +437,14 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // Lit rooms should read as luminous panes, not white bloom cards. Large
   // window surfaces stay below the bloom threshold so frame detail survives
   // indoors and at street distance; dedicated neon remains the bloom source.
-  mats.set('windowWarm', new THREE.MeshStandardMaterial({
+  mats.set('windowWarm', new MeshStandardNodeMaterial({
     color: 0x33291b,
     emissive: 0xffc47d,
     emissiveIntensity: 0.38,
     roughness: 0.68,
     metalness: 0.02,
   }));
-  mats.set('windowCool', new THREE.MeshStandardMaterial({
+  mats.set('windowCool', new MeshStandardNodeMaterial({
     color: 0x18242d,
     emissive: 0x86b9d2,
     emissiveIntensity: 0.24,
@@ -439,7 +453,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   }));
   // Occupied-dark facade window: unlit glass behind a dim interior, still
   // distinct from a wall hole. Presentation-only, below the bloom threshold.
-  mats.set('windowDark', new THREE.MeshStandardMaterial({
+  mats.set('windowDark', new MeshStandardNodeMaterial({
     color: 0x111a22,
     emissive: 0x2a3b46,
     emissiveIntensity: 0.06,

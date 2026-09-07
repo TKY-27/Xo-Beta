@@ -3333,6 +3333,133 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
     };
     (window as unknown as Record<string, unknown>).__xoTeleport = performQaTeleport;
 
+    // QA: raycast from an NDC screen point (default: centre) and report what
+    // was hit (object chain, material identity, light-relevant flags) so a
+    // suspicious pixel in a capture can be attributed to its exact
+    // object/material. __xoPick(nx, ny) with NDC in [-1,1].
+    (window as unknown as Record<string, unknown>).__xoPick = (ndcX = 0, ndcY = 0) => {
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), rig.camera);
+      const hits = raycaster.intersectObjects(renderer.scene.children, true).slice(0, 4);
+      return hits.map((h) => {        const mesh = h.object as THREE.Mesh;
+        const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
+        const std = mat && !Array.isArray(mat) ? mat : null;
+        const geo = mesh.geometry as THREE.BufferGeometry | undefined;
+        const wp = new THREE.Vector3();
+        mesh.getWorldPosition(wp);
+        return {
+          distance: Math.round(h.distance * 10) / 10,
+          world: `${wp.x.toFixed(1)},${wp.y.toFixed(1)},${wp.z.toFixed(1)}`,
+          object: mesh.name || '(unnamed)',
+          parent: mesh.parent?.name || '(none)',
+          grandparent: mesh.parent?.parent?.name || '(none)',
+          material: std ? std.name || std.type : Array.isArray(mesh.material) ? 'multi' : String(mat?.type),
+          color: std ? `#${std.color.getHexString()}` : null,
+          map: Boolean(std?.map),
+          vertexColors: Boolean(std?.vertexColors),
+          metalness: std?.metalness ?? null,
+          roughness: std?.roughness ?? null,
+          envMapIntensity: std?.envMapIntensity ?? null,
+          instanced: (mesh as THREE.InstancedMesh).isInstancedMesh === true,
+          hasNormals: Boolean(geo?.attributes.normal),
+          hasUv: Boolean(geo?.attributes.uv),
+          vertices: geo?.attributes.position?.count ?? null,
+          visible: mesh.visible,
+          uuid: mesh.uuid.slice(0, 8),
+        };
+      });
+    };
+    // QA: toggle meshes by uuid prefix, material name, OR material colour hex
+    // (names are empty for library materials; colours are the stable key).
+    (window as unknown as Record<string, unknown>).__xoHideUuid = (prefix: string) => {
+      const found: string[] = [];
+      const needle = prefix.replace('#', '').toLowerCase();
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
+        const matName = mat && !Array.isArray(mat) ? mat.name : '';
+        const hex = mat && !Array.isArray(mat) ? mat.color.getHexString() : '';
+        if (o.uuid.startsWith(prefix) || (matName && matName === prefix) || hex === needle) {
+          o.visible = !o.visible;
+          found.push(`${o.type}:${o.uuid.slice(0, 8)}:${matName || hex || '?'}:${o.visible ? 'shown' : 'hidden'}`);
+        }
+      });
+      return found;
+    };
+    // QA: recolour every material matching uuid/name/colour — A/B for
+    // "is this mesh the suspect" at maximum contrast.
+    (window as unknown as Record<string, unknown>).__xoTint = (prefix: string, hex = 'ff00ff') => {
+      const found: string[] = [];
+      const needle = prefix.replace('#', '').toLowerCase();
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+        for (const mat of mats) {
+          const std = mat as THREE.MeshStandardMaterial;
+          const hex2 = std?.color?.getHexString?.() ?? '';
+          if (std?.color && (hex2 === needle || (std.name && std.name === prefix) || o.uuid.startsWith(prefix))) {
+            std.color.set(hex);
+            std.metalness = 0;
+            std.roughness = 1;
+            // WebGPU pipelines only rebuild when the material is flagged —
+            // otherwise metalness/roughness edits silently do nothing.
+            std.needsUpdate = true;
+            found.push(`${o.uuid.slice(0, 8)}:${hex2}->${hex}`);
+          }
+        }
+      });
+      return found;
+    };
+    // QA: brute-force sight-line census — every mesh whose world bounding box
+    // intersects the NDC ray within [near,far] metres, raycast-independent
+    // (catches meshes the raycaster skips for layer/attribute reasons).
+    (window as unknown as Record<string, unknown>).__xoRayEnum = (ndcX = 0, ndcY = 0, near = 1, far = 20) => {
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), rig.camera);
+      const ray = raycaster.ray;
+      const box = new THREE.Box3();
+      const hits: Array<Record<string, unknown>> = [];
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.visible) return;
+        // InstancedMesh.world-bounding: instance matrices move instances far
+        // from the unit geometry box at the origin — prefer the instance-aware
+        // bound when the mesh has one.
+        const instanced = mesh as THREE.InstancedMesh & { boundingBox?: THREE.Box3 | null };
+        let worldBox: THREE.Box3 | null = null;
+        if (instanced.isInstancedMesh) {
+          if (!instanced.boundingBox) instanced.computeBoundingBox();
+          worldBox = instanced.boundingBox ?? null;
+        } else {
+          if (!mesh.geometry?.boundingBox) mesh.geometry?.computeBoundingBox();
+          if (mesh.geometry?.boundingBox) {
+            worldBox = new THREE.Box3().copy(mesh.geometry.boundingBox).applyMatrix4(mesh.matrixWorld);
+          }
+        }
+        if (!worldBox) return;
+        const point = new THREE.Vector3();
+        if (!ray.intersectBox(worldBox, point)) return;
+        const d = ray.origin.distanceTo(point);
+        if (d < near || d > far) return;
+        const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
+        const std = mat && !Array.isArray(mat) ? mat : null;
+        hits.push({
+          distance: Math.round(d * 10) / 10,
+          object: mesh.name || '(unnamed)',
+          parent: mesh.parent?.name || '(none)',
+          material: std ? std.name || std.type : Array.isArray(mesh.material) ? 'multi' : String(mat?.type),
+          color: std ? `#${std.color.getHexString()}` : null,
+          metalness: std?.metalness ?? null,
+          roughness: std?.roughness ?? null,
+          instanced: (mesh as THREE.InstancedMesh).isInstancedMesh === true,
+          vertices: mesh.geometry.attributes.position?.count ?? null,
+          uuid: mesh.uuid.slice(0, 8),
+        });
+      });
+      hits.sort((a, b) => (a.distance as number) - (b.distance as number));
+      return hits;
+    };
+
     // QA: hide object subsets before their GPU pipelines are created so
     // render-side issues (e.g. WebGPU validation errors) can be attributed
     // to a subsystem. Applies for the first seconds of a match.

@@ -103,8 +103,11 @@ export function buildAsharaReach(): MapDef {
     sunDirection: [-0.48, -0.82, -0.3],
     sunColor: 0xffe2b7,
     sunIntensity: 3.35,
+    // Shadow fill: hard desert light needs a strong bounce floor — with
+    // ambient 0.62 the shaded sides of metal props crushed to near-black
+    // (cycle-23 A/B: roadside sign panel rendered (0,10,35) in full shade).
     ambientColor: 0xb8c4d0,
-    ambientIntensity: 0.62,
+    ambientIntensity: 0.8,
     hemisphereSky: 0x9fb9ce,
     hemisphereGround: 0x8b6f4e,
     hemisphereIntensity: 1.02,
