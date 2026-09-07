@@ -79,6 +79,8 @@ five cycles.
 
 | 29 | ashara wreck close-up + runtime material pick | Round-5 P0.3 fixed: wrecked vehicles rendered as black silhouettes. Diagnosis chain: (1) wreck tint multiplied the already-dark authored colour by 0.32 → black; (2) after de-darkening, the pool STILL intermittently rendered black with verified-correct material values at runtime — the stochastic face of the r185 instanced-binding fault; (3) vehicles are now one non-instanced clone per car (≤9/map, cheap) with the colormap atlas dropped for wrecks (flat ash 0x4a423a, matte) — the atlas's saturated primary body paint otherwise bled through any multiplied tint. Capture: sun-lit ash-brown wreck, readable silhouette. Note: two 5s net-clock unit timeouts during the cycle were load flakes (pass in isolation) | wreck reads as a scorched car; vehicles immune to the instancing fault by construction |
 
+| 30 | eden rain capture | Round-5 P2 batch: rain streaks 900→1400, longer strips, opacity 0.34→0.4 (former sparse scratches); sky cloud density gains a fine noise octave breaking up the bilinear cell edges of the low octave (rectangular cloud edges) with a slightly wider coverage ramp | denser rain reads as weather; cloud edges organic; zero console errors |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.

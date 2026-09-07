@@ -9,7 +9,7 @@
  */
 import * as THREE from 'three';
 
-const STREAK_COUNT = 900;
+const STREAK_COUNT = 1400;
 /** Rain cylinder radius around the viewer (m). */
 const FIELD_RADIUS = 34;
 /** Height band above the camera where streaks recycle. */

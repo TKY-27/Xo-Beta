@@ -104,9 +104,12 @@ export class SkyAtmosphereSystem {
     const density = (uv: Node<'vec2'>): Node<'float'> => {
       const low = this.noise.sample(uv).r;
       const high = this.noise.sample(uv.mul(3.7)).g;
-      const d = low.mul(0.72).add(high.mul(0.28));
+      // CYCLE 30: a fine octave breaks up the bilinear cell boundaries of the
+      // low octave, which read as rectangular cloud edges at high zoom.
+      const fine = this.noise.sample(uv.mul(11.3)).g;
+      const d = low.mul(0.58).add(high.mul(0.27)).add(fine.mul(0.15));
       // Remap around the coverage control: 0 = clear, 1 = heavy overcast.
-      return smoothstep(float(1.0).sub(u.cloudCover.mul(1.15)), float(1.0).sub(u.cloudCover.mul(0.35)), d);
+      return smoothstep(float(1.0).sub(u.cloudCover.mul(1.2)), float(1.0).sub(u.cloudCover.mul(0.3)), d);
     };
     const plane = dir.xz.div(max(dir.y.add(0.22), 0.14));
     const wind = u.time.mul(u.windSpeed);
