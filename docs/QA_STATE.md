@@ -72,6 +72,9 @@ five cycles.
 
 | 26 | ashara highway/compound/pole captures + pick census | Critic P0.1/P0.3 root: GLTF-loader materials (props, rocks, vehicles) are plain `MeshStandardMaterial` → same WebGPU instancing ambient-immunity as cycle 23. (1) `toNodeStandard` converts every GLB material at ingest (`extractGeometries`, vehicle templates, makeInstanced fallback). (2) Roadside pole now renders warm wood with visible crossarm (was void-black) — P0.1 verified fixed in capture. (3) `ProjectedStandardMaterial.copy()` now rebuilds the triplanar graph for clones — the road dirt shoulder and surface-path clones had been rendering graph-less pale-white (also the eden white-path class). (4) Desert floor foil shimmer: sand DataTexture had no mipmaps (2 cm texels aliasing at grazing) → trilinear mips; bumpMap removed in favour of the meandering normal map; desert normalScale 0.42→0.25; road ribbon resampled at 0.5 m. Outstanding: wreck silhouettes still dark (vehicle tint path), drain ribbon pale | 542 unit tests pass; zero console errors |
 
+| 27 | eden transport capture | Critic P0.2: transport aircraft was a featureless grey capsule with slab wings and flat cyan discs. Rebuilt `buildTransport` as procedural dropship anatomy: lathed fuselage profile (nose cone → cockpit hump → troop section → tapered tail), glazed cockpit on the nose slope, swept tapered extruded wings with slight anhedral, wing-tip nacelles (intake lip + trim ring + recessed emissive exhaust disc), twin canted tail fins, structural hoops, dorsal rail + antenna, belly skids, slung cargo pod with lit windows, red running beacons | transport reads as a real twin-engine dropship from the drop camera; zero console errors |
+
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.

@@ -2006,74 +2006,141 @@ export class WorldView {
   }
 
   private buildTransport(): void {
-    // Muted military gunship palette: the former bright blue/cyan/orange toy
-    // scheme undercut the drop — the most-watched object of every match.
-    const hullMat = new THREE.MeshStandardMaterial({ color: 0x3a4249, roughness: 0.52, metalness: 0.62 });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x22282e, roughness: 0.55, metalness: 0.6 });
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0x565f68, roughness: 0.4, metalness: 0.75 });
+    // CYCLE 27: procedural dropship anatomy — lathed fuselage, swept tapered
+    // wings, twin canted tail fins and wing-tip nacelles with exhaust rings.
+    // The former capsule + slab wings read as a featureless toy at the exact
+    // moment every player is looking at it (round-5 critic P0).
+    const hullMat = new THREE.MeshStandardMaterial({ color: 0x3a4249, roughness: 0.55, metalness: 0.55 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x22282e, roughness: 0.6, metalness: 0.5 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x565f68, roughness: 0.42, metalness: 0.7 });
     const glassMat = new THREE.MeshStandardMaterial({
-      color: 0x0c1218, emissive: 0x9fd8e8, emissiveIntensity: 0.5, roughness: 0.25, metalness: 0.4,
+      color: 0x0c1218, emissive: 0x9fd8e8, emissiveIntensity: 0.45, roughness: 0.25, metalness: 0.4,
     });
-    const hull = new THREE.Mesh(new THREE.CapsuleGeometry(3.4, 14, 6, 14), hullMat);
-    hull.geometry.rotateZ(Math.PI / 2);
-    hull.castShadow = true;
-    const wingL = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.3, 7), darkMat);
-    wingL.position.set(-2, 0.6, 5.4);
-    wingL.rotation.z = 0.16;
-    wingL.castShadow = true;
-    const wingR = wingL.clone();
-    wingR.position.z = -5.4;
-    wingR.rotation.z = -0.16;
-    const engineGlow = new THREE.Mesh(new THREE.SphereGeometry(1.15, 12, 10), glassMat);
-    engineGlow.position.set(-9.6, 0, 0);
-    const fin = new THREE.Mesh(new THREE.BoxGeometry(3.4, 4.4, 0.3), darkMat);
-    fin.position.set(6.4, 2.4, 0);
-    fin.castShadow = true;
-    // Structural hoops and a raised cockpit break up the old featureless
-    // capsule silhouette. These pieces share the hull axes, so the ship still
-    // reads clearly from the high transport camera at normal gameplay scale.
+    const exhaustMat = new THREE.MeshStandardMaterial({
+      color: 0x1a1f24, emissive: 0x7fd4ec, emissiveIntensity: 1.6, roughness: 0.4, metalness: 0.3,
+    });
+
+    // Fuselage: lathe profile from nose cone through cockpit hump, constant
+    // troop section and tapered tail. Points are (radius, axis-x) before the
+    // lathe's Y-axis sweep is laid onto the ship's forward X axis.
+    const profile: Array<[number, number]> = [
+      [0.12, 8.8], [0.7, 8.1], [1.3, 7.2], [1.8, 6.1], [2.2, 4.6],
+      [2.62, 2.4], [2.86, -0.4], [2.8, -2.6], [2.5, -4.8], [1.8, -6.8],
+      [1.05, -8.4], [0.5, -9.3],
+    ];
+    const fuselagePoints = profile.map(([r, x]) => new THREE.Vector2(r, x));
+    const fuselage = new THREE.Mesh(new THREE.LatheGeometry(fuselagePoints, 22), hullMat);
+    fuselage.geometry.rotateZ(-Math.PI / 2);
+    fuselage.castShadow = true;
+
+    // Cockpit canopy hugging the nose slope.
+    const cockpit = new THREE.Mesh(new THREE.CapsuleGeometry(1.15, 2.2, 4, 12), glassMat);
+    cockpit.geometry.rotateZ(Math.PI / 2);
+    cockpit.position.set(5.6, 1.7, 0);
+    cockpit.scale.set(1, 0.55, 1.15);
+    cockpit.rotation.z = 0.12;
+
+    // Swept, tapered wings (plan-view polygon, extruded to thickness).
+    const wingShape = (spanSign: number): THREE.Shape => {
+      const s = new THREE.Shape();
+      s.moveTo(1.6, 0);
+      s.lineTo(0.35, spanSign * 5.6);
+      s.lineTo(-1.15, spanSign * 5.6);
+      s.lineTo(-1.8, 0);
+      s.closePath();
+      return s;
+    };
+    const buildWing = (spanSign: number): THREE.Mesh => {
+      const geo = new THREE.ExtrudeGeometry(wingShape(spanSign), { depth: 0.3, bevelEnabled: false });
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(0, 0, 0);
+      const wing = new THREE.Mesh(geo, darkMat);
+      wing.position.set(-0.6, 0.7, 0);
+      wing.rotation.z = spanSign * 0.07;
+      wing.castShadow = true;
+      return wing;
+    };
+
+    // Wing-tip nacelles: capsule + intake lip + recessed glowing exhaust.
+    const buildNacelle = (z: number): THREE.Object3D[] => {
+      const parts: THREE.Object3D[] = [];
+      const nacelle = new THREE.Mesh(new THREE.CapsuleGeometry(0.8, 2.9, 4, 12), darkMat);
+      nacelle.geometry.rotateZ(Math.PI / 2);
+      nacelle.position.set(-3.1, 0.55, z);
+      nacelle.castShadow = true;
+      const intake = new THREE.Mesh(new THREE.TorusGeometry(0.82, 0.1, 8, 16), trimMat);
+      intake.geometry.rotateY(Math.PI / 2);
+      intake.position.set(-1.55, 0.55, z);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.09, 8, 16), trimMat);
+      ring.geometry.rotateY(Math.PI / 2);
+      ring.position.set(-4.85, 0.55, z);
+      const glow = new THREE.Mesh(new THREE.CircleGeometry(0.52, 16), exhaustMat);
+      glow.geometry.rotateY(-Math.PI / 2);
+      glow.position.set(-4.87, 0.55, z);
+      parts.push(nacelle, intake, ring, glow);
+      return parts;
+    };
+
+    // Twin canted tail fins.
+    const buildFin = (sideSign: number): THREE.Mesh => {
+      const shape = new THREE.Shape();
+      shape.moveTo(0, 0);
+      shape.lineTo(1.15, 0);
+      shape.lineTo(2.35, 2.3);
+      shape.lineTo(1.35, 2.3);
+      shape.closePath();
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.18, bevelEnabled: false });
+      geo.rotateY(Math.PI / 2);
+      const fin = new THREE.Mesh(geo, hullMat);
+      fin.position.set(-8.1, 1.4, sideSign * 1.25);
+      fin.rotation.x = sideSign * -0.42;
+      fin.castShadow = true;
+      return fin;
+    };
+
+    // Structural rings + dorsal spine + belly cargo pod (kept from the
+    // earlier pass — they still read well against the new hull).
     const hoops: THREE.Mesh[] = [];
-    for (const hx of [-4.6, 0, 4.6]) {
-      const hoop = new THREE.Mesh(new THREE.TorusGeometry(3.55, 0.14, 6, 18), trimMat);
+    for (const hx of [-3.4, 1.2, 5.2]) {
+      const hoop = new THREE.Mesh(new THREE.TorusGeometry(2.92, 0.12, 6, 20), trimMat);
       hoop.geometry.rotateY(Math.PI / 2);
       hoop.position.x = hx;
+      hoop.scale.set(1, 1.04, 1);
       hoop.castShadow = true;
       hoops.push(hoop);
     }
-    const cockpit = new THREE.Mesh(new THREE.CapsuleGeometry(1.4, 2.4, 4, 10), glassMat);
-    cockpit.geometry.rotateZ(Math.PI / 2);
-    cockpit.position.set(4.4, 2.8, 0);
-    cockpit.scale.set(1, 0.58, 1.25);
-    const cargoCabin = new THREE.Mesh(new THREE.BoxGeometry(6.4, 2.2, 3.8), darkMat);
-    cargoCabin.position.set(-0.5, -3.2, 0);
+    const dorsalRail = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.14, 0.24), trimMat);
+    dorsalRail.position.set(-0.6, 3.02, 0);
+    const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.02, 1.1, 6), trimMat);
+    antenna.position.set(-6.2, 2.6, 0);
+    const cargoCabin = new THREE.Mesh(new THREE.BoxGeometry(6.2, 2.1, 3.6), darkMat);
+    cargoCabin.position.set(-0.5, -3.3, 0);
     cargoCabin.castShadow = true;
-    const cabinWindowL = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.75, 0.12), glassMat);
-    cabinWindowL.position.set(-0.5, -3.05, 1.96);
+    const cabinWindowL = new THREE.Mesh(new THREE.BoxGeometry(4.3, 0.7, 0.12), glassMat);
+    cabinWindowL.position.set(-0.5, -3.15, 1.86);
     const cabinWindowR = cabinWindowL.clone();
-    cabinWindowR.position.z = -1.96;
-    const nacelles: THREE.Object3D[] = [];
-    for (const nz of [-5.3, 5.3]) {
-      const nacelle = new THREE.Mesh(new THREE.CapsuleGeometry(0.85, 3.2, 4, 10), darkMat);
-      nacelle.geometry.rotateZ(Math.PI / 2);
-      nacelle.position.set(-3.4, -0.1, nz);
-      nacelle.castShadow = true;
-      const exhaust = new THREE.Mesh(new THREE.SphereGeometry(0.72, 12, 8), glassMat);
-      exhaust.scale.set(0.65, 1, 1);
-      exhaust.position.set(-5.45, -0.1, nz);
-      nacelles.push(nacelle, exhaust);
-    }
-    const dorsalRail = new THREE.Mesh(new THREE.BoxGeometry(8.8, 0.16, 0.22), trimMat);
-    dorsalRail.position.set(-0.4, 3.45, 0);
-    // running lights
+    cabinWindowR.position.z = -1.86;
+    const skidL = new THREE.Mesh(new THREE.BoxGeometry(7.4, 0.3, 0.4), darkMat);
+    skidL.position.set(0.2, -2.95, 1.7);
+    skidL.rotation.z = 0.05;
+    const skidR = skidL.clone();
+    skidR.position.z = -1.7;
+    skidR.rotation.z = -0.05;
+
+    // Running lights.
     const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff5f5f });
     for (const bz of [4.4, -4.4]) {
       const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 6), beaconMat);
-      beacon.position.set(3.2, 2.2, bz);
+      beacon.position.set(3.2, 1.4, bz);
       this.transportGroup.add(beacon);
     }
+
     this.transportGroup.add(
-      hull, wingL, wingR, engineGlow, fin,
-      ...hoops, cockpit, cargoCabin, cabinWindowL, cabinWindowR, ...nacelles, dorsalRail,
+      fuselage, cockpit, buildWing(1), buildWing(-1),
+      ...buildNacelle(5.6), ...buildNacelle(-5.6),
+      buildFin(1), buildFin(-1),
+      ...hoops, dorsalRail, antenna,
+      cargoCabin, cabinWindowL, cabinWindowR, skidL, skidR,
     );
     this.transportGroup.visible = false;
     this.group.add(this.transportGroup);
