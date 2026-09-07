@@ -10,7 +10,7 @@ import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
 
-const HIP_POS = new THREE.Vector3(0.115, -0.125, -0.42);
+const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.33);
 const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
 const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
 
@@ -163,7 +163,11 @@ export class ViewModel {
    * canonical length (~1 m AR) for world/loot presentation; at the hip offset
    * (~6 cm from the eye) that fills half the screen, so the viewmodel carries
    * its own presentation scale, like every shipped FPS does. */
-  private static readonly WEAPON_VIEW_SCALE = 0.6;
+  /** Per-class presentation scale (round-6 weapon review): the flat 0.6
+   * left the pistol at ~5% of frame while long guns filled 20%. */
+  private static readonly WEAPON_VIEW_SCALE: Record<WeaponId, number> = {
+    pistol: 1.2, smg: 0.78, ar: 0.82, shotgun: 0.85, sniper: 0.78,
+  };
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
     const key = `${id}:${rarity}`;
@@ -172,7 +176,7 @@ export class ViewModel {
       const built = this.factory.build(id, rarity);
       if (!built) return null;
       m = built;
-      m.group.scale.setScalar(ViewModel.WEAPON_VIEW_SCALE);
+      m.group.scale.setScalar(ViewModel.WEAPON_VIEW_SCALE[id]);
       // viewmodel render tuning: draw over world, no shadow casting
       m.group.traverse((o) => {
         const mesh = o as THREE.Mesh;
@@ -352,7 +356,7 @@ export class ViewModel {
     this.pivot.position.set(px, py, pz);
     // Base hip stance angles the receiver inward across the lower-right
     // frame (muzzle toward center) like a real ready position; ADS removes it.
-    const hipYaw = 0.16 * (1 - ads);
+    const hipYaw = 0.28 * (1 - ads);
     const hipRoll = -0.1 * (1 - ads);
     this.pivot.rotation.set(
       -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,

@@ -161,21 +161,24 @@ export class WeaponModelFactory {
         roughness: 0.42,
         metalness: 0.3,
       });
-      const stripLen = length * (rank >= 3 ? 0.42 : 0.26);
-      const strip = new THREE.Mesh(new THREE.BoxGeometry(0.009, 0.004, stripLen), stripMat);
-      strip.position.set(0.024, gun.railY - 0.002, gun.railZ + 0.02);
+      // CYCLE 34 (review): the strip hung in mid-air beside every receiver
+      // (x 0.024 > half-widths, length overshooting the butt). It now lies
+      // flush inside the top-rail slot like a rail insert, capped length.
+      const stripLen = Math.min(0.22, length * (rank >= 3 ? 0.4 : 0.26));
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.0022, stripLen), stripMat);
+      strip.position.set(0, gun.railY + 0.007, gun.railZ + 0.02);
       strip.visible = rank > 0 || weaponId === 'pistol';
       group.add(strip);
       accents.push(stripMat);
 
-      // Legendary/epic edge glow lines along the handguard.
+      // Legendary/epic edge glow lines hugging the handguard sides.
       if (rank >= 3) {
         const lineMat = stripMat.clone();
         lineMat.emissiveIntensity += 0.12;
         accents.push(lineMat);
         for (const side of [-1, 1]) {
-          const line = new THREE.Mesh(new THREE.BoxGeometry(0.0025, 0.0025, stripLen * 1.2), lineMat);
-          line.position.set(side * 0.0255, gun.railY - 0.024, gun.railZ - length * 0.12);
+          const line = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.002, stripLen * 1.1), lineMat);
+          line.position.set(side * 0.0255, gun.railY - 0.026, gun.railZ - 0.1);
           group.add(line);
         }
       }

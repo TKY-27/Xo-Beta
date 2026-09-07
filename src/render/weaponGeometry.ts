@@ -223,7 +223,7 @@ export function makeGunMaterials(): GunMaterials {
   polymer.normalMap = stipple;
   polymer.normalScale.set(0.35, 0.35);
   polymer.name = 'polymer';
-  const rubber = new THREE.MeshStandardMaterial({ color: 0x141619, roughness: 0.96, metalness: 0.02 });
+  const rubber = new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.94, metalness: 0.02 });
   rubber.normalMap = stipple;
   rubber.normalScale.set(0.5, 0.5);
   rubber.name = 'rubber';
@@ -337,8 +337,10 @@ function ironSights(parent: THREE.Object3D, mats: GunMaterials, yTop: number, zF
   parent.add(front);
   const rear = new THREE.Group();
   rear.position.set(0, yTop, zRear);
-  box(rear, mats.aluminum, 0.024, 0.016, 0.01, 0, 0.006, 0, 0.002);
-  box(rear, mats.polymer, 0.008, 0.012, 0.006, 0, 0.018, 0, 0.001);
+  // CYCLE 34 (review): pedestal reaching down to the receiver deck — the
+  // bare base used to hover ~20 mm above it, reading as a black tower.
+  box(rear, mats.aluminum, 0.024, 0.024, 0.012, 0, 0.0, 0, 0.002);
+  box(rear, mats.polymer, 0.008, 0.012, 0.006, 0, 0.021, 0, 0.001);
   parent.add(rear);
 }
 
@@ -401,7 +403,7 @@ function receiver(parent: THREE.Object3D, mats: GunMaterials, w: number, h: numb
 function buildAr(mats: GunMaterials): ProceduralWeapon {
   const g = new THREE.Group();
   // Upper + lower receiver
-  receiver(g, mats, 0.042, 0.052, -0.34, -0.08, 0.032);
+  receiver(g, mats, 0.042, 0.052, -0.34, -0.08, 0.048);
   // Barrel: profiled steps + muzzle device
   cyl(g, mats.steel, 0.009, 0.011, 0.34, 0, 0.024, -0.51);
   cyl(g, mats.steel, 0.013, 0.013, 0.05, 0, 0.024, -0.345, 14);
@@ -419,8 +421,8 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
   box(g, mats.steel, 0.016, 0.036, 0.018, 0, 0.04, -0.63, 0.003);
   // Stock: buffer tube + adjustable shoulder stock
   cyl(g, mats.aluminum, 0.016, 0.016, 0.14, 0, 0.02, -0.008, 12);
-  box(g, mats.polymer, 0.036, 0.062, 0.11, 0, 0.014, 0.09, 0.009);
-  box(g, mats.rubber, 0.04, 0.085, 0.018, 0, 0.006, 0.15, 0.006);
+  box(g, mats.polymer, 0.036, 0.05, 0.11, 0, 0.016, 0.09, 0.009);
+  box(g, mats.rubber, 0.036, 0.06, 0.018, 0, 0.008, 0.15, 0.006);
   box(g, mats.polymer, 0.02, 0.03, 0.06, 0, -0.024, 0.055, 0.005);
   // Pistol grip + trigger
   pistolGrip(g, mats, 0, 0.004, -0.115);
@@ -434,7 +436,7 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
   const bolt = chargingDetail(g, mats, 0.023, 0.038, -0.1);
   bolt.name = 'bolt';
   // Iron sights (folded profile)
-  ironSights(g, mats, 0.058, -0.615, -0.075);
+  ironSights(g, mats, 0.058, -0.615, -0.1);
   // Sling loop
   ring(g, mats.hardware, 0.008, 0.002, 0.024, 0.006, -0.09);
   return { group: g, muzzleZ: -0.71, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.055, railZ: -0.2 };
@@ -468,7 +470,7 @@ function buildPistol(mats: GunMaterials): ProceduralWeapon {
 /** SMG anatomy (canonical 0.62 m): compact, side-folding rails, big suppressor. */
 function buildSmg(mats: GunMaterials): ProceduralWeapon {
   const g = new THREE.Group();
-  receiver(g, mats, 0.046, 0.058, -0.3, -0.07, 0.035);
+  receiver(g, mats, 0.046, 0.058, -0.3, -0.07, 0.05);
   // Short barrel + suppressor-ready muzzle
   cyl(g, mats.steel, 0.012, 0.012, 0.12, 0, 0.026, -0.36, 14);
   cyl(g, mats.aluminum, 0.019, 0.019, 0.12, 0, 0.026, -0.46, 16);
@@ -481,19 +483,19 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
   topRail(g, mats.aluminum, -0.05, -0.44, 0.058);
   // Side-folding stock rails + compact buttplate
   for (const side of [-1, 1]) {
-    box(g, mats.aluminum, 0.008, 0.014, 0.17, side * 0.028, 0.018, 0.02, 0.002);
+    box(g, mats.aluminum, 0.012, 0.014, 0.17, side * 0.026, 0.018, 0.02, 0.002);
   }
-  box(g, mats.polymer, 0.07, 0.05, 0.03, 0, 0.014, 0.115, 0.008);
-  box(g, mats.rubber, 0.074, 0.062, 0.012, 0, 0.012, 0.135, 0.004);
+  box(g, mats.polymer, 0.062, 0.05, 0.03, 0, 0.014, 0.115, 0.008);
+  box(g, mats.rubber, 0.05, 0.052, 0.012, 0, 0.012, 0.135, 0.004);
   // Vertical foregrip
-  box(g, mats.polymer, 0.026, 0.084, 0.032, 0, -0.022, -0.38, 0.008);
+  box(g, mats.rubber, 0.026, 0.084, 0.032, 0, -0.022, -0.38, 0.008);
   for (let i = 0; i < 3; i++) {
     box(g, mats.polymer, 0.03, 0.005, 0.01, 0, -0.045 + i * 0.022, -0.388, 0.0015);
   }
   pistolGrip(g, mats, 0, 0.0, -0.1);
   triggerGroup(g, mats, 0.006, -0.13);
   // Long straight mag
-  const mag = boxMagazine(g, mats, 0, -0.026, -0.19, 0.032, 0.16, 0.19);
+  const mag = boxMagazine(g, mats, 0, -0.026, -0.19, 0.032, 0.16, 0.15);
   mag.group.name = 'mag';
   const bolt = chargingDetail(g, mats, 0.026, 0.04, -0.085);
   bolt.name = 'bolt';
@@ -504,7 +506,7 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
 /** Shotgun anatomy (canonical 1.0 m): tube magazine, pump, bead sight. */
 function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   const g = new THREE.Group();
-  receiver(g, mats, 0.044, 0.056, -0.36, -0.1, 0.032);
+  receiver(g, mats, 0.044, 0.056, -0.36, -0.1, 0.046);
   // Barrel + underbarrel tube magazine
   cyl(g, mats.steel, 0.011, 0.012, 0.56, 0, 0.03, -0.64, 14);
   cyl(g, mats.aluminum, 0.013, 0.013, 0.46, 0, 0.002, -0.58, 12);
@@ -529,7 +531,7 @@ function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   stock.position.set(0, 0.012, -0.02);
   stock.rotation.x = 0.14;
   box(stock, mats.polymer, 0.038, 0.056, 0.22, 0, -0.01, 0.13, 0.01);
-  box(stock, mats.rubber, 0.042, 0.09, 0.016, 0, -0.03, 0.245, 0.005);
+  box(stock, mats.rubber, 0.04, 0.06, 0.016, 0, -0.024, 0.245, 0.005);
   g.add(stock);
   pistolGrip(g, mats, 0, 0.002, -0.095);
   triggerGroup(g, mats, 0.006, -0.135);
@@ -542,7 +544,7 @@ function buildShotgun(mats: GunMaterials): ProceduralWeapon {
 /** Sniper anatomy (canonical 1.28 m): heavy barrel, bolt handle, cheek riser. */
 function buildSniper(mats: GunMaterials): ProceduralWeapon {
   const g = new THREE.Group();
-  receiver(g, mats, 0.044, 0.05, -0.4, -0.06, 0.034);
+  receiver(g, mats, 0.044, 0.05, -0.4, -0.06, 0.048);
   // Free-floated heavy barrel with fluting suggestion
   cyl(g, mats.steel, 0.013, 0.016, 0.72, 0, 0.026, -0.82, 16);
   for (const side of [-1, 1]) {
@@ -559,10 +561,10 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
   // Adjustable stock: cheek riser + hook
   box(g, mats.aluminum, 0.04, 0.04, 0.14, 0, 0.02, 0.02, 0.007);
   const stock = new THREE.Group();
-  stock.position.set(0, 0.018, 0.09);
+  stock.position.set(0, 0.018, 0.07);
   box(stock, mats.polymer, 0.042, 0.07, 0.17, 0, -0.006, 0.085, 0.01);
-  box(stock, mats.rubber, 0.046, 0.095, 0.018, 0, -0.012, 0.175, 0.006);
-  box(stock, mats.aluminum, 0.03, 0.03, 0.05, 0, 0.048, 0.06, 0.005);
+  box(stock, mats.rubber, 0.046, 0.072, 0.018, 0, -0.012, 0.175, 0.006);
+  box(stock, mats.aluminum, 0.05, 0.03, 0.05, 0, 0.036, 0.06, 0.005);
   g.add(stock);
   // Grip + trigger
   pistolGrip(g, mats, 0, 0.002, -0.085);
@@ -576,6 +578,24 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
   bolt.add(knob);
   bolt.name = 'bolt';
   g.add(bolt);
+  // CYCLE 34 (review): class-identity optic — tube + objective bell +
+  // eyepiece + mounts + emissive lens on the full-length rail.
+  const scope = new THREE.Group();
+  scope.position.set(0, 0.096, -0.16);
+  cyl(scope, mats.aluminum, 0.02, 0.02, 0.28, 0, 0, 0, 14);
+  cyl(scope, mats.aluminum, 0.028, 0.023, 0.07, 0, 0, -0.17, 14);
+  cyl(scope, mats.aluminum, 0.023, 0.02, 0.05, 0, 0, 0.16, 14);
+  box(scope, mats.aluminum, 0.014, 0.03, 0.022, 0, -0.02, -0.06, 0.002);
+  box(scope, mats.aluminum, 0.014, 0.03, 0.022, 0, -0.02, 0.05, 0.002);
+  box(scope, mats.hardware, 0.01, 0.014, 0.014, 0, 0.026, 0, 0.002);
+  const lens = new THREE.Mesh(
+    new THREE.CircleGeometry(0.022, 16),
+    new THREE.MeshStandardMaterial({ color: 0x0a1420, emissive: 0x2a5a8c, emissiveIntensity: 0.5, roughness: 0.15, metalness: 0.4 }),
+  );
+  lens.rotation.y = Math.PI;
+  lens.position.set(0, 0, -0.206);
+  scope.add(lens);
+  g.add(scope);
   // Box magazine
   const mag = boxMagazine(g, mats, 0, -0.022, -0.2, 0.036, 0.1, 0.1);
   mag.group.name = 'mag';

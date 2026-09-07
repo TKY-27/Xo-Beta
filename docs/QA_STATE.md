@@ -89,6 +89,8 @@ five cycles.
 
 | 33 | eden FP AR capture | Reference-footage pass 2 — viewmodel handling: hip pose raised/closer (0.115,-0.125,-0.42) showing the full weapon profile with the muzzle toward the crosshair; viewmodel scale 0.55→0.6; reference-feel recoil kick (deeper Z+pitch, randomized roll flick, slightly slower pitch recovery); magazine now rocks out/in around its base during reloads instead of a pure vertical slide | pose framing matches the reference; zero console errors |
 
+| 34 | eden FP sniper capture (epic) | Weapon-review subagent Top-5 implemented: (1) floating accent rod → flush rail-slot insert, length capped 0.22 m (all five guns); (2) per-class viewmodel scale {pistol 1.2, smg 0.78, ar 0.82, shotgun 0.85, sniper 0.78} + COD-weight lower-right hip anchor; (3) sniper class-identity scope (tube/objective/eyepiece/mounts/emissive lens); (4) receivers rise to close the 12-17 mm rail gap + rear sights pedestaled to the deck, AR rear sight inside rail span; (5) butt pads proportioned to stock height, rubber brightened 0x141619→0x2a2d31, sniper cheek riser seated, stock seam closed, SMG mag shortened + foregrip out of skin panels | sniper reads as a scoped precision rifle; zero console errors |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
