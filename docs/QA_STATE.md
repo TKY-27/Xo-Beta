@@ -62,6 +62,8 @@ five cycles.
 
 | 21 | neocity night capture | Vehicles floated on asphalt (no contact grounding after AO removal) → soft dark contact-shadow discs under every vehicle bucket | verified in capture |
 
+| 22 | ashara aerial + ground captures, eden tree-cluster captures | (1) Ashara ground corduroy: the sand micro texture tiled one global 13-crest sinusoid + a fixed-direction normal streak map → every tile showed identical parallel grooves. Fixed in `buildSandMicroTexture` (two phase-warped ripple families at different angles, faded in/out by periodic-noise patch masks; seam-free lattice noise) and in the desert normal map (streak coordinates meandered by a second noise, anisotropy 3:1→1.5:1, strength 2.2→1.5, normalScale 0.5→0.42). (2) Contact blobs extended to rocks and trees via shared `buildContactBlobs` helper (vehicle blobs now share one geometry/material per view). Probe now also dumps the tac-map aerial (`00-aerial.png`) for map-wide tiling sweeps | corduroy gone in aerial + ground views (sand reads as calm, patchily rippled desert); blob discs visible under every rock/tree/vehicle; probe runs zero console errors |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.

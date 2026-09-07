@@ -104,6 +104,18 @@ try {
     if (phase?.grounded && phase.state !== 'freefall' && phase.state !== 'glide') break;
   }
   await page.screenshot({ path: `${OUT}/03-grounded.png` });
+  // Tactical-map aerial (top-down terrain render) when the DEV bridge
+  // exposed it — the best view for tiling/texture-defect sweeps map-wide.
+  try {
+    const aerial = await page.evaluate(() => {
+      const c = (window as unknown as { __xoAerial?: HTMLCanvasElement }).__xoAerial;
+      return c ? c.toDataURL('image/png') : null;
+    });
+    if (aerial) {
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(`${OUT}/00-aerial.png`, Buffer.from(aerial.split(',')[1]!, 'base64'));
+    }
+  } catch { /* cosmetic */ }
   // Optional loadout (env QA_GIVE="weaponId:rarity") before the look shot.
   const give = process.env.QA_GIVE;
   if (give) {

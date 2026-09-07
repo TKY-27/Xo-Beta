@@ -382,6 +382,11 @@ export class WorldView {
   private readonly mapDef: MapDef;
   /** Beyond-bounds landscape + boundary barrier (see vista.ts). */
   readonly vista: VistaHandle;
+  /** Shared contact-shadow disc resources (vehicles, rocks, trees). Built
+   * lazily; dispose() traverses the group, so one instance per view is
+   * enough — the Set-based teardown dedupes them. */
+  private blobGeo: THREE.CircleGeometry | null = null;
+  private blobMat: THREE.MeshBasicMaterial | null = null;
 
   static async create(
     def: MapDef,
@@ -1024,6 +1029,31 @@ export class WorldView {
       this.group.add(scree);
     }
 
+    // Contact-shadow discs seat boulders and trees the way the vehicle blobs
+    // ground cars (round-4 critic: with AO gone, props float on overcast
+    // maps, where tree shadows are skipped entirely). The glow texture fades
+    // to transparent at the rim, so spans run past the visible footprint.
+    if (def.rocks.length > 0) {
+      const rockBlobs = this.buildContactBlobs(def.rocks.map((r) => ({
+        x: r.x,
+        z: r.z,
+        y: r.y,
+        span: r.scale * 2.0 + 0.5,
+      })));
+      if (rockBlobs) this.group.add(rockBlobs);
+    }
+    if (def.trees.length > 0) {
+      const treeBlobs = this.buildContactBlobs(def.trees.map((t) => ({
+        x: t.x,
+        z: t.z,
+        y: t.y,
+        span: t.variant === 'palm'
+          ? Math.max(1.3, t.scale * 2.3)
+          : t.scale * 2.3 + 0.3,
+      })));
+      if (treeBlobs) this.group.add(treeBlobs);
+    }
+
     // Lamps: authored street fixtures, instanced per part (draw-call budget).
     // Maps can finish with zero surviving lamps (eden/oldfront/neocity reject
     // every authored lamp in MapBuilder.finish). Creating the fixture pools
@@ -1164,6 +1194,53 @@ export class WorldView {
   // Vehicles — Kenney car kit GLBs with tint
   // -------------------------------------------------------------------------
 
+  /** Lazily-built shared contact-shadow disc resources for this view. */
+  private ensureBlobMaterial(): THREE.MeshBasicMaterial {
+    if (!this.blobMat) {
+      this.blobMat = new THREE.MeshBasicMaterial({
+        map: makeGlowTexture('rgba(6,8,10,', 128),
+        transparent: true,
+        opacity: 0.5,
+        depthWrite: false,
+        fog: true,
+      });
+    }
+    return this.blobMat;
+  }
+
+  private ensureBlobGeometry(): THREE.CircleGeometry {
+    if (!this.blobGeo) {
+      this.blobGeo = new THREE.CircleGeometry(1, 18);
+      this.blobGeo.rotateX(-Math.PI / 2);
+    }
+    return this.blobGeo;
+  }
+
+  /** One instanced soft-disc pool for world-space contact shadows. The caller
+   * fills exactly `spots.length` instances; count 0 yields a hidden mesh. */
+  private buildContactBlobs(spots: Array<{ x: number; z: number; y?: number; span: number }>): THREE.InstancedMesh | null {
+    if (spots.length === 0) return null;
+    const blobs = new THREE.InstancedMesh(this.ensureBlobGeometry(), this.ensureBlobMaterial(), spots.length);
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const groundY = (s: { x: number; z: number; y?: number }): number =>
+      s.y ?? (this.mapDef.terrainHeight ? this.mapDef.terrainHeight(s.x, s.z) : 0);
+    spots.forEach((s, i) => {
+      m.compose(
+        new THREE.Vector3(s.x, groundY(s) + 0.05, s.z),
+        q.identity(),
+        new THREE.Vector3(s.span, 1, s.span),
+      );
+      blobs.setMatrixAt(i, m);
+    });
+    blobs.instanceMatrix.needsUpdate = true;
+    blobs.computeBoundingBox();
+    blobs.computeBoundingSphere();
+    blobs.frustumCulled = true;
+    blobs.name = 'contact-blobs';
+    return blobs;
+  }
+
   private buildVehicles(def: MapDef, props: PropLibrary): void {
     const buckets = new Map<string, Array<{ vehicle: (typeof def.vehicles)[number]; key: string }>>();
     for (let i = 0; i < def.vehicles.length; i++) {
@@ -1185,12 +1262,8 @@ export class WorldView {
 
     // Contact-shadow blobs: the shadow map alone leaves props floating on
     // overcast maps — a soft dark disc under each vehicle grounds it.
-    const blobTex = makeGlowTexture('rgba(6,8,10,', 128);
-    const blobMat = new THREE.MeshBasicMaterial({
-      map: blobTex, transparent: true, opacity: 0.5, depthWrite: false, fog: true,
-    });
-    const blobGeo = new THREE.CircleGeometry(1, 18);
-    blobGeo.rotateX(-Math.PI / 2);
+    const blobMat = this.ensureBlobMaterial();
+    const blobGeo = this.ensureBlobGeometry();
     for (const [bucketName, entries] of buckets) {
       const key = entries[0]!.key;
       const tmpl = props.cloneTemplate(`vehicle/${key}`);
