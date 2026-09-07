@@ -629,7 +629,9 @@ export class WorldView {
       // roadSegment stores local X as length and local Z as width. Yaw rotates
       // those axes in world space but does not swap the stored dimensions.
       const width = Math.max(...group.map((box) => box.sz));
-      const steps = Math.max(2, Math.ceil((end - start) / 2));
+      // 0.5 m sampling: at 2 m the ribbon's computeVertexNormals faceted the
+      // micro-terrain into visible specular crinkle at grazing angles.
+      const steps = Math.max(2, Math.ceil((end - start) / 0.5));
       const addStrip = (stripWidth: number, yOffset: number, mat: MatKey, layer: number) => {
         const positions: number[] = [];
         const uvs: number[] = [];

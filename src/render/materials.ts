@@ -142,18 +142,47 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
     } = {},
   ) {
     super({ metalness: opts.metalness ?? 0 });
-    const u = this.uniforms();
     // Material.clone() constructs with zero arguments and then copies state
-    // through the accessors below — the node graph is only built when a real
-    // texture set is provided.
+    // through the accessors below — the node graph is rebuilt by copy() when
+    // the source had one, so per-map retints, weather wetness and the road/
+    // path polygon-offset clones keep their projected texture.
     if (!set) return;
+    this.projectionSource = { set, opts };
+    const u = this.uniforms();
     u.tint.value = new THREE.Color(opts.color ?? 0xffffff);
     u.rough.value = opts.roughness ?? 1;
     u.ns.value.set(opts.normalScale ?? 1, opts.normalScale ?? 1);
+    this.buildProjectionGraph(set, opts.metersPerTile);
+    if (opts.envMapIntensity !== undefined) this.envMapIntensity = opts.envMapIntensity;
+  }
+
+  /** Set + options the graph was built from; clones re-derive their graph
+   * from the source's record via copy(). */
+  private declare projectionSource?: {
+    set: TextureSet;
+    opts: { metersPerTile?: number; color?: number; roughness?: number; metalness?: number; envMapIntensity?: number; normalScale?: number };
+  };
+  private declare normalTex?: THREE.Texture;
+
+  override copy(source: THREE.Material): this {
+    super.copy(source);
+    const src = source as ProjectedStandardMaterial;
+    if (src.projectionSource) {
+      this.projectionSource = src.projectionSource;
+      this.buildProjectionGraph(src.projectionSource.set, src.projectionSource.opts.metersPerTile);
+    }
+    return this;
+  }
+
+  /** Build the triplanar node graph sampling the given set, tinted by the
+   * CURRENT uniform values (not constructor options) so clones and runtime
+   * retints keep their state. */
+  private buildProjectionGraph(set: TextureSet, metersPerTile?: number): void {
+    const u = this.uniforms();
     this.colorTex = set.color ? finalize(set.color.clone()) : undefined;
     this.roughTex = set.rough ? finalize(set.rough.clone()) : undefined;
-    if (set.normal) finalize(set.normal.clone());
-    const k = uniform(1 / Math.max(0.001, opts.metersPerTile ?? 4));
+    this.normalTex = set.normal ? finalize(set.normal.clone()) : undefined;
+    const k = uniform(1 / Math.max(0.001, metersPerTile ?? 4));
 
     // projUv: single-axis pick from the interpolated world normal — exact for
     // axis-aligned/yaw-rotated boxes and stable under instancing.
@@ -173,8 +202,8 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
     if (this.roughTex) {
       this.roughnessNode = u.rough.mul(texture(this.roughTex).sample(puv).g);
     }
-    if (set.normal) {
-      const mapN = texture(set.normal).sample(puv).xyz.mul(2).sub(1);
+    if (this.normalTex) {
+      const mapN = texture(this.normalTex).sample(puv).xyz.mul(2).sub(1);
       const mapNxy = mapN.xy.mul(u.ns);
       // Face-tangent frame derived from the world normal.
       const T0 = normalize(cross(vec3(0.0, 1.0, 0.0), wNrm));
@@ -184,7 +213,6 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
       const wPerturbed = normalize(T.mul(mapNxy.x).add(B.mul(mapNxy.y)).add(wNrm.mul(mapN.z)));
       this.normalNode = transformNormalToView(wPerturbed);
     }
-    if (opts.envMapIntensity !== undefined) this.envMapIntensity = opts.envMapIntensity;
   }
 
   override get color(): THREE.Color {

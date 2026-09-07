@@ -6,8 +6,41 @@
  */
 
 import * as THREE from 'three';
+import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { mergeGeometries, toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { loadGltf } from '../assets/assets';
+
+/**
+ * Rebuild a GLTF-loader plain standard material as its node-material twin.
+ * On the WebGPU backend, plain MeshStandardMaterial on InstancedMesh draws
+ * loses ambient/hemisphere/env fill (direct sun works, shade crushes to
+ * void-black) — node materials render the same inputs correctly. Used at
+ * every GLB ingest point so props/vehicles never hit the broken path.
+ */
+export function toNodeStandard(mat: THREE.MeshStandardMaterial): MeshStandardNodeMaterial {
+  const node = new MeshStandardNodeMaterial({
+    color: mat.color.clone(),
+    map: mat.map ?? null,
+    normalMap: mat.normalMap ?? null,
+    roughnessMap: mat.roughnessMap ?? null,
+    metalnessMap: mat.metalnessMap ?? null,
+    aoMap: mat.aoMap ?? null,
+    emissive: mat.emissive.clone(),
+    emissiveMap: mat.emissiveMap ?? null,
+    emissiveIntensity: mat.emissiveIntensity,
+    roughness: mat.roughness,
+    metalness: mat.metalness,
+    envMapIntensity: mat.envMapIntensity,
+    transparent: mat.transparent,
+    opacity: mat.opacity,
+    alphaTest: mat.alphaTest,
+    side: mat.side,
+    name: mat.name,
+  });
+  node.normalScale.copy(mat.normalScale);
+  node.aoMapIntensity = mat.aoMapIntensity;
+  return node;
+}
 
 export interface InstancedProp {
   /** One mesh per material bucket; instance matrices applied at build time. */
@@ -114,7 +147,18 @@ export class PropLibrary {
 
     // Vehicle + weapon templates
     for (const v of ['sedan', 'suv', 'van', 'truck', 'taxi', 'police', 'delivery-flat', 'hatchback-sports', 'race-future']) {
-      jobs.push(loadGltf(`vehicles/${v}.glb`).then((a) => { this.templates.set(`vehicle/${v}`, a.scene); }));
+      jobs.push(loadGltf(`vehicles/${v}.glb`).then((a) => {
+        a.scene.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (!mesh.isMesh || !mesh.material) return;
+          const swap = (m: THREE.Material): THREE.Material =>
+            m instanceof THREE.MeshStandardMaterial ? toNodeStandard(m) : m;
+          mesh.material = Array.isArray(mesh.material)
+            ? mesh.material.map(swap)
+            : swap(mesh.material);
+        });
+        this.templates.set(`vehicle/${v}`, a.scene);
+      }));
     }
     await Promise.all(jobs);
     for (const variant of this.variants.values()) {
@@ -150,7 +194,7 @@ export class PropLibrary {
     const src = this.variants.get(key);
     if (!src || count === 0) return [];
     return src.geoms.map((geo, i) => {
-      const mat = src.materials[i] ?? new THREE.MeshStandardMaterial({ color: 0x5d7a43 });
+      const mat = src.materials[i] ?? new MeshStandardNodeMaterial({ color: 0x5d7a43 });
       const mesh = new THREE.InstancedMesh(geo, mat, count);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -601,6 +645,13 @@ export function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGe
       lambert.name = mat.name;
       mat.dispose();
       mat = lambert;
+    }
+    // Remaining plain PBR materials (bark, rock, vehicle paint) go through
+    // the node twin — see toNodeStandard for the WebGPU instancing bug.
+    if (mat instanceof THREE.MeshStandardMaterial) {
+      const node = toNodeStandard(mat);
+      mat.dispose();
+      mat = node;
     }
     materials.push(mat);
   });

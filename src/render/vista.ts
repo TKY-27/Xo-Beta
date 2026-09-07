@@ -1800,6 +1800,12 @@ function buildSandMicroTexture(): THREE.DataTexture {
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
+  // CYCLE 26: DataTexture defaults to no mipmaps — at grazing angles the
+  // 2 cm texels aliased into a foil-crinkle shimmer across the whole desert
+  // floor. Trilinear mips + anisotropy filter it like a regular scan.
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.anisotropy = 16;
   texture.needsUpdate = true;
   return texture;
@@ -1983,10 +1989,9 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   });
   if (map) {
     mat.map = map;
-    if (isDesert) {
-      mat.bumpMap = map;
-      mat.bumpScale = 0.018;
-    }
+    // CYCLE 26: the former bumpMap copy of the sand albedo shone as foil
+    // crinkle at grazing angles (bump shading has no range control there).
+    // The meandering normal map below carries the micro relief instead.
   }
   // Small-scale surface response shared by every terrain: a generated
   // near-neutral normal map (grass blade grain / sand ripple micro relief)
@@ -1996,7 +2001,7 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   const micro = buildMicroNormalTexture(isDesert);
   if (micro) {
     mat.normalMap = micro;
-    mat.normalScale.set(isDesert ? 0.42 : 0.7, isDesert ? 0.42 : 0.7);
+    mat.normalScale.set(isDesert ? 0.25 : 0.7, isDesert ? 0.25 : 0.7);
   }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
