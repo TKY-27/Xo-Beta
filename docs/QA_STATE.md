@@ -77,6 +77,8 @@ five cycles.
 
 | 28 | eden lake capture, neocity aerial/pick census | Round-5 P1 fixes: (1) eden water desaturated (lake/pond/river scatter profiles toward muted slate) + an always-on sky-ambient term (reflected×0.08) — real water never shows pure scatter from overhead; capture shows grey-blue water with sun glint instead of opaque turquoise. (2) HUD weapon slots were 24% translucent (bright world bled through at night) → near-opaque + 3px backdrop blur. (3) Round-5 P1.3 'two 55 m dark discs' in the neocity aerial investigated via ground-level pick: both are AUTHORED geometry (the 28.5 m centre canopy and the (−130,110) gasometer pad) — not a defect, no fix needed | zero console errors; water + material unit tests pass |
 
+| 29 | ashara wreck close-up + runtime material pick | Round-5 P0.3 fixed: wrecked vehicles rendered as black silhouettes. Diagnosis chain: (1) wreck tint multiplied the already-dark authored colour by 0.32 → black; (2) after de-darkening, the pool STILL intermittently rendered black with verified-correct material values at runtime — the stochastic face of the r185 instanced-binding fault; (3) vehicles are now one non-instanced clone per car (≤9/map, cheap) with the colormap atlas dropped for wrecks (flat ash 0x4a423a, matte) — the atlas's saturated primary body paint otherwise bled through any multiplied tint. Capture: sun-lit ash-brown wreck, readable silhouette. Note: two 5s net-clock unit timeouts during the cycle were load flakes (pass in isolation) | wreck reads as a scorched car; vehicles immune to the instancing fault by construction |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.

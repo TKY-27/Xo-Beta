@@ -1268,94 +1268,69 @@ export class WorldView {
   }
 
   private buildVehicles(def: MapDef, props: PropLibrary): void {
-    const buckets = new Map<string, Array<{ vehicle: (typeof def.vehicles)[number]; key: string }>>();
-    for (let i = 0; i < def.vehicles.length; i++) {
-      const v = def.vehicles[i]!;
-      const key = vehicleRenderSpec(v.variant, v.x, v.z).asset;
-      const bucketKey = `${key}:${v.variant === 'wrecked' ? 'wrecked' : 'live'}`;
-      const bucket = buckets.get(bucketKey) ?? [];
-      bucket.push({ vehicle: v, key });
-      buckets.set(bucketKey, bucket);
-    }
-
-    const rootInverse = new THREE.Matrix4();
-    const localMatrix = new THREE.Matrix4();
-    const vehicleMatrix = new THREE.Matrix4();
-    const instanceMatrix = new THREE.Matrix4();
-    const vehicleQuaternion = new THREE.Quaternion();
-    const vehiclePosition = new THREE.Vector3();
-    const sourceScale = new THREE.Vector3();
-
-    // Contact-shadow blobs: the shadow map alone leaves props floating on
-    // overcast maps — a soft dark disc under each vehicle grounds it.
+    // CYCLE 29: one non-instanced clone per vehicle. The former InstancedMesh
+    // pools intermittently rendered as pure-black silhouettes on WebGPU —
+    // material values verified correct at runtime (round-5 P0.3), i.e. the
+    // r185 instanced-binding fault from QA_STATE's zero-size-uniform family.
+    // Maps author ≤9 vehicles, so individual draws are cheap and avoid the
+    // instanced path entirely.
     const blobMat = this.ensureBlobMaterial();
     const blobGeo = this.ensureBlobGeometry();
-    for (const [bucketName, entries] of buckets) {
-      const key = entries[0]!.key;
-      const tmpl = props.cloneTemplate(`vehicle/${key}`);
-      if (!tmpl) continue;
-      tmpl.updateMatrixWorld(true);
-      rootInverse.copy(tmpl.matrixWorld).invert();
-      const blobs = new THREE.InstancedMesh(blobGeo, blobMat, entries.length);
-      let blobIdx = 0;
-      tmpl.traverse((o) => {
-        const sourceMesh = o as THREE.Mesh;
-        if (!sourceMesh.isMesh || !sourceMesh.material || !sourceMesh.geometry) return;
-        const src = Array.isArray(sourceMesh.material) ? sourceMesh.material[0]! : sourceMesh.material;
-        const m = src.clone() as THREE.MeshStandardMaterial;
-        delete m.userData.externalShared;
-        const wrecked = entries[0]!.vehicle.variant === 'wrecked';
-        const tintable = wrecked || Boolean(m.map);
-        if (wrecked) {
-          m.metalness = 0.4;
-          m.roughness = 0.95;
+    for (const v of def.vehicles) {
+      const key = vehicleRenderSpec(v.variant, v.x, v.z).asset;
+      const car = props.cloneTemplate(`vehicle/${key}`);
+      if (!car) continue;
+      const wrecked = v.variant === 'wrecked';
+      const spec = vehicleRenderSpec(v.variant, v.x, v.z);
+      car.position.set(v.x, v.y + spec.yOffset, v.z);
+      car.rotation.y = v.yaw;
+      car.scale.setScalar(spec.scale);
+      const fixMaterial = (source: THREE.Material): THREE.Material => {
+        const m = source.clone();
+        m.userData.externalShared = false;
+        const std = m as THREE.MeshStandardMaterial;
+        if (wrecked && std.color) {
+          // Burnt-out but still a readable car. The Kenney colormap atlas
+          // paints bodies in saturated primaries — multiplied tints stayed
+          // green/blue, so drop the atlas and paint flat ash (geometry keeps
+          // the silhouette; windows read as inset panels).
+          std.map = null;
+          std.color.set(0x4a423a);
+          std.metalness = 0.2;
+          std.roughness = 0.9;
+        } else if (std.color && std.map) {
+          const tint = new THREE.Color(v.color ?? 0x88929c);
+          std.color.multiply(tint).multiplyScalar(0.85).addScalar(0.0375);
         }
-        const instanced = new THREE.InstancedMesh(sourceMesh.geometry, m, entries.length);
-        localMatrix.multiplyMatrices(rootInverse, sourceMesh.matrixWorld);
-        for (let i = 0; i < entries.length; i++) {
-          const v = entries[i]!.vehicle;
-          const spec = vehicleRenderSpec(v.variant, v.x, v.z);
-          const vs = spec.scale;
-          vehiclePosition.set(v.x, v.y + spec.yOffset, v.z);
-          vehicleQuaternion.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, v.yaw);
-          sourceScale.setScalar(vs);
-          vehicleMatrix.compose(vehiclePosition, vehicleQuaternion, sourceScale);
-          instanceMatrix.multiplyMatrices(vehicleMatrix, localMatrix);
-          instanced.setMatrixAt(i, instanceMatrix);
-          if (tintable) {
-            const tint = new THREE.Color(v.color ?? 0x88929c);
-            if (wrecked) tint.multiplyScalar(0.32);
-            else tint.multiplyScalar(0.85).addScalar(0.0375);
-            instanced.setColorAt(i, tint);
-          }
-        }
-        instanced.instanceMatrix.needsUpdate = true;
-        if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
-        instanced.computeBoundingBox();
-        instanced.computeBoundingSphere();
-        instanced.frustumCulled = true;
-        instanced.castShadow = true;
-        instanced.receiveShadow = true;
-        instanced.name = `vehicle:${bucketName}`;
-        this.group.add(instanced);
-        for (let i = 0; i < entries.length; i++) {
-          const v = entries[i]!.vehicle;
-          const vs = vehicleRenderSpec(v.variant, v.x, v.z).scale;
-          const gy = this.mapDef.terrainHeight
-            ? this.mapDef.terrainHeight(v.x, v.z)
-            : v.y;
-          vehiclePosition.set(v.x, gy + 0.045, v.z);
-          vehicleQuaternion.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, v.yaw);
-          const blobSpan = vs * 3.1;
-          vehicleMatrix.compose(vehiclePosition, vehicleQuaternion, new THREE.Vector3(blobSpan, 1, blobSpan * 0.72));
-          blobs.setMatrixAt(blobIdx++, vehicleMatrix);
-        }
-        blobs.count = blobIdx;
-        blobs.instanceMatrix.needsUpdate = true;
-        blobs.frustumCulled = true;
-        blobs.name = `vehicle-blob:${bucketName}`;
-        this.group.add(blobs);
+        return m;
+      };
+      car.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.material) return;
+        mesh.material = Array.isArray(mesh.material)
+          ? mesh.material.map(fixMaterial)
+          : fixMaterial(mesh.material);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
       });
+      this.group.add(car);
+
+      // Contact-shadow disc grounds the car (shadow map alone floats it on
+      // overcast maps).
+      const gy = this.mapDef.terrainHeight
+        ? this.mapDef.terrainHeight(v.x, v.z)
+        : v.y;
+      const blobs = new THREE.InstancedMesh(blobGeo, blobMat, 1);
+      const m4 = new THREE.Matrix4().compose(
+        new THREE.Vector3(v.x, gy + 0.045, v.z),
+        new THREE.Quaternion().setFromAxisAngle(THREE.Object3D.DEFAULT_UP, v.yaw),
+        new THREE.Vector3(spec.scale * 3.1, 1, spec.scale * 3.1 * 0.72),
+      );
+      blobs.setMatrixAt(0, m4);
+      blobs.instanceMatrix.needsUpdate = true;
+      blobs.frustumCulled = true;
+      blobs.name = `vehicle-blob:${key}`;
+      this.group.add(blobs);
     }
   }
 
