@@ -9,7 +9,7 @@ import { WEAPONS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
-import { ArmSolver, createHandRig, type HandRig } from './hands';
+import { ArmSolver, createHandRig, type HandRig, type SupportStyle } from './hands';
 
 function smooth(t: number): number {
   const c = Math.min(1, Math.max(0, t));
@@ -131,7 +131,7 @@ export class ViewModel {
     this.group.name = 'viewmodel-root';
     this.group.add(this.pivot);
     this.buildFists();
-    this.armSolver = new ArmSolver(this.gloveMat);
+    this.armSolver = new ArmSolver();
     this.pivot.add(this.armSolver.group);
 
     this.muzzleFlashLight = new THREE.PointLight(0xffc878, 0, 7, 2);
@@ -301,7 +301,9 @@ export class ViewModel {
     if (slide && this.currentKey?.startsWith('pistol')) {
       if (slide.userData.baseZ === undefined) slide.userData.baseZ = slide.position.z;
       const slideCurve = this.slideT > 0 ? Math.sin((1 - this.slideT / 0.09) * Math.PI) : 0;
-      slide.position.z = (slide.userData.baseZ as number) - slideCurve * 0.035;
+      // CYCLE 37 (review): slides travel REARWARD (+z) — v2 moved it into
+      // the barrel.
+      slide.position.z = (slide.userData.baseZ as number) + slideCurve * 0.035;
     }
 
     // Swap-in dip
@@ -314,7 +316,8 @@ export class ViewModel {
       return;
     }
 
-    const def = WEAPONS[actor.inv.selectedWeapon?.weaponId ?? 'pistol'];
+    const weaponId = actor.inv.selectedWeapon?.weaponId ?? 'pistol';
+    const def = WEAPONS[weaponId];
     const adsTarget = actor.wpn.adsAmount;
     this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
     const ads = this.adsSmooth;
@@ -365,7 +368,7 @@ export class ViewModel {
         }
         mag.position.y = magY;
         mag.rotation.z = (mag.userData.baseRot as number) + rock;
-        mag.visible = !(phase < 0.44 && actor.wpn.reloadingEmpty);
+        mag.visible = !(phase < 0.25 && actor.wpn.reloadingEmpty);
       }
     } else {
       if (mag && mag.userData.baseY !== undefined) {
@@ -398,8 +401,14 @@ export class ViewModel {
     if (rig) {
       const reloadPhase = reloading ? 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal : -1;
       const boltMode = def2.fireMode === 'bolt';
+      const supportStyle: SupportStyle = weaponId === 'pistol'
+        ? 'over'
+        : def2.fireMode === 'pump'
+          ? 'pump'
+          : weaponId === 'smg' ? 'side' : 'under';
       rig.pose({
         reloadPhase,
+        supportStyle,
         magLocal: mag ? mag.position : null,
         pumpOffset,
         pumpHand: def2.fireMode === 'pump',
@@ -513,6 +522,7 @@ export class ViewModel {
     const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
 
     if (!weaponId) {
+      this.armSolver.setVisible(false);
       this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
       return;
     }
@@ -536,6 +546,9 @@ export class ViewModel {
     if (rig) {
       rig.pose({
         reloadPhase: -1,
+        supportStyle: weaponId === 'pistol' ? 'over'
+          : weaponId === 'shotgun' ? 'pump'
+            : weaponId === 'smg' ? 'side' : 'under',
         magLocal: this.currentModel?.mag?.position ?? null,
         pumpOffset: 0,
         pumpHand: weaponId === 'shotgun',

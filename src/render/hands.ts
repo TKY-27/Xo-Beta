@@ -24,9 +24,13 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 
+export type SupportStyle = 'under' | 'side' | 'pump' | 'over';
+
 export interface HandPoseInput {
   /** 0..1 through the reload, or -1 when not reloading. */
   reloadPhase: number;
+  /** How the support hand holds this weapon class. */
+  supportStyle: SupportStyle;
   /** Magazine position in weapon-local space (null if none). */
   magLocal: THREE.Vector3 | null;
   /** Weapon-local +z offset of the pump/bolt under cycle. */
@@ -93,6 +97,16 @@ function getFabricBump(): THREE.CanvasTexture | null {
   return tex;
 }
 
+
+let handMatsSingleton: HandMats | null = null;
+
+/** Shared hand materials — ONE instance used by the hands AND the arm
+ * sleeves, so the chain reads as one person (round-2 review: three tones). */
+export function getHandMaterialSet(): HandMats {
+  if (handMatsSingleton) return handMatsSingleton;
+  handMatsSingleton = makeHandMats();
+  return handMatsSingleton;
+}
 
 function makeHandMats(): HandMats {
   const bump = getFabricBump();
@@ -164,19 +178,6 @@ function buildHand(mats: HandMats): THREE.Group {
   return hand;
 }
 
-/** Forearm sleeve: child of the hand, running from the wrist off-screen.
- * Direction is authored in HAND space for the DEFAULT pose, so it exits the
- * bottom frame corners; reload swings carry it naturally. */
-function buildForearm(mats: HandMats, dir: THREE.Vector3): THREE.Group {
-  const arm = new THREE.Group();
-  const len = 0.4;
-  const sleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.026, len, 4, 10), mats.shell);
-  sleeve.position.copy(dir).multiplyScalar(len / 2 + 0.02);
-  sleeve.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
-  arm.add(sleeve);
-  return arm;
-}
-
 function smooth(t: number): number {
   const c = Math.min(1, Math.max(0, t));
   return c * c * (3 - 2 * c);
@@ -195,11 +196,6 @@ export function createHandRig(): HandRig {
 
   const right = buildHand(mats);
 
-  // Forearms exit bottom-right (right) / bottom-left-centre (left) in the
-  // default poses. Thinner sleeve — v1's read as grey clubs.
-  right.add(buildForearm(mats, new THREE.Vector3(0.5, -0.95, 0.5).normalize()));
-  left.add(buildForearm(mats, new THREE.Vector3(-0.35, -1.0, 0.55).normalize()));
-
   let gripR = new THREE.Vector3();
   let gripL = new THREE.Vector3();
 
@@ -215,7 +211,7 @@ export function createHandRig(): HandRig {
       left.position.copy(gripL);
       left.scale.setScalar(s);
     },
-    pose({ reloadPhase, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal }) {
+    pose({ reloadPhase, supportStyle, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal }) {
       // ---- Right hand -------------------------------------------------
       // Sniper: the firing hand leaves the grip and works the bolt through
       // the cycle, then re-seats. Grip → bolt → ride → return.
@@ -240,10 +236,11 @@ export function createHandRig(): HandRig {
       }
 
       // ---- Left hand ----------------------------------------------------
-      if (pumpHand) {
-        // Shotgun: hand rides ON the pump (anchor sits at its rear-top).
-        left.position.set(gripL.x, gripL.y, gripL.z + pumpOffset);
-        leftWrap.rotation.set(-0.15, Math.PI, 0);
+      if (pumpHand || supportStyle === 'pump') {
+        // Shotgun: fingers wrap UNDER the pump (v2's flat palm lay on top
+        // and vanished into the pump box).
+        left.position.set(gripL.x, gripL.y - 0.022, gripL.z + pumpOffset);
+        leftWrap.rotation.set(-0.6, Math.PI, 0);
         return;
       }
       if (reloadPhase >= 0 && magLocal) {
@@ -266,12 +263,24 @@ export function createHandRig(): HandRig {
         left.position.copy(target);
         return;
       }
-      // Default support pose: palm cups the underside, fingers curling up
-      // around the far side — tucked lower while aiming so it never crosses
-      // the sight line (round-6 review: ADS was blocked by the glove).
+      // Support poses per class (review: the shared -1.15 pitch speared
+      // fingertips through the solid forends on every long gun).
       const tuck = ads * 0.035;
-      left.position.set(gripL.x, gripL.y - 0.03 - tuck, gripL.z + ads * 0.01);
-      leftWrap.rotation.set(-1.15 - ads * 0.25, Math.PI, 0.2);
+      if (supportStyle === 'side') {
+        // SMG: horizontal wrap around the vertical foregrip.
+        left.position.set(gripL.x - 0.03, gripL.y - 0.01 - tuck, gripL.z);
+        leftWrap.rotation.set(-0.2, Math.PI, 1.15);
+        return;
+      }
+      if (supportStyle === 'over') {
+        // Pistol: hand-over-hand — palm cups the firing hand from below-front.
+        left.position.set(gripL.x, gripL.y - 0.012, gripL.z - 0.024);
+        leftWrap.rotation.set(-0.85, Math.PI, -0.35);
+        return;
+      }
+      // 'under' (AR/sniper): fingers run forward along the bottom face.
+      left.position.set(gripL.x, gripL.y - 0.035 - tuck, gripL.z);
+      leftWrap.rotation.set(-0.3 - ads * 0.15, Math.PI, 0.15);
     },
   };
 }
@@ -289,12 +298,15 @@ export function createHandRig(): HandRig {
 export class ArmSolver {
   readonly group = new THREE.Group();
   /** Shoulder anchors in view (pivot) space — off the bottom corners. */
+  // CYCLE 37 (review): shoulders near the eye plane and a chain long enough
+  // for the worst-case reach (sniper support hand) — v2's left sleeve ended
+  // 20-40 cm short of the hand in EVERY long-gun frame by construction.
   private readonly shoulders = [
-    new THREE.Vector3(0.24, -0.38, 0.26),
-    new THREE.Vector3(-0.22, -0.36, 0.24),
+    new THREE.Vector3(0.18, -0.28, 0.05),
+    new THREE.Vector3(-0.18, -0.28, 0.05),
   ];
-  private readonly upperLen = 0.32;
-  private readonly foreLen = 0.34;
+  private readonly upperLen = 0.34;
+  private readonly foreLen = 0.32;
   private readonly bends = [new THREE.Vector3(1.2, -0.9, 0.1), new THREE.Vector3(-1.2, -0.9, 0.1)];
   private readonly sleeves: Array<{ upper: THREE.Mesh; fore: THREE.Mesh }> = [];
   private joints: THREE.Mesh[] = [];
@@ -302,7 +314,8 @@ export class ArmSolver {
   private tmpB = new THREE.Vector3();
   private tmpElbow = new THREE.Vector3();
 
-  constructor(shell: THREE.MeshStandardMaterial) {
+  constructor() {
+    const shell = getHandMaterialSet().shell;
     const make = (rTop: number, rBottom: number): THREE.Mesh => {
       // Unit-height tapered cylinder, stretched between joints per frame.
       const mesh = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBottom, 1, 10, 1, true), shell);
@@ -313,7 +326,9 @@ export class ArmSolver {
       return mesh;
     };
     for (let i = 0; i < 2; i++) {
-      this.sleeves.push({ upper: make(0.052, 0.046), fore: make(0.045, 0.034) });
+      // Taper: thicker at the shoulder, thinnest at the wrist (aim() maps
+      // +Y to the SECOND joint, so rTop is the far end — v2 had it inverted).
+      this.sleeves.push({ upper: make(0.044, 0.054), fore: make(0.032, 0.044) });
     }
     // Joint spheres close the open cylinder ends at elbow and wrist.
     this.joints = [
