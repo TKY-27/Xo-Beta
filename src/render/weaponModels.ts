@@ -19,6 +19,9 @@ export interface WeaponModel {
   bolt: THREE.Object3D | null;
   /** Accent meshes whose emissive follows rarity. */
   accents: THREE.MeshStandardMaterial[];
+  /** CYCLE 35: first-person hand anchors (weapon-local metres). */
+  gripR: THREE.Vector3;
+  gripL: THREE.Vector3;
 }
 
 const ALL_RARITIES = RARITIES;
@@ -38,6 +41,8 @@ function cloneWeaponModel(tmpl: WeaponModel): WeaponModel {
     mag: tmpl.mag ? mag : null,
     bolt: tmpl.bolt ? bolt : null,
     accents: tmpl.accents,
+    gripR: tmpl.gripR,
+    gripL: tmpl.gripL,
   };
 }
 
@@ -215,7 +220,7 @@ export class WeaponModelFactory {
         if (!material.userData.externalShared) material.userData.weaponFactoryOwned = true;
       }
     });
-    return { group, muzzle: muzzle.position.clone(), mag: gun.mag, bolt: gun.bolt, accents };
+    return { group, muzzle: muzzle.position.clone(), mag: gun.mag, bolt: gun.bolt, accents, gripR: gun.gripR, gripL: gun.gripL };
   }
 
   /** World-loot presentation scale of a weapon. */

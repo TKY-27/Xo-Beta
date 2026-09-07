@@ -9,6 +9,7 @@ import { WEAPONS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
+import { createHandRig, type HandRig } from './hands';
 
 const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.33);
 const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
@@ -28,6 +29,8 @@ export class ViewModel {
   private readonly pivot = new THREE.Group();
   private factory: WeaponModelFactory;
   private models = new Map<string, WeaponModel>();
+  /** CYCLE 35: hands rig attached inside each weapon model clone. */
+  private rigs = new Map<string, HandRig>();
   private armMat: THREE.MeshStandardMaterial;
   private gloveMat: THREE.MeshStandardMaterial;
   private currentId: WeaponId | null = null;
@@ -176,7 +179,8 @@ export class ViewModel {
       const built = this.factory.build(id, rarity);
       if (!built) return null;
       m = built;
-      m.group.scale.setScalar(ViewModel.WEAPON_VIEW_SCALE[id]);
+      const viewScale = ViewModel.WEAPON_VIEW_SCALE[id];
+      m.group.scale.setScalar(viewScale);
       // viewmodel render tuning: draw over world, no shadow casting
       m.group.traverse((o) => {
         const mesh = o as THREE.Mesh;
@@ -184,6 +188,19 @@ export class ViewModel {
         const mat = mesh.material as THREE.Material | undefined;
         if (mat && 'depthTest' in mat) { /* keep depth test; weapon clips handled by proximity */ }
       });
+      // CYCLE 35: gloved hands parented inside the weapon so every weapon
+      // motion (sway/ADS/recoil/reload) carries them; counter-scaled to stay
+      // human-size against the presentation scale.
+      const rig = createHandRig();
+      rig.configure({ gripR: m.gripR, gripL: m.gripL, scale: viewScale });
+      for (const handGroup of [rig.right, rig.left]) {
+        handGroup.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (mesh.isMesh) { mesh.castShadow = false; mesh.receiveShadow = false; }
+        });
+        m.group.add(handGroup);
+      }
+      this.rigs.set(key, rig);
       m.group.visible = false;
       this.models.set(key, m);
       this.pivot.add(m.group);
@@ -331,10 +348,27 @@ export class ViewModel {
       boltAnim = Math.sin((1 - actor.wpn.boltTimer / total) * Math.PI);
     }
     const bolt = this.currentModel?.bolt ?? null;
+    let pumpOffset = 0;
     if (bolt) {
       if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
       const dir = def2.fireMode === 'pump' ? -0.085 : 0.06;
-      bolt.position.z = (bolt.userData.baseZ as number) + boltAnim * dir;
+      pumpOffset = boltAnim * dir;
+      bolt.position.z = (bolt.userData.baseZ as number) + pumpOffset;
+    }
+
+    // CYCLE 35: drive the hand rig with the same choreography the weapon
+    // already follows (reload timeline, pump/bolt travel, ADS stiffening).
+    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
+    if (rig) {
+      const reloadPhase = reloading ? 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal : -1;
+      rig.pose({
+        reloadPhase,
+        magVisible: mag ? mag.visible : false,
+        magLocal: mag ? mag.position : null,
+        pumpOffset,
+        pumpHand: def2.fireMode === 'pump',
+        ads,
+      });
     }
 
     // Compose position: hip → ADS → sprint offsets

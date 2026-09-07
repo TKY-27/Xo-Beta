@@ -53,6 +53,8 @@ describe('replica viewmodel presentation', () => {
       mag: null,
       bolt: null,
       accents: [],
+      gripR: new THREE.Vector3(0, -0.05, -0.1),
+      gripL: new THREE.Vector3(0, -0.01, -0.5),
     }));
     const viewmodel = new ViewModel(factory(build));
     const view = actor();

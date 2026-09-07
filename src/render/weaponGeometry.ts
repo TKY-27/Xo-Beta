@@ -387,6 +387,11 @@ export interface ProceduralWeapon {
   railY: number;
   /** Where a scope/sight mounts (z). */
   railZ: number;
+  /** CYCLE 35: first-person hand anchors (weapon-local, metres).
+   * gripR = trigger hand on the pistol grip; gripL = support hand on the
+   * handguard / foregrip / pump. */
+  gripR: THREE.Vector3;
+  gripL: THREE.Vector3;
 }
 
 /** Common receiver block: upper + lower with magwell, serial-plate detail. */
@@ -439,7 +444,11 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
   ironSights(g, mats, 0.058, -0.615, -0.1);
   // Sling loop
   ring(g, mats.hardware, 0.008, 0.002, 0.024, 0.006, -0.09);
-  return { group: g, muzzleZ: -0.71, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.055, railZ: -0.2 };
+  return {
+    group: g, muzzleZ: -0.71, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.055, railZ: -0.2,
+    gripR: new THREE.Vector3(0, -0.05, -0.108),
+    gripL: new THREE.Vector3(0, -0.008, -0.5),
+  };
 }
 
 /** Pistol anatomy (canonical 0.42 m incl. arms-length proportioning). */
@@ -464,7 +473,11 @@ function buildPistol(mats: GunMaterials): ProceduralWeapon {
   mag.group.name = 'mag';
   // Sights
   ironSights(g, mats, 0.048, -0.225, -0.035);
-  return { group: g, muzzleZ: -0.246, mag: g.getObjectByName('mag') ?? null, bolt: slide, railY: 0.048, railZ: -0.11 };
+  return {
+    group: g, muzzleZ: -0.246, mag: g.getObjectByName('mag') ?? null, bolt: slide, railY: 0.048, railZ: -0.11,
+    gripR: new THREE.Vector3(0, -0.052, -0.052),
+    gripL: new THREE.Vector3(-0.012, -0.062, -0.045),
+  };
 }
 
 /** SMG anatomy (canonical 0.62 m): compact, side-folding rails, big suppressor. */
@@ -500,7 +513,11 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
   const bolt = chargingDetail(g, mats, 0.026, 0.04, -0.085);
   bolt.name = 'bolt';
   ironSights(g, mats, 0.06, -0.43, -0.06);
-  return { group: g, muzzleZ: -0.525, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.058, railZ: -0.16 };
+  return {
+    group: g, muzzleZ: -0.525, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.058, railZ: -0.16,
+    gripR: new THREE.Vector3(0, -0.048, -0.092),
+    gripL: new THREE.Vector3(0, -0.05, -0.38),
+  };
 }
 
 /** Shotgun anatomy (canonical 1.0 m): tube magazine, pump, bead sight. */
@@ -538,7 +555,11 @@ function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   // Shell carrier detail on the receiver side
   box(g, mats.aluminum, 0.006, 0.03, 0.1, 0.024, 0.008, -0.18, 0.002);
   ironSights(g, mats, 0.06, -0.35, -0.08);
-  return { group: g, muzzleZ: -0.92, mag: null, bolt: pump, railY: 0.06, railZ: -0.2 };
+  return {
+    group: g, muzzleZ: -0.92, mag: null, bolt: pump, railY: 0.06, railZ: -0.2,
+    gripR: new THREE.Vector3(0, -0.042, -0.088),
+    gripL: new THREE.Vector3(0, 0.0, -0.52),
+  };
 }
 
 /** Sniper anatomy (canonical 1.28 m): heavy barrel, bolt handle, cheek riser. */
@@ -604,7 +625,11 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
     const leg = box(g, mats.aluminum, 0.008, 0.09, 0.012, side * 0.014, -0.036, -0.6, 0.002);
     leg.rotation.x = 0.9 * side * 0.25;
   }
-  return { group: g, muzzleZ: -1.28, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.062, railZ: -0.16 };
+  return {
+    group: g, muzzleZ: -1.28, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.062, railZ: -0.16,
+    gripR: new THREE.Vector3(0, -0.04, -0.082),
+    gripL: new THREE.Vector3(0, -0.005, -0.5),
+  };
 }
 
 export function buildProceduralWeapon(weaponId: WeaponId, mats: GunMaterials): ProceduralWeapon {
