@@ -75,6 +75,8 @@ five cycles.
 | 27 | eden transport capture | Critic P0.2: transport aircraft was a featureless grey capsule with slab wings and flat cyan discs. Rebuilt `buildTransport` as procedural dropship anatomy: lathed fuselage profile (nose cone → cockpit hump → troop section → tapered tail), glazed cockpit on the nose slope, swept tapered extruded wings with slight anhedral, wing-tip nacelles (intake lip + trim ring + recessed emissive exhaust disc), twin canted tail fins, structural hoops, dorsal rail + antenna, belly skids, slung cargo pod with lit windows, red running beacons | transport reads as a real twin-engine dropship from the drop camera; zero console errors |
 
 
+| 28 | eden lake capture, neocity aerial/pick census | Round-5 P1 fixes: (1) eden water desaturated (lake/pond/river scatter profiles toward muted slate) + an always-on sky-ambient term (reflected×0.08) — real water never shows pure scatter from overhead; capture shows grey-blue water with sun glint instead of opaque turquoise. (2) HUD weapon slots were 24% translucent (bright world bled through at night) → near-opaque + 3px backdrop blur. (3) Round-5 P1.3 'two 55 m dark discs' in the neocity aerial investigated via ground-level pick: both are AUTHORED geometry (the 28.5 m centre canopy and the (−130,110) gasometer pad) — not a defect, no fix needed | zero console errors; water + material unit tests pass |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
