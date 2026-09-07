@@ -7,7 +7,7 @@
 
 import * as THREE from 'three';
 import { RARITY_COLORS, RARITIES, type Rarity, type WeaponId } from '../core/balance';
-import { buildProceduralWeapon, makeGunMaterials, type GunMaterials } from './weaponGeometry';
+import { buildProceduralWeapon, makeGunMaterials, makeSkinTexture, type GunMaterials } from './weaponGeometry';
 
 export interface WeaponModel {
   group: THREE.Group;
@@ -58,12 +58,46 @@ export class WeaponModelFactory {
   /** Prebuilt archetype per `weaponId:rarity`. Clones share geometry+materials. */
   private templates = new Map<string, WeaponModel>();
   private readonly mats: GunMaterials;
+  /** CYCLE 32: per-rarity skin material overrides for the large receiver /
+   * handguard / stock panels. Shared across every weapon archetype. */
+  private skinPanels = new Map<Rarity, Map<string, THREE.MeshStandardMaterial>>();
+  /** Hex tint per rarity for the skin graphic. */
+  private static readonly SKIN_TINTS: Record<Rarity, string> = {
+    common: '#8d949c',
+    uncommon: '#5fd08a',
+    rare: '#57a8ff',
+    epic: '#c46bff',
+    legendary: '#ffb545',
+  };
 
   constructor(
     /** Unused since the procedural-geometry rework; retained for call-site stability. */
     _props: unknown,
   ) {
     this.mats = makeGunMaterials();
+  }
+
+  /** Skin-panel material for one base material + rarity (cached). Common
+   * keeps the bare-metal look; uncommon+ carry the pattern graphic. */
+  private skinPanel(baseName: string, rarity: Rarity): THREE.MeshStandardMaterial | null {
+    if (rarity === 'common') return null;
+    let byBase = this.skinPanels.get(rarity);
+    if (!byBase) {
+      byBase = new Map();
+      this.skinPanels.set(rarity, byBase);
+    }
+    const cached = byBase.get(baseName);
+    if (cached) return cached;
+    const base = (this.mats as unknown as Record<string, THREE.MeshStandardMaterial | undefined>)[baseName];
+    if (!base) return null;
+    const panel = base.clone();
+    panel.map = makeSkinTexture(rarity, WeaponModelFactory.SKIN_TINTS[rarity]);
+    panel.color.set(0xbfc3c8);
+    panel.roughness = Math.min(0.62, base.roughness + 0.08);
+    panel.name = `skin:${baseName}:${rarity}`;
+    panel.userData.weaponFactoryOwned = true;
+    byBase.set(baseName, panel);
+    return panel;
   }
 
   /**
@@ -153,6 +187,20 @@ export class WeaponModelFactory {
     muzzle.position.set(0, 0.026, gun.muzzleZ - 0.015);
     group.add(muzzle);
 
+    // CYCLE 32: rarity skin panels on the large surfaces (receiver/handguard/
+    // stock are aluminum/polymer-named materials). Small hardware stays bare.
+    if (rarity !== 'common') {
+      group.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const mat = mesh.material as THREE.MeshStandardMaterial;
+        if (Array.isArray(mat) || !mat?.name) return;
+        if (mat.name !== 'aluminum' && mat.name !== 'polymer') return;
+        const panel = this.skinPanel(mat.name, rarity);
+        if (panel) mesh.material = panel;
+      });
+    }
+
     group.traverse((object) => {
       const mesh = object as THREE.Mesh;
       if (!mesh.isMesh) return;
@@ -191,6 +239,10 @@ export class WeaponModelFactory {
     for (const material of materials) material.dispose();
     for (const geometry of geometries) geometry.dispose();
     for (const material of Object.values(this.mats)) material.dispose();
+    for (const byBase of this.skinPanels.values()) {
+      for (const material of byBase.values()) material.dispose();
+    }
+    this.skinPanels.clear();
     this.templates.clear();
   }
 }

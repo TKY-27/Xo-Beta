@@ -9,7 +9,7 @@
 
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import type { WeaponId } from '../core/balance';
+import type { Rarity, WeaponId } from '../core/balance';
 
 export interface GunMaterials {
   /** Blued steel: barrels, bolts, slides. */
@@ -24,14 +24,212 @@ export interface GunMaterials {
   hardware: THREE.MeshStandardMaterial;
 }
 
+/**
+ * CYCLE 32 — procedural weapon PBR detail. Flat-shaded gun materials read as
+ * clay toys at viewmodel range (the reference footage carries visible brush
+ * grain, machining marks and grip stipple). One shared 256px canvas per map
+ * type; textures tile over the primitive UVs.
+ */
+
+let brushedRough: THREE.CanvasTexture | null = null;
+let stippleBump: THREE.CanvasTexture | null = null;
+
+/** Horizontal brush grain + random machining scratches as a roughness map. */
+function getBrushedRoughness(): THREE.CanvasTexture {
+  if (brushedRough) return brushedRough;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#8c8c8c';
+  ctx.fillRect(0, 0, size, size);
+  // Brush streaks: faint horizontal value lines.
+  for (let i = 0; i < 460; i++) {
+    const y = Math.random() * size;
+    const v = 120 + Math.floor(Math.random() * 70);
+    ctx.strokeStyle = `rgba(${v},${v},${v},0.35)`;
+    ctx.lineWidth = 0.6 + Math.random() * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(size, y + (Math.random() - 0.5) * 3);
+    ctx.stroke();
+  }
+  // Machining scratches: short diagonal bright/dark nicks.
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const len = 3 + Math.random() * 16;
+    const bright = Math.random() > 0.5;
+    ctx.strokeStyle = bright ? 'rgba(230,230,230,0.5)' : 'rgba(40,40,40,0.45)';
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + len, y + (Math.random() - 0.5) * 6);
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 2);
+  tex.colorSpace = THREE.NoColorSpace;
+  brushedRough = tex;
+  return tex;
+}
+
+/** Polymer stipple: staggered dot grid as a bump map (grip texture). */
+function getStippleBump(): THREE.CanvasTexture {
+  if (stippleBump) return stippleBump;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0, 0, size, size);
+  const step = 9;
+  for (let row = 0; row * step < size; row++) {
+    for (let col = 0; col * step < size; col++) {
+      const x = col * step + (row % 2 ? step / 2 : 0);
+      const y = row * step;
+      const grad = ctx.createRadialGradient(x, y, 0.5, x, y, 3.4);
+      grad.addColorStop(0, 'rgba(230,230,230,0.9)');
+      grad.addColorStop(1, 'rgba(128,128,128,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, 3.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(3, 3);
+  tex.colorSpace = THREE.NoColorSpace;
+  stippleBump = tex;
+  return tex;
+}
+
+/**
+ * Rarity skin panel graphic. A per-tier pattern drawn over a gunmetal base,
+ * tinted toward the rarity colour — the reference footage carries full-body
+ * weapon skins; flat single-colour receivers read as toys. One canvas per
+ * rarity, shared by every weapon class.
+ */
+export function makeSkinTexture(rarity: Rarity, tint: string): THREE.CanvasTexture {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  // Gunmetal base with a faint vertical brushed gradient.
+  const grad = ctx.createLinearGradient(0, 0, 0, size);
+  grad.addColorStop(0, '#4c5157');
+  grad.addColorStop(0.5, '#41464c');
+  grad.addColorStop(1, '#363b41');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  ctx.globalAlpha = 0.5;
+  for (let i = 0; i < 90; i++) {
+    const y = Math.random() * size;
+    ctx.strokeStyle = Math.random() > 0.5 ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.16)';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(size, y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = tint;
+  ctx.fillStyle = tint;
+  switch (rarity) {
+    case 'uncommon': // diagonal service stripes
+      ctx.globalAlpha = 0.4;
+      ctx.lineWidth = 9;
+      for (let i = -1; i < 6; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-20, i * 48);
+        ctx.lineTo(size + 20, i * 48 + 34);
+        ctx.stroke();
+      }
+      break;
+    case 'rare': // circuit traces
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = 3;
+      for (let i = 0; i < 5; i++) {
+        const y = 28 + i * 48;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(70 + (i % 2) * 40, y);
+        ctx.lineTo(110 + (i % 2) * 40, y - 22);
+        ctx.lineTo(size, y - 22);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(70 + (i % 2) * 40, y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    case 'epic': // geometric shards
+      ctx.globalAlpha = 0.34;
+      for (let i = 0; i < 9; i++) {
+        const x = Math.random() * size;
+        const y = Math.random() * size;
+        const w = 30 + Math.random() * 60;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + w, y - w * 0.32);
+        ctx.lineTo(x + w * 1.2, y + w * 0.3);
+        ctx.closePath();
+        ctx.fill();
+      }
+      break;
+    case 'legendary': // ornate filigree + crown band
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 4;
+      for (let i = 0; i < 4; i++) {
+        const y = 32 + i * 64;
+        ctx.beginPath();
+        for (let x = 0; x <= size; x += 8) {
+          ctx.lineTo(x, y + Math.sin(x * 0.09 + i) * 12);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 0.3;
+      ctx.fillRect(0, size * 0.42, size, 14);
+      break;
+    default: // common: plain gunmetal, no graphic
+      ctx.globalAlpha = 0;
+      break;
+  }
+  ctx.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  return tex;
+}
+
 export function makeGunMaterials(): GunMaterials {
-  return {
-    steel: new THREE.MeshStandardMaterial({ color: 0x3c4046, roughness: 0.3, metalness: 0.88 }),
-    aluminum: new THREE.MeshStandardMaterial({ color: 0x484d54, roughness: 0.48, metalness: 0.72 }),
-    polymer: new THREE.MeshStandardMaterial({ color: 0x313438, roughness: 0.76, metalness: 0.05 }),
-    rubber: new THREE.MeshStandardMaterial({ color: 0x121315, roughness: 0.96, metalness: 0.02 }),
-    hardware: new THREE.MeshStandardMaterial({ color: 0x585f66, roughness: 0.28, metalness: 0.9 }),
-  };
+  // CYCLE 32: brightened one step so silhouette shapes read at gameplay
+  // range, plus shared PBR detail maps (brush grain, grip stipple).
+  const rough = getBrushedRoughness();
+  const stipple = getStippleBump();
+  const steel = new THREE.MeshStandardMaterial({ color: 0x495057, roughness: 0.34, metalness: 0.9 });
+  steel.roughnessMap = rough;
+  steel.name = 'steel';
+  const aluminum = new THREE.MeshStandardMaterial({ color: 0x575e66, roughness: 0.52, metalness: 0.78 });
+  aluminum.roughnessMap = rough;
+  aluminum.name = 'aluminum';
+  const polymer = new THREE.MeshStandardMaterial({ color: 0x3d4147, roughness: 0.8, metalness: 0.06 });
+  polymer.normalMap = stipple;
+  polymer.normalScale.set(0.35, 0.35);
+  polymer.name = 'polymer';
+  const rubber = new THREE.MeshStandardMaterial({ color: 0x141619, roughness: 0.96, metalness: 0.02 });
+  rubber.normalMap = stipple;
+  rubber.normalScale.set(0.5, 0.5);
+  rubber.name = 'rubber';
+  const hardware = new THREE.MeshStandardMaterial({ color: 0x666d75, roughness: 0.3, metalness: 0.92 });
+  hardware.name = 'hardware';
+  return { steel, aluminum, polymer, rubber, hardware };
 }
 
 /** Shared helper: chamfered box at a pose. */

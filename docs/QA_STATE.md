@@ -85,6 +85,8 @@ five cycles.
 
 | 31 | eden lake capture | Round-6 refutations: (1) water profiles desaturated another step (shallow scatter toward slate 0x466e6b-family) + sky-ambient floor 0.08→0.12 — the lake reads slate-blue at all sampled angles; (2) wood/woodDark tints lifted one step (0x9a9284 / 0x7d766a) for backlit pole legibility | zero console errors |
 
+| 32 | eden FP AR capture (epic rarity) | Reference-footage pass 1 — weapon material/skin system: procedural PBR detail maps (brushed-metal roughness grain, polymer grip stipple bump), brightened gun palette so silhouettes read at gameplay range, and per-rarity full-panel SKIN graphics (uncommon stripes / rare circuit / epic shards / legendary filigree) applied to receiver/handguard/stock via shared cached materials — the reference footage carries full-body weapon skins; the former thin accent strip read as a black blob at hip | epic AR shows purple shard skin + material contrast; zero console errors |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
