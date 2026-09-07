@@ -476,7 +476,7 @@ function buildPistol(mats: GunMaterials): ProceduralWeapon {
   return {
     group: g, muzzleZ: -0.246, mag: g.getObjectByName('mag') ?? null, bolt: slide, railY: 0.048, railZ: -0.11,
     gripR: new THREE.Vector3(0, -0.052, -0.052),
-    gripL: new THREE.Vector3(-0.012, -0.062, -0.045),
+    gripL: new THREE.Vector3(-0.02, -0.05, -0.03),
   };
 }
 
@@ -558,7 +558,7 @@ function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   return {
     group: g, muzzleZ: -0.92, mag: null, bolt: pump, railY: 0.06, railZ: -0.2,
     gripR: new THREE.Vector3(0, -0.042, -0.088),
-    gripL: new THREE.Vector3(0, 0.0, -0.52),
+    gripL: new THREE.Vector3(0, 0.03, -0.48),
   };
 }
 

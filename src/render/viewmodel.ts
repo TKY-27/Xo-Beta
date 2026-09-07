@@ -9,7 +9,12 @@ import { WEAPONS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
-import { createHandRig, type HandRig } from './hands';
+import { ArmSolver, createHandRig, type HandRig } from './hands';
+
+function smooth(t: number): number {
+  const c = Math.min(1, Math.max(0, t));
+  return c * c * (3 - 2 * c);
+}
 
 const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.33);
 const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
@@ -31,6 +36,9 @@ export class ViewModel {
   private models = new Map<string, WeaponModel>();
   /** CYCLE 35: hands rig attached inside each weapon model clone. */
   private rigs = new Map<string, HandRig>();
+  /** CYCLE 36 (user pass): connected shoulder→elbow→wrist arm chains — the
+   * hands are the END of the character's arms, never floating mittens. */
+  readonly armSolver: ArmSolver;
   private armMat: THREE.MeshStandardMaterial;
   private gloveMat: THREE.MeshStandardMaterial;
   private currentId: WeaponId | null = null;
@@ -51,6 +59,7 @@ export class ViewModel {
   private recoilZ = 0;
   private recoilPitch = 0;
   private recoilRoll = 0;
+  private slideT = 0;
   private reloadT = 0;
   private swapT = 0;
   private adsSmooth = 0;
@@ -122,6 +131,8 @@ export class ViewModel {
     this.group.name = 'viewmodel-root';
     this.group.add(this.pivot);
     this.buildFists();
+    this.armSolver = new ArmSolver(this.gloveMat);
+    this.pivot.add(this.armSolver.group);
 
     this.muzzleFlashLight = new THREE.PointLight(0xffc878, 0, 7, 2);
   }
@@ -265,6 +276,7 @@ export class ViewModel {
     this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
     if (!actor || (!this.currentId && !this.fistsR.visible)) {
       this.group.visible = false;
+      this.armSolver.setVisible(false);
       return;
     }
     this.group.visible = true;
@@ -283,12 +295,21 @@ export class ViewModel {
     this.recoilZ *= Math.exp(-8.5 * dt);
     this.recoilPitch *= Math.exp(-6.5 * dt);
     this.recoilRoll *= Math.exp(-9 * dt);
+    // Pistol slide return spring.
+    this.slideT = Math.max(0, this.slideT - dt);
+    const slide = this.currentModel?.bolt ?? null;
+    if (slide && this.currentKey?.startsWith('pistol')) {
+      if (slide.userData.baseZ === undefined) slide.userData.baseZ = slide.position.z;
+      const slideCurve = this.slideT > 0 ? Math.sin((1 - this.slideT / 0.09) * Math.PI) : 0;
+      slide.position.z = (slide.userData.baseZ as number) - slideCurve * 0.035;
+    }
 
     // Swap-in dip
     this.swapT = Math.max(0, this.swapT - dt);
     const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
 
     if (!this.currentId) {
+      this.armSolver.setVisible(false);
       this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
       return;
     }
@@ -316,20 +337,34 @@ export class ViewModel {
     if (reloading) {
       const phase = 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal;
       const curve = Math.sin(phase * Math.PI);
-      reloadPitch = curve * 0.55;
-      reloadRoll = curve * 0.38;
+      // CYCLE 36 (review): port-side cant + slight muzzle-down — the former
+      // muzzle-up 0.55 pitch read as 'presenting arms'.
+      reloadPitch = curve * 0.14;
+      reloadRoll = curve * 0.3;
       reloadDrop = curve * 0.055;
       if (mag) {
         if (mag.userData.baseY === undefined) {
           mag.userData.baseY = mag.position.y;
           mag.userData.baseRot = mag.rotation.z;
         }
+        // CYCLE 36 (review): the v1 formula levitated the mag to baseY+0.2 on
+        // the second half. Proper reload: slide DOWN out of the well through
+        // the first half, then carry a fresh mag back UP to exactly baseY.
         const baseY = mag.userData.baseY as number;
-        const dropPhase = Math.min(1, phase * 2.4);
-        mag.position.y = baseY - dropPhase * 0.2 * (phase < 0.52 ? 1 : -1);
-        // CYCLE 33: rock the magazine out/in around its base like a real
-        // reload instead of a pure vertical slide.
-        mag.rotation.z = (mag.userData.baseRot as number) + (phase < 0.52 ? 1 : -1) * dropPhase * 0.35;
+        const drop = 0.14;
+        let magY: number;
+        let rock: number;
+        if (phase < 0.5) {
+          const t = smooth(Math.min(1, phase / 0.5));
+          magY = baseY - drop * t;
+          rock = 0.3 * t;
+        } else {
+          const t = smooth(Math.min(1, (phase - 0.5) / 0.35));
+          magY = baseY - drop * (1 - t);
+          rock = 0.3 * (1 - t);
+        }
+        mag.position.y = magY;
+        mag.rotation.z = (mag.userData.baseRot as number) + rock;
         mag.visible = !(phase < 0.44 && actor.wpn.reloadingEmpty);
       }
     } else {
@@ -351,23 +386,28 @@ export class ViewModel {
     let pumpOffset = 0;
     if (bolt) {
       if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
-      const dir = def2.fireMode === 'pump' ? -0.085 : 0.06;
+      // CYCLE 36 (review): a pump PULLS rearward (+z) to eject, then returns.
+      const dir = def2.fireMode === 'pump' ? 0.085 : 0.06;
       pumpOffset = boltAnim * dir;
       bolt.position.z = (bolt.userData.baseZ as number) + pumpOffset;
     }
 
-    // CYCLE 35: drive the hand rig with the same choreography the weapon
-    // already follows (reload timeline, pump/bolt travel, ADS stiffening).
+    // CYCLE 35/36: drive the hand rig with the same choreography the weapon
+    // already follows (reload timeline, pump/bolt travel, ADS tuck).
     const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
     if (rig) {
       const reloadPhase = reloading ? 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal : -1;
+      const boltMode = def2.fireMode === 'bolt';
       rig.pose({
         reloadPhase,
-        magVisible: mag ? mag.visible : false,
         magLocal: mag ? mag.position : null,
         pumpOffset,
         pumpHand: def2.fireMode === 'pump',
         ads,
+        boltPhase: boltMode && actor.wpn.boltTimer > 0
+          ? 1 - actor.wpn.boltTimer / 0.9
+          : -1,
+        boltLocal: boltMode && bolt ? bolt.position : null,
       });
     }
 
@@ -397,6 +437,29 @@ export class ViewModel {
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
       reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
     );
+
+    // CYCLE 36 (user pass): connect the arms shoulder→elbow→wrist to the
+    // posed hands so nothing floats.
+    this.solveArms(ads);
+  }
+
+  /** Solve the arm chains against the live hand positions (world → view). */
+  private solveArms(ads: number): void {
+    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
+    if (!rig) {
+      this.armSolver.setVisible(false);
+      return;
+    }
+    this.pivot.updateMatrixWorld(true);
+    const wR = new THREE.Vector3();
+    rig.right.getWorldPosition(wR);
+    const wL = new THREE.Vector3();
+    rig.left.getWorldPosition(wL);
+    // Wrist targets sit BEHIND each palm (toward the eye) so the sleeve
+    // ends at the cuff — the v2 joint sphere covered the hand entirely.
+    wR.z += 0.075;
+    wL.z += 0.075;
+    this.armSolver.solve(this.pivot, [wR, wL]);
   }
 
   /**
@@ -467,6 +530,21 @@ export class ViewModel {
 
     // Replica views intentionally do not animate reload/bolt state: those
     // timers are private combat authority and are absent from ActorView.
+    // CYCLE 36 (review): the online path must pose hands too — v1 left them
+    // frozen at configure defaults for every remote player.
+    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
+    if (rig) {
+      rig.pose({
+        reloadPhase: -1,
+        magLocal: this.currentModel?.mag?.position ?? null,
+        pumpOffset: 0,
+        pumpHand: weaponId === 'shotgun',
+        ads,
+        boltPhase: -1,
+        boltLocal: null,
+      });
+    }
+
     const inspect = this.inspectPose(dt, ads, this.sprintBlend, false);
     const iw = inspect.weight;
     const px =
@@ -488,6 +566,7 @@ export class ViewModel {
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
       this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
     );
+    this.solveArms(ads);
   }
 
   kick(strength: number): void {
@@ -496,6 +575,9 @@ export class ViewModel {
     this.recoilZ += strength * 0.085;
     this.recoilPitch += strength * 0.05;
     this.recoilRoll += (Math.random() - 0.5) * strength * 0.05;
+    // CYCLE 36 (review): semi-auto slide cycling — a frozen slide read as a
+    // toy. Snap the slide back; the update loop returns it on a spring.
+    if (this.currentKey?.startsWith('pistol')) this.slideT = 0.09;
   }
 
   private updateFists(crouched: boolean, dt: number, movingSpeed: number, swapDip: number): void {
