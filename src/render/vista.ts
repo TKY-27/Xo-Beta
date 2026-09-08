@@ -1934,6 +1934,9 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   const cRock = new THREE.Color(texMode ? (isDesert ? 0x8f8272 : 0x99a294) : pal.rock);
   const cSand = new THREE.Color(texMode ? (isDesert ? 0xe1c995 : 0xe4d9b4) : pal.sand);
   const cBed = new THREE.Color(texMode ? (isDesert ? 0x76634d : 0x5c6a5f) : pal.bed);
+  // Deep-water bed tone for the depth gradient (CYCLE 56 review: the lake
+  // read as one flat teal disc with a hard edge from the air).
+  const cBedDeep = cBed.clone().multiplyScalar(0.5);
   const cAsphalt = new THREE.Color(0x23262b);
   const cDry = new THREE.Color(texMode ? (isDesert ? 0xc2a675 : 0xd6cda6) : 0x9a9160);
   const tmp = new THREE.Color();
@@ -1969,15 +1972,22 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
       // as one uniform toy-green lawn.
       const dry = Math.max(0, fbm(x * 0.006 + 71.3, z * 0.006 + 3.9) - 0.15) * 1.7;
       tmp.lerp(cDry, Math.min(isDesert ? 0.72 : 0.5, dry));
-      // Water shading: beds + sandy shores around registered volumes.
+      // Water shading (CYCLE 56 review): depth-gradient bed + feathered sand
+      // shoreline. The old binary bed/sand rects read from the air as a flat
+      // teal disc with a hard circular edge and a dark radial blob.
       for (const w of def.water) {
-        const pad = 9;
-        if (x > w.minX - pad && x < w.maxX + pad && z > w.minZ - pad && z < w.maxZ + pad) {
-          const inside = x >= w.minX && x <= w.maxX && z <= w.maxZ && z >= w.minZ;
-          if (inside && h < w.surfaceY - 0.35) tmp.copy(cBed);
-          else if (h < w.surfaceY + 0.4) tmp.copy(cSand);
-          break;
+        const pad = 14;
+        if (x <= w.minX - pad || x >= w.maxX + pad || z <= w.minZ - pad || z >= w.maxZ + pad) continue;
+        const depth = w.surfaceY - h;
+        if (depth > -0.8) {
+          const shoreT = Math.min(1, Math.max(0, (depth + 0.8) / 1.7));
+          tmp.lerp(cSand, 0.3 + 0.7 * shoreT);
+          if (depth > 0.9) {
+            tmp.lerp(cBed, Math.min(1, (depth - 0.9) / 1.1));
+            if (depth > 2.2) tmp.lerp(cBedDeep, Math.min(1, (depth - 2.2) / 2.4));
+          }
         }
+        break;
       }
       // Ashara low-end albedo breakup: deterministic ±3% value jitter per
       // grid vertex (hash of world position, stable across builds/clients)
