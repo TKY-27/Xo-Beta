@@ -1097,8 +1097,11 @@ export class WorldView {
         const key3 = rnd() < 0.6 ? 'bush/common' : 'fern/1';
         underMatrices.get(key3)!.push(scatterMatrix(x, y + 0.02, z, 0.55 + rnd() * 0.6, rnd() * Math.PI * 2));
       }
-      // Meadow tufts: break up the open lawn so fields don't read as empty carpet.
-      const tuftCount = def.id === 'eden' ? 420 : def.id === 'oldfront' ? 520 : 0;
+      // Meadow tufts: break up the open lawn so fields don't read as empty
+      // carpet. CYCLE 59: density raised ~5x — at 420/520 across a 488 m map
+      // the near field still read as smooth green felt; the sun fix made the
+      // extra cutouts pay off (they now catch light and shadow).
+      const tuftCount = def.id === 'eden' ? 2400 : def.id === 'oldfront' ? 2600 : 0;
       const facilityCores = def.id === 'eden'
         ? [{ x: -90, z: -20, r: 46 }, { x: 120, z: 40, r: 34 }]
         : [];
