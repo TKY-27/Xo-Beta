@@ -1812,6 +1812,65 @@ function buildSandMicroTexture(): THREE.DataTexture {
 }
 
 /**
+ * Neutral-grey multi-octave grain for the terrain roughnessMap — the sand
+ * micro field's value-only sibling. Tile-periodic value noise in three
+ * octaves (broad patchiness → mid grit → fine speckle) so ground breaks the
+ * poured-clay read at 1-5 m by varying micro-roughness under moving light.
+ * Values hug the top of the range: base roughness is 1 (matte stays matte),
+ * only the variation is new information. One canvas per terrain build,
+ * disposed with it.
+ */
+function buildTerrainDetailRoughness(): THREE.CanvasTexture | null {
+  // Headless/QA environments have no DOM; the detail map is cosmetic.
+  if (typeof document === 'undefined') return null;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const image = ctx.createImageData(size, size);
+  const lattice = (x: number, y: number, seed: number): number => {
+    const h = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+    return h - Math.floor(h);
+  };
+  const smooth = (t: number): number => t * t * (3 - 2 * t);
+  const noise = (x: number, y: number, period: number, seed: number): number => {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = smooth(x - xi), yf = smooth(y - yi);
+    const wrap = (v: number, p: number): number => ((v % p) + p) % p;
+    const a = lattice(wrap(xi, period), wrap(yi, period), seed);
+    const b = lattice(wrap(xi + 1, period), wrap(yi, period), seed);
+    const c = lattice(wrap(xi, period), wrap(yi + 1, period), seed);
+    const d = lattice(wrap(xi + 1, period), wrap(yi + 1, period), seed);
+    return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf;
+  };
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = x / size;
+      const v = y / size;
+      const n = noise(u * 6, v * 6, 6, 71) * 0.5
+        + noise(u * 14, v * 14, 14, 72) * 0.3
+        + noise(u * 32, v * 32, 32, 73) * 0.2;
+      const shade = THREE.MathUtils.clamp(0.93 + (n - 0.5) * 0.14, 0.84, 1);
+      const g = Math.round(shade * 255);
+      const i = (y * size + x) * 4;
+      image.data[i] = g;
+      image.data[i + 1] = g;
+      image.data[i + 2] = g;
+      image.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.anisotropy = 8;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+/**
  * One terrain mesh covering the playable area (exact heightfield match)
  * plus a wide skirt continuing the landscape beyond the boundary.
  */
@@ -1955,6 +2014,13 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
           break;
         }
       }
+      // Ashara low-end albedo breakup: deterministic ±3% value jitter per
+      // grid vertex (hash of world position, stable across builds/clients)
+      // so near-field sand never reads as one flat clay tone.
+      if (isDesert) {
+        const grainHash = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
+        tmp.offsetHSL(0, 0, (grainHash - Math.floor(grainHash) - 0.5) * 0.06);
+      }
     }
     colors[i * 3] = tmp.r;
     colors[i * 3 + 1] = tmp.g;
@@ -2000,8 +2066,27 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   // fixed-seed canvas per map build, disposed with the terrain.
   const micro = buildMicroNormalTexture(isDesert);
   if (micro) {
+    // Node materials (the auto-converted standard material on WebGPU
+    // included) honour per-texture UV transforms: give the micro relief its
+    // own near-field tiling. The previous repeat (1,1) stretched one tile
+    // across the whole span, collapsing the relief to nothing on WebGPU.
+    const microTile = isDesert ? 2.4 : 3;
+    micro.repeat.set(span / microTile, span / microTile);
     mat.normalMap = micro;
-    mat.normalScale.set(isDesert ? 0.25 : 0.7, isDesert ? 0.25 : 0.7);
+    // Desert 0.25 predates the per-texture tiling fix (the relief was
+    // stretched to invisibility on WebGPU); 0.38 keeps the ripples faint but
+    // actually present at the 2.4 m tile scale.
+    mat.normalScale.set(isDesert ? 0.38 : 0.7, isDesert ? 0.38 : 0.7);
+  }
+  // Roughness breakup: ~1.2 m neutral grain so the 1-5 m band responds to
+  // light (grass, sand and city asphalt alike) instead of reading as flat
+  // clay. Its own UV transform keeps it independent of the albedo's 5-8 m
+  // repeat on WebGPU; the WebGL fallback shares the albedo tiling, which
+  // still reads.
+  const detailRough = buildTerrainDetailRoughness();
+  if (detailRough) {
+    detailRough.repeat.set(span / 1.2, span / 1.2);
+    mat.roughnessMap = detailRough;
   }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
@@ -2018,6 +2103,7 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
       geo.dispose();
       map?.dispose();
       micro?.dispose();
+      detailRough?.dispose();
       mat.dispose();
     },
   };

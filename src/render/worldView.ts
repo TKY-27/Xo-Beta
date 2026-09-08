@@ -1285,7 +1285,7 @@ export class WorldView {
       car.position.set(v.x, v.y + spec.yOffset, v.z);
       car.rotation.y = v.yaw;
       car.scale.setScalar(spec.scale);
-      const fixMaterial = (source: THREE.Material): THREE.Material => {
+      const fixMaterial = (source: THREE.Material, meshName: string): THREE.Material => {
         const m = source.clone();
         m.userData.externalShared = false;
         const std = m as THREE.MeshStandardMaterial;
@@ -1301,6 +1301,19 @@ export class WorldView {
         } else if (std.color && std.map) {
           const tint = new THREE.Color(v.color ?? 0x88929c);
           std.color.multiply(tint).multiplyScalar(0.85).addScalar(0.0375);
+          // Car-paint response, split per part. The Kenney GLBs share ONE
+          // 'colormap' atlas material, but body and wheels are separate
+          // meshes and this clone runs per mesh, so each part gets its own
+          // response. Painted steel: low roughness + low metalness and an
+          // above-baseline envMapIntensity — with the scene's PMREM IBL that
+          // reads as a clearcoat-ish second spec lobe instead of flat toy
+          // plastic. Glass is baked into the body atlas (no separate
+          // material in these GLBs), so it rides the body response. Rubber
+          // tyres stay near-raw with env damped below baseline.
+          const isTyre = meshName.toLowerCase().includes('wheel');
+          std.roughness = isTyre ? 0.95 : 0.35;
+          std.metalness = isTyre ? 0 : 0.2;
+          std.envMapIntensity = isTyre ? 0.9 : 1.2;
         }
         return m;
       };
@@ -1308,8 +1321,8 @@ export class WorldView {
         const mesh = o as THREE.Mesh;
         if (!mesh.isMesh || !mesh.material) return;
         mesh.material = Array.isArray(mesh.material)
-          ? mesh.material.map(fixMaterial)
-          : fixMaterial(mesh.material);
+          ? mesh.material.map((mat) => fixMaterial(mat, mesh.name))
+          : fixMaterial(mesh.material, mesh.name);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
       });

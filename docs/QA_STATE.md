@@ -101,6 +101,9 @@ five cycles.
 
 | 39 | hands implementation subagent pass | APEX-bar polish delegated to an implementation specialist: root-cause mesh fix (v3 fingers stacked down the palm-normal — now spread along the width axis with per-finger curl variance), chirality fix (the v3 right hand was anatomically a left), declarative quaternion pose solver (palm/fingers direction basis replacing hand-solved Eulers) with per-class grips contacting surfaces, geometry-based panel contrast (proud shell/knuckle plates, rubber palm pad, leather finger pads), ArmSolver retune (shoulders ±0.27/-0.40/-0.12, bones 0.42/0.40, damped elbow). New fast harness qa-hands-isolate (seconds per iteration vs 3-min probes). All 542 unit tests pass; probes zero console errors | hands read as gloved hands wrapping the weapon at hip framing |
 
+| 40 | neocity night vehicle captures (QA_SEED=1) | Round-6 P0 'vehicles are untextured toys': per-part car-paint response — body roughness 1.0→0.35, metalness 0.2, envMapIntensity 1.2 (clearcoat-ish IBL spec), wheels matte rubber (0.95/0.9), wrecks unchanged. GLBs share one colormap atlas so glass keeps the documented fallback | painted sheen + spec streak on live cars |
+| 41 | eden + ashara ground captures | Round-6 P0 'near-field terrain is painted clay': new generated 3-octave grain roughnessMap tiled ~1.2 m on every terrain; latent bug found — the micro normal shipped with repeat(1,1), stretching one tile across 1600 m on WebGPU (per-texture transforms), i.e. the relief was invisible on the shipping backend; now tiled ~3 m (grass) / ~2.4 m (desert) with desert normalScale re-tuned 0.25→0.38; ashara adds deterministic ±3% per-vertex albedo jitter | 542 tests pass; grain visible at 1-5 m, no foil-crinkle regression |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
