@@ -75,11 +75,42 @@ if (zoom > 0) {
   // Punch in on the grip area for contact inspection (does not move the rig):
   // narrow FOV + aim the camera at the trigger-hand region in view space.
   camera.fov = 80 / zoom;
-  camera.lookAt(0.15, -0.16, -0.34);
+  const aims = {
+    grip: [0.15, -0.16, -0.34],
+    // Support-hand contact zone (under/side forend grip) at hip framing.
+    left: [0.06, -0.19, -0.62],
+    // Right-grip contact from the right side (hip framing).
+    right: [0.2, -0.17, -0.37],
+  };
+  const aim = aims[params.get('aim') ?? 'grip'] ?? aims.grip;
+  camera.lookAt(aim[0], aim[1], aim[2]);
   camera.updateProjectionMatrix();
 }
 window.__ready = true;
 window.__vm = viewmodel;
+
+// QA_GIZMO=1: overlay the grip pose basis on the RIGHT hand (red = palm
+// normal (local -y), green = finger-extend (local -z), blue = hand-local
+// +z toward the wrist) so pose vectors tune against the geometry directly.
+if (params.get('gizmo') === '1') {
+  const mk = (color) => {
+    const g = new THREE.Group();
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.14), new THREE.MeshBasicMaterial({ color }));
+    shaft.rotation.x = Math.PI / 2;
+    shaft.position.z = 0.07;
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.012, 0.03), new THREE.MeshBasicMaterial({ color }));
+    tip.rotation.x = -Math.PI / 2;
+    tip.position.z = 0.155;
+    g.add(shaft, tip);
+    return g;
+  };
+  const palmArrow = mk(0xff3040);
+  palmArrow.rotation.x = Math.PI / 2; // +z -> -y (palm faces local -y)
+  const fingersArrow = mk(0x30ff40);
+  fingersArrow.rotation.x = Math.PI;  // +z -> -z (fingers extend local -z)
+  const zedArrow = mk(0x3060ff);      // +z (toward the wrist)
+  for (const key of viewmodel.rigs.keys()) viewmodel.rigs.get(key).right.add(palmArrow, fingersArrow, zedArrow);
+}
 
 const errors = [];
 window.addEventListener('error', (e) => errors.push(String(e.error ?? e.message)));

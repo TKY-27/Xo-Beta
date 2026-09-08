@@ -157,8 +157,35 @@ export class GameRenderer {
     // GPU identity resolves asynchronously once the backend reports in.
     this.ready = this.renderer.init().then(() => this.resolveGpuDevice());
     this.ready.catch((err) => console.error('renderer init failed', err));
+    this.watchDeviceLoss();
 
     window.addEventListener('resize', this.onResize);
+  }
+
+  /**
+   * CYCLE 56 (review): surface WebGPU device loss. A driver reset or
+   * backgrounded-tab eviction kills the device and silently freezes the
+   * frame; one automatic reload recovers, and the sessionStorage guard keeps
+   * a persistent device failure from becoming a reload loop.
+   */
+  private watchDeviceLoss(): void {
+    const backend = this.renderer as unknown as {
+      backend?: { device?: { lost?: Promise<GPUDeviceLostInfo> } };
+    };
+    const lost = backend.backend?.device?.lost;
+    if (!lost || typeof lost.then !== 'function') return;
+    sessionStorage.removeItem('xo-device-loss-reload');
+    lost.then((info) => {
+      console.error(`[xo] GPU device lost (${info.reason ?? 'unknown'}) — reloading`);
+      // QA probes are long single-session headless captures where the WebGPU
+      // device is routinely evicted; an auto-reload there silently reboots to
+      // the lobby mid-capture (match scene + __xoState gone). Under QA the
+      // loss is reported through the probe's console-error channel instead.
+      if (document.documentElement.dataset.xoQa === '1') return;
+      if (sessionStorage.getItem('xo-device-loss-reload') === '1') return;
+      sessionStorage.setItem('xo-device-loss-reload', '1');
+      location.reload();
+    });
   }
 
   private async resolveGpuDevice(): Promise<void> {

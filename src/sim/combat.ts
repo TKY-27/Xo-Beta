@@ -106,7 +106,7 @@ export interface CombatEvents {
   /** `dry` is explicit so consumers do not infer it from post-shot ammo. */
   onShotFired(actor: Actor, weaponId: WeaponId, x: number, y: number, z: number, dry: boolean): void;
   /** Fired for both manual and empty-mag automatic reload starts. */
-  onReloadStarted?(actor: Actor, empty: boolean): void;
+  onReloadStarted?(actor: Actor, empty: boolean, weaponId: WeaponId): void;
   onImpact(x: number, y: number, z: number, nx: number, ny: number, nz: number, material: string, projectile: boolean): void;
   onActorHit(target: Actor, attacker: Actor | null, damage: number, region: string, weaponId: WeaponId, killed: boolean, headshot: boolean): void;
   onShieldBroken?(target: Actor): void;
@@ -389,7 +389,7 @@ export class CombatSystem {
     rt.reloadWeaponId = w.weaponId;
     rt.reloadInitialAmmo = w.ammoInMag;
     rt.reloadRoundsLoaded = 0;
-    this.events.onReloadStarted?.(a, rt.reloadingEmpty);
+    this.events.onReloadStarted?.(a, rt.reloadingEmpty, w.weaponId);
     return true;
   }
 

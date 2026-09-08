@@ -43,6 +43,10 @@ export class ViewModel {
   private static readonly _wristOffset = new THREE.Vector3();
   private static readonly _wristWorldR = new THREE.Vector3();
   private static readonly _wristWorldL = new THREE.Vector3();
+  /** Reusable wrist-target pair (B5: solveArms/updateFists run per frame). */
+  private static readonly _wristPair: [THREE.Vector3, THREE.Vector3] = [
+    new THREE.Vector3(), new THREE.Vector3(),
+  ];
   private currentId: WeaponId | null = null;
   private currentKey: string | null = null;
   private currentModel: WeaponModel | null = null;
@@ -243,6 +247,23 @@ export class ViewModel {
    * left the pistol at ~5% of frame while long guns filled 20%. */
   private static readonly WEAPON_VIEW_SCALE: Record<WeaponId, number> = {
     pistol: 0.95, smg: 0.78, ar: 0.82, shotgun: 0.85, sniper: 0.78,
+  };
+
+  /** Extra per-class ADS pose offsets (metres, applied through the ads
+   * blend). Y drops the sniper so the box magazine falls out of the aim
+   * point and the scope reads on the bore line. */
+  private static readonly ADS_EXTRA_Y: Record<WeaponId, number> = {
+    pistol: 0, smg: 0, ar: 0, shotgun: -0.006, sniper: -0.006,
+  };
+
+  /** Hands-review fix: extra forward pose offset at full ADS (metres, applied
+   * through the ads blend). The shared ADS_POS leaves a long gun's buttstock
+   * ~9 cm from the eye — inside the 8 cm near plane, so the stock renders as
+   * a giant clipped slab (and on the shotgun the hollow interior of the
+   * clipped butt fills the aim point). Long guns ride further forward; the
+   * pistol barely moves. */
+  private static readonly ADS_EXTRA_FORWARD: Record<WeaponId, number> = {
+    pistol: 0.02, smg: 0.1, ar: 0.12, shotgun: 0.14, sniper: 0.09,
   };
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
@@ -487,16 +508,18 @@ export class ViewModel {
     // Compose position: hip → ADS → sprint offsets
     const inspect = this.inspectPose(dt, ads, this.sprintBlend, reloading);
     const iw = inspect.weight;
+    const adsFwd = ViewModel.ADS_EXTRA_FORWARD[weaponId] * ads;
+    const adsDrop = ViewModel.ADS_EXTRA_Y[weaponId] * ads;
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
       bobX + this.swayX - 0.1 * inspect.lift * iw;
     const py =
-      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
+      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads - adsDrop +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
       bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
     const pz =
-      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
+      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads - adsFwd +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
       this.recoilZ + 0.14 * inspect.lift * iw;
 
@@ -513,11 +536,11 @@ export class ViewModel {
 
     // CYCLE 36 (user pass): connect the arms shoulder→elbow→wrist to the
     // posed hands so nothing floats.
-    this.solveArms();
+    this.solveArms(ads);
   }
 
   /** Solve the arm chains against the live hand positions (world → view). */
-  private solveArms(): void {
+  private solveArms(ads = 0): void {
     const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
     if (!rig) {
       this.armSolver.setVisible(false);
@@ -525,19 +548,19 @@ export class ViewModel {
     }
     this.pivot.updateMatrixWorld(true);
     const wR = ViewModel._wristWorldR;
-    rig.right.getWorldPosition(wR);
+    // Attach the sleeves at each hand's CUFF RIDGE (an anchor riding the
+    // hand's own cuff barrel), not behind the palm and not a hand-orientation
+    // guess: the grip pose rotates the hand's local +z up-and-across (the old
+    // +z offset dragged the sniper ADS sleeve through the scope line), while
+    // a fixed view-space offset gapped the sleeve off the under-hand. The
+    // elbow droop (ArmSolver bend hints) does the below-the-bore routing.
+    rig.wristR.getWorldPosition(wR);
     const wL = ViewModel._wristWorldL;
-    rig.left.getWorldPosition(wL);
-    // Wrist targets sit BEHIND each palm (toward the eye) so the sleeve
-    // ends at the cuff — the v2 joint sphere covered the hand entirely.
-    // CYCLE 46 (review/B2): the behind-palm offset must rotate with the
-    // view — world-space +z pointed camera-LEFT at other yaws, detaching
-    // the arm from the cuff on every turn.
-    const qR = rig.right.getWorldQuaternion(ViewModel._wristQuat);
-    wR.add(ViewModel._wristOffset.set(0, 0, 0.068).applyQuaternion(qR));
-    const qL = rig.left.getWorldQuaternion(ViewModel._wristQuat);
-    wL.add(ViewModel._wristOffset.set(0, 0, 0.068).applyQuaternion(qL));
-    this.armSolver.solve(this.pivot, [wR, wL]);
+    rig.wristL.getWorldPosition(wL);
+    const pair = ViewModel._wristPair;
+    pair[0].copy(wR);
+    pair[1].copy(wL);
+    this.armSolver.solve(this.pivot, pair, ads);
   }
 
   /**
@@ -701,16 +724,18 @@ export class ViewModel {
 
     const inspect = this.inspectPose(dt, ads, this.sprintBlend, reloading);
     const iw = inspect.weight;
+    const adsFwd = ViewModel.ADS_EXTRA_FORWARD[weaponId] * ads;
+    const adsDrop = ViewModel.ADS_EXTRA_Y[weaponId] * ads;
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
       bobX + this.swayX - 0.1 * inspect.lift * iw;
     const py =
-      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
+      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads - adsDrop +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
       bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
     const pz =
-      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
+      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads - adsFwd +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
       this.recoilZ + 0.14 * inspect.lift * iw;
 
@@ -801,6 +826,9 @@ export class ViewModel {
     this.fistRig.wristR.getWorldPosition(wR);
     const wL = ViewModel._wristWorldL;
     this.fistRig.wristL.getWorldPosition(wL);
-    this.armSolver.solve(this.pivot, [wR, wL]);
+    const pair = ViewModel._wristPair;
+    pair[0].copy(wR);
+    pair[1].copy(wL);
+    this.armSolver.solve(this.pivot, pair);
   }
 }

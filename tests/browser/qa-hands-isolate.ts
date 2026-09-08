@@ -12,6 +12,7 @@ import { mkdirSync } from 'node:fs';
 const weapons = (process.env.QA_WEAPONS ?? 'ar,shotgun,pistol,smg,sniper').split(',').filter(Boolean);
 const ads = process.env.QA_ADS === '1' ? '1' : '0';
 const zoom = process.env.QA_ZOOM ?? '0';
+const aim = process.env.QA_AIM ?? 'grip';
 const suffix = process.env.QA_OUT ?? '';
 const OUT = 'qa/hands-isolate';
 mkdirSync(OUT, { recursive: true });
@@ -33,13 +34,34 @@ page.on('console', (msg) => {
 page.on('pageerror', (err) => errors.push(String(err)));
 
 for (const w of weapons) {
-  await page.goto(`http://localhost:5198/tests/browser/qa-hands-isolate.html?w=${w}&ads=${ads}&zoom=${zoom}`, {
+  await page.goto(`http://localhost:5198/tests/browser/qa-hands-isolate.html?w=${w}&ads=${ads}&zoom=${zoom}&aim=${aim}&gizmo=${process.env.QA_GIZMO ?? '0'}`, {
     waitUntil: 'networkidle',
   });
   await page.waitForFunction('window.__ready === true', { timeout: 30000 });
   await page.waitForTimeout(1800);
   await page.screenshot({ path: `${OUT}/${w}${suffix}.png` });
   console.log(`captured ${OUT}/${w}${suffix}.png`);
+  if (process.env.QA_DUMP === '1') {
+    const dump = await page.evaluate(`(() => {
+      const vm = window.__vm;
+      const rig = vm.rigs.get([...vm.rigs.keys()][0]);
+      const model = vm.currentModel;
+      vm.pivot.updateMatrixWorld(true);
+      const V = model.gripR.constructor;
+      const p = (o) => { const v = new V(); o.getWorldPosition(v); return v.toArray().map((n) => +n.toFixed(4)); };
+      return JSON.stringify({
+        rightWorld: p(rig.right),
+        leftWorld: p(rig.left),
+        rightLocal: rig.right.position.toArray().map((n) => +n.toFixed(4)),
+        leftLocal: rig.left.position.toArray().map((n) => +n.toFixed(4)),
+        gripR: model.gripR.toArray(),
+        gripL: model.gripL.toArray(),
+        viewScale: model.group.scale.x,
+        pivotPos: vm.pivot.position.toArray().map((n) => +n.toFixed(4)),
+      });
+    })()`);
+    console.log(`DUMP ${w}: ${dump}`);
+  }
 }
 
 await browser.close();

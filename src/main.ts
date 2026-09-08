@@ -2578,7 +2578,17 @@ function presentOnlineAuthoritativeEventQueued(
   }
   const queue = guestPresentationQueue;
   if (queue.length >= GUEST_PRESENTATION_QUEUE_CAP) {
-    const shedIndex = queue.findIndex((task) => GUEST_SHEDDABLE_EVENTS.has(task.event.type));
+    // CYCLE 56 (review): never shed the LOCAL actor's reloadStarted — the
+    // guest reload choreography is seeded only from this event, so dropping
+    // it strands the hands at grip while the authoritative weapon refills.
+    // Other actors' reloads and the pure one-shot transients shed first.
+    const localId = live?.kind === 'replica' ? live.localActorId : -1;
+    const sheddable = (task: GuestPresentationTask): boolean =>
+      GUEST_SHEDDABLE_EVENTS.has(task.event.type)
+      && !(task.event.type === 'reloadStarted'
+        && typeof task.event.payload.actorId === 'number'
+        && task.event.payload.actorId === localId);
+    const shedIndex = queue.findIndex(sheddable);
     if (shedIndex >= 0) queue.splice(shedIndex, 1);
     else queue.shift();
   }
@@ -2798,8 +2808,11 @@ function presentOnlineAuthoritativeEvent(
       // CYCLE 48: drive the local viewmodel's reload choreography from the
       // authoritative reloadStarted event — guests have no combat runtime,
       // so the presentation timeline is seeded from the event stream.
+      // CYCLE 56: prefer the event's weaponId payload (a weapon swap between
+      // reload start and snapshot application used to seed the wrong class).
+      const payloadWeapon = typeof payload.weaponId === 'string' ? (payload.weaponId as WeaponId) : null;
       const reloader = actorView(localActorId);
-      const weaponId = reloader?.equippedWeapon;
+      const weaponId = payloadWeapon ?? reloader?.equippedWeapon;
       if (reloader && weaponId) {
         const slot = reloader.inventory && reloader.inventory.selected >= 0
           ? reloader.inventory.slots[reloader.inventory.selected]
@@ -3386,6 +3399,8 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
           hasUv: Boolean(geo?.attributes.uv),
           vertices: geo?.attributes.position?.count ?? null,
           visible: mesh.visible,
+          receiveShadow: mesh.receiveShadow,
+          castShadow: mesh.castShadow,
           uuid: mesh.uuid.slice(0, 8),
         };
       });
@@ -3438,7 +3453,6 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       const raycaster = new THREE.Raycaster();
       raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), rig.camera);
       const ray = raycaster.ray;
-      const box = new THREE.Box3();
       const hits: Array<Record<string, unknown>> = [];
       renderer.scene.traverse((o) => {
         const mesh = o as THREE.Mesh;

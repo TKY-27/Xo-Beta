@@ -51,6 +51,11 @@ export interface HandRig {
   right: THREE.Group;
   /** Left (support) hand group — parent into the weapon, at gripL. */
   left: THREE.Group;
+  /** Wrist anchors riding each hand's cuff barrel — the ArmSolver attaches
+   * the sleeves HERE (not behind the palm), so the seam never gaps no matter
+   * how the grip pose rotates the hand's local axes. */
+  wristR: THREE.Object3D;
+  wristL: THREE.Object3D;
   configure(anchors: { gripR: THREE.Vector3; gripL: THREE.Vector3; scale: number }): void;
   pose(input: HandPoseInput): void;
 }
@@ -128,7 +133,10 @@ function makeHandMats(): HandMats {
     shell.normalMap = bump;
     shell.normalScale.set(0.4, 0.4);
   }
-  const skin = new THREE.MeshStandardMaterial({ color: 0x8f6b4f, roughness: 0.62, metalness: 0.02 });
+  // CYCLE 56 (review): distal segments were warm naked-skin tan (0x8f6b4f)
+  // — read as bare sausages against the glove, not leather. Dark rubber
+  // gripper pads keep the glove story and catch less glare.
+  const skin = new THREE.MeshStandardMaterial({ color: 0x2f343a, roughness: 0.85, metalness: 0.02 });
   const plate = new THREE.MeshStandardMaterial({ color: 0x394049, roughness: 0.38, metalness: 0.55 });
   const palm = new THREE.MeshStandardMaterial({ color: 0x474e56, roughness: 0.88, metalness: 0.02 });
   return { glove, shell, skin, plate, palm };
@@ -190,16 +198,18 @@ function buildHand(mats: HandMats, thumbSide: 1 | -1, curlBoost = 0): THREE.Grou
   // Thumb wrapping across the near face: base on the thumb-side edge just
   // under the tang line, angled forward-inward so the tip crosses in front
   // of the fingers (a higher base stabbed the tip past the grip top).
+  // curlBoost (fist rig): the thumb clamps ACROSS the curled finger stack —
+  // deeper segment pitch and a tip pulled in over the knuckle row.
   const thumb = new THREE.Group();
-  thumb.position.set(thumbSide * 0.026, -0.004, 0.012);
-  thumb.rotation.set(-0.05, thumbSide * 0.55, thumbSide * -0.1);
+  thumb.position.set(thumbSide * 0.026, -0.004, 0.012 + curlBoost * 0.006);
+  thumb.rotation.set(-0.05 - curlBoost * 0.22, thumbSide * 0.55, thumbSide * -0.1);
   const thumbSeg = new THREE.Mesh(new THREE.CapsuleGeometry(0.011, 0.026, 3, 10), mats.glove);
-  thumbSeg.rotation.x = Math.PI / 2 - 0.28;
+  thumbSeg.rotation.x = Math.PI / 2 - 0.28 - curlBoost * 0.32;
   thumbSeg.position.set(0, -0.008, -0.015);
   thumb.add(thumbSeg);
   const thumbTip = new THREE.Mesh(new THREE.CapsuleGeometry(0.0098, 0.018, 3, 10), mats.skin);
-  thumbTip.rotation.x = Math.PI / 2 - 0.75;
-  thumbTip.position.set(0, -0.021, -0.029);
+  thumbTip.rotation.x = Math.PI / 2 - 0.75 - curlBoost * 0.32;
+  thumbTip.position.set(0, -0.021 - curlBoost * 0.008, -0.029 + curlBoost * 0.01);
   thumb.add(thumbTip);
   hand.add(thumb);
 
@@ -245,9 +255,16 @@ function handBasisQuat(
   _bp.copy(palm).normalize();
   _bf.copy(fingers).addScaledVector(_bp, -fingers.dot(_bp)).normalize();
   // Hand-local axes: +x thumb side, +y back of hand, +z opposite the
-  // finger-extend direction.
-  if (mirrored) _axisX.copy(_bp).cross(_bf);
-  else _axisX.copy(_bf).cross(_bp);
+  // finger-extend direction. The basis MUST stay right-handed for BOTH
+  // chiralities (x = y × z = (-palm) × (-fingers) = palm × fingers): the
+  // v4 code crossed the right hand the other way, handing
+  // setFromRotationMatrix a REFLECTION matrix — silently degraded to a
+  // skewed rotation, so every authored right-hand pose rendered with the
+  // palm facing somewhere else entirely. That single defect is why the
+  // firing hand read as a buried mitt instead of a grip (hands-review #1).
+  // `mirrored` no longer changes the basis — chirality is baked into the
+  // meshes (buildHand's thumbSide); the parameter only documents intent.
+  _axisX.copy(_bp).cross(_bf);
   _axisY.copy(_bp).negate();
   _axisZ.copy(_bf).negate();
   _basis.makeBasis(_axisX, _axisY, _axisZ);
@@ -275,16 +292,30 @@ export function createHandRig(): HandRig {
 
   const right = buildHand(mats, -1);
 
+  // Cuff-ridge anchors for the sleeve solve (same offset the fist rig uses):
+  // one per hand, riding the hand's own cuff barrel at the wrist.
+  const wristR = new THREE.Object3D();
+  wristR.position.set(0, -0.002, 0.073);
+  right.add(wristR);
+  const wristL = new THREE.Object3D();
+  wristL.position.set(0, -0.002, 0.073);
+  left.add(wristL);
+
   const gripR = new THREE.Vector3();
   const gripL = new THREE.Vector3();
 
   return {
     right,
     left,
+    wristR,
+    wristL,
     configure(anchors) {
       gripR.copy(anchors.gripR);
       gripL.copy(anchors.gripL);
-      const s = 1 / anchors.scale;
+      // Hands-review fix: 1.1x human size against the presentation scale —
+      // at hip framing the 1.0 counter-scale read half-size next to the gun
+      // (1.18 tested oversized: the mitts dwarfed the receiver details).
+      const s = 1.1 / anchors.scale;
       right.position.copy(gripR);
       right.scale.setScalar(s);
       left.position.copy(gripL);
@@ -292,15 +323,19 @@ export function createHandRig(): HandRig {
     },
     pose({ reloadPhase, supportStyle, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal }) {
       // ---- Right (trigger) hand ---------------------------------------
-      // High power grip: the BACK of the hand (knuckle plate + shell panel)
-      // faces up-right-REAR toward the camera so the hand reads at hip
-      // framing; the palm presses the grip's front-right corner and the
-      // fingers wrap down the front strap. ADS settles it flatter.
-      const gripPalm = _palm.set(-0.45, -0.7, -0.42);
-      const gripFingers = _fingers.set(0.72, -0.66, -0.2);
+      // High power grip: the palm presses the grip's right FACE (normal -x)
+      // with a down-forward bias, and the fingers extend DOWN-slightly-
+      // inboard so their segments wrap the grip's front-right corner — the
+      // knuckle row and middle phalanges stay visible on the camera side.
+      // v4's forward-pressing palm (-z normal) sent the finger chain around
+      // the front strap out of sight while the palm floated a centimetre
+      // off the face: the hand read as a smooth mitt beside the receiver
+      // (hands-review: "zero readable fingers").
+      const gripPalm = _palm.set(-0.88, -0.28, -0.38);
+      const gripFingers = _fingers.set(-0.15, -0.85, -0.5);
       if (ads > 0) {
-        gripPalm.z += ads * 0.2;
-        gripFingers.x -= ads * 0.1;
+        gripPalm.z += ads * 0.08;
+        gripFingers.x -= ads * 0.06;
       }
       if (boltPhase >= 0 && boltLocal) {
         // Sniper: the firing hand leaves the grip and works the bolt through
@@ -320,7 +355,7 @@ export function createHandRig(): HandRig {
         right.position.copy(target);
         orientHand(right, gripPalm, gripFingers, false);
       } else {
-        right.position.set(gripR.x + 0.02, gripR.y - 0.003 + ads * 0.004, gripR.z + 0.002);
+        right.position.set(gripR.x + 0.008, gripR.y - 0.004 + ads * 0.004, gripR.z + 0.002);
         orientHand(right, gripPalm, gripFingers, false);
       }
 
@@ -328,9 +363,11 @@ export function createHandRig(): HandRig {
       if (pumpHand || supportStyle === 'pump') {
         // Shotgun: palm cups UNDER the pump body, fingers wrapping up its
         // front face only (a taller curl speared the tips past the pump
-        // top); the hand rides the pump travel.
-        left.position.set(gripL.x, gripL.y - 0.066, gripL.z - 0.04 + pumpOffset);
-        orientHand(left, _palm.set(0, 0.9, -0.44), _fingers.set(0, -0.55, -0.84), true);
+        // top); the hand rides the pump travel. Anchor sits at the pump
+        // body's centre height, so the fixed -y drop seats the palm just
+        // under the pump's bottom face.
+        left.position.set(gripL.x, gripL.y - 0.056, gripL.z - 0.012 + pumpOffset);
+        orientHand(left, _palm.set(0, 1, -0.1), _fingers.set(0, -0.35, -0.94), true);
         return;
       }
       if (reloadPhase >= 0 && magLocal) {
@@ -358,11 +395,11 @@ export function createHandRig(): HandRig {
         // hardcoded the 'under' cup → 50-70° orientation snaps on pistol/SMG
         // reload starts and ends).
         if (supportStyle === 'side') {
-          handBasisQuat(_quatA, _palm.set(0.95, -0.2, 0.2), _fingers.set(0.1, -0.4, -0.9), true);
+          handBasisQuat(_quatA, _palm.set(0.95, -0.25, 0.18), _fingers.set(0.05, -0.5, -0.86), true);
         } else if (supportStyle === 'over') {
-          handBasisQuat(_quatA, _palm.set(0.75, -0.35, -0.55), _fingers.set(0.1, -0.55, -0.84), true);
+          handBasisQuat(_quatA, _palm.set(0.45, 0.7, 0.55), _fingers.set(0.1, 0.6, -0.79), true);
         } else {
-          handBasisQuat(_quatA, _palm.set(0.45, 0.85 - ads * 0.1, -0.28), _fingers.set(0, -0.2, -0.98), true);
+          handBasisQuat(_quatA, _palm.set(0.3, 0.9 - ads * 0.1, -0.32), _fingers.set(0.04, -0.32, -0.95), true);
         }
         handBasisQuat(_quatB, _palm.set(0.85, -0.35, 0.2), _fingers.set(0, -0.5, -0.86), true);
         leftWrap.quaternion.slerpQuaternions(_quatA, _quatB, blend);
@@ -373,11 +410,13 @@ export function createHandRig(): HandRig {
       // fingertips through the solid forends on every long gun).
       const tuck = ads * 0.012;
       if (supportStyle === 'side') {
-        // SMG: horizontal wrap around the vertical foregrip — palm faces
-        // into the grip from the left, fingers curl around the far side,
-        // thumb riding up the near edge.
-        left.position.set(gripL.x - 0.028, gripL.y + 0.025 - tuck, gripL.z);
-        orientHand(left, _palm.set(0.95, -0.2, 0.2), _fingers.set(0.1, -0.4, -0.9), true);
+        // SMG: horizontal wrap around the vertical foregrip — the anchor sits
+        // ON the grip's left face, the palm centre sits just off it, fingers
+        // curl around the far side, thumb riding up the near edge. Palm kept
+        // near-vertical so the cuff anchor routes the sleeve rearward, not
+        // skyward (ADS sight-line crossing).
+        left.position.set(gripL.x - 0.018, gripL.y + 0.012 - tuck, gripL.z);
+        orientHand(left, _palm.set(0.98, -0.15, 0.1), _fingers.set(0.05, -0.2, -0.98), true);
         return;
       }
       if (supportStyle === 'over') {
@@ -387,11 +426,21 @@ export function createHandRig(): HandRig {
         orientHand(left, _palm.set(0.45, 0.7, 0.55), _fingers.set(0.1, 0.6, -0.79), true);
         return;
       }
-      // 'under' (AR/sniper): palm up under the handguard, fingers running
-      // forward and curling up its far side (shallow enough to stay under
-      // the rail line — a taller curl stabbed through the forend).
-      left.position.set(gripL.x - 0.006, gripL.y - 0.008 - tuck, gripL.z + 0.008);
-      orientHand(left, _palm.set(0.45, 0.85, -0.28), _fingers.set(0, -0.2, -0.98), true);
+      // 'under' (AR/sniper): palm straight UP under the handguard, fingers
+      // running straight FORWARD — flat, because the hand's cuff/wrist anchor
+      // rides local +z: a tilted palm-up-forward pose rotated the wrist
+      // direction 30° skyward and the sleeve rose across the sight line at
+      // ADS (hands-review #2). The hand sits half outboard of the forend's
+      // bottom-left corner so the knuckles break the left silhouette at hip,
+      // and SLIDES BACK toward the magwell while aiming — a 30 cm forward
+      // under-hand foreshortens to nothing at ADS and forces the forearm
+      // across the frame.
+      left.position.set(
+        gripL.x - 0.024 - ads * 0.012,
+        gripL.y - 0.006 - tuck,
+        gripL.z + 0.006 + ads * 0.2,
+      );
+      orientHand(left, _palm.set(0.15, 0.98, -0.12), _fingers.set(0.05, 0.15, -0.99), true);
     },
   };
 }
@@ -421,10 +470,9 @@ export function createFistRig(): FistRig {
   const mats = getHandMaterialSet();
   const group = new THREE.Group();
 
-  const right = buildHand(mats, -1, 0.55);
+  const right = buildHand(mats, -1, 1.0);
   const left = new THREE.Group();
-  left.rotation.y = Math.PI;
-  left.add(buildHand(mats, 1, 0.55));
+  left.add(buildHand(mats, 1, 1.0));
   group.add(right, left);
 
   // Guard pose, authored palm/fingers like every other hand pose. The BACK
@@ -472,14 +520,18 @@ export class ArmSolver {
   ];
   private readonly upperLen = 0.42;
   private readonly foreLen = 0.4;
-  // Bend hints: strong downward+outward elbow drop — v3's shallow hints
-  // projected nearly parallel to the reach and read as straight pipes.
-  private readonly bends = [new THREE.Vector3(1.8, -1.05, 0.1), new THREE.Vector3(-1.8, -1.05, 0.1)];
+  // Bend hints: strong downward elbow drop with a slight rearward bias —
+  // v3's shallow hints projected nearly parallel to the reach and read as
+  // straight pipes, while wide ±x splays tented the forearms OVER the
+  // receiver at ADS (hands-review #2).
+  private readonly bends = [new THREE.Vector3(0.8, -1.8, -0.35), new THREE.Vector3(-0.8, -1.8, -0.35)];
   private readonly sleeves: Array<{ upper: THREE.Mesh; fore: THREE.Mesh }> = [];
+  private readonly cuffs: THREE.Mesh[] = [];
   private joints: THREE.Mesh[] = [];
   private tmpA = new THREE.Vector3();
   private tmpB = new THREE.Vector3();
   private tmpElbow = new THREE.Vector3();
+  private tmpShoulder = new THREE.Vector3();
   // Per-frame solve scratch (B5: no allocations in the hot path).
   private tmpWristC = new THREE.Vector3();
   private tmpAlong = new THREE.Vector3();
@@ -487,9 +539,16 @@ export class ArmSolver {
 
   constructor() {
     const shell = getHandMaterialSet().shell;
+    // CYCLE 56 (review): the sleeve tubes reused the hand shell material at
+    // full normal-map strength — at viewmodel texel density the fabric weave
+    // aliased into a shimmering moiré ("dev-placeholder" read). Sleeves get
+    // their own clone with the weave calmed and roughness raised.
+    const sleeveMat = shell.clone();
+    sleeveMat.roughness = 0.8;
+    if (sleeveMat.normalMap) sleeveMat.normalScale.set(0.14, 0.14);
     const make = (rTop: number, rBottom: number): THREE.Mesh => {
       // Unit-height tapered cylinder, stretched between joints per frame.
-      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBottom, 1, 10, 1, true), shell);
+      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBottom, 1, 10, 1, true), sleeveMat);
       mesh.matrixAutoUpdate = true;
       mesh.castShadow = false;
       mesh.receiveShadow = false;
@@ -499,17 +558,23 @@ export class ArmSolver {
     for (let i = 0; i < 2; i++) {
       // Taper: thicker at the shoulder, thinnest at the wrist (aim() maps
       // +Y to the SECOND joint, so rTop is the far end — v2 had it inverted).
-      this.sleeves.push({ upper: make(0.04, 0.05), fore: make(0.026, 0.04) });
+      // Slimmed ~15% (hands-review): the 8-10 cm tubes crowded the ADS frame.
+      this.sleeves.push({ upper: make(0.034, 0.044), fore: make(0.022, 0.031) });
+      // Cuff ring bridging the forearm end into the hand's own cuff barrel.
+      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.031, 1, 12, 1, true), sleeveMat);
+      cuff.castShadow = false;
+      cuff.receiveShadow = false;
+      this.group.add(cuff);
+      this.cuffs.push(cuff);
     }
     // Elbow joint spheres close the open cylinder ends; wrist spheres cover
     // the forearm-to-cuff seam (round-3: hollow tube rims showed on clamp).
     this.joints = [
-      new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), sleeveMat),
+      new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), sleeveMat),
+      new THREE.Mesh(new THREE.SphereGeometry(0.024, 10, 8), sleeveMat),
+      new THREE.Mesh(new THREE.SphereGeometry(0.024, 10, 8), sleeveMat),
     ];
-    void this.joints;
     for (const j of this.joints) {
       j.castShadow = false;
       j.receiveShadow = false;
@@ -535,11 +600,16 @@ export class ArmSolver {
   /**
    * Solve both arms so the wrists land on the given hand positions.
    * `pivot` is the view-space root (hands are converted from world space).
+   * `settle` (0..1, the ADS blend) drops the shoulders back and down — the
+   * aimed stance tucks the elbows below the bore so the sleeves stop
+   * tenting over the receiver (hands-review #2).
    */
-  solve(pivot: THREE.Object3D, wristWorld: THREE.Vector3[]): void {
+  solve(pivot: THREE.Object3D, wristWorld: THREE.Vector3[], settle = 0): void {
     this.group.visible = true;
     for (let i = 0; i < 2; i++) {
-      const shoulder = this.shoulders[i]!;
+      const shoulder = this.tmpShoulder.copy(this.shoulders[i]!);
+      shoulder.y -= 0.055 * settle;
+      shoulder.z += 0.075 * settle;
       const wrist = pivot.worldToLocal(this.tmpB.copy(wristWorld[i]!));
       const { upper, fore } = this.sleeves[i]!;
 
@@ -572,8 +642,13 @@ export class ArmSolver {
       // TRUE wrist (never render a floating open tube end short of the hand).
       const short = wrist.distanceTo(shoulder) > maxReach + 1e-3;
       this.aim(fore, this.tmpElbow, short ? wrist : wristC);
+      // Cuff ring: a short wider barrel straddling the forearm-to-hand seam.
+      const wristFinal = short ? wrist : wristC;
+      this.tmpAlong.copy(this.tmpElbow).sub(wristFinal).normalize();
+      this.tmpBend.copy(wristFinal).addScaledVector(this.tmpAlong, 0.055);
+      this.aim(this.cuffs[i]!, wristFinal, this.tmpBend);
       this.joints[i]!.position.copy(this.tmpElbow);
-      this.joints[this.joints.length - 2 + i]!.position.copy(short ? wrist : wristC);
+      this.joints[this.joints.length - 2 + i]!.position.copy(wristFinal);
     }
   }
 

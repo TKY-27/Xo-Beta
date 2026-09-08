@@ -449,8 +449,13 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
   ring(g, mats.hardware, 0.008, 0.002, 0.024, 0.006, -0.09);
   return {
     group: g, muzzleZ: -0.71, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.055, railZ: -0.2,
-    gripR: new THREE.Vector3(0, -0.05, -0.108),
-    gripL: new THREE.Vector3(0, -0.008, -0.5),
+    // Hands-review fix: anchors sit ON the grip surfaces, not at the grip's
+    // centre — gripR on the right-rear face (the palm's contact face, weapon
+    // +x) so the hand wraps the profile instead of centring inside it;
+    // gripL just under the handguard bottom for the palm-up under carry.
+    // AR grip: top (0, 0.004, -0.115) raked -0.32, centre ≈ (0, -0.045, -0.099).
+    gripR: new THREE.Vector3(0.02, -0.052, -0.096),
+    gripL: new THREE.Vector3(0, -0.006, -0.44),
   };
 }
 
@@ -478,7 +483,8 @@ function buildPistol(mats: GunMaterials): ProceduralWeapon {
   ironSights(g, mats, 0.048, -0.225, -0.035);
   return {
     group: g, muzzleZ: -0.246, mag: g.getObjectByName('mag') ?? null, bolt: slide, railY: 0.048, railZ: -0.11,
-    gripR: new THREE.Vector3(0, -0.052, -0.052),
+    // Same on-surface rule (grip top (0, -0.01, -0.045) raked -0.32).
+    gripR: new THREE.Vector3(0.019, -0.056, -0.024),
     gripL: new THREE.Vector3(-0.02, -0.05, -0.03),
   };
 }
@@ -518,8 +524,10 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
   ironSights(g, mats, 0.06, -0.43, -0.06);
   return {
     group: g, muzzleZ: -0.525, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.058, railZ: -0.16,
-    gripR: new THREE.Vector3(0, -0.048, -0.092),
-    gripL: new THREE.Vector3(0, -0.05, -0.38),
+    // Grip top (0, 0, -0.1) raked -0.32; gripL on the LEFT face of the
+    // vertical foregrip (spans x ±0.013, y -0.064..0.02, z -0.396..-0.364).
+    gripR: new THREE.Vector3(0.02, -0.05, -0.072),
+    gripL: new THREE.Vector3(-0.014, -0.03, -0.38),
   };
 }
 
@@ -560,8 +568,10 @@ function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   ironSights(g, mats, 0.06, -0.35, -0.08);
   return {
     group: g, muzzleZ: -0.92, mag: null, bolt: pump, railY: 0.06, railZ: -0.2,
-    gripR: new THREE.Vector3(0, -0.042, -0.088),
-    gripL: new THREE.Vector3(0, 0.03, -0.48),
+    // Grip top (0, 0.002, -0.095) raked -0.32; gripL rides the pump body
+    // (y -0.016..0.02 at z -0.52) — the rig offsets the palm UNDER it.
+    gripR: new THREE.Vector3(0.02, -0.048, -0.068),
+    gripL: new THREE.Vector3(0, 0.014, -0.51),
   };
 }
 
@@ -630,8 +640,10 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
   }
   return {
     group: g, muzzleZ: -1.28, mag: g.getObjectByName('mag') ?? null, bolt, railY: 0.062, railZ: -0.16,
-    gripR: new THREE.Vector3(0, -0.04, -0.082),
-    gripL: new THREE.Vector3(0, -0.005, -0.5),
+    // Grip top (0, 0.002, -0.085) raked -0.32; gripL under the chassis
+    // fore-end (spans y -0.005..0.045, z -0.41..-0.75).
+    gripR: new THREE.Vector3(0.02, -0.048, -0.058),
+    gripL: new THREE.Vector3(0, -0.008, -0.52),
   };
 }
 
