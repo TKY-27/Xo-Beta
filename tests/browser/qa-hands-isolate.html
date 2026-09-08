@@ -1,0 +1,128 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>hands isolate</title>
+<style>body{margin:0;background:#888}canvas{display:block}</style>
+</head>
+<body>
+<script type="module">
+// Fast hands/viewmodel snapshot harness: mounts the REAL ViewModel updateView
+// path (hands rig + ArmSolver) at gameplay hip framing (FOV 80), for pose/
+// material iteration without the full 3-minute match-entry probe.
+// Query: ?w=ar&ads=0&zoom=0
+import * as THREE from 'three';
+import { WebGPURenderer } from 'three/webgpu';
+
+const params = new URLSearchParams(location.search);
+const weapon = params.get('w') ?? 'ar';
+const adsAmount = params.get('ads') === '1' ? 1 : 0;
+const zoom = Number(params.get('zoom') ?? '0');
+
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fa3b5);
+const camera = new THREE.PerspectiveCamera(80, innerWidth / innerHeight, 0.08, 900);
+camera.position.set(0, 0, 0);
+camera.lookAt(0, 0, -1);
+
+const key = new THREE.DirectionalLight(0xffffff, 2.4);
+key.position.set(0.6, 1.2, 0.5);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xbfd4e8, 1.1);
+fill.position.set(-1.2, 0.3, 0.7);
+scene.add(fill);
+scene.add(new THREE.AmbientLight(0x9fb4c8, 0.55));
+
+const { ViewModel } = await import('/src/render/viewmodel.ts');
+const { WeaponModelFactory } = await import('/src/render/weaponModels.ts');
+
+const factory = new WeaponModelFactory(null);
+const viewmodel = new ViewModel(factory);
+scene.add(viewmodel.group);
+viewmodel.syncCamera(camera);
+
+const rarity = params.get('rarity') ?? 'epic';
+const unarmed = weapon === 'none';
+const actor = {
+  id: 1, displayName: 'LOCAL', ownership: { kind: 'local-human', peerId: 'p' },
+  connectionState: 'connected', teamId: null, skinId: 'vanguard', accentColor: 0x33aaff,
+  alive: true, health: 100, shield: 100,
+  position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 },
+  yaw: 0, pitch: 0, grounded: true, moveState: 'ground', crouched: false, deployed: true,
+  equippedWeapon: unarmed ? null : weapon,
+  inventory: {
+    selected: 0,
+    slots: unarmed
+      ? [null, null, null, null, null]
+      : [{ kind: 'weapon', weaponId: weapon, rarity, ammoInMag: 30 }, null, null, null, null],
+    ammo: { light: 0, medium: 90, shells: 0, heavy: 0 }, healing: null,
+  },
+  placement: 0,
+  stats: { kills: 0, damageDealt: 0, shotsFired: 0, shotsHit: 0, headshots: 0, survivalTime: 0 },
+};
+
+// Warm the presentation springs to steady state, then hold the hip pose.
+for (let i = 0; i < 120; i++) viewmodel.updateView(actor, 1 / 60, 0, 0, 0, { adsAmount });
+viewmodel.updateView(actor, 1 / 60, 0, 0, 0, { adsAmount });
+
+if (zoom > 0) {
+  // Punch in on the grip area for contact inspection (does not move the rig):
+  // narrow FOV + aim the camera at the trigger-hand region in view space.
+  camera.fov = 80 / zoom;
+  const aims = {
+    grip: [0.15, -0.16, -0.34],
+    // Support-hand contact zone (under/side forend grip) at hip framing.
+    left: [0.06, -0.19, -0.62],
+    // Right-grip contact from the right side (hip framing).
+    right: [0.2, -0.17, -0.37],
+  };
+  const aim = aims[params.get('aim') ?? 'grip'] ?? aims.grip;
+  camera.lookAt(aim[0], aim[1], aim[2]);
+  camera.updateProjectionMatrix();
+}
+window.__ready = true;
+window.__vm = viewmodel;
+
+// QA_GIZMO=1: overlay the grip pose basis on the RIGHT hand (red = palm
+// normal (local -y), green = finger-extend (local -z), blue = hand-local
+// +z toward the wrist) so pose vectors tune against the geometry directly.
+if (params.get('gizmo') === '1') {
+  const mk = (color) => {
+    const g = new THREE.Group();
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.14), new THREE.MeshBasicMaterial({ color }));
+    shaft.rotation.x = Math.PI / 2;
+    shaft.position.z = 0.07;
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.012, 0.03), new THREE.MeshBasicMaterial({ color }));
+    tip.rotation.x = -Math.PI / 2;
+    tip.position.z = 0.155;
+    g.add(shaft, tip);
+    return g;
+  };
+  const palmArrow = mk(0xff3040);
+  palmArrow.rotation.x = Math.PI / 2; // +z -> -y (palm faces local -y)
+  const fingersArrow = mk(0x30ff40);
+  fingersArrow.rotation.x = Math.PI;  // +z -> -z (fingers extend local -z)
+  const zedArrow = mk(0x3060ff);      // +z (toward the wrist)
+  for (const key of viewmodel.rigs.keys()) viewmodel.rigs.get(key).right.add(palmArrow, fingersArrow, zedArrow);
+}
+
+const errors = [];
+window.addEventListener('error', (e) => errors.push(String(e.error ?? e.message)));
+
+const loop = () => {
+  viewmodel.updateView(actor, 1 / 60, 0, 0, 0, { adsAmount });
+  renderer.renderAsync(scene, camera).catch((e) => errors.push(String(e)));
+  requestAnimationFrame(loop);
+};
+loop();
+window.__errors = errors;
+console.log('HANDS_ISOLATE_READY');
+</script>
+</body>
+</html>

@@ -124,19 +124,28 @@ export interface SkinSpec {
   helmetKind: 0 | 1 | 2 | 3;
   armorHeavy: boolean;
   hasPack: boolean;
+  /** Base body archetype for this skin (real model variety, not just gear). */
+  female: boolean;
 }
 
 export const SKIN_SPECS: Readonly<Record<SkinId, SkinSpec>> = {
-  vanguard: { id: 'vanguard', label: 'Vanguard', primary: 0x263446, secondary: 0x171c25, accent: 0xf2b544, helmetKind: 1, armorHeavy: true, hasPack: true },
-  pathfinder: { id: 'pathfinder', label: 'Pathfinder', primary: 0x315d52, secondary: 0x172a29, accent: 0x7de0c0, helmetKind: 3, armorHeavy: false, hasPack: true },
-  specter: { id: 'specter', label: 'Specter', primary: 0x191d2b, secondary: 0x0a0d14, accent: 0x9c7cff, helmetKind: 2, armorHeavy: false, hasPack: false },
-  striker: { id: 'striker', label: 'Striker', primary: 0x5b2d2d, secondary: 0x241316, accent: 0xff6b55, helmetKind: 0, armorHeavy: true, hasPack: false },
-  warden: { id: 'warden', label: 'Warden', primary: 0x4b5142, secondary: 0x20231c, accent: 0xd6e890, helmetKind: 1, armorHeavy: true, hasPack: true },
-  nova: { id: 'nova', label: 'Nova', primary: 0x3d2a58, secondary: 0x1b122c, accent: 0x66d8ff, helmetKind: 3, armorHeavy: false, hasPack: true },
+  vanguard: { id: 'vanguard', label: 'Vanguard', primary: 0x263446, secondary: 0x171c25, accent: 0xf2b544, helmetKind: 1, armorHeavy: true, hasPack: true, female: false },
+  pathfinder: { id: 'pathfinder', label: 'Pathfinder', primary: 0x315d52, secondary: 0x172a29, accent: 0x7de0c0, helmetKind: 3, armorHeavy: false, hasPack: true, female: false },
+  specter: { id: 'specter', label: 'Specter', primary: 0x191d2b, secondary: 0x0a0d14, accent: 0x9c7cff, helmetKind: 2, armorHeavy: false, hasPack: false, female: false },
+  striker: { id: 'striker', label: 'Striker', primary: 0x5b2d2d, secondary: 0x241316, accent: 0xff6b55, helmetKind: 0, armorHeavy: true, hasPack: false, female: false },
+  warden: { id: 'warden', label: 'Warden', primary: 0x4b5142, secondary: 0x20231c, accent: 0xd6e890, helmetKind: 1, armorHeavy: true, hasPack: true, female: false },
+  nova: { id: 'nova', label: 'Nova', primary: 0x3d2a58, secondary: 0x1b122c, accent: 0x66d8ff, helmetKind: 3, armorHeavy: false, hasPack: true, female: true },
+  seraph: { id: 'seraph', label: 'Seraph', primary: 0x8d8468, secondary: 0x3c382c, accent: 0xffe9b0, helmetKind: 1, armorHeavy: true, hasPack: true, female: true },
+  corsair: { id: 'corsair', label: 'Corsair', primary: 0x1f5f66, secondary: 0x0d2b30, accent: 0x53e0d8, helmetKind: 0, armorHeavy: false, hasPack: true, female: true },
+  vesper: { id: 'vesper', label: 'Vesper', primary: 0x5e2438, secondary: 0x26101a, accent: 0xff9ec2, helmetKind: 2, armorHeavy: false, hasPack: false, female: true },
+  dragoon: { id: 'dragoon', label: 'Dragoon', primary: 0x4c5230, secondary: 0x22261a, accent: 0xff9d3c, helmetKind: 0, armorHeavy: true, hasPack: true, female: false },
+  tempest: { id: 'tempest', label: 'Tempest', primary: 0x2e4a6b, secondary: 0x131f2e, accent: 0xffd23c, helmetKind: 3, armorHeavy: false, hasPack: false, female: false },
+  reaper: { id: 'reaper', label: 'Reaper', primary: 0x1c1c20, secondary: 0x0b0b0d, accent: 0xe84040, helmetKind: 2, armorHeavy: false, hasPack: false, female: false },
 };
 
 export const SKIN_IDS: readonly SkinId[] = Object.freeze([
   'vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova',
+  'seraph', 'corsair', 'vesper', 'dragoon', 'tempest', 'reaper',
 ]);
 
 const feetYFromView = feetYFromBodyCenter;
@@ -224,8 +233,6 @@ export class CharacterFactory {
     weaponModelOrSkin: THREE.Object3D | null | SkinId = null,
     explicitSkin?: SkinId,
   ): CharacterRig {
-    const proto = female ? this.protoFemale : this.protoMale;
-    const s = female ? this.scaleF : this.scaleM;
     // Keep the legacy weapon fourth argument source-compatible while allowing
     // callers that do not need a weapon to pass the skin in that position.
     const weaponModel = typeof weaponModelOrSkin === 'string' ? null : weaponModelOrSkin;
@@ -233,6 +240,13 @@ export class CharacterFactory {
       ? weaponModelOrSkin
       : explicitSkin ?? skinForName(name);
     const skin = SKIN_SPECS[skinId] ?? SKIN_SPECS.vanguard;
+    // The skin owns the body archetype; the legacy boolean only applies to
+    // callers that pass a real weapon model and no explicit skin.
+    const useFemaleBody = typeof weaponModelOrSkin === 'string' || explicitSkin !== undefined
+      ? skin.female
+      : female;
+    const proto = useFemaleBody ? this.protoFemale : this.protoMale;
+    const s = useFemaleBody ? this.scaleF : this.scaleM;
 
     const group = new THREE.Group();
     group.userData.xoSkinId = skin.id;
@@ -365,14 +379,51 @@ export class CharacterFactory {
       head.add(helm);
     }
 
+    // Light-armored skins still read as geared operators: a slim chest rig
+    // with straps and a belt kit, instead of the bare mannequin body.
+    if (!armorHeavy && (bones['spine_02'] || bones['spine_03'])) {
+      const anchor = bones['spine_03'] ?? bones['spine_02']!;
+      const rig = new THREE.Group();
+      const panel = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.27, 0.14), costumeMat);
+      panel.position.z = 0.05;
+      for (const strapX of [-0.075, 0.075]) {
+        const strap = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.26, 0.075), costumeMat);
+        strap.position.set(strapX, 0.02, 0.0);
+        strap.rotation.z = strapX > 0 ? -0.12 : 0.12;
+        rig.add(strap);
+      }
+      for (const pouchX of [-0.08, 0.02]) {
+        const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.08, 0.05), costumeMat);
+        pouch.position.set(pouchX, -0.06, 0.085);
+        rig.add(pouch);
+      }
+      const buckle = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.035, 0.02), trimMat);
+      buckle.position.set(0, 0.0, 0.068);
+      rig.add(buckle);
+      rig.add(panel);
+      anchor.add(rig);
+      rig.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = true; });
+      // Belt kit on the hips.
+      if (bones['spine_01']) {
+        const beltAnchor = bones['spine_01'];
+        const belt = new THREE.Mesh(new THREE.TorusGeometry(0.155, 0.022, 6, 14), costumeMat);
+        belt.rotation.x = Math.PI / 2 - 0.08;
+        belt.scale.set(1, 1, 0.82);
+        beltAnchor.add(belt);
+        belt.frustumCulled = true;
+      }
+    }
     if (armorHeavy) {
       // Chest plate
       if (bones['spine_02'] || bones['spine_03']) {
         const anchor = bones['spine_03'] ?? bones['spine_02']!;
         const plate = new THREE.Group();
-        const main = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.26, 0.14), costumeMat);
-        const glow = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.06, 0.03), trimMat);
-        glow.position.set(0, 0.03, 0.075);
+        // Oversized relative to the torso so the plate reads as worn armor
+        // sitting OUTSIDE the body mesh, not as an inset patch.
+        const main = new THREE.Mesh(new THREE.BoxGeometry(0.33, 0.27, 0.16), costumeMat);
+        main.position.z = 0.055;
+        const glow = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.07, 0.03), trimMat);
+        glow.position.set(0, 0.03, 0.14);
         plate.add(main, glow);
         anchor.add(plate);
         plate.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = true; });

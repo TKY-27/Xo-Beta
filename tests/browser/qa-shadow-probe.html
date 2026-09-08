@@ -1,0 +1,102 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>shadow probe</title>
+<style>body{margin:0;background:#888}canvas{display:block}</style>
+</head>
+<body>
+<script type="module">
+// CYCLE 56 — engine-level shadow isolation: does WebGPURenderer render
+// DirectionalLight shadows at all in this three version? A ground plane
+// (receiveShadow) + casting box + oblique sun. If the box shadow is missing
+// in shadow.png, the defect is engine-level, not scene config.
+import * as THREE from 'three';
+import { WebGPURenderer, MeshStandardNodeMaterial } from 'three/webgpu';
+
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.setSize(640, 480);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fa3b5);
+const camera = new THREE.PerspectiveCamera(60, 640 / 480, 0.1, 200);
+camera.position.set(3, 3, 8);
+camera.lookAt(0, 0, 0);
+
+const sun = new THREE.DirectionalLight(0xffffff, 3);
+// CYCLE 56 bisect: replicate the EXACT game sun rig (offset-260 ortho,
+// near 10 / far 560, ±110 extents, game biases) to find which parameter
+// kills shadow rendering.
+sun.position.set(5, 8, 3);
+sun.position.setLength(260);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 10;
+sun.shadow.camera.far = 560;
+sun.shadow.camera.left = -110;
+sun.shadow.camera.right = 110;
+sun.shadow.camera.top = 110;
+sun.shadow.camera.bottom = -110;
+sun.shadow.bias = -0.00035;
+sun.shadow.normalBias = 0.03;
+scene.add(sun);
+sun.target.position.set(0, 0, 0);
+scene.add(sun.target);
+scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(30, 30),
+  new THREE.MeshStandardMaterial({ color: 0x779955, roughness: 1 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const caster = new THREE.Mesh(
+  new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshStandardMaterial({ color: 0x995533, roughness: 0.8 }),
+);
+caster.position.set(0, 0.5, 0);
+caster.castShadow = true;
+scene.add(caster);
+
+// CYCLE 56: instanced caster — does the WebGPU shadow pass drop InstancedMesh?
+const instGeo = new THREE.BoxGeometry(0.8, 2, 0.8);
+const instMat = new THREE.MeshStandardMaterial({ color: 0x335599, roughness: 0.8 });
+const inst = new THREE.InstancedMesh(instGeo, instMat, 2);
+inst.castShadow = true;
+const m4 = new THREE.Matrix4();
+m4.identity().setPosition(2.5, 1, 0);
+inst.setMatrixAt(0, m4);
+m4.identity().setPosition(2.5, 1, -3);
+inst.setMatrixAt(1, m4);
+inst.instanceMatrix.needsUpdate = true;
+scene.add(inst);
+
+// Node-material receiver strip (in front): plain vs node receive parity.
+const nodeGround = new THREE.Mesh(
+  new THREE.PlaneGeometry(30, 15),
+  new MeshStandardNodeMaterial({ color: 0x779955, roughness: 1 }),
+);
+nodeGround.rotation.x = -Math.PI / 2;
+nodeGround.position.set(0, 0.01, -15);
+nodeGround.receiveShadow = true;
+scene.add(nodeGround);
+
+const shadowPassVisible = renderer.shadowMap?.enabled === true;
+window.__shadowProbe = { shadowMapEnabled: shadowPassVisible };
+
+const loop = () => {
+  try { renderer.render(scene, camera); } catch (e) { window.__shadowError = String(e); }
+  requestAnimationFrame(loop);
+};
+loop();
+window.__ready = true;
+</script>
+</body>
+</html>

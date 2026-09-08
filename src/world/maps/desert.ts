@@ -103,8 +103,11 @@ export function buildAsharaReach(): MapDef {
     sunDirection: [-0.48, -0.82, -0.3],
     sunColor: 0xffe2b7,
     sunIntensity: 3.35,
+    // Shadow fill: hard desert light needs a strong bounce floor — with
+    // ambient 0.62 the shaded sides of metal props crushed to near-black
+    // (cycle-23 A/B: roadside sign panel rendered (0,10,35) in full shade).
     ambientColor: 0xb8c4d0,
-    ambientIntensity: 0.62,
+    ambientIntensity: 0.8,
     hemisphereSky: 0x9fb9ce,
     hemisphereGround: 0x8b6f4e,
     hemisphereIntensity: 1.02,
@@ -129,7 +132,7 @@ export function buildAsharaReach(): MapDef {
       { id: 'dustHaze', hazeStrength: 0.85, fogDensityScale: 1.7, exposureScale: 0.94, windSpeed: 0.06 },
       // Dry storm: towering clouds, electric wind, rare rain that never
       // reaches the ground.
-      { id: 'dryStorm', cloudCover: 0.7, cloudShade: 0x4a4335, windSpeed: 0.08, thunder: true, rain: 0.2 },
+      { id: 'dryStorm', cloudCover: 0.7, cloudShade: 0x4a4335, windSpeed: 0.08, thunder: true },
     ],
   });
 }
@@ -234,7 +237,7 @@ function sunwallMarket(b: WorldBuilder, rng: Rng, cx: number, cz: number): void 
     const baseY = structureBaseY(terrainH, x, z, w, d);
     addBuilding(b, {
       x, z, baseY, w, d, floors,
-      wallMat: i % 3 === 0 ? 'plasterOld' : i % 3 === 1 ? 'plaster' : 'concrete',
+      wallMat: i % 3 === 0 ? 'plasterOld' : i % 3 === 1 ? 'plaster' : 'mudbrick',
       trimMat: 'woodDark', floorMat: 'concreteDark', roofMat: 'concrete',
       doors: [[i % 2 ? 1 : 0, Math.max(3, (i % 2 ? d : w) * 0.45), 2.4]],
       roofAccess: floors > 1,
@@ -453,15 +456,19 @@ function kestrelCompound(b: WorldBuilder, cx: number, cz: number): void {
   // 52 m wide, not 46: the main building's outer fire-escape flight hangs on
   // the west facade at cx-23.2, and the former wall line ran straight through
   // the flight, leaving its top ridge as the only descent surface.
-  compoundWall(b, cx, cz, 52, 42, y, 'concrete');
+  compoundWall(b, cx, cz, 52, 42, y, 'mudbrick');
   addBuilding(b, {
     x: cx - 10, z: cz - 6, baseY: y, w: 18, d: 16, floors: 2,
-    wallMat: 'concrete', trimMat: 'metalDark', doors: [[0, 8, 2.6]], roofAccess: true,
+    wallMat: 'mudbrick', trimMat: 'metalDark', doors: [[0, 8, 2.6]], roofAccess: true, stairMat: 'mudbrick',
   });
+  // Bare interiors read as black voids — hang working lamps in each room.
+  b.light(cx - 10, y + 3.1, cz - 6, 0xffd9a0, 1.3, 13);
+  b.light(cx - 10, y + 6.7, cz - 6, 0xffd9a0, 1.1, 11);
   addBuilding(b, {
     x: cx + 12, z: cz + 9, baseY: y, w: 14, d: 12, floors: 1,
     wallMat: 'plasterOld', trimMat: 'concrete', doors: [[2, 5, 2.4]], interiorDividers: false,
   });
+  b.light(cx + 12, y + 2.6, cz + 9, 0xffd9a0, 1.2, 12);
   for (let i = -3; i <= 3; i++) b.box(cx + i * 4.6, y + 0.55, cz + 18, 3.7, 1.1, 0.8, 'sandbag');
   chestPad(b, cx - 4, cz + 8, y, 'vault');
   b.loot(cx + 14, y + 0.4, cz - 8, 'heal');
@@ -542,7 +549,7 @@ function fuelCourt(b: WorldBuilder, cx: number, cz: number): void {
   for (const [offsetY, mat] of [[4.05, 'neonOrange'], [3.52, 'windowCool'], [2.99, 'neonOrange']] as Array<[number, MatKey]>) {
     b.box(statusX, statusY + offsetY, statusZ - 0.14, 2.45, 0.16, 0.06, mat, 0, { noCollide: true });
   }
-  compoundWall(b, cx, cz, 44, 36, y, 'concrete');
+  compoundWall(b, cx, cz, 44, 36, y, 'mudbrick');
   for (const [ox, oz] of [[-11, -7], [0, -7], [11, -7], [-6, 7], [7, 7]] as Array<[number, number]>) {
     const tankX = cx + ox;
     const tankZ = cz + oz;

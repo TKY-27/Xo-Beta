@@ -2,10 +2,14 @@
 
 export type MatKey =
   | 'concrete' | 'concreteDark' | 'asphalt' | 'asphaltDesert' | 'sidewalk' | 'metal' | 'metalDark' | 'metalExterior'
-  | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld'
+  | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld' | 'mudbrick'
   | 'glass' | 'grass' | 'dirt' | 'rock' | 'roofTile' | 'gold'
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
   | 'windowWarm' | 'windowCool' | 'windowDark'
+  // CYCLE 42: emissive-intensity buckets for night window grids — per-window
+  // variety without per-instance materials (static geo batches one
+  // InstancedMesh per material key, so a bucket IS a draw).
+  | 'windowWarmBright' | 'windowWarmDim' | 'windowCoolBright' | 'windowCoolDim'
   | 'facadeA' | 'facadeB' | 'facadeC' | 'marble' | 'sandbag' | 'hay'
   | 'corrugated' | 'bricksOld' | 'facilityFloor'
   | 'interiorCeiling'
@@ -174,6 +178,8 @@ export interface SkyGrade {
   contrast?: number;
   /** Shadow lift color (linear RGB offsets). */
   lift?: [number, number, number];
+  /** Display transform for this map. Default ACES filmic. */
+  toneMapping?: 'aces' | 'agx' | 'neutral';
 }
 
 /**

@@ -46,7 +46,7 @@ describe('persistent settings boundary', () => {
     expect(settings.quality).toBe('high');
     expect(settings.fov).toBe(110);
     expect(settings.masterVolume).toBe(0);
-    expect(settings.resolutionScale).toBe(0.7);
+    expect(settings.resolutionScale).toBe(1);
     expect(settings.shadowQuality).toBe('high');
     expect(settings.aa).toBe('smaa');
     expect(settings.crosshairColor).toBe('#eaf6ff');

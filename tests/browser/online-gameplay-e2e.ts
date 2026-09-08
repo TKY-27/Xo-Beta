@@ -629,26 +629,31 @@ async function main(): Promise<void> {
     assert.equal(healthyHost.error, null, 'host reports no protocol/runtime error before leave');
     assert.equal(healthyGuest.error, null, 'guest reports no protocol/runtime error before leave');
     assert.equal(healthyHost.lagTelemetry?.accepted, true, 'browser firing uses host lag compensation');
+    // Read the guest's input-packet counter BEFORE leaving: the fixture's
+    // leave/reset path zeroes it, so a post-leave read always sees 0 (the
+    // counter belongs to the match that just ended, measured in-flight).
+    const guestInputPacketsInMatch = healthyGuest.inputPackets;
     await guest.page.click('#btn-runtime-leave');
     await waitUntil(async () => (await snapshot(guest)).screen === 'main' && (await snapshot(guest)).role === 'idle', 'return to menu');
 
     const finalHost = await snapshot(host);
-    const finalGuest = await snapshot(guest);
     assert.ok(finalHost.hostTick > 0, 'host fixed simulation advanced');
     assert.ok(finalHost.inputPackets === 0, 'host does not sample guest input');
-    assert.ok(finalGuest.inputPackets > 0, 'guest sends compact input ticks');
+    assert.ok(guestInputPacketsInMatch > 0, 'guest sends compact input ticks');
     for (const event of ['shotFired', 'glassBreak', 'eliminated', 'matchWon']) {
       assert.ok(finalHost.events.includes(event), `host observed authoritative ${event}`);
-      assert.ok(finalGuest.events.includes(event), `guest received reliable ${event}`);
+      // The guest fixture's leave/reset clears its event log, so reliable-
+      // delivery is asserted against the pre-leave in-match snapshot.
+      assert.ok(healthyGuest.events.includes(event), `guest received reliable ${event}`);
     }
     console.log(JSON.stringify({
       isolatedContexts: peers.length,
       directConnection: 'same-machine WebRTC DataChannels',
       path: ['create', 'join', 'ready', 'start-barrier', 'transport', 'combat', 'glass', 'elimination', 'spectating', 'results', 'menu'],
       hostTick: finalHost.hostTick,
-      guestInputPackets: finalGuest.inputPackets,
+      guestInputPackets: guestInputPacketsInMatch,
       hostEvents: finalHost.events,
-      guestEvents: finalGuest.events,
+      guestEvents: healthyGuest.events,
       lagCompensation: healthyHost.lagTelemetry,
       hostNetwork: healthyHost.hostMetrics,
       guestPrediction: movementPrediction,

@@ -138,7 +138,7 @@ export interface MatchEventsMap {
   transportGateOpened: Record<string, never>;
   phaseChanged: { phase: MatchPhase };
   matchWon: { winnerId: number; winnerName: string; teamId: TeamId | null };
-  reloadStarted: { actorId: number; empty: boolean };
+  reloadStarted: { actorId: number; empty: boolean; weaponId: WeaponId };
   meleeSwing: { actorId: number; x: number; y: number; z: number; yaw: number };
   meleeHit: { targetId: number; attackerId: number; damage: number; killed: boolean; headshot: boolean };
 }
@@ -809,8 +809,11 @@ export class Match {
       onShotFired: (a, weaponId, x, y, z, dry) => {
         this.events.emit('shotFired', { actorId: a.id, weaponId, x, y, z, dry });
       },
-      onReloadStarted: (a, empty) => {
-        this.events.emit('reloadStarted', { actorId: a.id, empty });
+      onReloadStarted: (a, empty, weaponId) => {
+        // CYCLE 56 (review): weaponId rides the payload — a weapon swap
+        // between reload start and the guest's snapshot application used to
+        // seed the WRONG weapon's reload choreography (100-300 ms mismatch).
+        this.events.emit('reloadStarted', { actorId: a.id, empty, weaponId });
       },
       onImpact: (x, y, z, nx, ny, nz, material) => {
         this.events.emit('impact', { x, y, z, nx, ny, nz, material });

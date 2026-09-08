@@ -1,11 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { AUTHORITATIVE_EVENT_TYPES } from '../../src/net/hostMatchSession';
+import { isDecodableAuthoritativeEvent } from '../../src/net/matchStateCodec';
 import { DECAL_BUDGETS } from '../../src/render/impactDecals';
 import { WEAPONS } from '../../src/core/balance';
 
 
 
 describe('presentation networking invariants', () => {
+  it('every host-forwarded authoritative event type is guest-decodable', () => {
+    // CYCLE 65 audit P1 regression guard: a type forwarded by the host
+    // session but missing from the codec's decode set fails the guest's
+    // whole match with a protocolFailure on the first occurrence (shipped
+    // for meleeSwing). Keep both lists in lockstep.
+    for (const type of AUTHORITATIVE_EVENT_TYPES) {
+      expect(isDecodableAuthoritativeEvent(type), `codec must decode '${type}'`).toBe(true);
+    }
+  });
+
   it('impact decals derive from the already-networked impact event only', () => {
     // v0.4 deliberately added meleeSwing (bounded, low frequency) so guests
     // see punches; melee hits stay host-authoritative in the meleeHit flow.

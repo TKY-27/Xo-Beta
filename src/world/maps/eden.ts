@@ -185,9 +185,12 @@ export function buildEdenFacility(): MapDef {
       hdri: 'qwantani_puresky_2k.hdr',
       fogColor: 0xa9c2d4,
       fogDensity: 0.0013,
-      sunDirection: [0.45, -0.8, 0.35],
+      // CYCLE 60 (review): sun lowered from ~55° to ~40° elevation — at the
+      // old angle tree/prop shadows collapsed underfoot and the meadow read
+      // shadowless; the lower sun gives readable shadow shapes.
+      sunDirection: [0.45, -0.58, 0.35],
       sunColor: 0xfff2dd,
-      sunIntensity: 2.25,
+      sunIntensity: 2.05,
       ambientColor: 0xb6ccd8,
       ambientIntensity: 0.46,
       hemisphereSky: 0xa8d4f0,

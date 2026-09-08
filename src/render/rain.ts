@@ -9,7 +9,7 @@
  */
 import * as THREE from 'three';
 
-const STREAK_COUNT = 900;
+const STREAK_COUNT = 1400;
 /** Rain cylinder radius around the viewer (m). */
 const FIELD_RADIUS = 34;
 /** Height band above the camera where streaks recycle. */
@@ -41,11 +41,11 @@ export class RainSystem {
 
   constructor(intensity: number) {
     this.intensity = Math.max(0.15, Math.min(1, intensity));
-    const geo = new THREE.BoxGeometry(0.016, 0.55, 0.016);
+    const geo = new THREE.BoxGeometry(0.013, 0.85, 0.013);
     const mat = new THREE.MeshBasicMaterial({
       color: 0x9fb6c8,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0.2,
       depthWrite: false,
       // Streaks read best as slightly glowing lines against dark scenes.
       blending: THREE.NormalBlending,

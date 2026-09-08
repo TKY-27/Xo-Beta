@@ -76,6 +76,29 @@ export class CameraRig {
     this.camera.updateProjectionMatrix();
   }
 
+  /**
+   * Dynamic near plane: at transport altitude a 0.08 m near plane starves
+   * the depth buffer and ground planes z-fight; at ground level the tight
+   * near keeps close-quarters clipping away. Depth precision scales with
+   * distance-to-first-geometry, so approximating near from camera height
+   * buys the precision back exactly where the fights happened.
+   */
+  setAltitude(eyeY: number, groundY: number): boolean {
+    // Discrete bands: the TSL AO pass reconstructs depth from the camera
+    // projection, so a continuously sliding near plane breaks it (black
+    // terrain). Bands keep near stable for minutes at a time; the shell
+    // rebuilds the post chain when a band boundary is crossed (returns true).
+    const near = Math.max(0.08, Math.min(0.6, (eyeY - groundY) * 0.02));
+    const band = near < 0.15 ? 0 : near < 0.35 ? 1 : 2;
+    const target = band === 0 ? 0.08 : band === 1 ? 0.18 : 0.5;
+    if (Math.abs(target - this.camera.near) > 0.001) {
+      this.camera.near = target;
+      this.camera.updateProjectionMatrix();
+      return true;
+    }
+    return false;
+  }
+
   toggleMode(): void {
     this.mode = this.mode === 'fps' ? 'tps' : 'fps';
     this.setScoped(false);

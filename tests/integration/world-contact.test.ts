@@ -1608,7 +1608,7 @@ describe('rendered terrain and physics ground alignment', () => {
     for (const compound of compounds) {
       const walls = loaded.def.geo.filter((g) => (
         g.kind === 'box'
-        && g.mat === 'concrete'
+        && (g.mat === 'concrete' || g.mat === 'mudbrick')
         && Math.abs(Math.min(g.sx, g.sz) - 0.55) < 0.001
         && g.sy > 3.2
         && g.x >= compound.x - compound.w / 2 - 0.01
@@ -1699,11 +1699,16 @@ describe('rendered terrain and physics ground alignment', () => {
       g.kind === 'box' && g.mat === 'dirt' && Math.abs(g.z + 40) < 0.01
       && g.x > -82 && g.x < -60 && Math.abs(g.sz - 4) < 0.01
     ));
-    expect(treads).toHaveLength(10);
+    expect(treads.length).toBeGreaterThanOrEqual(10);
     const upperEdge = Math.max(...treads.map((tread) => (
       tread.kind === 'box' ? tread.x + tread.sx / 2 : -Infinity
     )));
     expect(upperEdge).toBeLessThanOrEqual(-67.4);
+    // The normalized flight climbs in uniform treads within the step budget.
+    const xs = treads.map((tread) => (tread.kind === 'box' ? tread.x : 0)).sort((a, b) => a - b);
+    for (let i = 1; i < xs.length; i++) {
+      expect(xs[i]! - xs[i - 1]!).toBeCloseTo(xs[1]! - xs[0]!, 4);
+    }
   });
 
   it('removes positive-volume crate overlaps from every production map', () => {

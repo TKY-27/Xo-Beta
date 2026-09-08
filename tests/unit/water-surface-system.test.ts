@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { WebGPURenderer } from 'three/webgpu';
+import { WaterSurfaceMaterial, WaterFoamMaterial } from '../../src/render/waterSurfaceSystem';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildWaterlineRibbonPositions,
@@ -140,7 +142,7 @@ describe('water surface handles', () => {
     try {
       const directions = system.group.children.map((root) => {
         const mesh = root.children.find((child) => child.name.startsWith('water-surface:'));
-        if (!(mesh instanceof THREE.Mesh) || !(mesh.material instanceof THREE.ShaderMaterial)) {
+        if (!(mesh instanceof THREE.Mesh) || !(mesh.material instanceof WaterSurfaceMaterial)) {
           throw new Error('Water surface material is missing');
         }
         const direction = mesh.material.uniforms['uWind']?.value;
@@ -165,7 +167,7 @@ describe('water surface handles', () => {
     const renderer = {
       capabilities: { isWebGL2: true },
       extensions: { has: vi.fn(() => false) },
-    } as unknown as THREE.WebGLRenderer;
+    } as unknown as WebGPURenderer;
     const system = new WaterSurfaceSystem(testMap([volume('lake')]), { renderer, quality: 'low' });
 
     try {
@@ -175,11 +177,12 @@ describe('water surface handles', () => {
       const mesh = root.children.find((child) => child.name.startsWith('water-surface:'));
       if (!(mesh instanceof THREE.Mesh)) throw new Error('Water surface mesh is missing');
       const material = mesh.material;
-      if (!(material instanceof THREE.ShaderMaterial)) throw new Error('Water surface material is missing');
+      if (!(material instanceof WaterSurfaceMaterial)) throw new Error('Water surface material is missing');
       const waveTexture = material.uniforms['uWaveTexture']?.value;
       expect(waveTexture).toBeInstanceOf(THREE.DataTexture);
       expect((waveTexture as THREE.DataTexture).type).toBe(THREE.UnsignedByteType);
-      expect(renderer.extensions.has).toHaveBeenCalledWith('OES_texture_half_float_linear');
+      const extProbe = renderer as unknown as { extensions: { has(name: string): boolean } };
+      expect(extProbe.extensions.has).toHaveBeenCalledWith('OES_texture_half_float_linear');
     } finally {
       system.dispose();
     }
@@ -189,7 +192,7 @@ describe('water surface handles', () => {
     const renderer = {
       capabilities: { isWebGL2: true },
       extensions: { has: vi.fn((name: string) => name === 'OES_texture_float_linear') },
-    } as unknown as THREE.WebGLRenderer;
+    } as unknown as WebGPURenderer;
     const system = new WaterSurfaceSystem(testMap([volume('river')]), { renderer, quality: 'medium' });
 
     try {
@@ -200,7 +203,7 @@ describe('water surface handles', () => {
       });
       const root = system.group.children[0];
       const mesh = root?.children.find((child) => child.name.startsWith('water-surface:'));
-      if (!(mesh instanceof THREE.Mesh) || !(mesh.material instanceof THREE.ShaderMaterial)) {
+      if (!(mesh instanceof THREE.Mesh) || !(mesh.material instanceof WaterSurfaceMaterial)) {
         throw new Error('Water surface material is missing');
       }
       expect((mesh.material.uniforms['uWaveTexture']?.value as THREE.DataTexture).type)
@@ -223,7 +226,7 @@ describe('water surface handles', () => {
       geometries.push(object.geometry);
       if (Array.isArray(object.material)) materials.push(...object.material);
       else materials.push(object.material);
-      const shader = object.material instanceof THREE.ShaderMaterial ? object.material : null;
+      const shader = object.material instanceof WaterSurfaceMaterial || object.material instanceof WaterFoamMaterial ? object.material : null;
       for (const uniform of Object.values(shader?.uniforms ?? {})) {
         if (uniform.value instanceof THREE.Texture && uniform.value.userData.xoWaterOwned === true) {
           textures.add(uniform.value);
@@ -243,7 +246,7 @@ describe('water surface handles', () => {
 
     const currentTextures = new Set<THREE.Texture>();
     system.group.traverse((object) => {
-      if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.ShaderMaterial)) return;
+      if (!(object instanceof THREE.Mesh) || !(object.material instanceof WaterSurfaceMaterial)) return;
       for (const uniform of Object.values(object.material.uniforms)) {
         if (uniform.value instanceof THREE.Texture && uniform.value.userData.xoWaterOwned === true) {
           currentTextures.add(uniform.value);
@@ -295,7 +298,7 @@ describe('water surface handles', () => {
         const materials = Array.isArray(object.material) ? object.material : [object.material];
         for (const material of materials) {
           resources.add(material);
-          if (!(material instanceof THREE.ShaderMaterial)) continue;
+          if (!(material instanceof WaterSurfaceMaterial)) continue;
           for (const uniform of Object.values(material.uniforms)) {
             if (uniform.value instanceof THREE.Texture && uniform.value.userData.xoWaterOwned === true) {
               resources.add(uniform.value);

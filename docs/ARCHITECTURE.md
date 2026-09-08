@@ -77,10 +77,11 @@ Recorded sample playback (CC0 packs — see docs/ASSET_MANIFEST.md) through WebA
 
 See `docs/adr/`:
 
-- ADR-0001: Renderer choice — Three.js over Babylon/WebGPU-first stacks
+- ADR-0001: Renderer choice — Three.js over Babylon/WebGPU-first stacks (backend superseded by ADR-0005)
 - ADR-0002: Physics choice — Rapier WASM
 - ADR-0003: Original and redistributed asset pipeline with verified provenance
 - ADR-0004: Simulation-first architecture & future multiplayer path
+- ADR-0005: WebGPU-primary renderer with WebGL2 fallback (TSL node materials)
 
 ## Multiplayer boundary
 
