@@ -1124,9 +1124,11 @@ export class WorldView {
     for (const key of undergrowthKeys) {
       const ms = underMatrices.get(key)!;
       if (!ms.length || !props.hasVariant(key)) continue;
+      // CYCLE 62 (review): ground the tufts one value step — thin bright
+      // blade strands floated against the darker grass at mid distance.
       const softTint = def.id === 'oldfront'
         ? moorTintSoft
-        : def.id === 'eden' ? wetlandTintSoft : undefined;
+        : def.id === 'eden' ? wetlandTintSoft : groundTuftTint;
       this.addInstancedByGrid(key, ms, props, 4096, false, softTint);
     }
 
@@ -2555,6 +2557,18 @@ function wetlandTintSoft(m: THREE.Material): void {
   if (std.emissive) {
     std.emissive.set(0x122014);
     std.emissiveIntensity = Math.max(std.emissiveIntensity ?? 0, 0.07);
+  }
+}
+
+/** CYCLE 62: default tuft tint for maps without a biome pass — darkens thin
+ * blade cards one value step so they don't float as bright hairs. */
+function groundTuftTint(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  std.color.multiplyScalar(0.82);
+  if (std.emissive) {
+    std.emissive.set(0x121a12);
+    std.emissiveIntensity = Math.max(std.emissiveIntensity ?? 0, 0.06);
   }
 }
 

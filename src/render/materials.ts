@@ -105,7 +105,15 @@ const TINTS: Partial<Record<MatKey, number>> = {
   plaster: 0xb3a892,
   plasterOld: 0xd8d2c6,
   concreteDark: 0x8d9096,
-  concrete: 0x9aa0a6,
+  // CYCLE 62: eden's concrete service paths clipped to snow under the
+  // restored direct sun + bloom — darkened a full step.
+  concrete: 0x707479,
+  // The dirt shoulder under the path ribbons had no tint (white multiplier)
+  // and blew out at distance against the sunlit grass.
+  dirt: 0x9a8468,
+  // CYCLE 62 (review): eden's road ribbon clipped to snow under the restored
+  // sun + bloom — the asphalt set had no tint entry (white multiplier).
+  asphalt: 0x84878b,
   rock: 0x948e83,
   metalDark: 0x59636d,
   metal: 0x6b7580,
@@ -414,7 +422,9 @@ export async function createMaterials(): Promise<MaterialLibrary> {
       return m;
     }
     const fallback: Record<string, number> = {
-      concrete: 0x8f9296, concreteDark: 0x74777c, asphalt: 0x60646b, sidewalk: 0x777a7d,
+      // CYCLE 62 (review): the pale concrete ribbon read as snow against sunlit
+      // grass — warmed/darkened one step.
+      concrete: 0x7d8084, concreteDark: 0x74777c, asphalt: 0x60646b, sidewalk: 0x777a7d,
       metal: 0x9aa4ad, metalDark: 0x59636d, rust: 0x7a4a30, corrugated: 0x88929c,
       wood: 0xa07848, woodDark: 0x5f4630, stoneBrick: 0x8d897f, bricksOld: 0x8d6f5f,
       plaster: 0xbfb7a8, plasterOld: 0xb0a48c, grass: 0x5d7a43, dirt: 0x6e5a41,

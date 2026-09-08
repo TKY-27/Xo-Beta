@@ -1932,13 +1932,16 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   // raw grass albedo reads as tan dunes at distance otherwise.
   const cGrassFar = new THREE.Color(texMode ? (isDesert ? 0xa58c68 : 0xa8bd9a) : pal.grassFar);
   const cRock = new THREE.Color(texMode ? (isDesert ? 0x8f8272 : 0x99a294) : pal.rock);
-  const cSand = new THREE.Color(texMode ? (isDesert ? 0xe1c995 : 0xe4d9b4) : pal.sand);
+  // CYCLE 62 (review): the near-white sand path vertices (0xe4d9b4) clipped
+  // to snow under the restored direct sun — warmed and darkened to a trodden
+  // path tone. The desert keeps its own (sun-heavier) sand value.
+  const cSand = new THREE.Color(texMode ? (isDesert ? 0xc9ad7e : 0xbfaf8a) : pal.sand);
   const cBed = new THREE.Color(texMode ? (isDesert ? 0x76634d : 0x5c6a5f) : pal.bed);
   // Deep-water bed tone for the depth gradient (CYCLE 56 review: the lake
   // read as one flat teal disc with a hard edge from the air).
   const cBedDeep = cBed.clone().multiplyScalar(0.5);
   const cAsphalt = new THREE.Color(0x23262b);
-  const cDry = new THREE.Color(texMode ? (isDesert ? 0xc2a675 : 0xd6cda6) : 0x9a9160);
+  const cDry = new THREE.Color(texMode ? (isDesert ? 0xb0956a : 0xb5ad8c) : 0x9a9160);
   const tmp = new THREE.Color();
 
   for (let i = 0; i < pos.count; i++) {
