@@ -466,8 +466,8 @@ export class ViewModel {
     rig.left.getWorldPosition(wL);
     // Wrist targets sit BEHIND each palm (toward the eye) so the sleeve
     // ends at the cuff — the v2 joint sphere covered the hand entirely.
-    wR.z += 0.075;
-    wL.z += 0.075;
+    wR.z += 0.068;
+    wL.z += 0.068;
     this.armSolver.solve(this.pivot, [wR, wL]);
   }
 

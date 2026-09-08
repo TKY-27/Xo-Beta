@@ -1,24 +1,25 @@
 /**
- * CYCLE 35/36 — first-person hands/arms rig (v2 after critical review).
+ * CYCLE 38 — first-person hands/arms rig (v4, AAA readability pass).
  *
  * Two gloved hands parented INSIDE each weapon model group at its grip
  * anchors (see ProceduralWeapon.gripR/gripL), so every weapon motion — sway,
  * ADS, recoil kick, reload — carries the hands for free. The rig is built to
  * human scale and counter-scaled against the weapon's presentation scale.
  *
- * v2 review fixes baked in:
- * - the left-hand mirror lives in a dedicated wrapper group, and the pose
- *   solver composes rotations around it (the v1 Euler clobber un-mirrored
- *   the hand on frame one, dangling the fingers into the air),
- * - forearms tuned per hand so they exit the bottom frame corners in the
- *   default poses, thinner, and stay attached through reload swings,
- * - one human hand scale (no per-weapon size jumps),
- * - lighter glove material with fabric bump so hands read against dark
- *   polymer weapons,
- * - support-hand tuck while aiming (never crosses the sight line),
- * - dedicated magazine-carry offset (palm ON the mag body) and a bolt-cycle
- *   timeline for the sniper (right hand leaves the grip, works the bolt,
- *   returns).
+ * v4 changes (Apex-class hip-framing pass):
+ * - fingers now spread along the hand's WIDTH axis (v3 stacked them down
+ *   the palm normal, reading as dangling finger chains), two segments each
+ *   with a gentle per-finger wrap curl + rotation variance — silhouette
+ *   unified, separations visible, no comb;
+ * - chirality fixed: buildHand(thumbSide) builds real right/left hands (v3's
+ *   "right" build was anatomically mirrored, forcing Euler pose hacks);
+ * - poses authored as palm/fingers DIRECTIONS through handBasisQuat() —
+ *   no more hand-solved Euler triples — with contact offsets per class;
+ * - materials: fabric glove + lighter hard-shell panels + dark rubber palm
+ *   pads + glossy knuckle armour + warm leather finger pads (one family,
+ *   shared with ArmSolver sleeves via `shell`);
+ * - sleeves tapered thinner with a stronger elbow drop so arms leave the
+ *   bottom corners with a visible bend, never straight pipes.
  */
 
 import * as THREE from 'three';
@@ -59,6 +60,8 @@ interface HandMats {
   shell: THREE.MeshStandardMaterial;
   skin: THREE.MeshStandardMaterial;
   plate: THREE.MeshStandardMaterial;
+  /** Dark rubberized palm/fingertip contact pads (grip surfaces read as gear). */
+  palm: THREE.MeshStandardMaterial;
 }
 
 let fabricBump: THREE.CanvasTexture | null = null;
@@ -110,72 +113,139 @@ export function getHandMaterialSet(): HandMats {
 
 function makeHandMats(): HandMats {
   const bump = getFabricBump();
-  // CYCLE 36 (review): lifted from near-black — hands must read against dark
-  // polymer weapons. Warm dark-grey glove + harder shell accents.
-  const glove = new THREE.MeshStandardMaterial({ color: 0x5c646c, roughness: 0.72, metalness: 0.06 });
+  // One material FAMILY across hands + sleeves (ArmSolver shares `shell`):
+  // mid-grey fabric base, lighter hard-shell panels, dark rubber grip pads,
+  // near-black glossy knuckle armour that catches speculars, and warm
+  // leather finger pads. Panel contrast comes from GEOMETRY (proud shell
+  // plates over fabric), not just color swaps.
+  const glove = new THREE.MeshStandardMaterial({ color: 0x5a626b, roughness: 0.76, metalness: 0.05 });
   if (bump) {
     glove.normalMap = bump;
-    glove.normalScale.set(0.5, 0.5);
+    glove.normalScale.set(0.35, 0.35);
   }
-  const shell = new THREE.MeshStandardMaterial({ color: 0x565d64, roughness: 0.55, metalness: 0.3 });
-  const skin = new THREE.MeshStandardMaterial({ color: 0xc0906c, roughness: 0.7, metalness: 0 });
-  const plate = new THREE.MeshStandardMaterial({ color: 0x22262b, roughness: 0.45, metalness: 0.4 });
-  return { glove, shell, skin, plate };
+  const shell = new THREE.MeshStandardMaterial({ color: 0x646d78, roughness: 0.5, metalness: 0.3 });
+  const skin = new THREE.MeshStandardMaterial({ color: 0x8f6b4f, roughness: 0.62, metalness: 0.02 });
+  const plate = new THREE.MeshStandardMaterial({ color: 0x394049, roughness: 0.38, metalness: 0.55 });
+  const palm = new THREE.MeshStandardMaterial({ color: 0x474e56, roughness: 0.88, metalness: 0.02 });
+  return { glove, shell, skin, plate, palm };
 }
 
 /** One gloved hand, built reaching palm-down with fingers curling -y and
- * extending -z. The caller mirrors it for the left hand via a wrapper group
- * so pose rotations can never undo the mirror. */
-function buildHand(mats: HandMats): THREE.Group {
+ * extending -z. The four fingers spread along the hand's WIDTH axis (x) —
+ * v3 stacked them down the palm normal, which read as dangling finger
+ * chains. `thumbSide` picks the chirality: -1 = anatomical right hand
+ * (thumb on -x), +1 = anatomical left hand. 15 meshes/hand (38 total with
+ * the ArmSolver — inside the low-poly budget). */
+function buildHand(mats: HandMats, thumbSide: 1 | -1): THREE.Group {
   const hand = new THREE.Group();
 
-  const palm = new THREE.Mesh(new RoundedBoxGeometry(0.036, 0.03, 0.088, 2, 0.011), mats.glove);
-  palm.position.set(0, 0, 0.01);
+  // Palm: widened (real palms are ~as wide as long) with a proud rubber
+  // grip pad on the contact face (-y).
+  const palm = new THREE.Mesh(new RoundedBoxGeometry(0.052, 0.032, 0.094, 3, 0.012), mats.glove);
+  palm.position.set(0, 0, 0.012);
   hand.add(palm);
+  const palmPad = new THREE.Mesh(new RoundedBoxGeometry(0.046, 0.011, 0.078, 2, 0.004), mats.palm);
+  palmPad.position.set(0, -0.0155, 0.008);
+  hand.add(palmPad);
 
-  // Knuckle armour across the back.
-  const plate = new THREE.Mesh(new RoundedBoxGeometry(0.04, 0.013, 0.04, 2, 0.004), mats.plate);
-  plate.position.set(0, 0.02, 0.016);
+  // Hard-shell back panel + knuckle armour across the back of the hand.
+  const backPanel = new THREE.Mesh(new RoundedBoxGeometry(0.046, 0.012, 0.062, 2, 0.005), mats.shell);
+  backPanel.position.set(0, 0.017, 0.014);
+  hand.add(backPanel);
+  const plate = new THREE.Mesh(new RoundedBoxGeometry(0.05, 0.014, 0.034, 2, 0.005), mats.plate);
+  plate.position.set(0, 0.024, 0.006);
   hand.add(plate);
 
-  // Four fingers: two segments, curled to wrap a ~30 mm grip; tight spacing
-  // so the silhouette reads as one hand (v1's 4 mm gaps read as a comb).
+  // Four fingers side by side along x (spacing slightly under the segment
+  // diameter so the silhouette unifies but separations still read), two
+  // segments each with a gentle wrap curl that grows toward the pinky, and
+  // a deterministic per-finger rotation variance so they never read as a
+  // comb. Leather-toned distal segments do the contacting.
   for (let i = 0; i < 4; i++) {
+    const wig = Math.sin(i * 12.9898 + 4.1) * 0.5; // -0.5..0.5 pseudo-random
     const finger = new THREE.Group();
-    finger.position.set(0, 0.008 - i * 0.0165, -0.03);
-    const seg1 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0092, 0.026, 3, 8), mats.glove);
+    finger.position.set((i - 1.5) * 0.0142 + wig * 0.0012, -0.004 - Math.abs(wig) * 0.0012, -0.032 + (i === 1 ? -0.002 : i === 3 ? 0.004 : 0));
+    finger.rotation.y = thumbSide * ((i - 1.5) * 0.045 + wig * 0.05);
+    // Proximal segment: fabric glove.
+    const seg1 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0098, 0.024, 3, 10), mats.glove);
     seg1.rotation.x = Math.PI / 2;
-    seg1.position.set(0, -0.008, -0.012);
+    seg1.position.set(0, -0.01, -0.012);
     finger.add(seg1);
-    const seg2 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0086, 0.022, 3, 8), mats.glove);
-    seg2.position.set(0, -0.022, -0.026);
-    seg2.rotation.x = Math.PI / 2 + 1.0;
+    // Distal segment: leather pad, curled down-and-under the grip surface.
+    const curl = 0.72 + i * 0.09 + wig * 0.1;
+    const seg2 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0092, 0.02, 3, 10), mats.skin);
+    seg2.rotation.x = Math.PI / 2 - curl;
+    seg2.position.set(0, -0.01 - Math.sin(curl) * 0.015, -0.034 - (1 - Math.cos(curl)) * 0.015);
     finger.add(seg2);
-    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.0066, 8, 8), mats.skin);
-    tip.position.set(0, -0.024, -0.04);
-    finger.add(tip);
     hand.add(finger);
   }
 
-  // Thumb closing across the near face.
+  // Thumb wrapping across the near face: base on the thumb-side edge just
+  // under the tang line, angled forward-inward so the tip crosses in front
+  // of the fingers (a higher base stabbed the tip past the grip top).
   const thumb = new THREE.Group();
-  thumb.position.set(0.02, 0.008, 0.006);
-  const thumbSeg = new THREE.Mesh(new THREE.CapsuleGeometry(0.0095, 0.03, 3, 8), mats.glove);
-  thumbSeg.rotation.set(0.3, 0, -1.15);
-  thumbSeg.position.set(0.01, -0.004, -0.012);
+  thumb.position.set(thumbSide * 0.026, -0.004, 0.012);
+  thumb.rotation.set(-0.05, thumbSide * 0.55, thumbSide * -0.1);
+  const thumbSeg = new THREE.Mesh(new THREE.CapsuleGeometry(0.011, 0.026, 3, 10), mats.glove);
+  thumbSeg.rotation.x = Math.PI / 2 - 0.28;
+  thumbSeg.position.set(0, -0.008, -0.015);
   thumb.add(thumbSeg);
-  const thumbTip = new THREE.Mesh(new THREE.SphereGeometry(0.007, 8, 8), mats.skin);
-  thumbTip.position.set(0.008, -0.01, -0.03);
+  const thumbTip = new THREE.Mesh(new THREE.CapsuleGeometry(0.0098, 0.018, 3, 10), mats.skin);
+  thumbTip.rotation.x = Math.PI / 2 - 0.75;
+  thumbTip.position.set(0, -0.021, -0.029);
   thumb.add(thumbTip);
   hand.add(thumb);
 
-  // Wrist cuff.
-  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.03, 0.03, 10), mats.shell);
-  cuff.rotation.x = Math.PI / 2 - 0.3;
-  cuff.position.set(0, 0.004, 0.055);
+  // Wrist cuff: 16-segment barrel aligned to the wrist joint (+z axis),
+  // flaring toward the forearm where the ArmSolver sleeve meets it. Kept
+  // narrower than the palm — v4's 5.7 cm cuff read as a second palm.
+  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.0235, 0.0205, 0.032, 16), mats.shell);
+  cuff.rotation.x = Math.PI / 2;
+  cuff.position.set(0, -0.002, 0.062);
   hand.add(cuff);
 
   return hand;
+}
+
+// Pose-scratch vectors/quats (module-level: pose() runs once per frame).
+const _palm = new THREE.Vector3();
+const _fingers = new THREE.Vector3();
+const _bp = new THREE.Vector3();
+const _bf = new THREE.Vector3();
+const _axisX = new THREE.Vector3();
+const _axisY = new THREE.Vector3();
+const _axisZ = new THREE.Vector3();
+const _basis = new THREE.Matrix4();
+const _quatA = new THREE.Quaternion();
+const _quatB = new THREE.Quaternion();
+
+/**
+ * Build the hand orientation from two anatomical directions: `palm` (the
+ * way the open palm faces) and `fingers` (the way the finger chain extends
+ * at the knuckles). Replaces v3's hand-solved Euler triples — poses are now
+ * authored as "palm here, fingers there", which is how a grip is described.
+ * `mirrored` selects the left-hand chirality (thumb = palm×fingers).
+ */
+function handBasisQuat(
+  out: THREE.Quaternion,
+  palm: THREE.Vector3,
+  fingers: THREE.Vector3,
+  mirrored: boolean,
+): THREE.Quaternion {
+  _bp.copy(palm).normalize();
+  _bf.copy(fingers).addScaledVector(_bp, -fingers.dot(_bp)).normalize();
+  // Hand-local axes: +x thumb side, +y back of hand, +z opposite the
+  // finger-extend direction.
+  if (mirrored) _axisX.copy(_bp).cross(_bf);
+  else _axisX.copy(_bf).cross(_bp);
+  _axisY.copy(_bp).negate();
+  _axisZ.copy(_bf).negate();
+  _basis.makeBasis(_axisX, _axisY, _axisZ);
+  return out.setFromRotationMatrix(_basis);
+}
+
+function orientHand(group: THREE.Object3D, palm: THREE.Vector3, fingers: THREE.Vector3, mirrored: boolean): void {
+  group.quaternion.copy(handBasisQuat(_quatA, palm, fingers, mirrored));
 }
 
 function smooth(t: number): number {
@@ -186,15 +256,14 @@ function smooth(t: number): number {
 export function createHandRig(): HandRig {
   const mats = getHandMaterialSet();
 
-  // Left hand: the mirror lives in a WRAPPER so pose rotations can never
-  // undo it (v1 clobbered rotation.y = Math.PI on the first frame).
+  // Left hand: anatomically built (thumbSide +1) inside a WRAPPER group —
+  // the pose solver composes orientations around it, so no pose can undo
+  // the chirality (the v1 Euler clobber dangled the fingers frame one).
   const leftWrap = new THREE.Group();
-  leftWrap.rotation.y = Math.PI;
-  const leftHand = buildHand(mats);
-  leftWrap.add(leftHand);
+  leftWrap.add(buildHand(mats, 1));
   const left = leftWrap;
 
-  const right = buildHand(mats);
+  const right = buildHand(mats, -1);
 
   let gripR = new THREE.Vector3();
   let gripL = new THREE.Vector3();
@@ -212,10 +281,20 @@ export function createHandRig(): HandRig {
       left.scale.setScalar(s);
     },
     pose({ reloadPhase, supportStyle, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal }) {
-      // ---- Right hand -------------------------------------------------
-      // Sniper: the firing hand leaves the grip and works the bolt through
-      // the cycle, then re-seats. Grip → bolt → ride → return.
+      // ---- Right (trigger) hand ---------------------------------------
+      // High power grip: the BACK of the hand (knuckle plate + shell panel)
+      // faces up-right-REAR toward the camera so the hand reads at hip
+      // framing; the palm presses the grip's front-right corner and the
+      // fingers wrap down the front strap. ADS settles it flatter.
+      const gripPalm = _palm.set(-0.45, -0.7, -0.42);
+      const gripFingers = _fingers.set(0.72, -0.66, -0.2);
+      if (ads > 0) {
+        gripPalm.z += ads * 0.2;
+        gripFingers.x -= ads * 0.1;
+      }
       if (boltPhase >= 0 && boltLocal) {
+        // Sniper: the firing hand leaves the grip and works the bolt through
+        // the cycle, then re-seats. Grip → bolt → ride → return.
         const target = new THREE.Vector3();
         if (boltPhase < 0.3) {
           target.lerpVectors(gripR, boltLocal, smooth(boltPhase / 0.3));
@@ -229,58 +308,71 @@ export function createHandRig(): HandRig {
           target.lerpVectors(boltLocal, gripR, smooth((boltPhase - 0.7) / 0.3));
         }
         right.position.copy(target);
-        right.rotation.set(-0.4, -0.2, 0.2);
+        orientHand(right, gripPalm, gripFingers, false);
       } else {
-        right.position.set(gripR.x + 0.014, gripR.y - 0.018, gripR.z + 0.03);
-        right.rotation.set(-0.55 + ads * 0.1, -0.25, 0.12);
+        right.position.set(gripR.x + 0.02, gripR.y - 0.003 + ads * 0.004, gripR.z + 0.002);
+        orientHand(right, gripPalm, gripFingers, false);
       }
 
-      // ---- Left hand ----------------------------------------------------
+      // ---- Left (support) hand ----------------------------------------
       if (pumpHand || supportStyle === 'pump') {
-        // Shotgun: fingers wrap UNDER the pump (v2's flat palm lay on top
-        // and vanished into the pump box).
-        left.position.set(gripL.x, gripL.y - 0.065, gripL.z + pumpOffset);
-        leftWrap.rotation.set(2.8, Math.PI, 0);
+        // Shotgun: palm cups UNDER the pump body, fingers wrapping up its
+        // front face only (a taller curl speared the tips past the pump
+        // top); the hand rides the pump travel.
+        left.position.set(gripL.x, gripL.y - 0.066, gripL.z - 0.04 + pumpOffset);
+        orientHand(left, _palm.set(0, 0.9, -0.44), _fingers.set(0, -0.55, -0.84), true);
         return;
       }
       if (reloadPhase >= 0 && magLocal) {
         // Reach to the mag (0-0.3), pull down with it (0.3-0.5), carry back
         // up and seat (0.5-0.85), slap + re-grip (0.85-1). The palm rides ON
-        // the mag body (small offset — v1 hovered 9 cm below it).
+        // the mag body; orientation blends from the support grip to a
+        // mag-carry cup and back.
         const p = reloadPhase;
         const target = new THREE.Vector3();
+        let blend: number;
         if (p < 0.3) {
           target.lerpVectors(gripL, magLocal, smooth(p / 0.3));
-          leftWrap.rotation.set(-0.2, Math.PI, 0.1);
+          blend = smooth(p / 0.3);
         } else if (p < 0.85) {
           target.copy(magLocal);
           target.y -= 0.02;
-          leftWrap.rotation.set(-0.3, Math.PI, -0.15);
+          blend = 1;
         } else {
           target.lerpVectors(magLocal, gripL, smooth((p - 0.85) / 0.15));
-          leftWrap.rotation.set(-0.2, Math.PI, 0.1);
+          blend = 1 - smooth((p - 0.85) / 0.15);
         }
         left.position.copy(target);
+        const tuck = ads * 0.035;
+        handBasisQuat(_quatA, _palm.set(0, 0.96 - ads * 0.1, -0.28), _fingers.set(0, -0.28, -0.96), true);
+        handBasisQuat(_quatB, _palm.set(0.85, -0.35, 0.2), _fingers.set(0, -0.5, -0.86), true);
+        leftWrap.quaternion.slerpQuaternions(_quatA, _quatB, blend);
+        left.position.y -= tuck * (1 - blend);
         return;
       }
-      // Support poses per class (review: the shared -1.15 pitch speared
+      // Support poses per class (review: the shared pitch speared
       // fingertips through the solid forends on every long gun).
       const tuck = ads * 0.035;
       if (supportStyle === 'side') {
-        // SMG: horizontal wrap around the vertical foregrip.
-        left.position.set(gripL.x - 0.03, gripL.y - 0.02 - tuck, gripL.z);
-        leftWrap.rotation.set(-0.2, Math.PI, 1.35);
+        // SMG: horizontal wrap around the vertical foregrip — palm faces
+        // into the grip from the left, fingers curl around the far side,
+        // thumb riding up the near edge.
+        left.position.set(gripL.x - 0.028, gripL.y + 0.025 - tuck, gripL.z);
+        orientHand(left, _palm.set(0.95, -0.2, 0.2), _fingers.set(0.1, -0.4, -0.9), true);
         return;
       }
       if (supportStyle === 'over') {
-        // Pistol: hand-over-hand — palm cups the firing hand from below-front.
-        left.position.set(gripL.x, gripL.y - 0.012, gripL.z - 0.024);
-        leftWrap.rotation.set(-0.85, Math.PI, -0.35);
+        // Pistol: hand-over-hand — the left hand cups the firing hand from
+        // below-left-front, fingers wrapping up around it.
+        left.position.set(gripL.x - 0.008, gripL.y - 0.025, gripL.z - 0.028);
+        orientHand(left, _palm.set(0.45, 0.7, 0.55), _fingers.set(0.1, 0.6, -0.79), true);
         return;
       }
-      // 'under' (AR/sniper): fingers run forward along the bottom face.
-      left.position.set(gripL.x, gripL.y - 0.035 - tuck, gripL.z);
-      leftWrap.rotation.set(2.55 - ads * 0.15, Math.PI, 0.12);
+      // 'under' (AR/sniper): palm up under the handguard, fingers running
+      // forward and curling up its far side (shallow enough to stay under
+      // the rail line — a taller curl stabbed through the forend).
+      left.position.set(gripL.x, gripL.y - 0.016 - tuck, gripL.z + 0.008);
+      orientHand(left, _palm.set(0, 0.96 - ads * 0.1, -0.28), _fingers.set(0, -0.2, -0.98), true);
     },
   };
 }
@@ -302,12 +394,14 @@ export class ArmSolver {
   // for the worst-case reach (sniper support hand) — v2's left sleeve ended
   // 20-40 cm short of the hand in EVERY long-gun frame by construction.
   private readonly shoulders = [
-    new THREE.Vector3(0.18, -0.24, -0.02),
-    new THREE.Vector3(-0.18, -0.24, -0.02),
+    new THREE.Vector3(0.27, -0.4, -0.12),
+    new THREE.Vector3(-0.27, -0.4, -0.12),
   ];
-  private readonly upperLen = 0.38;
-  private readonly foreLen = 0.35;
-  private readonly bends = [new THREE.Vector3(1.2, -0.9, 0.1), new THREE.Vector3(-1.2, -0.9, 0.1)];
+  private readonly upperLen = 0.42;
+  private readonly foreLen = 0.4;
+  // Bend hints: strong downward+outward elbow drop — v3's shallow hints
+  // projected nearly parallel to the reach and read as straight pipes.
+  private readonly bends = [new THREE.Vector3(1.8, -1.05, 0.1), new THREE.Vector3(-1.8, -1.05, 0.1)];
   private readonly sleeves: Array<{ upper: THREE.Mesh; fore: THREE.Mesh }> = [];
   private joints: THREE.Mesh[] = [];
   private tmpA = new THREE.Vector3();
@@ -328,15 +422,15 @@ export class ArmSolver {
     for (let i = 0; i < 2; i++) {
       // Taper: thicker at the shoulder, thinnest at the wrist (aim() maps
       // +Y to the SECOND joint, so rTop is the far end — v2 had it inverted).
-      this.sleeves.push({ upper: make(0.044, 0.054), fore: make(0.032, 0.044) });
+      this.sleeves.push({ upper: make(0.04, 0.05), fore: make(0.03, 0.04) });
     }
     // Elbow joint spheres close the open cylinder ends; wrist spheres cover
     // the forearm-to-cuff seam (round-3: hollow tube rims showed on clamp).
     this.joints = [
-      new THREE.Mesh(new THREE.SphereGeometry(0.042, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.042, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.021, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.021, 10, 8), shell),
     ];
     void this.joints;
     for (const j of this.joints) {
@@ -373,7 +467,11 @@ export class ArmSolver {
       const { upper, fore } = this.sleeves[i]!;
 
       // Analytic two-bone IK: clamp the reach, then place the elbow off the
-      // law-of-cosines angle along the bend hint (down/outward).
+      // law-of-cosines angle along the bend hint (down/outward). At the
+      // short viewmodel reaches the raw sinA folds the elbow ~30 cm off the
+      // line (v4 round 1: pipe-arms), so the offset is damped — the stretched
+      // forearm absorbs the residual, keeping a subtle visible bend.
+      const elbowDamp = 0.5;
       const delta = this.tmpA.copy(wrist).sub(shoulder);
       let d = delta.length();
       const maxReach = this.upperLen + this.foreLen - 0.02;
@@ -383,7 +481,7 @@ export class ArmSolver {
       const wristC = shoulder.clone().add(delta);
 
       const cosA = (this.upperLen * this.upperLen + d * d - this.foreLen * this.foreLen) / (2 * this.upperLen * d);
-      const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+      const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA)) * elbowDamp;
       const along = delta.clone().normalize();
       const bend = this.bends[i]!.clone().addScaledVector(along, -this.bends[i]!.dot(along));
       if (bend.lengthSq() < 1e-6) bend.set(0, -1, 0);

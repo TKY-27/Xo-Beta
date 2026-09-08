@@ -99,6 +99,8 @@ five cycles.
 
 | 38 | eden FP AR capture | Round-3 review's validated constants applied: shoulders (±0.18,-0.24,-0.02), chain 0.38+0.35 (worst-case reach 0.642 vs 0.71 — visible elbow bend on all classes), right-hand regrip (fingers across the grip's front strap), 'under' pose flipped to a palm-up cup (2.55, π, 0.12), 'side' roll 1.35 with anchor y -0.02, 'pump' un-buried (y -0.065, pitch 2.8), wrist seam spheres added, clamp safety aims the forearm at the TRUE wrist on shortfall (no floating open tube), rigs use the shared material singleton; HIP z -0.33→-0.30. APEX reference pass: fixed-viewmodel framing kept (world FOV shared), per-class scale retained | arm chains read as one person holding the weapon; zero console errors |
 
+| 39 | hands implementation subagent pass | APEX-bar polish delegated to an implementation specialist: root-cause mesh fix (v3 fingers stacked down the palm-normal — now spread along the width axis with per-finger curl variance), chirality fix (the v3 right hand was anatomically a left), declarative quaternion pose solver (palm/fingers direction basis replacing hand-solved Eulers) with per-class grips contacting surfaces, geometry-based panel contrast (proud shell/knuckle plates, rubber palm pad, leather finger pads), ArmSolver retune (shoulders ±0.27/-0.40/-0.12, bones 0.42/0.40, damped elbow). New fast harness qa-hands-isolate (seconds per iteration vs 3-min probes). All 542 unit tests pass; probes zero console errors | hands read as gloved hands wrapping the weapon at hip framing |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
