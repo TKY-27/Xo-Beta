@@ -39,6 +39,8 @@ export class ViewModel {
   /** CYCLE 36 (user pass): connected shoulder→elbow→wrist arm chains — the
    * hands are the END of the character's arms, never floating mittens. */
   readonly armSolver: ArmSolver;
+  private static readonly _wristQuat = new THREE.Quaternion();
+  private static readonly _wristOffset = new THREE.Vector3();
   private armMat: THREE.MeshStandardMaterial;
   private gloveMat: THREE.MeshStandardMaterial;
   private currentId: WeaponId | null = null;
@@ -180,7 +182,7 @@ export class ViewModel {
   /** Per-class presentation scale (round-6 weapon review): the flat 0.6
    * left the pistol at ~5% of frame while long guns filled 20%. */
   private static readonly WEAPON_VIEW_SCALE: Record<WeaponId, number> = {
-    pistol: 1.2, smg: 0.78, ar: 0.82, shotgun: 0.85, sniper: 0.78,
+    pistol: 0.95, smg: 0.78, ar: 0.82, shotgun: 0.85, sniper: 0.78,
   };
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
@@ -466,8 +468,13 @@ export class ViewModel {
     rig.left.getWorldPosition(wL);
     // Wrist targets sit BEHIND each palm (toward the eye) so the sleeve
     // ends at the cuff — the v2 joint sphere covered the hand entirely.
-    wR.z += 0.068;
-    wL.z += 0.068;
+    // CYCLE 46 (review/B2): the behind-palm offset must rotate with the
+    // view — world-space +z pointed camera-LEFT at other yaws, detaching
+    // the arm from the cuff on every turn.
+    const qR = rig.right.getWorldQuaternion(ViewModel._wristQuat);
+    wR.add(ViewModel._wristOffset.set(0, 0, 0.068).applyQuaternion(qR));
+    const qL = rig.left.getWorldQuaternion(ViewModel._wristQuat);
+    wL.add(ViewModel._wristOffset.set(0, 0, 0.068).applyQuaternion(qL));
     this.armSolver.solve(this.pivot, [wR, wL]);
   }
 

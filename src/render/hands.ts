@@ -123,7 +123,11 @@ function makeHandMats(): HandMats {
     glove.normalMap = bump;
     glove.normalScale.set(0.35, 0.35);
   }
-  const shell = new THREE.MeshStandardMaterial({ color: 0x646d78, roughness: 0.5, metalness: 0.3 });
+  const shell = new THREE.MeshStandardMaterial({ color: 0x646d78, roughness: 0.68, metalness: 0.08 });
+  if (bump) {
+    shell.normalMap = bump;
+    shell.normalScale.set(0.4, 0.4);
+  }
   const skin = new THREE.MeshStandardMaterial({ color: 0x8f6b4f, roughness: 0.62, metalness: 0.02 });
   const plate = new THREE.MeshStandardMaterial({ color: 0x394049, roughness: 0.38, metalness: 0.55 });
   const palm = new THREE.MeshStandardMaterial({ color: 0x474e56, roughness: 0.88, metalness: 0.02 });
@@ -209,6 +213,7 @@ function buildHand(mats: HandMats, thumbSide: 1 | -1): THREE.Group {
 
 // Pose-scratch vectors/quats (module-level: pose() runs once per frame).
 const _palm = new THREE.Vector3();
+const _boltRest = new THREE.Vector3();
 const _fingers = new THREE.Vector3();
 const _bp = new THREE.Vector3();
 const _bf = new THREE.Vector3();
@@ -343,8 +348,17 @@ export function createHandRig(): HandRig {
           blend = 1 - smooth((p - 0.85) / 0.15);
         }
         left.position.copy(target);
-        const tuck = ads * 0.035;
-        handBasisQuat(_quatA, _palm.set(0, 0.96 - ads * 0.1, -0.28), _fingers.set(0, -0.28, -0.96), true);
+        const tuck = ads * 0.012;
+        // CYCLE 46 (review): quatA = the ACTIVE support-style grip (v4
+        // hardcoded the 'under' cup → 50-70° orientation snaps on pistol/SMG
+        // reload starts and ends).
+        if (supportStyle === 'side') {
+          handBasisQuat(_quatA, _palm.set(0.95, -0.2, 0.2), _fingers.set(0.1, -0.4, -0.9), true);
+        } else if (supportStyle === 'over') {
+          handBasisQuat(_quatA, _palm.set(0.75, -0.35, -0.55), _fingers.set(0.1, -0.55, -0.84), true);
+        } else {
+          handBasisQuat(_quatA, _palm.set(0.45, 0.85 - ads * 0.1, -0.28), _fingers.set(0, -0.2, -0.98), true);
+        }
         handBasisQuat(_quatB, _palm.set(0.85, -0.35, 0.2), _fingers.set(0, -0.5, -0.86), true);
         leftWrap.quaternion.slerpQuaternions(_quatA, _quatB, blend);
         left.position.y -= tuck * (1 - blend);
@@ -352,7 +366,7 @@ export function createHandRig(): HandRig {
       }
       // Support poses per class (review: the shared pitch speared
       // fingertips through the solid forends on every long gun).
-      const tuck = ads * 0.035;
+      const tuck = ads * 0.012;
       if (supportStyle === 'side') {
         // SMG: horizontal wrap around the vertical foregrip — palm faces
         // into the grip from the left, fingers curl around the far side,
@@ -371,8 +385,8 @@ export function createHandRig(): HandRig {
       // 'under' (AR/sniper): palm up under the handguard, fingers running
       // forward and curling up its far side (shallow enough to stay under
       // the rail line — a taller curl stabbed through the forend).
-      left.position.set(gripL.x, gripL.y - 0.016 - tuck, gripL.z + 0.008);
-      orientHand(left, _palm.set(0, 0.96 - ads * 0.1, -0.28), _fingers.set(0, -0.2, -0.98), true);
+      left.position.set(gripL.x - 0.006, gripL.y - 0.008 - tuck, gripL.z + 0.008);
+      orientHand(left, _palm.set(0.45, 0.85, -0.28), _fingers.set(0, -0.2, -0.98), true);
     },
   };
 }
@@ -422,15 +436,15 @@ export class ArmSolver {
     for (let i = 0; i < 2; i++) {
       // Taper: thicker at the shoulder, thinnest at the wrist (aim() maps
       // +Y to the SECOND joint, so rTop is the far end — v2 had it inverted).
-      this.sleeves.push({ upper: make(0.04, 0.05), fore: make(0.03, 0.04) });
+      this.sleeves.push({ upper: make(0.04, 0.05), fore: make(0.026, 0.04) });
     }
     // Elbow joint spheres close the open cylinder ends; wrist spheres cover
     // the forearm-to-cuff seam (round-3: hollow tube rims showed on clamp).
     this.joints = [
       new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), shell),
       new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.021, 10, 8), shell),
-      new THREE.Mesh(new THREE.SphereGeometry(0.021, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 8), shell),
+      new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 8), shell),
     ];
     void this.joints;
     for (const j of this.joints) {
