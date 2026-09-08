@@ -20,6 +20,7 @@ import {
 } from '../world/terrainMesh';
 import type { TerrainGridMesh } from '../world/types';
 import type { MaterialLibrary } from './materials';
+import { buildDetailGrainRoughness } from './materials';
 import { peekTextureSet } from '../assets/assets';
 
 const SEG = 150;
@@ -129,7 +130,7 @@ class BoundaryBarrier {
     geo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
     for (let i = 0; i < 4; i++) {
       const mat = new THREE.LineBasicMaterial({
-        color: 0xff4038,
+        color: 0x37d8ff,
         transparent: true,
         opacity: 0,
         depthWrite: false,
@@ -163,9 +164,12 @@ class BoundaryBarrier {
     ];
     for (const [dist, idx] of walls) {
       const mat = this.mats[idx]!;
+      // CYCLE 56 (review): the near-invisible alpha-red hairline read as a
+      // stray debug line. Electric-cyan at a slightly higher ceiling with a
+      // livelier pulse reads as an intentional containment fence.
       const near = 22;
-      let target = dist < near ? Math.min(0.08, ((near - dist) / near) * 0.11) : 0;
-      target *= 0.92 + 0.08 * Math.sin(time * 2.6 + idx);
+      let target = dist < near ? Math.min(0.2, ((near - dist) / near) * 0.28) : 0;
+      target *= 0.86 + 0.14 * Math.sin(time * 3.4 + idx);
       mat.opacity += (target - mat.opacity) * 0.18;
       // Hard visibility gate: an invisible-but-rendered transparent plane
       // still costs a draw call and can interact with post processing.
@@ -222,6 +226,10 @@ function buildSkyline(size: number): THREE.Group {
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
     texture.repeat.set(family === 1 ? 2.7 : 3.2, family === 2 ? 5.2 : 4.2);
+    // CYCLE 56 (review): grazing-angle minification collapsed the window
+    // atlas into a mauve checkerboard on one tower — anisotropic filtering
+    // keeps the grid legible at skyline distance.
+    texture.anisotropy = 8;
     return texture;
   });
   const skylineMaterials = windowTextures.map((texture, family) => new THREE.MeshStandardMaterial({
@@ -246,6 +254,16 @@ function buildSkyline(size: number): THREE.Group {
   const crowns = new THREE.InstancedMesh(box, crownMat, count);
   const antennaCount = Math.ceil(count / 4);
   const antennas = new THREE.InstancedMesh(box, crownMat, antennaCount);
+  // Setback tiers and street-level podiums break the monolithic cuboid mass
+  // the QA ledger flagged: real high-rises step in as they rise and sit on a
+  // wider base. One instance per tower keeps the batched draws.
+  const tiers = new THREE.InstancedMesh(box, crownMat, count);
+  const podiums = new THREE.InstancedMesh(
+    box,
+    new THREE.MeshStandardMaterial({ color: 0x1b2530, roughness: 0.88, metalness: 0.1 }),
+    count,
+  );
+  const zeroScale = new THREE.Vector3(0, 0, 0);
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
@@ -267,9 +285,11 @@ function buildSkyline(size: number): THREE.Group {
     const family = i % 3;
     const towerIndex = towerIndices[family]!;
     towers[family]!.setMatrixAt(towerIndex, m);
+    // CYCLE 56 (review): widen the per-tone value range — the old 0.14-0.22
+    // lightness band read as one flat navy value wall at mid distance.
     towers[family]!.setColorAt(
       towerIndex,
-      new THREE.Color().setHSL(0.56 + random() * 0.045, 0.1 + random() * 0.08, 0.14 + random() * 0.08),
+      new THREE.Color().setHSL(0.55 + random() * 0.07, 0.09 + random() * 0.1, 0.11 + random() * 0.19),
     );
     towerIndices[family] = towerIndex + 1;
 
@@ -291,6 +311,28 @@ function buildSkyline(size: number): THREE.Group {
       m.compose(mastP, q, new THREE.Vector3(0.32, 9 + random() * 13, 0.32));
       antennas.setMatrixAt(antennaIndex++, m);
     }
+
+    // Roughly half the towers gain one setback tier partway up; every tower
+    // sits on a low wider podium like a real street wall.
+    if (random() < 0.5 && h > 55) {
+      const tierH = 3.5 + random() * 9;
+      const tierY = p.y + h * (0.52 + random() * 0.2);
+      m.compose(
+        new THREE.Vector3(p.x, tierY, p.z),
+        q,
+        new THREE.Vector3(s.x * (0.72 + random() * 0.16), tierH, s.z * (0.72 + random() * 0.16)),
+      );
+    } else {
+      m.compose(p, q, zeroScale);
+    }
+    tiers.setMatrixAt(i, m);
+    const podiumH = 4 + random() * 6;
+    m.compose(
+      new THREE.Vector3(p.x, p.y - 1, p.z),
+      q,
+      new THREE.Vector3(s.x * 1.18, podiumH, s.z * 1.18),
+    );
+    podiums.setMatrixAt(i, m);
   }
   towers.forEach((tower, family) => {
     tower.count = towerIndices[family]!;
@@ -301,9 +343,13 @@ function buildSkyline(size: number): THREE.Group {
   crowns.instanceMatrix.needsUpdate = true;
   antennas.count = antennaIndex;
   antennas.instanceMatrix.needsUpdate = true;
+  tiers.instanceMatrix.needsUpdate = true;
+  podiums.instanceMatrix.needsUpdate = true;
   crowns.frustumCulled = false;
   antennas.frustumCulled = false;
-  group.add(...towers, crowns, antennas);
+  tiers.frustumCulled = false;
+  podiums.frustumCulled = false;
+  group.add(...towers, crowns, antennas, tiers, podiums);
   group.userData.windowTextures = windowTextures;
   return group;
 }
@@ -729,7 +775,10 @@ function buildGableRoofGeometry(): THREE.BufferGeometry {
   // cone into the pyramid roofs that previously dominated Old Front's vista.
   const positions = new Float32Array([
     -0.55, 0, -0.55, 0.55, 0, -0.55, 0, 0.5, -0.55,
-    -0.55, 0, 0.55, 0, 0.5, 0.55, 0.55, 0, 0.55,
+    // End caps wound OUTWARD (cycle 53): both caps were inward-facing, so
+    // the gable ends backface-culled and street-axis views read hollow.
+    -0.55, 0, -0.55, 0, 0.5, -0.55, 0.55, 0, -0.55,
+    -0.55, 0, 0.55, 0.55, 0, 0.55, 0, 0.5, 0.55,
     -0.55, 0, -0.55, -0.55, 0, 0.55, 0, 0.5, 0.55,
     -0.55, 0, -0.55, 0, 0.5, 0.55, 0, 0.5, -0.55,
     0.55, 0, -0.55, 0, 0.5, -0.55, 0, 0.5, 0.55,
@@ -1325,7 +1374,10 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
     fog: true,
   });
   const farMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(0x6c6870).lerp(fog, 0.52),
+    // CYCLE 56 (review): the cool grey-violet 0x6c6870 clashed with the warm
+    // desert sun/sand as a foreign violet band on the horizon — warm the base
+    // toward sand-shadow and sink it deeper into the fog colour.
+    color: new THREE.Color(0x9c8266).lerp(fog, 0.66),
     fog: false,
   });
   const far = new THREE.Mesh(buildRidgeBandGeometry(half + 515, 118, 4.2), farMat);
@@ -1700,21 +1752,59 @@ function buildDesertDust(size: number): {
   };
 }
 
-/** Seamless deterministic sand grain and wind ripples for close terrain. */
+/**
+ * Seamless deterministic sand grain and wind ripples for close terrain.
+ *
+ * The first version drew one global 13-crest sinusoid per tile; tiled across
+ * the map it became perfectly parallel grooves in a single direction — the
+ * "corduroy" the round-4 critic flagged. Dune ripples instead appear in
+ * patchy fields whose crest direction and spacing drift, so here two ripple
+ * families at different angles are phase-warped by periodic value noise and
+ * faded in/out by patch masks. Every noise term is lattice-periodic over the
+ * tile, so the texture still tiles without seams.
+ */
 function buildSandMicroTexture(): THREE.DataTexture {
   const size = 384;
   const data = new Uint8Array(size * size * 4);
   const tau = Math.PI * 2;
+  const lattice = (xi: number, yi: number, seed: number): number => {
+    const h = Math.sin(xi * 127.1 + yi * 311.7 + seed * 74.7) * 43758.5453;
+    return h - Math.floor(h);
+  };
+  const fade = (t: number): number => t * t * (3 - 2 * t);
+  const clamp01 = (t: number): number => Math.min(1, Math.max(0, t));
+  /** Tile-periodic value noise: `period` lattice cells span the texture. */
+  const pnoise = (x: number, y: number, period: number, seed: number): number => {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = fade(x - xi), yf = fade(y - yi);
+    const wrap = (v: number): number => ((v % period) + period) % period;
+    const a = lattice(wrap(xi), wrap(yi), seed);
+    const b = lattice(wrap(xi + 1), wrap(yi), seed);
+    const c = lattice(wrap(xi), wrap(yi + 1), seed);
+    const d = lattice(wrap(xi + 1), wrap(yi + 1), seed);
+    return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf;
+  };
+  /** 0→1 ramp so ripple masks leave genuinely calm sand between patches. */
+  const patchMask = (n: number, lo: number, hi: number): number =>
+    fade(clamp01((n - lo) / (hi - lo)));
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const u = x / size;
       const v = y / size;
-      const warp = Math.sin(tau * v * 3) * 0.055 + Math.sin(tau * v * 7) * 0.018;
-      const longRipple = Math.sin(tau * (u * 13 + warp));
-      const crossRipple = Math.sin(tau * (v * 5 - u * 2)) * 0.34;
+      // Low-frequency meander bends crest lines instead of leaving them
+      // ruler-straight (also the old warp term's job, now stronger).
+      const warp = (pnoise(u * 3, v * 3, 3, 5) - 0.5) * 1.6;
+      // Family A — dominant ripple train (integer frequency sums keep the
+      // tile seamless), visible only inside its patches.
+      const maskA = patchMask(pnoise(u * 4 + 11, v * 4 - 7, 4, 21), 0.42, 0.72);
+      const rippleA = Math.sin(tau * (u * 6 + v * 2 + warp)) * maskA;
+      // Family B — crossing crests at a different angle/spacing, masked
+      // independently so A and B never stripe the same ground.
+      const maskB = patchMask(pnoise(u * 4 - 13, v * 4 + 5, 4, 33), 0.52, 0.82);
+      const rippleB = Math.sin(tau * (u * 2 - v * 5 + warp * 0.6)) * maskB;
       const hash = Math.sin((x * 127.1 + y * 311.7) * 0.0174533) * 43758.5453;
       const grain = (hash - Math.floor(hash)) * 2 - 1;
-      const shade = THREE.MathUtils.clamp(0.955 + longRipple * 0.014 + crossRipple * 0.008 + grain * 0.019, 0.87, 1);
+      const shade = THREE.MathUtils.clamp(0.965 + rippleA * 0.02 + rippleB * 0.013 + grain * 0.019, 0.87, 1);
       const offset = (y * size + x) * 4;
       data[offset] = Math.round(255 * shade);
       data[offset + 1] = Math.round(249 * shade);
@@ -1726,10 +1816,24 @@ function buildSandMicroTexture(): THREE.DataTexture {
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
+  // CYCLE 26: DataTexture defaults to no mipmaps — at grazing angles the
+  // 2 cm texels aliased into a foil-crinkle shimmer across the whole desert
+  // floor. Trilinear mips + anisotropy filter it like a regular scan.
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
   texture.anisotropy = 16;
   texture.needsUpdate = true;
   return texture;
 }
+
+/**
+ * CYCLE 48: the terrain grain generator moved to materials.ts
+ * (`buildDetailGrainRoughness`) so the flat ground material family carries
+ * the SAME field as the heightfield — adjacent ground planes and terrain now
+ * share texture character and plane seams soften. One canvas per terrain
+ * build, disposed with it.
+ */
 
 /**
  * One terrain mesh covering the playable area (exact heightfield match)
@@ -1828,10 +1932,16 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   // raw grass albedo reads as tan dunes at distance otherwise.
   const cGrassFar = new THREE.Color(texMode ? (isDesert ? 0xa58c68 : 0xa8bd9a) : pal.grassFar);
   const cRock = new THREE.Color(texMode ? (isDesert ? 0x8f8272 : 0x99a294) : pal.rock);
-  const cSand = new THREE.Color(texMode ? (isDesert ? 0xe1c995 : 0xe4d9b4) : pal.sand);
+  // CYCLE 62 (review): the near-white sand path vertices (0xe4d9b4) clipped
+  // to snow under the restored direct sun — warmed and darkened to a trodden
+  // path tone. The desert keeps its own (sun-heavier) sand value.
+  const cSand = new THREE.Color(texMode ? (isDesert ? 0xc9ad7e : 0xbfaf8a) : pal.sand);
   const cBed = new THREE.Color(texMode ? (isDesert ? 0x76634d : 0x5c6a5f) : pal.bed);
+  // Deep-water bed tone for the depth gradient (CYCLE 56 review: the lake
+  // read as one flat teal disc with a hard edge from the air).
+  const cBedDeep = cBed.clone().multiplyScalar(0.5);
   const cAsphalt = new THREE.Color(0x23262b);
-  const cDry = new THREE.Color(texMode ? (isDesert ? 0xc2a675 : 0xd6cda6) : 0x9a9160);
+  const cDry = new THREE.Color(texMode ? (isDesert ? 0xb0956a : 0xb5ad8c) : 0x9a9160);
   const tmp = new THREE.Color();
 
   for (let i = 0; i < pos.count; i++) {
@@ -1852,7 +1962,9 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
       // a texture is present (the albedo already provides detail).
       const patch = fbm(x * 0.013 + 40.7, z * 0.013 - 17.3);
       const patch2 = fbm(x * 0.045 - 9.1, z * 0.045 + 23.8);
-      const varAmt = texMode ? 0.4 : 1;
+      // Full-strength macro variation even with the albedo texture: the
+      // critic pass showed 0.4 leaves open fields reading as one flat color.
+      const varAmt = 1;
       tmp.offsetHSL(
         patch2 * 0.014 * varAmt,
         patch * 0.05 * varAmt,
@@ -1863,15 +1975,29 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
       // as one uniform toy-green lawn.
       const dry = Math.max(0, fbm(x * 0.006 + 71.3, z * 0.006 + 3.9) - 0.15) * 1.7;
       tmp.lerp(cDry, Math.min(isDesert ? 0.72 : 0.5, dry));
-      // Water shading: beds + sandy shores around registered volumes.
+      // Water shading (CYCLE 56 review): depth-gradient bed + feathered sand
+      // shoreline. The old binary bed/sand rects read from the air as a flat
+      // teal disc with a hard circular edge and a dark radial blob.
       for (const w of def.water) {
-        const pad = 9;
-        if (x > w.minX - pad && x < w.maxX + pad && z > w.minZ - pad && z < w.maxZ + pad) {
-          const inside = x >= w.minX && x <= w.maxX && z <= w.maxZ && z >= w.minZ;
-          if (inside && h < w.surfaceY - 0.35) tmp.copy(cBed);
-          else if (h < w.surfaceY + 0.4) tmp.copy(cSand);
-          break;
+        const pad = 14;
+        if (x <= w.minX - pad || x >= w.maxX + pad || z <= w.minZ - pad || z >= w.maxZ + pad) continue;
+        const depth = w.surfaceY - h;
+        if (depth > -0.8) {
+          const shoreT = Math.min(1, Math.max(0, (depth + 0.8) / 1.7));
+          tmp.lerp(cSand, 0.3 + 0.7 * shoreT);
+          if (depth > 0.9) {
+            tmp.lerp(cBed, Math.min(1, (depth - 0.9) / 1.1));
+            if (depth > 2.2) tmp.lerp(cBedDeep, Math.min(1, (depth - 2.2) / 2.4));
+          }
         }
+        break;
+      }
+      // Ashara low-end albedo breakup: deterministic ±3% value jitter per
+      // grid vertex (hash of world position, stable across builds/clients)
+      // so near-field sand never reads as one flat clay tone.
+      if (isDesert) {
+        const grainHash = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
+        tmp.offsetHSL(0, 0, (grainHash - Math.floor(grainHash) - 0.5) * 0.06);
       }
     }
     colors[i * 3] = tmp.r;
@@ -1907,32 +2033,44 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   });
   if (map) {
     mat.map = map;
-    if (isDesert) {
-      mat.bumpMap = map;
-      mat.bumpScale = 0.018;
-    }
+    // CYCLE 26: the former bumpMap copy of the sand albedo shone as foil
+    // crinkle at grazing angles (bump shading has no range control there).
   }
-  // Small-scale surface response shared by every terrain: a generated
-  // near-neutral normal map (grass blade grain / sand ripple micro relief)
-  // plus a roughness breakup map so wet/dry and trampled patches read without
-  // changing the collider or adding per-cell materials. Deterministic: one
-  // fixed-seed canvas per map build, disposed with the terrain.
-  const micro = buildMicroNormalTexture();
-  if (micro) {
-    mat.normalMap = micro;
-    mat.normalScale.set(isDesert ? 0.5 : 0.7, isDesert ? 0.5 : 0.7);
+  // CYCLE 57 (sun-light fix): the micro normal map is DISABLED. three.js
+  // r185's node pipeline (WebGPU and the WebGL2 fallback alike) zeroes ALL
+  // direct lighting for a standard material whose normalMap (or bumpMap) is
+  // combined with any other map: sun and sky-fill contribute exactly zero —
+  // the terrain read as flat ambient/IBL wash and never received shadows —
+  // while the same material without the normal map lights fully. Verified
+  // in-engine via tests/browser/qa-boot-probe.ts pixel readbacks
+  // (qa/boot-probe-eden). Terrain keeps map + roughnessMap + vertexColors,
+  // which all light correctly; buildMicroNormalTexture is kept for the
+  // three.js upgrade that fixes the node normal path.
+  // Roughness breakup: ~1.2 m neutral grain so the 1-5 m band responds to
+  // light (grass, sand and city asphalt alike) instead of reading as flat
+  // clay. Its own UV transform keeps it independent of the albedo's 5-8 m
+  // repeat on WebGPU; the WebGL fallback shares the albedo tiling, which
+  // still reads.
+  const detailRough = buildDetailGrainRoughness();
+  if (detailRough) {
+    detailRough.repeat.set(span / 1.2, span / 1.2);
+    mat.roughnessMap = detailRough;
   }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
+  // One mesh spans the whole playable area plus the skirt — it is always
+  // potentially visible, and a stale aggregate bound showed up as the entire
+  // terrain vanishing (black void) from some ground-level camera positions.
+  mesh.frustumCulled = false;
 
   return {
     mesh,
     dispose: () => {
       geo.dispose();
       map?.dispose();
-      micro?.dispose();
+      detailRough?.dispose();
       mat.dispose();
     },
   };
@@ -1945,8 +2083,13 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
  * UV transform (three.js derives normal-map UVs from the base map), so it
  * tiles at the same ~5 m scale with no extra draw cost. 128px, one canvas
  * per terrain build, disposed with it.
+ *
+ * Exported but currently UNUSED at runtime: combining it with the terrain's
+ * albedo map trips the three.js r185 node-pipeline direct-light kill (see
+ * buildTerrain). Kept for the three.js upgrade that fixes the node normal
+ * path — re-enable by assigning mat.normalMap in buildTerrain.
  */
-function buildMicroNormalTexture(isDesert = false): THREE.CanvasTexture | null {
+export function buildMicroNormalTexture(isDesert = false): THREE.CanvasTexture | null {
   // Headless/QA environments have no DOM; the detail map is cosmetic, so
   // simply skip it there instead of failing the build.
   if (typeof document === 'undefined') return null;
@@ -1976,14 +2119,17 @@ function buildMicroNormalTexture(isDesert = false): THREE.CanvasTexture | null {
       const u = (x / size) * (isDesert ? 6 : 10);
       const v = (y / size) * (isDesert ? 6 : 10);
       // Height field: anisotropic streaks for sand ripples, isotropic lumps
-      // for grass thatch.
+      // for grass thatch. Desert streak coordinates are phase-warped by a
+      // second noise so crest lines meander — straight parallel grooves tiled
+      // map-wide read as corduroy (round-4 critic finding).
+      const meander = isDesert ? (noise(u * 0.8, v * 0.8, 8, 23) - 0.5) * 1.5 : 0;
       const h = isDesert
-        ? noise(u * 2.4, v * 0.8, 16, 11)
+        ? noise(u * 1.7 + meander, v * 1.15, 16, 11)
         : noise(u, v, 10, 11) * 0.6 + noise(u * 3, v * 3, 30, 12) * 0.4;
       const hx = noise(u + 0.05, v, isDesert ? 16 : 10, 11);
       const hy = noise(u, v + 0.05, isDesert ? 16 : 10, 11);
-      const nx = (h - hx) * (isDesert ? 2.2 : 1.6);
-      const ny = (h - hy) * (isDesert ? 2.2 : 1.6);
+      const nx = (h - hx) * (isDesert ? 1.5 : 1.6);
+      const ny = (h - hy) * (isDesert ? 1.5 : 1.6);
       const i = (y * size + x) * 4;
       image.data[i] = Math.round(128 + nx * 127);
       image.data[i + 1] = Math.round(128 + ny * 127);

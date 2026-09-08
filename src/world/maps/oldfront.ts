@@ -11,16 +11,33 @@ import { addBuilding, hardenExposedFlanks, scatterRocks, scatterTrees, structure
 
 const S = 500;
 
-/** Gentle terrain — small undulation only (collision-safe for all structures). */
+/** Rolling meadowland: real relief in the open, flattened under the town. */
 function terrainH(x: number, z: number): number {
-  let h = Math.sin(x * 0.02) * 0.45 + Math.cos(z * 0.023) * 0.4 + Math.sin((x + z) * 0.008) * 0.25;
+  // Two low-frequency hill octaves plus a diagonal swell read as a valley
+  // landscape instead of a flat lawn.
+  let h = Math.sin(x * 0.011 + 1.3) * 1.35
+    + Math.cos(z * 0.013 - 0.7) * 1.15
+    + Math.sin((x + z) * 0.006 + 0.4) * 0.9
+    + Math.sin(x * 0.031) * Math.cos(z * 0.027) * 0.35;
+  // The town core (cathedral square, old town, market) stays combat-flat:
+  // blend the relief toward a low pedestal inside the built-up radius.
+  const townD = Math.hypot(x - 15, z + 25);
+  const townFlat = Math.min(1, Math.max(0, (townD - 55) / 65));
+  h *= 0.16 + 0.84 * townFlat;
+  h += (1 - townFlat) * 0.35;
+  // The keep plateau: the donjon fire-escape stairs must land on ground, so
+  // the ruin's surroundings ease toward its pad height instead of sloping
+  // away beneath the bottom landing.
+  const keepD = Math.hypot(x + 150, z + 150);
+  const keepFlat = Math.min(1, Math.max(0, (keepD - 34) / 48));
+  h *= 0.12 + 0.88 * keepFlat;
   // South forest dip (shallow, no structures there)
   const forestD = Math.hypot(x - 100, z - 195);
-  if (forestD < 60) h -= (1 - forestD / 60) * 0.8;
+  if (forestD < 60) h -= (1 - forestD / 60) * 1.4;
   // The quarry is a real terrain depression, not a solid box disguised as a
   // pit. This lets render terrain, physics, stairs and props share one surface.
   const quarryD = Math.hypot(x + 90, z + 40);
-  if (quarryD < 30) h -= (1 - quarryD / 30) * 4.6;
+  if (quarryD < 30) h -= (1 - quarryD / 30) * 5.6;
   return h;
 }
 
@@ -179,18 +196,18 @@ export function buildOldFront(): MapDef {
       sunColor: 0xe8ded0,
       sunIntensity: 1.3,
       ambientColor: 0xaeb9c6,
-      ambientIntensity: 0.42,
+      ambientIntensity: 0.55,
       hemisphereSky: 0xc2cbd6,
       hemisphereGround: 0x6a685c,
-      hemisphereIntensity: 0.82,
-      exposure: 0.79,
+      hemisphereIntensity: 1.0,
+      exposure: 0.95,
       envIntensity: 0.46,
       backgroundBlurriness: 0.12,
       backgroundIntensity: 0.34,
       grade: {
-        vignette: 0.34,
+        vignette: 0.26,
         saturation: 0.88,
-        contrast: 1.07,
+        contrast: 1.0,
         lift: [0.006, 0.005, 0.004],
       },
     },
@@ -300,7 +317,7 @@ function edgeHomesteads(b: WorldBuilder, rng: Rng): void {
 }
 
 function buildHeightfield(b: WorldBuilder): void {
-  const n = 64;
+  const n = 128;
   const heights = new Float32Array(n * n);
   for (let r = 0; r < n; r++) {
     for (let c = 0; c < n; c++) {
@@ -375,6 +392,7 @@ function townHouse(b: WorldBuilder, cx: number, cz: number, doorSide: 0 | 1 | 2 
   addBuilding(b, {
     x: cx, z: cz, baseY: gy, w: 13, d: 15, floors: 2, wallMat: mat, trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[doorSide, 5, 1.9]],
+    roofStyle: 'gable', chimney: (hash2(cx, cz) & 3) !== 0,
   });
   b.loot(cx + 3, gy + 0.4, cz + 3);
   // Chest tucked against the door wall of some homes — never mid-street.
@@ -396,6 +414,7 @@ function shopHouse(b: WorldBuilder, cx: number, cz: number): void {
   addBuilding(b, {
     x: cx, z: cz, baseY: gy, w: 16, d: 14, floors: 1, wallMat: 'plasterOld', trimMat: 'woodDark', roofMat: 'roofTile',
     doors: [[0, 4, 2.6], [0, 11, 2.6]], interiorDividers: false,
+    roofStyle: 'gable',
   });
   // The enterable shop used to be a bare plaster room containing only loot.
   // Shallow wall shelves and a warm suspended service light add purpose while

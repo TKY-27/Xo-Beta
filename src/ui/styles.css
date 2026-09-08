@@ -931,7 +931,11 @@ html[lang='ja'] #weapon-name { letter-spacing: 0.14em; }
 #inventory-slots { display: flex; gap: 7px; justify-content: flex-end; }
 .slot {
   width: 52px; height: 46px; position: relative;
-  background: rgba(10, 14, 20, 0.76);
+  /* CYCLE 28: 0.76 alpha let bright world geometry bleed through the cards
+     at night (round-5 critic). Near-opaque + a light backdrop blur keeps
+     the HUD readable over any scene. */
+  background: rgba(8, 11, 16, 0.92);
+  backdrop-filter: blur(3px);
   border: 1px solid rgba(255,255,255,0.09);
   clip-path: polygon(6px 0, 100% 0, calc(100% - 6px) 100%, 0 100%);
   transition: border-color 0.15s ease, background 0.15s ease;
@@ -1381,3 +1385,17 @@ html[lang='ja'] .stat-cell .k { letter-spacing: 0.1em; }
 
 /* Mobile gate */
 #mobile-gate { z-index: 70; }
+
+/* Killfeed weapon silhouettes (inline SVG from the shell). */
+.kf-entry .wpn {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0.3em;
+  color: var(--hud-dim, #9fb4c8);
+}
+
+.kf-entry .wpn .kf-svg {
+  width: 18px;
+  height: 11px;
+  display: block;
+}

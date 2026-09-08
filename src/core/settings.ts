@@ -1,5 +1,6 @@
 /** Persistent user settings with safe fallbacks when storage is unavailable. */
 
+import { SKIN_IDS } from '../render/characters';
 import {
   DEFAULT_PREFERRED_ITEM_SLOTS,
   safePreferredItemSlots,
@@ -9,7 +10,7 @@ import {
 export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra' | 'cinematic';
 export type CameraMode = 'fps' | 'tps';
 export type TpsCharacterSide = 'left' | 'right';
-export type SkinId = 'vanguard' | 'pathfinder' | 'specter' | 'striker' | 'warden' | 'nova';
+export type SkinId = 'vanguard' | 'pathfinder' | 'specter' | 'striker' | 'warden' | 'nova' | 'seraph' | 'corsair' | 'vesper' | 'dragoon' | 'tempest' | 'reaper';
 
 export interface KeyBindings {
   forward: string; back: string; left: string; right: string;
@@ -112,11 +113,12 @@ export const DEFAULT_SETTINGS: Settings = {
   bindings: { ...DEFAULT_BINDINGS },
 
   quality: 'high',
-  // 0.5 made every default install render at half resolution and upscale —
-  // the single biggest reason the game read soft rather than AAA-sharp. 0.7
-  // keeps a safe fill-rate margin on integrated GPUs while preserving most
-  // of the detail; ultra/cinematic users should raise it further.
-  resolutionScale: 0.7,
+  // Native-resolution rendering by default: the WebGPU pipeline on the
+  // reference machine holds 60 FPS at scale 1.0, and upscaling from 0.7 was
+  // the single biggest reason the game read soft rather than AAA-sharp.
+  // Lower-end machines can still step down via settings; the adaptive
+  // resolution watchdog remains the dynamic safety net.
+  resolutionScale: 1,
   shadows: true,
   shadowQuality: 'high',
   postProcessing: true,
@@ -249,7 +251,7 @@ function mergeSettings(base: Settings, patch: unknown): Settings {
 
     cameraMode: choice(patch.cameraMode, base.cameraMode, ['fps', 'tps']),
     tpsCharacterSide: choice(patch.tpsCharacterSide, base.tpsCharacterSide, ['left', 'right']),
-    playerSkin: choice(patch.playerSkin, base.playerSkin, ['vanguard', 'pathfinder', 'specter', 'striker', 'warden', 'nova']),
+    playerSkin: choice(patch.playerSkin, base.playerSkin, [...SKIN_IDS]),
     preferredItemSlots: safePreferredItemSlots(patch.preferredItemSlots, base.preferredItemSlots),
     crosshairColor,
     crosshairSize: bounded(patch.crosshairSize, base.crosshairSize, 4, 20),

@@ -215,9 +215,14 @@ const RTC_OBSERVATION_INIT = String.raw`(() => {
   const originalGetContext = HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.getContext = function(type, ...args) {
     const context = originalGetContext.call(this, type, ...args);
-    if ((type === 'webgl' || type === 'webgl2') && context) {
+    // CYCLE 64: the primary render backend is WebGPU — track it alongside the
+    // legacy webgl/webgl2 fallback contexts so the single-canvas assertion
+    // holds on both backends.
+    if ((type === 'webgl' || type === 'webgl2' || type === 'webgpu') && context) {
       if (!canvasIds.includes(this.id)) canvasIds.push(this.id);
-      if (!observation.webglContexts.includes(context)) observation.webglContexts.push(context);
+      if ((type === 'webgl' || type === 'webgl2') && context) {
+        if (!observation.webglContexts.includes(context)) observation.webglContexts.push(context);
+      }
     }
     return context;
   };

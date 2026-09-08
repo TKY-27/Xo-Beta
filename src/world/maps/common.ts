@@ -27,6 +27,12 @@ export interface BuildingOpts {
   roofAccess?: boolean;
   interiorDividers?: boolean;
   parapet?: boolean;
+  /** Cosmetic pitched shell over the flat gameplay roof (silhouette only). */
+  roofStyle?: 'flat' | 'gable';
+  /** Decorative brick chimney on the gable ridge (deterministic per call). */
+  chimney?: boolean;
+  /** Material for the exterior fire-escape stair flights (default metal). */
+  stairMat?: MatKey;
 }
 
 /**
@@ -251,6 +257,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   const baseY = o.baseY ?? 0;
   const hw = o.w / 2, hd = o.d / 2;
   const trim = o.trimMat ?? o.wallMat;
+  const stairMat = o.stairMat ?? 'metalExterior';
   const floorMat = o.floorMat ?? 'concreteDark';
   const roofMat = o.roofMat ?? trim;
   const requestedStairSteps = Math.ceil(fh / 0.55);
@@ -306,34 +313,39 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   ) => {
     const paneH = 1.42;
     const paneY = y0 + sillH + paneH / 2;
-    const surfaceOffset = t / 2 + 0.025;
+    // Recessed reveal: the pane sits just inside the outer wall face so the
+    // opening casts a real shadow line instead of a pasted-on card.
+    const paneOffset = t / 2 - 0.06;
+    const frameOffset = t / 2 - 0.02;
     const family = windowFamily(side, offset, 0);
     const mat = windowMaterial(family);
     if (side === 2) {
       const paneX = x - hw + offset + width / 2;
-      const paneZ = z - hd - surfaceOffset;
-      b.box(paneX, paneY, paneZ, width, paneH, 0.045, mat, 0, { noCollide: true });
+      const paneZ = z - hd - paneOffset;
+      const frameZ = z - hd - frameOffset;
+      b.box(paneX, paneY, paneZ, width, paneH, 0.05, mat, 0, { noCollide: true });
       // Head and sill trims every window shares.
-      b.box(paneX, paneY, paneZ - 0.026, width + 0.08, 0.075, 0.055, trim, 0, { noCollide: true });
-      b.box(paneX, paneY - paneH / 2 - 0.02, paneZ - 0.026, width + 0.08, 0.075, 0.055, trim, 0, { noCollide: true });
+      b.box(paneX, paneY, frameZ, width + 0.08, 0.075, t + 0.08, trim, 0, { noCollide: true });
+      b.box(paneX, paneY - paneH / 2 - 0.02, frameZ, width + 0.08, 0.075, t + 0.08, trim, 0, { noCollide: true });
       if (family === 'dual') {
         // Mullion split into two sashes.
-        b.box(paneX, paneY, paneZ - 0.026, 0.075, paneH + 0.08, 0.055, trim, 0, { noCollide: true });
+        b.box(paneX, paneY, paneZ, 0.075, paneH + 0.08, 0.055, trim, 0, { noCollide: true });
       } else if (family === 'transom') {
         // Horizontal transom bar at two-thirds height.
-        b.box(paneX, paneY + paneH / 6, paneZ - 0.026, width + 0.08, 0.06, 0.055, trim, 0, { noCollide: true });
+        b.box(paneX, paneY + paneH / 6, paneZ, width + 0.08, 0.06, 0.055, trim, 0, { noCollide: true });
       }
       // 'single': one uninterrupted pane.
     } else {
-      const paneX = x + (side === 1 ? hw + surfaceOffset : -hw - surfaceOffset);
+      const paneX = x + (side === 1 ? hw + paneOffset : -hw - paneOffset);
+      const frameX = x + (side === 1 ? hw + frameOffset : -hw - frameOffset);
       const paneZ = z - hd + offset + width / 2;
-      b.box(paneX, paneY, paneZ, 0.045, paneH, width, mat, 0, { noCollide: true });
-      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, 0.075, width + 0.08, trim, 0, { noCollide: true });
-      b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY - paneH / 2 - 0.02, paneZ, 0.055, 0.075, width + 0.08, trim, 0, { noCollide: true });
+      b.box(paneX, paneY, paneZ, 0.05, paneH, width, mat, 0, { noCollide: true });
+      b.box(frameX, paneY, paneZ, t + 0.08, 0.075, width + 0.08, trim, 0, { noCollide: true });
+      b.box(frameX, paneY - paneH / 2 - 0.02, paneZ, t + 0.08, 0.075, width + 0.08, trim, 0, { noCollide: true });
       if (family === 'dual') {
-        b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY, paneZ, 0.055, paneH + 0.08, 0.075, trim, 0, { noCollide: true });
+        b.box(paneX, paneY, paneZ, 0.055, paneH + 0.08, 0.075, trim, 0, { noCollide: true });
       } else if (family === 'transom') {
-        b.box(paneX + (side === 1 ? 0.026 : -0.026), paneY + paneH / 6, paneZ, 0.055, 0.06, width + 0.08, trim, 0, { noCollide: true });
+        b.box(paneX, paneY + paneH / 6, paneZ, 0.055, 0.06, width + 0.08, trim, 0, { noCollide: true });
       }
     }
   };
@@ -565,6 +577,64 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     b.platform(x - hw - 0.4, x + hw + 0.4, z - hd - 0.4, z + hd + 0.4, roofY);
   }
 
+  // Pitched-roof shell: pure silhouette dressing floated above the flat
+  // gameplay roof — traversal, nav and roof platforms are untouched.
+  if (o.roofStyle === 'gable') {
+    const ridgeAlongX = o.w >= o.d;
+    const span = ridgeAlongX ? o.d : o.w;
+    const half = span / 2 + 0.35;
+    const rise = Math.min(2.2, span * 0.42);
+    const run = half;
+    const slopeLen = Math.hypot(run, rise) + 0.3;
+    const slopeAngle = Math.atan2(rise, run);
+    const longLen = (ridgeAlongX ? o.w : o.d) + 0.55;
+    const shellY = roofY + 0.22;
+    // Gable ends: stacked shrinking slabs approximate the triangle.
+    const gableSlabs = 5;
+    for (const endSide of [-1, 1]) {
+      const endX = ridgeAlongX ? x + endSide * (o.w / 2 + 0.16) : x;
+      const endZ = ridgeAlongX ? z : z + endSide * (o.d / 2 + 0.16);
+      for (let i = 0; i < gableSlabs; i++) {
+        const f = (i + 0.5) / gableSlabs;
+        const slabW = (span + 0.3) * (1 - f);
+        const slabY = shellY + rise * f;
+        const sizeX = ridgeAlongX ? 0.32 : slabW;
+        const sizeZ = ridgeAlongX ? slabW : 0.32;
+        b.box(endX, slabY, endZ, sizeX, rise / gableSlabs + 0.06, sizeZ, trim, 0, {
+          noCollide: true,
+        });
+      }
+    }
+    // Two slopes as rotated slabs.
+    for (const side of [-1, 1] as const) {
+      const slopeY = shellY + rise / 2;
+      const off = side * (half / 2);
+      if (ridgeAlongX) {
+        b.box(x, slopeY, z + off, longLen, 0.14, slopeLen, roofMat, 0, {
+          noCollide: true, pitch: side * slopeAngle,
+        });
+      } else {
+        b.box(x + off, slopeY, z, slopeLen, 0.14, longLen, roofMat, 0, {
+          noCollide: true, roll: -side * slopeAngle,
+        });
+      }
+    }
+    // Ridge cap.
+    if (ridgeAlongX) {
+      b.box(x, shellY + rise + 0.05, z, longLen, 0.1, 0.24, trim, 0, { noCollide: true });
+    } else {
+      b.box(x, shellY + rise + 0.05, z, 0.24, 0.1, longLen, trim, 0, { noCollide: true });
+    }
+    // Brick chimney with cap.
+    if (o.chimney) {
+      const chX = ridgeAlongX ? x + o.w * 0.22 : x + o.d * 0.18;
+      const chZ = ridgeAlongX ? z + o.d * 0.18 : z + o.d * 0.22;
+      const chH = rise + 0.85;
+      b.box(chX, shellY + chH / 2, chZ, 0.55, chH, 0.55, 'bricksOld', 0, { noCollide: true });
+      b.box(chX, shellY + chH + 0.06, chZ, 0.72, 0.14, 0.72, trim, 0, { noCollide: true });
+    }
+  }
+
   // Exterior access staircase to the roof (along the left wall)
   if (o.roofAccess) {
     // structureBaseY levels the building to its highest footprint sample;
@@ -594,7 +664,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     // 0.4 m under the first tread: a slab edge exactly at the riser line left
     // the approaching capsule half-supported there and its autostep never
     // completed.
-    b.slab(outerStairX, baseY + 0.04, frontZ + 0.8, stair.width + 0.5, 2.4, 0.2, 'metalExterior');
+    b.slab(outerStairX, baseY + 0.04, frontZ + 0.8, stair.width + 0.5, 2.4, 0.2, stairMat);
     let remainingSteps = stair.steps;
     let currentY = baseY;
     let currentZ = frontZ;

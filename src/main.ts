@@ -30,6 +30,7 @@ import { createMaterials, type MaterialLibrary } from './render/materials';
 import { preloadAll } from './assets/assets';
 import { PropLibrary } from './render/props';
 import { LobbyScene } from './render/lobby';
+import { SKIN_SPECS } from './render/characters';
 import { GameRenderer } from './render/renderer';
 import { WorldView } from './render/worldView';
 import { VfxSystem } from './render/vfx';
@@ -324,12 +325,13 @@ function weaponViewmodelKick(weaponId: string): number {
   // Scale to the ViewModel.kick impulse range the old table used.
   return (profile?.viewmodel ?? 0.5) * 2.2;
 }
+/** Inline SVG killfeed silhouettes: the Unicode stand-ins read as placeholder glyphs. */
 const WEAPON_ICONS: Record<string, string> = {
-  pistol: '⌐',
-  smg: '⁝⁝',
-  ar: '⟋',
-  shotgun: '≡',
-  sniper: '⌇',
+  pistol: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M2 3h15v3h-6l-1 4H6l1.5-4H4v2H2z" fill="currentColor"/></svg>`,
+  smg: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M1 3h17v2h-4v2h-3V5H8l-1 5H4l1-5H1zM13 7h4v1h-4z" fill="currentColor"/></svg>`,
+  ar: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M0 4h19v2h-2v1h-3V6H8l-1.5 5h-3L5 6H3v2H0z" fill="currentColor"/></svg>`,
+  shotgun: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M0 4h20v2H9l-1 4H5l1-4H0zM10 6h6v1h-6z" fill="currentColor"/></svg>`,
+  sniper: `<svg viewBox="0 0 20 12" class="kf-svg" aria-hidden="true"><path d="M0 5h20v1H8l-1.5 5h-3L5 6H3v2H0zM6 2h6v2H6z" fill="currentColor"/></svg>`,
 };
 
 // Powerful browser-inspection hooks must never be reachable from a production
@@ -1061,7 +1063,8 @@ async function prepareOnlineGuestRuntime(
     registerStartCleanup(generation, () => renderer.dispose());
     await renderer.setupSkyAndLights(input.map.sky);
     ensureCurrentStart(generation);
-    if (input.map.sky.grade) renderer.setGrading(input.map.sky.grade);
+    const qaToneOverride = QA_PARAMS.get('qaTone');
+    if (input.map.sky.grade) renderer.setGrading(qaToneOverride ? { ...input.map.sky.grade, toneMapping: qaToneOverride as 'aces' | 'agx' | 'neutral' } : input.map.sky.grade);
     const worldStart = performance.now();
     const guestSkyTexture = (renderer.scene.background as THREE.Texture | null)?.isTexture
       ? renderer.scene.background as THREE.Texture
@@ -1139,13 +1142,12 @@ async function prepareOnlineGuestRuntime(
     renderer.scene.add(characterFill);
     registerStartCleanup(generation, () => renderer.scene.remove(characterFill));
 
-    const females = new Set(['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX']);
     const rigs = new Map<number, CharacterRig>();
     for (const entry of input.payload.roster) {
       const character = charFactory.create(
         entry.displayName,
         entry.accentColor,
-        females.has(entry.displayName),
+        false, // body now derives from the actor's skin
         null,
         entry.skinId,
       );
@@ -1288,7 +1290,7 @@ async function prepareOnlineGuestRuntime(
       await renderer.renderer.compileAsync(renderer.scene, rig.camera);
       ensureCurrentStart(generation);
       renderer.renderer.render(renderer.scene, rig.camera);
-      const aerial = renderer.captureAerial(input.map.size / 2, 1024, [
+      const aerial = await renderer.captureAerial(input.map.size / 2, 1024, [
         world.stormMesh,
         world.transportGroup,
         ...[...rigs.values()].map((character) => character.group),
@@ -1447,6 +1449,31 @@ interface WarmupStageInput {
  * multi-second freeze when walking up to loot or water. The stage is placed
  * far below the map, rendered once, and fully detached afterwards.
  */
+function qaHidePredicate(kind: string): ((o: THREE.Object3D) => boolean) | null {
+  switch (kind) {
+    case 'instanced': return (o) => (o as THREE.InstancedMesh).isInstancedMesh === true;
+    case 'lambert': return (o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      return Boolean(m && (m as { isMeshLambertMaterial?: boolean }).isMeshLambertMaterial);
+    };
+    case 'skinned': return (o) => (o as THREE.SkinnedMesh).isSkinnedMesh === true;
+    case 'terrain': return (o) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
+    case 'points': return (o) => (o as THREE.Points).isPoints === true;
+    case 'lines': return (o) => (o as THREE.Line).isLine === true;
+    case 'transparent': return (o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      return Boolean(m && m.transparent);
+    };
+    case 'standard': return (o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      return Boolean(m && (m as { isMeshStandardMaterial?: boolean }).isMeshStandardMaterial);
+    };
+    case 'mesh': return (o) => (o as THREE.Mesh).isMesh === true;
+    case 'viewmodel': return (o) => o.name === 'viewmodel-root';
+    default: return null;
+  }
+}
+
 async function runShaderWarmupStage({ renderer, camera, world, weaponFactory }: WarmupStageInput): Promise<void> {
   const warmup = new THREE.Group();
   warmup.name = 'shader-warmup-stage';
@@ -1482,6 +1509,13 @@ async function runShaderWarmupStage({ renderer, camera, world, weaponFactory }: 
   }
   renderer.scene.add(warmup);
   try {
+    // QA attribution: apply any ?qaHide predicate before pipeline creation so
+    // the warmup render skips the hidden subsystem's pipelines entirely.
+    const qaHide = QA_PARAMS.get('qaHide');
+    if (qaHide) {
+      const hidePred = qaHidePredicate(qaHide);
+      if (hidePred) renderer.scene.traverse((o) => { if (hidePred(o)) o.visible = false; });
+    }
     await renderer.renderer.compileAsync(renderer.scene, camera);
     renderer.renderer.render(renderer.scene, camera);
   } catch {
@@ -1553,7 +1587,8 @@ async function startMatchImpl(
   registerStartCleanup(generation, () => renderer.dispose());
   await renderer.setupSkyAndLights(loaded.def.sky);
   ensureCurrentStart(generation);
-  if (loaded.def.sky.grade) renderer.setGrading(loaded.def.sky.grade);
+  const qaToneOverride2 = QA_PARAMS.get('qaTone');
+  if (loaded.def.sky.grade) renderer.setGrading(qaToneOverride2 ? { ...loaded.def.sky.grade, toneMapping: qaToneOverride2 as 'aces' | 'agx' | 'neutral' } : loaded.def.sky.grade);
   const worldStart = performance.now();
   const hostSkyTexture = (renderer.scene.background as THREE.Texture | null)?.isTexture
     ? renderer.scene.background as THREE.Texture
@@ -1775,15 +1810,18 @@ async function startMatchImpl(
   }
 
   // Character rigs (skinned GLB combatants)
-  const females = ['NOVA', 'KIRA', 'AXIS', 'ORBIT', 'VEX'];
   const deathPipelineActors = new Set<number>();
-  const firstFemaleBot = match.actors.find((actor) => match.isBotActor(actor) && females.includes(actor.name));
-  const firstMaleBot = match.actors.find((actor) => match.isBotActor(actor) && !females.includes(actor.name));
+  const skinIsFemale = (actorId: number): boolean => {
+    const actor = match.actors.find((candidate) => candidate.id === actorId);
+    return actor ? SKIN_SPECS[actor.skinId]?.female ?? false : false;
+  };
+  const firstFemaleBot = match.actors.find((actor) => match.isBotActor(actor) && skinIsFemale(actor.id));
+  const firstMaleBot = match.actors.find((actor) => match.isBotActor(actor) && !skinIsFemale(actor.id));
   if (firstFemaleBot) deathPipelineActors.add(firstFemaleBot.id);
   if (firstMaleBot) deathPipelineActors.add(firstMaleBot.id);
   const rigs = new Map<number, CharacterRig>();
   for (const actor of match.actors) {
-    const charRig = charFactory.create(actor.name, actor.accentColor, females.includes(actor.name), null, actor.skinId);
+    const charRig = charFactory.create(actor.name, actor.accentColor, false, null, actor.skinId);
     // Keep one representative of each body archetype on the death pipeline
     // from loading onward. Opacity 1 remains visually opaque, while avoiding
     // transparent sorting overhead on every living actor.
@@ -1852,7 +1890,7 @@ async function startMatchImpl(
   // One-shot aerial capture for the tactical map while the loading screen is
   // still up (single GPU readback, ~50 ms).
   try {
-    const aerial = renderer.captureAerial(match.mapDef.size / 2, 1024, [
+    const aerial = await renderer.captureAerial(match.mapDef.size / 2, 1024, [
       world.stormMesh,
       world.transportGroup,
       ...[...rigs.values()].map((r) => r.group),
@@ -2540,7 +2578,17 @@ function presentOnlineAuthoritativeEventQueued(
   }
   const queue = guestPresentationQueue;
   if (queue.length >= GUEST_PRESENTATION_QUEUE_CAP) {
-    const shedIndex = queue.findIndex((task) => GUEST_SHEDDABLE_EVENTS.has(task.event.type));
+    // CYCLE 56 (review): never shed the LOCAL actor's reloadStarted — the
+    // guest reload choreography is seeded only from this event, so dropping
+    // it strands the hands at grip while the authoritative weapon refills.
+    // Other actors' reloads and the pure one-shot transients shed first.
+    const localId = live?.kind === 'replica' ? live.localActorId : -1;
+    const sheddable = (task: GuestPresentationTask): boolean =>
+      GUEST_SHEDDABLE_EVENTS.has(task.event.type)
+      && !(task.event.type === 'reloadStarted'
+        && typeof task.event.payload.actorId === 'number'
+        && task.event.payload.actorId === localId);
+    const shedIndex = queue.findIndex(sheddable);
     if (shedIndex >= 0) queue.splice(shedIndex, 1);
     else queue.shift();
   }
@@ -2616,6 +2664,9 @@ function presentOnlineAuthoritativeEvent(
     if (isLocal && game.rig.mode === 'fps') {
       game.viewmodel.kick(weaponViewmodelKick(weaponId));
       game.viewmodel.muzzlePulse(0.8);
+      // CYCLE 48: authoritative confirm path (unpredicted shots) — same bolt/
+      // pump presentation seeding as the predicted fire handler above.
+      game.viewmodel.notifyShotFired(weaponId);
       return;
     }
     const hasMuzzle = game.rigs.get(actorId)?.muzzleWorld?.(
@@ -2752,7 +2803,25 @@ function presentOnlineAuthoritativeEvent(
     return;
   }
   if (event.type === 'reloadStarted') {
-    if (integer('actorId') === localActorId) audio.reloadClick(payload.empty === true);
+    if (integer('actorId') === localActorId) {
+      audio.reloadClick(payload.empty === true);
+      // CYCLE 48: drive the local viewmodel's reload choreography from the
+      // authoritative reloadStarted event — guests have no combat runtime,
+      // so the presentation timeline is seeded from the event stream.
+      // CYCLE 56: prefer the event's weaponId payload (a weapon swap between
+      // reload start and snapshot application used to seed the wrong class).
+      const payloadWeapon = typeof payload.weaponId === 'string' ? (payload.weaponId as WeaponId) : null;
+      const reloader = actorView(localActorId);
+      const weaponId = payloadWeapon ?? reloader?.equippedWeapon;
+      if (reloader && weaponId) {
+        const slot = reloader.inventory && reloader.inventory.selected >= 0
+          ? reloader.inventory.slots[reloader.inventory.selected]
+          : null;
+        const rarity: Rarity = slot?.kind === 'weapon' && slot.weaponId === weaponId
+          ? slot.rarity : 'common';
+        game.viewmodel.notifyReloadStarted(weaponId, rarity, payload.empty === true);
+      }
+    }
     return;
   }
   if (event.type === 'healDone') {
@@ -2799,6 +2868,9 @@ function predictGuestFirePresentation(inputSequence: number, command: Readonly<I
   if (game.rig.mode === 'fps') {
     game.viewmodel.kick(weaponViewmodelKick(weaponId));
     game.viewmodel.muzzlePulse(0.8);
+    // CYCLE 48: seed the bolt/pump presentation timeline so the online local
+    // hands cycle like the offline path (no combat runtime exists on guests).
+    game.viewmodel.notifyShotFired(weaponId);
   } else {
     const yaw = actor.yaw;
     const pitch = actor.pitch;
@@ -3088,6 +3160,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       resetPerf: resetPerfStats,
       worldGroup: world.group,
       threeRenderer: renderer.renderer,
+      gameScene: renderer.scene,
       sceneInfo: {
         children: renderer.scene.children.length,
         lights: renderer.scene.children
@@ -3293,6 +3366,173 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       return true;
     };
     (window as unknown as Record<string, unknown>).__xoTeleport = performQaTeleport;
+
+    // QA: raycast from an NDC screen point (default: centre) and report what
+    // was hit (object chain, material identity, light-relevant flags) so a
+    // suspicious pixel in a capture can be attributed to its exact
+    // object/material. __xoPick(nx, ny) with NDC in [-1,1].
+    (window as unknown as Record<string, unknown>).__xoPick = (ndcX = 0, ndcY = 0) => {
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), rig.camera);
+      const hits = raycaster.intersectObjects(renderer.scene.children, true).slice(0, 4);
+      return hits.map((h) => {        const mesh = h.object as THREE.Mesh;
+        const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
+        const std = mat && !Array.isArray(mat) ? mat : null;
+        const geo = mesh.geometry as THREE.BufferGeometry | undefined;
+        const wp = new THREE.Vector3();
+        mesh.getWorldPosition(wp);
+        return {
+          distance: Math.round(h.distance * 10) / 10,
+          world: `${wp.x.toFixed(1)},${wp.y.toFixed(1)},${wp.z.toFixed(1)}`,
+          object: mesh.name || '(unnamed)',
+          parent: mesh.parent?.name || '(none)',
+          grandparent: mesh.parent?.parent?.name || '(none)',
+          material: std ? std.name || std.type : Array.isArray(mesh.material) ? 'multi' : String(mat?.type),
+          color: std ? `#${std.color.getHexString()}` : null,
+          map: Boolean(std?.map),
+          vertexColors: Boolean(std?.vertexColors),
+          metalness: std?.metalness ?? null,
+          roughness: std?.roughness ?? null,
+          envMapIntensity: std?.envMapIntensity ?? null,
+          instanced: (mesh as THREE.InstancedMesh).isInstancedMesh === true,
+          hasNormals: Boolean(geo?.attributes.normal),
+          hasUv: Boolean(geo?.attributes.uv),
+          vertices: geo?.attributes.position?.count ?? null,
+          visible: mesh.visible,
+          receiveShadow: mesh.receiveShadow,
+          castShadow: mesh.castShadow,
+          uuid: mesh.uuid.slice(0, 8),
+        };
+      });
+    };
+    // QA: toggle meshes by uuid prefix, material name, OR material colour hex
+    // (names are empty for library materials; colours are the stable key).
+    (window as unknown as Record<string, unknown>).__xoHideUuid = (prefix: string) => {
+      const found: string[] = [];
+      const needle = prefix.replace('#', '').toLowerCase();
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
+        const matName = mat && !Array.isArray(mat) ? mat.name : '';
+        const hex = mat && !Array.isArray(mat) ? mat.color.getHexString() : '';
+        if (o.uuid.startsWith(prefix) || (matName && matName === prefix) || hex === needle) {
+          o.visible = !o.visible;
+          found.push(`${o.type}:${o.uuid.slice(0, 8)}:${matName || hex || '?'}:${o.visible ? 'shown' : 'hidden'}`);
+        }
+      });
+      return found;
+    };
+    // QA: recolour every material matching uuid/name/colour — A/B for
+    // "is this mesh the suspect" at maximum contrast.
+    (window as unknown as Record<string, unknown>).__xoTint = (prefix: string, hex = 'ff00ff') => {
+      const found: string[] = [];
+      const needle = prefix.replace('#', '').toLowerCase();
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+        for (const mat of mats) {
+          const std = mat as THREE.MeshStandardMaterial;
+          const hex2 = std?.color?.getHexString?.() ?? '';
+          if (std?.color && (hex2 === needle || (std.name && std.name === prefix) || o.uuid.startsWith(prefix))) {
+            std.color.set(hex);
+            std.metalness = 0;
+            std.roughness = 1;
+            // WebGPU pipelines only rebuild when the material is flagged —
+            // otherwise metalness/roughness edits silently do nothing.
+            std.needsUpdate = true;
+            found.push(`${o.uuid.slice(0, 8)}:${hex2}->${hex}`);
+          }
+        }
+      });
+      return found;
+    };
+    // QA: brute-force sight-line census — every mesh whose world bounding box
+    // intersects the NDC ray within [near,far] metres, raycast-independent
+    // (catches meshes the raycaster skips for layer/attribute reasons).
+    (window as unknown as Record<string, unknown>).__xoRayEnum = (ndcX = 0, ndcY = 0, near = 1, far = 20) => {
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), rig.camera);
+      const ray = raycaster.ray;
+      const hits: Array<Record<string, unknown>> = [];
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.visible) return;
+        // InstancedMesh.world-bounding: instance matrices move instances far
+        // from the unit geometry box at the origin — prefer the instance-aware
+        // bound when the mesh has one.
+        const instanced = mesh as THREE.InstancedMesh & { boundingBox?: THREE.Box3 | null };
+        let worldBox: THREE.Box3 | null = null;
+        if (instanced.isInstancedMesh) {
+          if (!instanced.boundingBox) instanced.computeBoundingBox();
+          worldBox = instanced.boundingBox ?? null;
+        } else {
+          if (!mesh.geometry?.boundingBox) mesh.geometry?.computeBoundingBox();
+          if (mesh.geometry?.boundingBox) {
+            worldBox = new THREE.Box3().copy(mesh.geometry.boundingBox).applyMatrix4(mesh.matrixWorld);
+          }
+        }
+        if (!worldBox) return;
+        const point = new THREE.Vector3();
+        if (!ray.intersectBox(worldBox, point)) return;
+        const d = ray.origin.distanceTo(point);
+        if (d < near || d > far) return;
+        const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
+        const std = mat && !Array.isArray(mat) ? mat : null;
+        hits.push({
+          distance: Math.round(d * 10) / 10,
+          object: mesh.name || '(unnamed)',
+          parent: mesh.parent?.name || '(none)',
+          material: std ? std.name || std.type : Array.isArray(mesh.material) ? 'multi' : String(mat?.type),
+          color: std ? `#${std.color.getHexString()}` : null,
+          metalness: std?.metalness ?? null,
+          roughness: std?.roughness ?? null,
+          instanced: (mesh as THREE.InstancedMesh).isInstancedMesh === true,
+          vertices: mesh.geometry.attributes.position?.count ?? null,
+          uuid: mesh.uuid.slice(0, 8),
+        });
+      });
+      hits.sort((a, b) => (a.distance as number) - (b.distance as number));
+      return hits;
+    };
+
+    // QA: hide object subsets before their GPU pipelines are created so
+    // render-side issues (e.g. WebGPU validation errors) can be attributed
+    // to a subsystem. Applies for the first seconds of a match.
+    const qaHide = QA_PARAMS.get('qaHide');
+    if (qaHide) {
+      let hideFrames = 600;
+      const predicate = (() => {
+        switch (qaHide) {
+          case 'instanced': return (o: THREE.Object3D) => (o as THREE.InstancedMesh).isInstancedMesh === true;
+          case 'lambert': return (o: THREE.Object3D) => {
+            const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+            return Boolean(m && (m as { isMeshLambertMaterial?: boolean }).isMeshLambertMaterial);
+          };
+          case 'skinned': return (o: THREE.Object3D) => (o as THREE.SkinnedMesh).isSkinnedMesh === true;
+          case 'terrain': return (o: THREE.Object3D) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
+          case 'points': return (o: THREE.Object3D) => (o as THREE.Points).isPoints === true;
+          case 'lines': return (o: THREE.Object3D) => (o as THREE.Line).isLine === true;
+          case 'transparent': return (o: THREE.Object3D) => {
+            const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+            return Boolean(m && m.transparent);
+          };
+          case 'standard': return (o: THREE.Object3D) => {
+            const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+            return Boolean(m && (m as { isMeshStandardMaterial?: boolean }).isMeshStandardMaterial);
+          };
+          case 'mesh': return (o: THREE.Object3D) => (o as THREE.Mesh).isMesh === true;
+          default: return () => false;
+        }
+      })();
+      const hideTick = () => {
+        if (hideFrames-- <= 0) return;
+        renderer.scene.traverse((o) => {
+          if (predicate(o)) o.visible = false;
+        });
+        requestAnimationFrame(hideTick);
+      };
+      hideTick();
+    }
 
     // The headed Codex browser runs evaluation in an isolated JS world, so
     // window expandos and direct dataset writes are intentionally unavailable.
@@ -3557,6 +3797,14 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
     hud.hideSpectate();
   }
   wasInTransport = inTransport && m.phase === 'transport';
+  const eyeY = rig.camera.position.y;
+  const local = m.localActor;
+  const groundY = local && m.isLocalActor(local) && m.mapDef.terrainHeight
+    ? m.mapDef.terrainHeight(local.body.position.x, local.body.position.z)
+    : 0;
+  if (rig.setAltitude(eyeY, groundY)) {
+    renderer.buildComposer(rig.camera);
+  }
   rig.tick(dtReal);
   applyQaWaterView(rig, world, false);
 
@@ -3788,6 +4036,10 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
     hud.hideSpectate();
   }
   wasInTransport = inTransport;
+  const replicaLocal = view.actors.find((a) => a.id === game.localActorId);
+  if (rig.setAltitude(rig.camera.position.y, replicaLocal && game.mapDef.terrainHeight ? game.mapDef.terrainHeight(replicaLocal.position.x, replicaLocal.position.z) : 0)) {
+    renderer.buildComposer(rig.camera);
+  }
   rig.tick(dtReal);
   applyQaWaterView(rig, world, false);
 

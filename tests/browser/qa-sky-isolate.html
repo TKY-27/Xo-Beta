@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>sky isolate</title>
+<style>body{margin:0}canvas{display:block}</style>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { RenderPipeline, WebGPURenderer } from 'three/webgpu';
+import { pass } from 'three/tsl';
+
+const renderer = new WebGPURenderer({ antialias: false });
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.98;
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 2000);
+camera.position.set(0, 0, 0);
+
+// Eden daylight profile (src/world/maps/eden.ts).
+const { SkyAtmosphereSystem } = await import('/src/render/skyAtmosphere.ts');
+const sky = new SkyAtmosphereSystem({
+  zenith: 0x2f6cb3, horizon: 0xa9c2d4,
+  discSize: 0.036, discColor: 0xfff2d4, discGlow: 0.55,
+  cloudCover: 0.42, cloudTint: 0xf2f5f7, cloudShade: 0x9fb2c4,
+  windSpeed: 0.01, starOpacity: 0.0,
+  hazeColor: 0xb9cdd8, hazeStrength: 0.34,
+}, [0.45, -0.8, 0.35]);
+scene.add(sky.mesh);
+sky.update(0.016);
+
+const pp = new RenderPipeline(renderer);
+pp.outputNode = pass(scene, camera);
+pp.render();
+
+const mode = [];
+window.toggle = () => {
+  mode.push(1);
+};
+// Capture three variants: post, raw, and neutral exposure.
+window.__phase = 'post';
+setInterval(() => { sky.update(0.016); pp.render(); }, 16);
+console.log('SKY_READY');
+</script>
+</body>
+</html>

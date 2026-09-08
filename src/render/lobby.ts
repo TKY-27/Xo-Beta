@@ -5,6 +5,10 @@
  */
 
 import * as THREE from 'three';
+import { RenderPipeline } from 'three/webgpu';
+import { pass } from 'three/tsl';
+import { smaa } from 'three/addons/tsl/display/SMAANode.js';
+import { getSharedGameRenderer } from './renderer';
 import { getSettings, onSettingsChanged } from '../core/settings';
 import { CharacterFactory, type CharacterRig } from './characters';
 import type { WeaponModelFactory } from './weaponModels';
@@ -31,7 +35,9 @@ function lobbyActor(pitch = 0): Parameters<NonNullable<CharacterRig['update']>>[
 }
 
 export class LobbyScene {
-  private renderer: THREE.WebGLRenderer | null = null;
+  private renderer: import('three/webgpu').WebGPURenderer | null = null;
+  private postProcessing: RenderPipeline | null = null;
+  private ready = false;
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private rig: CharacterRig | null = null;
@@ -54,12 +60,22 @@ export class LobbyScene {
   ): void {
     this.stop();
     this.characters = characters;
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    // One page-lifetime renderer is shared between the lobby and match scenes
+    // (a WebGPU canvas context cannot be handed to a second renderer).
+    const renderer = getSharedGameRenderer(canvas);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.08;
+    void renderer.init().then(() => {
+      this.ready = true;
+      // SMAA display chain: the shared renderer runs without MSAA, so the
+      // lobby composites through the same AA node the match pipeline uses.
+      if (!this.postProcessing && this.scene && this.camera) {
+        const pp = new RenderPipeline(renderer);
+        pp.outputNode = smaa(pass(this.scene, this.camera));
+        this.postProcessing = pp;
+      }
+    });
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0e1622);
@@ -199,7 +215,9 @@ export class LobbyScene {
         this.camera.lookAt(this.lookX, 1.06, 0);
       }
 
-      renderer.render(scene, this.camera!);
+      if (!this.ready || !this.postProcessing) return;
+
+      this.postProcessing.render();
     };
     requestAnimationFrame(loop);
 
@@ -268,7 +286,11 @@ export class LobbyScene {
     this.scene = null;
     this.rig = null;
     this.characters = null;
-    this.renderer?.dispose();
+    this.postProcessing?.dispose();
+    this.postProcessing = null;
+    this.ready = false;
+    // The shared renderer is a page-lifetime singleton — it must survive
+    // lobby teardown and be reused by the next lobby or match scene.
     this.renderer = null;
     this.camera = null;
   }

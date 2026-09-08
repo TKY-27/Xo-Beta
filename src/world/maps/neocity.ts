@@ -430,7 +430,9 @@ export function buildNeoCity(): MapDef {
 function applyNeoCityShadowBudget(b: WorldBuilder): void {
   const emissiveMats = new Set<MatKey>([
     'neonCyan', 'neonMagenta', 'neonOrange', 'neonGreen', 'neonBlue',
-    'windowWarm', 'windowCool', 'signDimCyan', 'signDimMagenta', 'signDimOrange',
+    'windowWarm', 'windowCool', 'windowDark',
+    'windowWarmBright', 'windowWarmDim', 'windowCoolBright', 'windowCoolDim',
+    'signDimCyan', 'signDimMagenta', 'signDimOrange',
   ]);
   for (const geo of b.def.geo) {
     if (geo.kind !== 'box' || !geo.noCollide) continue;
@@ -1031,13 +1033,37 @@ function billboardSpot(b: WorldBuilder, cx: number, cz: number): void {
  */
 function litWindows(b: WorldBuilder, rng: Rng): void {
   const facadeMats: MatKey[] = ['facadeA', 'facadeB', 'facadeC', 'plasterOld'];
-  const warmMats: MatKey[] = [
-    'windowWarm', 'windowWarm', 'windowWarm', 'windowWarm',
-    'windowWarm', 'windowWarm', 'windowCool', 'windowCool',
-  ];
   const geo = b.def.geo;
   let windowIndex = 0;
   let storefrontIndex = 0;
+
+  /**
+   * CYCLE 42 (candy-LED finding): per-window look is derived from a
+   * position hash instead of the shared rng, so a given pane always renders
+   * the same bucket regardless of layout order or seed drift. Distribution
+   * across LIT windows: ~15% bright, ~40% normal, ~30% dim, ~15% dark
+   * (occupied-dark glass) — the former uniform mid-bright grid read as a
+   * candy LED billboard wall.
+   */
+  const windowHash = (x: number, y: number, z: number, salt: number): number => {
+    let h = (Math.imul(Math.round(x * 97) | 0, 0x27d4eb2d)
+      ^ Math.imul(Math.round(y * 131) | 0, 0x165667b1)
+      ^ Math.imul(Math.round(z * 61) | 0, 0x9e3779b1)
+      ^ Math.imul(salt, 0x85ebca6b)) >>> 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, 0xc2b2ae35);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  };
+  const pickWindowMat = (x: number, y: number, z: number): MatKey => {
+    const family = windowHash(x, y, z, 0x51ed) < 0.62;
+    const roll = windowHash(x, y, z, 0x2b1f);
+    if (roll < 0.15) return family ? 'windowWarmBright' : 'windowCoolBright';
+    if (roll < 0.55) return family ? 'windowWarm' : 'windowCool';
+    if (roll < 0.85) return family ? 'windowWarmDim' : 'windowCoolDim';
+    return 'windowDark';
+  };
+
   const pushWindow = (x: number, y: number, z: number, sx: number, sy: number, sz: number, mat: MatKey) => {
     // A sampled deep reveal is enough to break the flat facade silhouette;
     // framing every lit pane would add thousands of world specs and slow
@@ -1062,7 +1088,7 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
   for (const g of b.def.geo) {
     if (g.kind !== 'box') continue;
     if (!facadeMats.includes(g.mat)) continue;
-    
+
     // Walls are emitted per-floor as segmented boxes (wallWithGaps); min dim
     // is the wall thickness — eligibility uses the LONG horizontal axis.
     const longSpan = Math.max(g.sx, g.sz);
@@ -1087,13 +1113,12 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
           let on = roll < 0.55;
           if (f === litRow) on = roll < 0.94;
           if (!on) continue;
-          const mat = warmMats[rng.int(0, warmMats.length - 1)]!;
-          const wW = Math.min(1.15, step * 0.62);
-          const wH = Math.min(1.3, rowH * 0.55);
+          const wW = Math.min(1.15, step * 0.62 * (0.85 + 0.3 * windowHash(g.x + along, wy, g.z, 0x91de)));
+          const wH = Math.min(1.3, rowH * 0.55 * (0.85 + 0.3 * windowHash(g.x + along, wy, g.z, 0x7ea2)));
           if (face.axis === 'x') {
-            pushWindow(g.x + face.sign * (g.sx / 2 + 0.07), wy, g.z + along, 0.07, wH, wW, mat);
+            pushWindow(g.x + face.sign * (g.sx / 2 + 0.07), wy, g.z + along, 0.07, wH, wW, pickWindowMat(g.x + along, wy, g.z));
           } else {
-            pushWindow(g.x + along, wy, g.z + face.sign * (g.sz / 2 + 0.07), wW, wH, 0.07, mat);
+            pushWindow(g.x + along, wy, g.z + face.sign * (g.sz / 2 + 0.07), wW, wH, 0.07, pickWindowMat(g.x + along, wy, g.z));
           }
         }
       }
@@ -1103,7 +1128,10 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
         const bandLen = span * 0.62;
         const addAwning = storefrontIndex++ % 6 === 0;
         if (face.axis === 'x') {
-          pushWindow(g.x + face.sign * (g.sx / 2 + 0.09), wy, g.z, 0.1, 0.85, bandLen, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
+          // CYCLE 42: storefront glow moved from full neon (2.4) to the dim
+          // sign tier — same hue family, below the billboard-bright band that
+          // made every ground floor read as a lit advertisement.
+          pushWindow(g.x + face.sign * (g.sx / 2 + 0.09), wy, g.z, 0.1, 0.85, bandLen, rng.bool(0.5) ? 'signDimOrange' : 'signDimMagenta');
           if (addAwning) {
             b.box(g.x + face.sign * (g.sx / 2 + 0.36), wy + 0.72, g.z, 0.72, 0.14, bandLen + 0.45, 'metalExterior', 0, {
               noCollide: true,
@@ -1111,7 +1139,7 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
             });
           }
         } else {
-          pushWindow(g.x, wy, g.z + face.sign * (g.sz / 2 + 0.09), bandLen, 0.85, 0.1, rng.bool(0.5) ? 'neonOrange' : 'neonMagenta');
+          pushWindow(g.x, wy, g.z + face.sign * (g.sz / 2 + 0.09), bandLen, 0.85, 0.1, rng.bool(0.5) ? 'signDimOrange' : 'signDimMagenta');
           if (addAwning) {
             b.box(g.x, wy + 0.72, g.z + face.sign * (g.sz / 2 + 0.36), bandLen + 0.45, 0.14, 0.72, 'metalExterior', 0, {
               noCollide: true,
@@ -1130,6 +1158,33 @@ function litWindows(b: WorldBuilder, rng: Rng): void {
  * barricades now line every road so streets read as a lived-in city.
  */
 function lotDressing(b: WorldBuilder, rng: Rng): void {
+  // Block interiors: the mid-lot cores between the street grid used to sit
+  // empty and unlit. Give every block a lamp, sparse prop clutter and an
+  // occasional kiosk so the dark cores read as inhabited lots.
+  const blockCs = [-150, -50, 50, 150];
+  for (const bx of blockCs) {
+    for (const bz of blockCs) {
+      const jitterX = rng.range(-14, 14);
+      const jitterZ = rng.range(-14, 14);
+      const lx = bx + jitterX;
+      const lz = bz + jitterZ;
+      const warm = rng.bool(0.5);
+      b.lampPost(lx, lz, 0, 5.6, warm ? 0xffc9a0 : 0x9fd8ff, 3.0, 34);
+      if (rng.bool(0.7)) {
+        const px = bx + rng.range(-30, 30);
+        const pz = bz + rng.range(-30, 30);
+        b.crate(px, 0.35, pz, 1);
+        if (rng.bool(0.5)) b.crate(px + rng.range(-2.4, 2.4), 0.35, pz + rng.range(-2.4, 2.4), 1);
+      }
+      if (rng.bool(0.45)) {
+        const kx = bx + rng.range(-26, 26);
+        const kz = bz + rng.range(-26, 26);
+        b.box(kx, 1.5, kz, 4.4, 3, 3.4, 'metalExterior', rng.bool(0.5) ? 0 : Math.PI / 2);
+        b.box(kx, 3.12, kz, 4.7, 0.24, 3.7, 'metalDark', 0);
+        b.light(kx, 3.2, kz, warm ? 0xffd9a0 : 0x9fd8ff, 0.9, 14);
+      }
+    }
+  }
   const carCols = [0x27313d, 0x503030, 0x2e3a2f, 0x33384a, 0x3a2f28];
   const roadCs = [-200, -100, 0, 100, 200];
   for (let i = -2; i <= 2; i++) {

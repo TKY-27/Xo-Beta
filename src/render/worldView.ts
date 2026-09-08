@@ -7,6 +7,12 @@
  */
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import type { Node, UniformNode } from 'three/webgpu';
+import {
+  abs, clamp, dot, floor, fract, float, mix, normalView, positionLocal,
+  positionViewDirection, pow, sin, smoothstep, step, uniform, uv, vec2,
+} from 'three/tsl';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import {
@@ -46,6 +52,200 @@ export interface PresentationTransport {
   yaw?: number;
 }
 
+/**
+ * CYCLE 42 (toy-flat finding): procedural dropship weathering. One 256px
+ * sheet drives both the albedo (panel seams, rivet dots, grime blotches,
+ * drip streaks, per-panel tone variation) and the roughness response (seams
+ * and grime stay rough, occasional polished wear patches). The lathe/extrude
+ * primitives tile UVs per face, so the sheet is designed full-cover: every
+ * feature repeats on a seamless wrap (whole-cycle sinusoid layouts and
+ * wrap-around draw offsets), and nothing is placement-specific — wherever a
+ * face's UV window lands, the pattern reads as hull plating.
+ */
+interface HullWeathering {
+  map: THREE.CanvasTexture;
+  roughnessMap: THREE.CanvasTexture;
+}
+
+let hullWeatheringCache: HullWeathering | null = null;
+
+function mulberry(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function makeHullWeathering(): HullWeathering | null {
+  // Headless/DOM-less guard (unit tests, workers): fall back to the plain
+  // pre-cycle-42 material response.
+  if (typeof document === 'undefined') return null;
+  if (hullWeatheringCache) return hullWeatheringCache;
+  const s = 256;
+  const albedo = document.createElement('canvas');
+  albedo.width = s;
+  albedo.height = s;
+  const rough = document.createElement('canvas');
+  rough.width = s;
+  rough.height = s;
+  const aCtx = albedo.getContext('2d')!;
+  const rCtx = rough.getContext('2d')!;
+  const rand = mulberry(0xc0ffee);
+
+  // Base: near-white so the material color carries the hue; roughness base
+  // ~0.58 (148) at roughness=1.
+  aCtx.fillStyle = '#e6e8ea';
+  aCtx.fillRect(0, 0, s, s);
+  rCtx.fillStyle = 'rgb(148,148,148)';
+  rCtx.fillRect(0, 0, s, s);
+
+  // Per-panel tone variation + roughness drift on a 64px plate grid (wraps).
+  for (let py = 0; py < 4; py++) {
+    for (let px = 0; px < 4; px++) {
+      const tone = 232 + Math.round(rand() * 36 - 18);
+      aCtx.fillStyle = `rgb(${tone},${tone + 1},${tone + 3})`;
+      aCtx.fillRect(px * 64, py * 64, 64, 64);
+      const rl = 128 + Math.round(rand() * 60 - 30);
+      rCtx.fillStyle = `rgb(${rl},${rl},${rl})`;
+      rCtx.fillRect(px * 64, py * 64, 64, 64);
+    }
+  }
+
+  // CYCLE 54 (review watch-item): second variation octaves — the lone 4×4
+  // plate grid read as a regular checker at transport distance. A fine 8×8
+  // drift plus coarse 2×2 tone bands break the periodicity (both wrap).
+  for (let py = 0; py < 8; py++) {
+    for (let px = 0; px < 8; px++) {
+      const d = rand() * 2 - 1;
+      if (Math.abs(d) < 0.18) continue;
+      aCtx.fillStyle = d > 0
+        ? `rgba(255,255,255,${(d * 0.09).toFixed(3)})`
+        : `rgba(20,22,24,${(-d * 0.09).toFixed(3)})`;
+      aCtx.fillRect(px * 32, py * 32, 32, 32);
+    }
+  }
+  for (let py = 0; py < 2; py++) {
+    for (let px = 0; px < 2; px++) {
+      const d = rand() * 2 - 1;
+      aCtx.fillStyle = d > 0
+        ? `rgba(255,255,255,${(d * 0.05).toFixed(3)})`
+        : `rgba(20,22,24,${(-d * 0.05).toFixed(3)})`;
+      aCtx.fillRect(px * 128, py * 128, 128, 128);
+    }
+  }
+
+  // Grime blotches: soft dark mottling, denser toward nothing in particular
+  // (uniform scatter — placement must not assume a UV layout).
+  for (let i = 0; i < 60; i++) {
+    const x = rand() * s;
+    const y = rand() * s;
+    const r = 6 + rand() * 26;
+    const g = aCtx.createRadialGradient(x, y, 0, x, y, r);
+    const dark = 120 + Math.round(rand() * 60);
+    g.addColorStop(0, `rgba(${dark},${dark + 2},${dark + 4},0.16)`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    aCtx.fillStyle = g;
+    aCtx.fillRect(x - r, y - r, r * 2, r * 2);
+    const rr = 90 + Math.round(rand() * 110);
+    rCtx.fillStyle = `rgba(${rr},${rr},${rr},0.22)`;
+    rCtx.beginPath();
+    rCtx.arc(x, y, r * 0.8, 0, Math.PI * 2);
+    rCtx.fill();
+  }
+
+  // Vertical drip streaks (wrap-drawn so edges stay seamless).
+  for (let i = 0; i < 26; i++) {
+    const x = Math.floor(rand() * s);
+    const y0 = Math.floor(rand() * s);
+    const len = 20 + Math.floor(rand() * 70);
+    const w = 1 + Math.floor(rand() * 2);
+    const alpha = 0.10 + rand() * 0.14;
+    for (const off of [-s, 0, s]) {
+      const grad = aCtx.createLinearGradient(x, y0 + off, x, y0 + off + len);
+      grad.addColorStop(0, `rgba(70,74,78,${alpha})`);
+      grad.addColorStop(1, 'rgba(70,74,78,0)');
+      aCtx.fillStyle = grad;
+      aCtx.fillRect(x - w / 2, y0 + off, w, len);
+      rCtx.fillStyle = `rgba(190,190,190,${alpha})`;
+      rCtx.fillRect(x - w / 2, y0 + off, w, len);
+    }
+  }
+
+  // Panel seams: strong verticals every 64px, fainter horizontals every
+  // 128px, plus rivet rows hugging the seams. Drawn with wrap offsets.
+  const seam = (x0: number, y0: number, x1: number, y1: number, w: number, dark: string) => {
+    for (const ox of [-s, 0, s]) {
+      for (const oy of [-s, 0, s]) {
+        aCtx.strokeStyle = dark;
+        aCtx.lineWidth = w;
+        aCtx.beginPath();
+        aCtx.moveTo(x0 + ox, y0 + oy);
+        aCtx.lineTo(x1 + ox, y1 + oy);
+        aCtx.stroke();
+      }
+    }
+  };
+  for (let i = 0; i < 4; i++) {
+    seam(i * 64 + 0.5, 0, i * 64 + 0.5, s, 2, 'rgba(48,52,56,0.55)');
+    seam(i * 64 + 1.5, 0, i * 64 + 1.5, s, 1, 'rgba(255,255,255,0.16)');
+    // Rougher (dirt-catching) seam grooves.
+    rCtx.fillStyle = 'rgba(205,205,205,0.6)';
+    rCtx.fillRect(i * 64, 0, 2, s);
+  }
+  for (let i = 0; i < 2; i++) {
+    seam(0, i * 128 + 0.5, s, i * 128 + 0.5, 1, 'rgba(48,52,56,0.34)');
+    rCtx.fillStyle = 'rgba(190,190,190,0.45)';
+    rCtx.fillRect(0, i * 128, s, 1);
+  }
+  // Rivets: two-dot clusters beside each vertical seam, every 32px.
+  aCtx.fillStyle = 'rgba(40,44,48,0.5)';
+  for (let i = 0; i < 4; i++) {
+    for (let y = 8; y < s; y += 32) {
+      for (const rx of [i * 64 + 5, i * 64 + 59]) {
+        for (const ox of [-s, 0, s]) {
+          aCtx.beginPath();
+          aCtx.arc(rx + ox, y, 1.6, 0, Math.PI * 2);
+          aCtx.fill();
+        }
+      }
+    }
+  }
+
+  // Chipped scratches: short bright/dark diagonal nicks (wrap-drawn).
+  for (let i = 0; i < 22; i++) {
+    const x = rand() * s;
+    const y = rand() * s;
+    const dx = (rand() - 0.5) * 18;
+    const dy = (rand() - 0.5) * 6;
+    for (const ox of [-s, 0, s]) {
+      for (const oy of [-s, 0, s]) {
+        aCtx.strokeStyle = rand() > 0.4 ? 'rgba(200,204,208,0.5)' : 'rgba(58,62,66,0.45)';
+        aCtx.lineWidth = 1;
+        aCtx.beginPath();
+        aCtx.moveTo(x + ox, y + oy);
+        aCtx.lineTo(x + dx + ox, y + dy + oy);
+        aCtx.stroke();
+      }
+    }
+  }
+
+  const map = new THREE.CanvasTexture(albedo);
+  map.name = 'dropshipGrunge';
+  map.wrapS = THREE.RepeatWrapping;
+  map.wrapT = THREE.RepeatWrapping;
+  map.anisotropy = 8;
+  const roughnessMap = new THREE.CanvasTexture(rough);
+  roughnessMap.name = 'dropshipGrungeRough';
+  roughnessMap.wrapS = THREE.RepeatWrapping;
+  roughnessMap.wrapT = THREE.RepeatWrapping;
+  roughnessMap.anisotropy = 8;
+  hullWeatheringCache = { map, roughnessMap };
+  return hullWeatheringCache;
+}
+
 /** Merge authored chest parts without allowing a silent null geometry. */
 function mergeChestParts(parts: THREE.BufferGeometry[], label: string): THREE.BufferGeometry {
   const firstIsIndexed = parts[0]?.index !== null;
@@ -58,49 +258,52 @@ function mergeChestParts(parts: THREE.BufferGeometry[], label: string): THREE.Bu
   return merged;
 }
 
-const STORM_VERT = /* glsl */ `
-  varying vec2 vUv;
-  varying vec3 vWPos;
-  void main() {
-    vUv = uv;
-    vec4 wp = modelMatrix * vec4(position, 1.0);
-    vWPos = wp.xyz;
-    gl_Position = projectionMatrix * viewMatrix * wp;
-  }
-`;
+/**
+ * TSL port of the former GLSL storm-wall shader: vertical fade, drifting
+ * murk, scrolling energy bands and hash crackle over a translucent purple
+ * wall. Uniform nodes keep per-frame updates recompile-free.
+ */
+interface StormUniforms {
+  time: UniformNode<'float', number>;
+  intensity: UniformNode<'float', number>;
+  colorA: UniformNode<'color', THREE.Color>;
+  colorB: UniformNode<'color', THREE.Color>;
+}
 
-const STORM_FRAG = /* glsl */ `
-  uniform float uTime;
-  uniform float uIntensity;
-  uniform vec3 uColorA;
-  uniform vec3 uColorB;
-  varying vec2 vUv;
-  varying vec3 vWPos;
-
-  float hash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-  }
-
-  void main() {
-    // vertical fade: solid at eye level, fading toward the top rim
-    float vertFade = smoothstep(1.0, 0.3, vUv.y) * smoothstep(0.0, 0.06, vUv.y);
-    // large-scale wall presence (slow drifting murk so it reads as a volume)
-    float murk = sin(vUv.x * 24.0 + uTime * 0.35 + sin(vUv.y * 9.0 + uTime * 0.2) * 1.4) * 0.5 + 0.5;
-    // scrolling energy bands (two directions)
-    float band = sin(vUv.x * 90.0 - uTime * 2.2 + sin(vUv.y * 22.0)) * 0.5 + 0.5;
-    band *= 0.55 + 0.45 * sin(vUv.y * 34.0 - uTime * 1.4);
-    // crackle noise streaks
-    vec2 cell = vec2(floor(vUv.x * 140.0), floor(vUv.y * 26.0));
-    float n = hash(cell + vec2(floor(uTime * 9.0), 0.0));
-    float crackle = step(0.82, n) * (0.6 + 0.4 * sin(uTime * 22.0));
-    float energy = band * (0.35 + crackle);
-    vec3 col = mix(uColorB, uColorA, clamp(energy * 1.5, 0.0, 1.0));
-    col = mix(col, uColorB * 0.85, murk * 0.35);
-    // readable translucent wall: solid purple body + energetic highlights
-    float alpha = vertFade * (0.27 + murk * 0.08 + energy * 0.24) * uIntensity;
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
+function buildStormMaterial(): { material: MeshBasicNodeMaterial; u: StormUniforms } {
+  const u: StormUniforms = {
+    time: uniform(0),
+    intensity: uniform(1),
+    colorA: uniform(new THREE.Color(0xd2b4ff)),
+    colorB: uniform(new THREE.Color(0x5426bd)),
+  };
+  const uvX = uv().x;
+  const uvY = uv().y;
+  // vertical fade: solid at eye level, fading toward the top rim
+  const vertFade = smoothstep(1.0, 0.3, uvY).mul(smoothstep(0.0, 0.06, uvY));
+  // large-scale wall presence (slow drifting murk so it reads as a volume)
+  const murk = sin(uvX.mul(24.0).add(u.time.mul(0.35)).add(sin(uvY.mul(9.0).add(u.time.mul(0.2))).mul(1.4)))
+    .mul(0.5).add(0.5);
+  // scrolling energy bands (two directions)
+  const band0 = sin(uvX.mul(90.0).sub(u.time.mul(2.2)).add(sin(uvY.mul(22.0)))).mul(0.5).add(0.5);
+  const band = band0.mul(float(0.55).add(float(0.45).mul(sin(uvY.mul(34.0).sub(u.time.mul(1.4))))));
+  // crackle noise streaks
+  const cell = vec2(floor(uvX.mul(140.0)), floor(uvY.mul(26.0)));
+  const n = fract(sin(dot(cell.add(vec2(floor(u.time.mul(9.0)), 0.0)), vec2(127.1, 311.7))).mul(43758.5453));
+  const crackle = step(0.82, n).mul(float(0.6).add(float(0.4).mul(sin(u.time.mul(22.0)))));
+  const energy = band.mul(float(0.35).add(crackle));
+  let col: Node<'vec3'> = mix(u.colorB, u.colorA, clamp(energy.mul(1.5), 0.0, 1.0));
+  col = mix(col, u.colorB.mul(0.85), murk.mul(0.35));
+  // readable translucent wall: solid purple body + energetic highlights
+  const alpha = vertFade.mul(float(0.27).add(murk.mul(0.08)).add(energy.mul(0.24))).mul(u.intensity);
+  const material = new MeshBasicNodeMaterial();
+  material.transparent = true;
+  material.side = THREE.DoubleSide;
+  material.depthWrite = false;
+  material.colorNode = col;
+  material.opacityNode = alpha;
+  return { material, u };
+}
 
 /**
  * WorldItem Y is a lightweight settling centre kept 0.35 m above support.
@@ -132,42 +335,34 @@ const AMMO_BASE_CLEARANCE = 0.16;
  * the hologram a little material character while keeping its brightness
  * deterministic from frame to frame (and therefore free of pickup flicker).
  */
-const RARITY_HOLOGRAM_VERT = /* glsl */ `
-  varying vec3 vNormalV;
-  varying vec3 vViewDirV;
-  varying vec3 vPositionO;
-
-  void main() {
-    vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
-    vNormalV = normalize(normalMatrix * normal);
-    vViewDirV = normalize(-viewPosition.xyz);
-    // Keep the small scan pattern in object space.  View-space coordinates
-    // would shimmer as the camera moves even though the item is stationary.
-    vPositionO = position;
-    gl_Position = projectionMatrix * viewPosition;
-  }
-`;
-
-const RARITY_HOLOGRAM_FRAG = /* glsl */ `
-  uniform vec3 uColor;
-  uniform float uOpacity;
-  varying vec3 vNormalV;
-  varying vec3 vViewDirV;
-  varying vec3 vPositionO;
-
-  void main() {
-    vec3 normalV = normalize(vNormalV);
-    vec3 viewDirV = normalize(vViewDirV);
-    // abs() keeps the treatment symmetrical for the double-sided shell.
-    float rim = pow(1.0 - abs(dot(normalV, viewDirV)), 2.35);
-    // A fixed, very low-contrast scan modulation breaks up a flat wash but
-    // never changes over time, unlike the old pulsing beacon.
-    float scan = 0.94 + 0.06 * sin(vPositionO.y * 26.0);
-    float alpha = uOpacity * (0.10 + rim * 0.38) * scan;
-    vec3 color = uColor * (0.42 + rim * 1.05);
-    gl_FragColor = vec4(color, alpha);
-  }
-`;
+/**
+ * TSL port of the former GLSL rarity hologram shader: view-dependent rim
+ * highlight plus a fixed low-contrast object-space scan. There is
+ * deliberately no time uniform — a static spatial scan keeps brightness
+ * deterministic from frame to frame (and therefore free of pickup flicker).
+ */
+function buildHologramMaterial(color: number, opacity: number): MeshBasicNodeMaterial {
+  const uColor = uniform(new THREE.Color(color));
+  const uOpacity = uniform(opacity);
+  // normalView is the view-space normal; positionViewDirection the normalized
+  // view vector. abs() keeps the treatment symmetrical for the double-sided
+  // shell.
+  const rim = pow(float(1.0).sub(abs(dot(normalView, positionViewDirection))), 2.35);
+  // A fixed, very low-contrast scan modulation breaks up a flat wash but
+  // never changes over time, unlike the old pulsing beacon.
+  const scan = float(0.94).add(float(0.06).mul(sin(positionLocal.y.mul(26.0))));
+  const alpha = uOpacity.mul(float(0.10).add(rim.mul(0.38))).mul(scan);
+  const colorNode = uColor.mul(float(0.42).add(rim.mul(1.05)));
+  const material = new MeshBasicNodeMaterial();
+  material.transparent = true;
+  material.depthTest = true;
+  material.depthWrite = false;
+  material.side = THREE.DoubleSide;
+  material.blending = THREE.AdditiveBlending;
+  material.colorNode = colorNode;
+  material.opacityNode = alpha;
+  return material;
+}
 
 /**
  * Virtualized static-light system. Night maps define far more light sources
@@ -369,6 +564,7 @@ export class WorldView {
   private chestMats = new Map<number, { body: THREE.MeshStandardMaterial; trim: THREE.MeshStandardMaterial; accent: THREE.MeshStandardMaterial }>();
   private lootViews = new Map<number, { root: THREE.Group; inner: THREE.Object3D | null; hologram?: THREE.Object3D }>();
   stormMesh!: THREE.Mesh;
+  private stormU: StormUniforms | null = null;
   readonly transportGroup = new THREE.Group();
   private time = 0;
   private waterVolumes: import('../world/types').WaterVolume[] = [];
@@ -380,6 +576,11 @@ export class WorldView {
   private readonly mapDef: MapDef;
   /** Beyond-bounds landscape + boundary barrier (see vista.ts). */
   readonly vista: VistaHandle;
+  /** Shared contact-shadow disc resources (vehicles, rocks, trees). Built
+   * lazily; dispose() traverses the group, so one instance per view is
+   * enough — the Set-based teardown dedupes them. */
+  private blobGeo: THREE.CircleGeometry | null = null;
+  private blobMat: THREE.MeshBasicMaterial | null = null;
 
   static async create(
     def: MapDef,
@@ -476,6 +677,10 @@ export class WorldView {
       concreteDark: 'concrete',
       metalDark: 'metal',
       woodDark: 'wood',
+      // CYCLE 24: the cool blue-grey fire-escape steel read as toy-plastic
+      // against warm mudbrick (round-4 critic) — substitute the warm metal
+      // scan for every exterior steel part on the desert map.
+      metalExterior: 'metal',
     };
     for (const g of def.geo) {
       if (g.noRender) continue;
@@ -509,10 +714,30 @@ export class WorldView {
     // instanced draw instead of allocating a mesh per bale.
     const hayBox = new RoundedBoxGeometry(1, 1, 1, 3, 0.12);
 
+    // Warm steel for the desert map: the shared metal scan's blue-grey tint
+    // read as toy plastic against mudbrick (round-4 critic). Instance colours
+    // multiply the base albedo, so the tint is the warm/cool channel ratio
+    // (>1 warms) rather than an absolute colour — no projected-material
+    // cloning needed (their graphs only build at construction).
+    const coolSteelBase = new THREE.Color(0x6b7580);
+    const warmSteelTarget = new THREE.Color(0x96826a);
+    const steelWarmTint = new THREE.Color(
+      warmSteelTarget.r / coolSteelBase.r,
+      warmSteelTarget.g / coolSteelBase.g,
+      warmSteelTarget.b / coolSteelBase.b,
+    );
+
     for (const { kind, mat, castShadow, matrices } of batches.values()) {
       const geometry = kind === 'box' && mat === 'hay' ? hayBox : geos[kind]!;
-      const inst = new THREE.InstancedMesh(geometry, this.mats.get(mat), matrices.length);
+      const material = this.mats.get(mat);
+      const inst = new THREE.InstancedMesh(geometry, material, matrices.length);
       matrices.forEach((m, i) => inst.setMatrixAt(i, m));
+      if (def.id === 'ashara' && (mat === 'metal' || mat === 'metalExterior')) {
+        for (let i = 0; i < matrices.length; i++) {
+          inst.setColorAt(i, steelWarmTint);
+        }
+        if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+      }
       inst.instanceMatrix.needsUpdate = true;
       inst.frustumCulled = false;
       inst.castShadow = castShadow;
@@ -598,7 +823,9 @@ export class WorldView {
       // roadSegment stores local X as length and local Z as width. Yaw rotates
       // those axes in world space but does not swap the stored dimensions.
       const width = Math.max(...group.map((box) => box.sz));
-      const steps = Math.max(2, Math.ceil((end - start) / 2));
+      // 0.5 m sampling: at 2 m the ribbon's computeVertexNormals faceted the
+      // micro-terrain into visible specular crinkle at grazing angles.
+      const steps = Math.max(2, Math.ceil((end - start) / 0.5));
       const addStrip = (stripWidth: number, yOffset: number, mat: MatKey, layer: number) => {
         const positions: number[] = [];
         const uvs: number[] = [];
@@ -798,8 +1025,11 @@ export class WorldView {
       this.group.add(trunks, crowns, fronds);
     }
 
-    // Undergrowth: bushes / ferns / clover / flowers near tree clusters
-    const undergrowthKeys = ['bush/common', 'bush/flowers', 'fern/1', 'clover/1', 'flower/group'];
+    // Undergrowth: bushes / ferns / clover / flowers near tree clusters.
+    // Ashara uses a dry-climate set (sparse bushes only) instead of none.
+    const undergrowthKeys = def.id === 'ashara'
+      ? ['bush/common', 'rock/medium1']
+      : ['bush/common', 'bush/flowers', 'fern/1', 'clover/1', 'flower/group'];
     const underMatrices = new Map<string, THREE.Matrix4[]>();
     const rngSeed = def.id === 'neocity' ? 11 : 23;
     let s1 = rngSeed * 1000 + 17;
@@ -808,7 +1038,7 @@ export class WorldView {
       return (s1 & 0x7fffffff) / 0x7fffffff;
     };
     for (const t of def.trees) {
-      const count = def.id === 'ashara' ? 0 : def.id === 'eden' ? 6 : 3;
+      const count = def.id === 'ashara' ? 2 : def.id === 'eden' ? 6 : 3;
       for (let i = 0; i < count; i++) {
         const a = rnd() * Math.PI * 2;
         const r = 1.6 + rnd() * 3.4;
@@ -867,8 +1097,11 @@ export class WorldView {
         const key3 = rnd() < 0.6 ? 'bush/common' : 'fern/1';
         underMatrices.get(key3)!.push(scatterMatrix(x, y + 0.02, z, 0.55 + rnd() * 0.6, rnd() * Math.PI * 2));
       }
-      // Meadow tufts: break up the open lawn so fields don't read as empty carpet.
-      const tuftCount = def.id === 'eden' ? 420 : def.id === 'oldfront' ? 520 : 0;
+      // Meadow tufts: break up the open lawn so fields don't read as empty
+      // carpet. CYCLE 59: density raised ~5x — at 420/520 across a 488 m map
+      // the near field still read as smooth green felt; the sun fix made the
+      // extra cutouts pay off (they now catch light and shadow).
+      const tuftCount = def.id === 'eden' ? 2400 : def.id === 'oldfront' ? 2600 : 0;
       const facilityCores = def.id === 'eden'
         ? [{ x: -90, z: -20, r: 46 }, { x: 120, z: 40, r: 34 }]
         : [];
@@ -891,9 +1124,11 @@ export class WorldView {
     for (const key of undergrowthKeys) {
       const ms = underMatrices.get(key)!;
       if (!ms.length || !props.hasVariant(key)) continue;
+      // CYCLE 62 (review): ground the tufts one value step — thin bright
+      // blade strands floated against the darker grass at mid distance.
       const softTint = def.id === 'oldfront'
         ? moorTintSoft
-        : def.id === 'eden' ? wetlandTintSoft : undefined;
+        : def.id === 'eden' ? wetlandTintSoft : groundTuftTint;
       this.addInstancedByGrid(key, ms, props, 4096, false, softTint);
     }
 
@@ -1019,69 +1254,102 @@ export class WorldView {
       this.group.add(scree);
     }
 
-    // Lamps: authored street fixtures, instanced per part (draw-call budget)
-    const poolGeo = new THREE.CircleGeometry(7, 20);
-    poolGeo.rotateX(-Math.PI / 2);
-    const poolTex = makeGlowTexture('rgba(255,235,190,', 128);
-    const maxLamps = Math.min(def.lamps.length, 84);
-    const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 1, 8);
-    poleGeo.translate(0, 0.5, 0);
-    const armGeo = new THREE.BoxGeometry(0.9, 0.08, 0.08);
-    const headGeo = new THREE.BoxGeometry(0.52, 0.14, 0.3);
-    const lensGeo = new THREE.PlaneGeometry(0.42, 0.2);
-    lensGeo.rotateX(-Math.PI / 2.6);
-    const poleMat = this.mats.get('metalDark');
-    const poles = new THREE.InstancedMesh(poleGeo, poleMat, maxLamps);
-    const arms = new THREE.InstancedMesh(armGeo, poleMat, maxLamps);
-    const heads = new THREE.InstancedMesh(headGeo, poleMat, maxLamps);
-    const lensInst = new THREE.InstancedMesh(lensGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), maxLamps);
-    const pools = new THREE.InstancedMesh(
-      poolGeo,
-      new THREE.MeshBasicMaterial({
-        map: poolTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.85,
-      }),
-      Math.min(maxLamps, 60),
-    );
-    pools.renderOrder = 1;
-    const headTilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0.18));
-    const idQ = new THREE.Quaternion();
-    const oneS = new THREE.Vector3(1, 1, 1);
-    let poolIdx = 0;
-    for (let i = 0; i < maxLamps; i++) {
-      const l = def.lamps[i]!;
-      const m4 = new THREE.Matrix4();
-      m4.compose(new THREE.Vector3(l.x, l.y, l.z), idQ, new THREE.Vector3(1, l.h, 1));
-      poles.setMatrixAt(i, m4);
-      m4.compose(new THREE.Vector3(l.x + 0.42, l.y + l.h - 0.06, l.z), idQ, oneS);
-      arms.setMatrixAt(i, m4);
-      m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.12, l.z), headTilt, oneS);
-      heads.setMatrixAt(i, m4);
-      m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.21, l.z), headTilt, oneS);
-      lensInst.setMatrixAt(i, m4);
-      lensInst.setColorAt(i, new THREE.Color(l.color));
-      // Real light comes from the shared pool; the fixture itself is emissive.
-      this.lightPool.add(l.x + 0.78, l.y + l.h - 0.35, l.z, l.color, l.intensity * 1.35, l.range);
-      if (poolIdx < pools.count) {
-        m4.compose(
-          new THREE.Vector3(l.x + 0.78, l.y + 0.07, l.z),
-          idQ,
-          new THREE.Vector3().setScalar(0.9 + Math.min(0.5, l.range / 60)),
-        );
-        pools.setMatrixAt(poolIdx, m4);
-        pools.setColorAt(poolIdx, new THREE.Color(l.color));
-        poolIdx++;
-      }
+    // Contact-shadow discs seat boulders and trees the way the vehicle blobs
+    // ground cars (round-4 critic: with AO gone, props float on overcast
+    // maps, where tree shadows are skipped entirely). The glow texture fades
+    // to transparent at the rim, so spans run past the visible footprint.
+    if (def.rocks.length > 0) {
+      const rockBlobs = this.buildContactBlobs(def.rocks.map((r) => ({
+        x: r.x,
+        z: r.z,
+        y: r.y,
+        span: r.scale * 2.0 + 0.5,
+      })));
+      if (rockBlobs) this.group.add(rockBlobs);
     }
-    poles.instanceMatrix.needsUpdate = true;
-    arms.instanceMatrix.needsUpdate = true;
-    heads.instanceMatrix.needsUpdate = true;
-    lensInst.instanceMatrix.needsUpdate = true;
-    if (lensInst.instanceColor) lensInst.instanceColor.needsUpdate = true;
-    if (pools.instanceColor) pools.instanceColor.needsUpdate = true;
-    pools.instanceMatrix.needsUpdate = true;
-    poles.castShadow = true;
-    poles.receiveShadow = true;
-    this.group.add(poles, arms, heads, lensInst, pools);
+    if (def.trees.length > 0) {
+      const treeBlobs = this.buildContactBlobs(def.trees.map((t) => ({
+        x: t.x,
+        z: t.z,
+        y: t.y,
+        span: t.variant === 'palm'
+          ? Math.max(1.3, t.scale * 2.3)
+          : t.scale * 2.3 + 0.3,
+      })));
+      if (treeBlobs) this.group.add(treeBlobs);
+    }
+
+    // Lamps: authored street fixtures, instanced per part (draw-call budget).
+    // Maps can finish with zero surviving lamps (eden/oldfront/neocity reject
+    // every authored lamp in MapBuilder.finish). Creating the fixture pools
+    // with capacity 0 gives them an empty instanceMatrix array, and three's
+    // WebGPU backend then binds a zero-byte uniform buffer for the instance
+    // matrices — a GPUValidationError per pool per pass ("Binding size ... is
+    // zero") that also knocks those draws out of the frame. Skip the pools.
+    if (def.lamps.length > 0) {
+      const poolGeo = new THREE.CircleGeometry(7, 20);
+      poolGeo.rotateX(-Math.PI / 2);
+      const poolTex = makeGlowTexture('rgba(255,235,190,', 128);
+      const maxLamps = Math.min(def.lamps.length, 84);
+      const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 1, 8);
+      poleGeo.translate(0, 0.5, 0);
+      const armGeo = new THREE.BoxGeometry(0.9, 0.08, 0.08);
+      const headGeo = new THREE.BoxGeometry(0.52, 0.14, 0.3);
+      const lensGeo = new THREE.PlaneGeometry(0.42, 0.2);
+      lensGeo.rotateX(-Math.PI / 2.6);
+      const poleMat = this.mats.get('metalDark');
+      const poles = new THREE.InstancedMesh(poleGeo, poleMat, maxLamps);
+      const arms = new THREE.InstancedMesh(armGeo, poleMat, maxLamps);
+      const heads = new THREE.InstancedMesh(headGeo, poleMat, maxLamps);
+      const lensInst = new THREE.InstancedMesh(lensGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), maxLamps);
+      const pools = new THREE.InstancedMesh(
+        poolGeo,
+        new THREE.MeshBasicMaterial({
+          map: poolTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.85,
+        }),
+        Math.min(maxLamps, 60),
+      );
+      pools.renderOrder = 1;
+      const headTilt = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, 0.18));
+      const idQ = new THREE.Quaternion();
+      const oneS = new THREE.Vector3(1, 1, 1);
+      let poolIdx = 0;
+      for (let i = 0; i < maxLamps; i++) {
+        const l = def.lamps[i]!;
+        const m4 = new THREE.Matrix4();
+        m4.compose(new THREE.Vector3(l.x, l.y, l.z), idQ, new THREE.Vector3(1, l.h, 1));
+        poles.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(l.x + 0.42, l.y + l.h - 0.06, l.z), idQ, oneS);
+        arms.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.12, l.z), headTilt, oneS);
+        heads.setMatrixAt(i, m4);
+        m4.compose(new THREE.Vector3(l.x + 0.78, l.y + l.h - 0.21, l.z), headTilt, oneS);
+        lensInst.setMatrixAt(i, m4);
+        lensInst.setColorAt(i, new THREE.Color(l.color));
+        // Real light comes from the shared pool; the fixture itself is emissive.
+        this.lightPool.add(l.x + 0.78, l.y + l.h - 0.35, l.z, l.color, l.intensity * 1.35, l.range);
+        if (poolIdx < pools.count) {
+          m4.compose(
+            new THREE.Vector3(l.x + 0.78, l.y + 0.07, l.z),
+            idQ,
+            new THREE.Vector3().setScalar(0.9 + Math.min(0.5, l.range / 60)),
+          );
+          pools.setMatrixAt(poolIdx, m4);
+          pools.setColorAt(poolIdx, new THREE.Color(l.color));
+          poolIdx++;
+        }
+      }
+      poles.instanceMatrix.needsUpdate = true;
+      arms.instanceMatrix.needsUpdate = true;
+      heads.instanceMatrix.needsUpdate = true;
+      lensInst.instanceMatrix.needsUpdate = true;
+      if (lensInst.instanceColor) lensInst.instanceColor.needsUpdate = true;
+      if (pools.instanceColor) pools.instanceColor.needsUpdate = true;
+      pools.instanceMatrix.needsUpdate = true;
+      poles.castShadow = true;
+      poles.receiveShadow = true;
+      this.group.add(poles, arms, heads, lensInst, pools);
+    }
 
     for (const l of def.lights) {
       this.lightPool.add(l.x, l.y, l.z, l.color, l.intensity, l.range);
@@ -1151,72 +1419,130 @@ export class WorldView {
   // Vehicles — Kenney car kit GLBs with tint
   // -------------------------------------------------------------------------
 
-  private buildVehicles(def: MapDef, props: PropLibrary): void {
-    const buckets = new Map<string, Array<{ vehicle: (typeof def.vehicles)[number]; key: string }>>();
-    for (let i = 0; i < def.vehicles.length; i++) {
-      const v = def.vehicles[i]!;
-      const key = vehicleRenderSpec(v.variant, v.x, v.z).asset;
-      const bucketKey = `${key}:${v.variant === 'wrecked' ? 'wrecked' : 'live'}`;
-      const bucket = buckets.get(bucketKey) ?? [];
-      bucket.push({ vehicle: v, key });
-      buckets.set(bucketKey, bucket);
-    }
-
-    const rootInverse = new THREE.Matrix4();
-    const localMatrix = new THREE.Matrix4();
-    const vehicleMatrix = new THREE.Matrix4();
-    const instanceMatrix = new THREE.Matrix4();
-    const vehicleQuaternion = new THREE.Quaternion();
-    const vehiclePosition = new THREE.Vector3();
-    const sourceScale = new THREE.Vector3();
-
-    for (const [bucketName, entries] of buckets) {
-      const key = entries[0]!.key;
-      const tmpl = props.cloneTemplate(`vehicle/${key}`);
-      if (!tmpl) continue;
-      tmpl.updateMatrixWorld(true);
-      rootInverse.copy(tmpl.matrixWorld).invert();
-      tmpl.traverse((o) => {
-        const sourceMesh = o as THREE.Mesh;
-        if (!sourceMesh.isMesh || !sourceMesh.material || !sourceMesh.geometry) return;
-        const src = Array.isArray(sourceMesh.material) ? sourceMesh.material[0]! : sourceMesh.material;
-        const m = src.clone() as THREE.MeshStandardMaterial;
-        delete m.userData.externalShared;
-        const wrecked = entries[0]!.vehicle.variant === 'wrecked';
-        const tintable = wrecked || Boolean(m.map);
-        if (wrecked) {
-          m.metalness = 0.4;
-          m.roughness = 0.95;
-        }
-        const instanced = new THREE.InstancedMesh(sourceMesh.geometry, m, entries.length);
-        localMatrix.multiplyMatrices(rootInverse, sourceMesh.matrixWorld);
-        for (let i = 0; i < entries.length; i++) {
-          const v = entries[i]!.vehicle;
-          const spec = vehicleRenderSpec(v.variant, v.x, v.z);
-          const vs = spec.scale;
-          vehiclePosition.set(v.x, v.y + spec.yOffset, v.z);
-          vehicleQuaternion.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, v.yaw);
-          sourceScale.setScalar(vs);
-          vehicleMatrix.compose(vehiclePosition, vehicleQuaternion, sourceScale);
-          instanceMatrix.multiplyMatrices(vehicleMatrix, localMatrix);
-          instanced.setMatrixAt(i, instanceMatrix);
-          if (tintable) {
-            const tint = new THREE.Color(v.color ?? 0x88929c);
-            if (wrecked) tint.multiplyScalar(0.32);
-            else tint.multiplyScalar(0.85).addScalar(0.0375);
-            instanced.setColorAt(i, tint);
-          }
-        }
-        instanced.instanceMatrix.needsUpdate = true;
-        if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
-        instanced.computeBoundingBox();
-        instanced.computeBoundingSphere();
-        instanced.frustumCulled = true;
-        instanced.castShadow = true;
-        instanced.receiveShadow = true;
-        instanced.name = `vehicle:${bucketName}`;
-        this.group.add(instanced);
+  /** Lazily-built shared contact-shadow disc resources for this view. */
+  private ensureBlobMaterial(): THREE.MeshBasicMaterial {
+    if (!this.blobMat) {
+      this.blobMat = new THREE.MeshBasicMaterial({
+        map: makeGlowTexture('rgba(6,8,10,', 128),
+        transparent: true,
+        opacity: 0.5,
+        depthWrite: false,
+        fog: true,
       });
+    }
+    return this.blobMat;
+  }
+
+  private ensureBlobGeometry(): THREE.CircleGeometry {
+    if (!this.blobGeo) {
+      this.blobGeo = new THREE.CircleGeometry(1, 18);
+      this.blobGeo.rotateX(-Math.PI / 2);
+    }
+    return this.blobGeo;
+  }
+
+  /** One instanced soft-disc pool for world-space contact shadows. The caller
+   * fills exactly `spots.length` instances; count 0 yields a hidden mesh. */
+  private buildContactBlobs(spots: Array<{ x: number; z: number; y?: number; span: number }>): THREE.InstancedMesh | null {
+    if (spots.length === 0) return null;
+    const blobs = new THREE.InstancedMesh(this.ensureBlobGeometry(), this.ensureBlobMaterial(), spots.length);
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const groundY = (s: { x: number; z: number; y?: number }): number =>
+      s.y ?? (this.mapDef.terrainHeight ? this.mapDef.terrainHeight(s.x, s.z) : 0);
+    spots.forEach((s, i) => {
+      m.compose(
+        new THREE.Vector3(s.x, groundY(s) + 0.05, s.z),
+        q.identity(),
+        new THREE.Vector3(s.span, 1, s.span),
+      );
+      blobs.setMatrixAt(i, m);
+    });
+    blobs.instanceMatrix.needsUpdate = true;
+    blobs.computeBoundingBox();
+    blobs.computeBoundingSphere();
+    blobs.frustumCulled = true;
+    blobs.name = 'contact-blobs';
+    return blobs;
+  }
+
+  private buildVehicles(def: MapDef, props: PropLibrary): void {
+    // CYCLE 29: one non-instanced clone per vehicle. The former InstancedMesh
+    // pools intermittently rendered as pure-black silhouettes on WebGPU —
+    // material values verified correct at runtime (round-5 P0.3), i.e. the
+    // r185 instanced-binding fault from QA_STATE's zero-size-uniform family.
+    // Maps author ≤9 vehicles, so individual draws are cheap and avoid the
+    // instanced path entirely.
+    const blobMat = this.ensureBlobMaterial();
+    const blobGeo = this.ensureBlobGeometry();
+    for (const v of def.vehicles) {
+      const key = vehicleRenderSpec(v.variant, v.x, v.z).asset;
+      const car = props.cloneTemplate(`vehicle/${key}`);
+      if (!car) continue;
+      const wrecked = v.variant === 'wrecked';
+      const spec = vehicleRenderSpec(v.variant, v.x, v.z);
+      car.position.set(v.x, v.y + spec.yOffset, v.z);
+      car.rotation.y = v.yaw;
+      car.scale.setScalar(spec.scale);
+      const fixMaterial = (source: THREE.Material, meshName: string): THREE.Material => {
+        const m = source.clone();
+        m.userData.externalShared = false;
+        const std = m as THREE.MeshStandardMaterial;
+        if (wrecked && std.color) {
+          // Burnt-out but still a readable car. The Kenney colormap atlas
+          // paints bodies in saturated primaries — multiplied tints stayed
+          // green/blue, so drop the atlas and paint flat ash (geometry keeps
+          // the silhouette; windows read as inset panels).
+          std.map = null;
+          std.color.set(0x4a423a);
+          std.metalness = 0.2;
+          std.roughness = 0.9;
+        } else if (std.color && std.map) {
+          const tint = new THREE.Color(v.color ?? 0x88929c);
+          std.color.multiply(tint).multiplyScalar(0.85).addScalar(0.0375);
+          // Car-paint response, split per part. The Kenney GLBs share ONE
+          // 'colormap' atlas material, but body and wheels are separate
+          // meshes and this clone runs per mesh, so each part gets its own
+          // response. Painted steel: low roughness + low metalness and an
+          // above-baseline envMapIntensity — with the scene's PMREM IBL that
+          // reads as a clearcoat-ish second spec lobe instead of flat toy
+          // plastic. Glass is baked into the body atlas (no separate
+          // material in these GLBs), so it rides the body response. Rubber
+          // tyres stay near-raw with env damped below baseline.
+          const isTyre = meshName.toLowerCase().includes('wheel');
+          std.roughness = isTyre ? 0.95 : 0.35;
+          std.metalness = isTyre ? 0 : 0.2;
+          std.envMapIntensity = isTyre ? 0.9 : 1.2;
+        }
+        return m;
+      };
+      car.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.material) return;
+        mesh.material = Array.isArray(mesh.material)
+          ? mesh.material.map((mat) => fixMaterial(mat, mesh.name))
+          : fixMaterial(mesh.material, mesh.name);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+      });
+      this.group.add(car);
+
+      // Contact-shadow disc grounds the car (shadow map alone floats it on
+      // overcast maps).
+      const gy = this.mapDef.terrainHeight
+        ? this.mapDef.terrainHeight(v.x, v.z)
+        : v.y;
+      const blobs = new THREE.InstancedMesh(blobGeo, blobMat, 1);
+      const m4 = new THREE.Matrix4().compose(
+        new THREE.Vector3(v.x, gy + 0.045, v.z),
+        new THREE.Quaternion().setFromAxisAngle(THREE.Object3D.DEFAULT_UP, v.yaw),
+        new THREE.Vector3(spec.scale * 3.1, 1, spec.scale * 3.1 * 0.72),
+      );
+      blobs.setMatrixAt(0, m4);
+      blobs.instanceMatrix.needsUpdate = true;
+      blobs.frustumCulled = true;
+      blobs.name = `vehicle-blob:${key}`;
+      this.group.add(blobs);
     }
   }
 
@@ -1639,16 +1965,22 @@ export class WorldView {
     let mesh: THREE.InstancedMesh;
     if (kind === 'med' || kind === 'shield') {
       const box = new THREE.BoxGeometry(0.48, 0.34, 0.34);
+      // Cross markings on both visible faces so the kit reads as a medkit
+      // from every loot-bob rotation.
       const c1 = new THREE.BoxGeometry(0.3, 0.08, 0.02);
       c1.translate(0, 0.05, 0.18);
       const c2 = new THREE.BoxGeometry(0.08, 0.02, 0.3);
       c2.translate(0, 0.05, 0.18);
+      const c1b = new THREE.BoxGeometry(0.3, 0.08, 0.02);
+      c1b.translate(0, 0.05, -0.18);
+      const c2b = new THREE.BoxGeometry(0.08, 0.02, 0.3);
+      c2b.translate(0, 0.05, -0.18);
       const glow = new THREE.SphereGeometry(0.05, 8, 6);
       glow.translate(0, 0.24, 0);
-      const geo = mergeGeometries([box, c1, c2, glow], true)!;
+      const geo = mergeGeometries([box, c1, c2, c1b, c2b, glow], true)!;
       const mats = kind === 'med'
-        ? [lootMats.medBox, lootMats.crossMed, lootMats.crossMed, lootMats.glowMed]
-        : [lootMats.shieldBox, lootMats.crossShield, lootMats.crossShield, lootMats.glowShield];
+        ? [lootMats.medBox, lootMats.crossMed, lootMats.crossMed, lootMats.crossMed, lootMats.crossMed, lootMats.glowMed]
+        : [lootMats.shieldBox, lootMats.crossShield, lootMats.crossShield, lootMats.crossShield, lootMats.crossShield, lootMats.glowShield];
       mesh = new THREE.InstancedMesh(geo, mats, cap);
     } else {
       const visual = ammoGroundVisual(kind);
@@ -1813,20 +2145,9 @@ export class WorldView {
 
   private buildStorm(): void {
     const geo = new THREE.CylinderGeometry(1, 1, 260, 72, 1, true);
-    const mat = new THREE.ShaderMaterial({
-      vertexShader: STORM_VERT,
-      fragmentShader: STORM_FRAG,
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      blending: THREE.NormalBlending,
-      uniforms: {
-        uTime: { value: 0 },
-        uIntensity: { value: 1 },
-        uColorA: { value: new THREE.Color(0xd2b4ff) },
-        uColorB: { value: new THREE.Color(0x5426bd) },
-      },
-    });
+    const storm = buildStormMaterial();
+    this.stormU = storm.u;
+    const mat = storm.material;
     this.stormMesh = new THREE.Mesh(geo, mat);
     this.stormMesh.position.y = 70;
     this.stormMesh.visible = false;
@@ -1840,7 +2161,7 @@ export class WorldView {
       return;
     }
     const me = match.localActor;
-    const mat = this.stormMesh.material as THREE.ShaderMaterial;
+    const mat = this.stormU!;
     if (!me) {
       this.stormMesh.visible = false;
       return;
@@ -1853,7 +2174,7 @@ export class WorldView {
     this.stormMesh.position.x = match.storm.centerX;
     this.stormMesh.position.z = match.storm.centerZ;
     this.stormMesh.scale.set(match.storm.radius, 1, match.storm.radius);
-    mat.uniforms['uIntensity']!.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
+    mat.intensity.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
   }
 
   syncStormView(storm: GameStateView['storm'], actorPosition?: Readonly<{ x: number; z: number }>): void {
@@ -1861,83 +2182,169 @@ export class WorldView {
       this.stormMesh.visible = false;
       return;
     }
-    const mat = this.stormMesh.material as THREE.ShaderMaterial;
+    const mat = this.stormU!;
     const distOutside = Math.hypot(actorPosition.x - storm.centerX, actorPosition.z - storm.centerZ) - storm.radius;
     const closeness = distOutside >= 0 ? 1 : Math.max(0, Math.min(1, 1 + distOutside / 60));
     this.stormMesh.visible = true;
     this.stormMesh.position.x = storm.centerX;
     this.stormMesh.position.z = storm.centerZ;
     this.stormMesh.scale.set(storm.radius, 1, storm.radius);
-    mat.uniforms['uIntensity']!.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
+    mat.intensity.value = Math.min(1.15, (0.5 + closeness * 0.5) * (0.92 + Math.sin(this.time * 1.4) * 0.08));
   }
 
   private buildTransport(): void {
-    const hullMat = new THREE.MeshStandardMaterial({ color: 0x42566f, roughness: 0.42, metalness: 0.7 });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x1c2633, roughness: 0.48, metalness: 0.72 });
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0xa87332, roughness: 0.34, metalness: 0.84 });
+    // CYCLE 27: procedural dropship anatomy — lathed fuselage, swept tapered
+    // wings, twin canted tail fins and wing-tip nacelles with exhaust rings.
+    // The former capsule + slab wings read as a featureless toy at the exact
+    // moment every player is looking at it (round-5 critic P0).
+    const hullMat = new THREE.MeshStandardMaterial({ color: 0x3a4249, roughness: 0.55, metalness: 0.55 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x22282e, roughness: 0.6, metalness: 0.5 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x565f68, roughness: 0.42, metalness: 0.7 });
+    // CYCLE 42 (toy-flat finding): full-cover grunge + panel seams on the two
+    // large hull finishes. The map is near-white so the base colors still set
+    // the hue; roughness moves to 1.0 with the whole range baked into the
+    // shared roughness sheet (seams/grime rough, wear patches polished).
+    // Silhouette and trim/emissive materials are untouched. Headless runs
+    // (no canvas) keep the plain materials.
+    const weather = makeHullWeathering();
+    if (weather) {
+      hullMat.map = weather.map;
+      hullMat.roughnessMap = weather.roughnessMap;
+      hullMat.roughness = 1;
+      hullMat.needsUpdate = true;
+      darkMat.map = weather.map;
+      darkMat.roughnessMap = weather.roughnessMap;
+      darkMat.roughness = 1;
+      darkMat.needsUpdate = true;
+    }
     const glassMat = new THREE.MeshStandardMaterial({
-      color: 0x0c1218, emissive: 0x53e0ff, emissiveIntensity: 0.9, roughness: 0.3, metalness: 0.5,
+      color: 0x0c1218, emissive: 0x9fd8e8, emissiveIntensity: 0.45, roughness: 0.25, metalness: 0.4,
     });
-    const hull = new THREE.Mesh(new THREE.CapsuleGeometry(3.4, 14, 6, 14), hullMat);
-    hull.geometry.rotateZ(Math.PI / 2);
-    hull.castShadow = true;
-    const wingL = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.3, 7), darkMat);
-    wingL.position.set(-2, 0.6, 5.4);
-    wingL.rotation.z = 0.16;
-    wingL.castShadow = true;
-    const wingR = wingL.clone();
-    wingR.position.z = -5.4;
-    wingR.rotation.z = -0.16;
-    const engineGlow = new THREE.Mesh(new THREE.SphereGeometry(1.15, 12, 10), glassMat);
-    engineGlow.position.set(-9.6, 0, 0);
-    const fin = new THREE.Mesh(new THREE.BoxGeometry(3.4, 4.4, 0.3), darkMat);
-    fin.position.set(6.4, 2.4, 0);
-    fin.castShadow = true;
-    // Structural hoops and a raised cockpit break up the old featureless
-    // capsule silhouette. These pieces share the hull axes, so the ship still
-    // reads clearly from the high transport camera at normal gameplay scale.
+    const exhaustMat = new THREE.MeshStandardMaterial({
+      color: 0x1a1f24, emissive: 0x7fd4ec, emissiveIntensity: 1.6, roughness: 0.4, metalness: 0.3,
+    });
+
+    // Fuselage: lathe profile from nose cone through cockpit hump, constant
+    // troop section and tapered tail. Points are (radius, axis-x) before the
+    // lathe's Y-axis sweep is laid onto the ship's forward X axis.
+    const profile: Array<[number, number]> = [
+      [0.12, 8.8], [0.7, 8.1], [1.3, 7.2], [1.8, 6.1], [2.2, 4.6],
+      [2.62, 2.4], [2.86, -0.4], [2.8, -2.6], [2.5, -4.8], [1.8, -6.8],
+      [1.05, -8.4], [0.5, -9.3],
+    ];
+    const fuselagePoints = profile.map(([r, x]) => new THREE.Vector2(r, x));
+    const fuselage = new THREE.Mesh(new THREE.LatheGeometry(fuselagePoints, 22), hullMat);
+    fuselage.geometry.rotateZ(-Math.PI / 2);
+    fuselage.castShadow = true;
+
+    // Cockpit canopy hugging the nose slope.
+    const cockpit = new THREE.Mesh(new THREE.CapsuleGeometry(1.15, 2.2, 4, 12), glassMat);
+    cockpit.geometry.rotateZ(Math.PI / 2);
+    cockpit.position.set(5.6, 1.7, 0);
+    cockpit.scale.set(1, 0.55, 1.15);
+    cockpit.rotation.z = 0.12;
+
+    // Swept, tapered wings (plan-view polygon, extruded to thickness).
+    const wingShape = (spanSign: number): THREE.Shape => {
+      const s = new THREE.Shape();
+      s.moveTo(1.6, 0);
+      s.lineTo(0.35, spanSign * 5.6);
+      s.lineTo(-1.15, spanSign * 5.6);
+      s.lineTo(-1.8, 0);
+      s.closePath();
+      return s;
+    };
+    const buildWing = (spanSign: number): THREE.Mesh => {
+      const geo = new THREE.ExtrudeGeometry(wingShape(spanSign), { depth: 0.3, bevelEnabled: false });
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(0, 0, 0);
+      const wing = new THREE.Mesh(geo, darkMat);
+      wing.position.set(-0.6, 0.7, 0);
+      wing.rotation.z = spanSign * 0.07;
+      wing.castShadow = true;
+      return wing;
+    };
+
+    // Wing-tip nacelles: capsule + intake lip + recessed glowing exhaust.
+    const buildNacelle = (z: number): THREE.Object3D[] => {
+      const parts: THREE.Object3D[] = [];
+      const nacelle = new THREE.Mesh(new THREE.CapsuleGeometry(0.8, 2.9, 4, 12), darkMat);
+      nacelle.geometry.rotateZ(Math.PI / 2);
+      nacelle.position.set(-3.1, 0.55, z);
+      nacelle.castShadow = true;
+      const intake = new THREE.Mesh(new THREE.TorusGeometry(0.82, 0.1, 8, 16), trimMat);
+      intake.geometry.rotateY(Math.PI / 2);
+      intake.position.set(-1.55, 0.55, z);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.09, 8, 16), trimMat);
+      ring.geometry.rotateY(Math.PI / 2);
+      ring.position.set(-4.85, 0.55, z);
+      const glow = new THREE.Mesh(new THREE.CircleGeometry(0.52, 16), exhaustMat);
+      glow.geometry.rotateY(-Math.PI / 2);
+      glow.position.set(-4.87, 0.55, z);
+      parts.push(nacelle, intake, ring, glow);
+      return parts;
+    };
+
+    // Twin canted tail fins.
+    const buildFin = (sideSign: number): THREE.Mesh => {
+      const shape = new THREE.Shape();
+      shape.moveTo(0, 0);
+      shape.lineTo(1.15, 0);
+      shape.lineTo(2.35, 2.3);
+      shape.lineTo(1.35, 2.3);
+      shape.closePath();
+      const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.18, bevelEnabled: false });
+      geo.rotateY(Math.PI / 2);
+      const fin = new THREE.Mesh(geo, hullMat);
+      fin.position.set(-8.1, 1.4, sideSign * 1.25);
+      fin.rotation.x = sideSign * -0.42;
+      fin.castShadow = true;
+      return fin;
+    };
+
+    // Structural rings + dorsal spine + belly cargo pod (kept from the
+    // earlier pass — they still read well against the new hull).
     const hoops: THREE.Mesh[] = [];
-    for (const hx of [-4.6, 0, 4.6]) {
-      const hoop = new THREE.Mesh(new THREE.TorusGeometry(3.55, 0.14, 6, 18), trimMat);
+    for (const hx of [-3.4, 1.2, 5.2]) {
+      const hoop = new THREE.Mesh(new THREE.TorusGeometry(2.92, 0.12, 6, 20), trimMat);
       hoop.geometry.rotateY(Math.PI / 2);
       hoop.position.x = hx;
+      hoop.scale.set(1, 1.04, 1);
       hoop.castShadow = true;
       hoops.push(hoop);
     }
-    const cockpit = new THREE.Mesh(new THREE.CapsuleGeometry(1.4, 2.4, 4, 10), glassMat);
-    cockpit.geometry.rotateZ(Math.PI / 2);
-    cockpit.position.set(4.4, 2.8, 0);
-    cockpit.scale.set(1, 0.58, 1.25);
-    const cargoCabin = new THREE.Mesh(new THREE.BoxGeometry(6.4, 2.2, 3.8), darkMat);
-    cargoCabin.position.set(-0.5, -3.2, 0);
+    const dorsalRail = new THREE.Mesh(new THREE.BoxGeometry(9.6, 0.14, 0.24), trimMat);
+    dorsalRail.position.set(-0.6, 3.02, 0);
+    const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.02, 1.1, 6), trimMat);
+    antenna.position.set(-6.2, 2.6, 0);
+    const cargoCabin = new THREE.Mesh(new THREE.BoxGeometry(6.2, 2.1, 3.6), darkMat);
+    cargoCabin.position.set(-0.5, -3.3, 0);
     cargoCabin.castShadow = true;
-    const cabinWindowL = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.75, 0.12), glassMat);
-    cabinWindowL.position.set(-0.5, -3.05, 1.96);
+    const cabinWindowL = new THREE.Mesh(new THREE.BoxGeometry(4.3, 0.7, 0.12), glassMat);
+    cabinWindowL.position.set(-0.5, -3.15, 1.86);
     const cabinWindowR = cabinWindowL.clone();
-    cabinWindowR.position.z = -1.96;
-    const nacelles: THREE.Object3D[] = [];
-    for (const nz of [-5.3, 5.3]) {
-      const nacelle = new THREE.Mesh(new THREE.CapsuleGeometry(0.85, 3.2, 4, 10), darkMat);
-      nacelle.geometry.rotateZ(Math.PI / 2);
-      nacelle.position.set(-3.4, -0.1, nz);
-      nacelle.castShadow = true;
-      const exhaust = new THREE.Mesh(new THREE.SphereGeometry(0.72, 12, 8), glassMat);
-      exhaust.scale.set(0.65, 1, 1);
-      exhaust.position.set(-5.45, -0.1, nz);
-      nacelles.push(nacelle, exhaust);
-    }
-    const dorsalRail = new THREE.Mesh(new THREE.BoxGeometry(8.8, 0.16, 0.22), trimMat);
-    dorsalRail.position.set(-0.4, 3.45, 0);
-    // running lights
+    cabinWindowR.position.z = -1.86;
+    const skidL = new THREE.Mesh(new THREE.BoxGeometry(7.4, 0.3, 0.4), darkMat);
+    skidL.position.set(0.2, -2.95, 1.7);
+    skidL.rotation.z = 0.05;
+    const skidR = skidL.clone();
+    skidR.position.z = -1.7;
+    skidR.rotation.z = -0.05;
+
+    // Running lights.
     const beaconMat = new THREE.MeshBasicMaterial({ color: 0xff5f5f });
     for (const bz of [4.4, -4.4]) {
       const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 6), beaconMat);
-      beacon.position.set(3.2, 2.2, bz);
+      beacon.position.set(3.2, 1.4, bz);
       this.transportGroup.add(beacon);
     }
+
     this.transportGroup.add(
-      hull, wingL, wingR, engineGlow, fin,
-      ...hoops, cockpit, cargoCabin, cabinWindowL, cabinWindowR, ...nacelles, dorsalRail,
+      fuselage, cockpit, buildWing(1), buildWing(-1),
+      ...buildNacelle(5.6), ...buildNacelle(-5.6),
+      buildFin(1), buildFin(-1),
+      ...hoops, dorsalRail, antenna,
+      cargoCabin, cabinWindowL, cabinWindowR, skidL, skidR,
     );
     this.transportGroup.visible = false;
     this.group.add(this.transportGroup);
@@ -1967,8 +2374,7 @@ export class WorldView {
     this.syncChests(match);
     this.syncDestructibles(match);
     this.syncStorm(match);
-    const stormMat = this.stormMesh.material as THREE.ShaderMaterial;
-    stormMat.uniforms['uTime']!.value = this.time;
+    this.stormU!.time.value = this.time;
 
     if (match.phase === 'transport') {
       this.transportGroup.visible = true;
@@ -2014,8 +2420,7 @@ export class WorldView {
     this.waterSystem.update(view.time, this.viewPos);
     this.rain?.update(dt, this.viewPos);
     this.syncReplica(view);
-    const stormMat = this.stormMesh.material as THREE.ShaderMaterial;
-    stormMat.uniforms['uTime']!.value = this.time;
+    this.stormU!.time.value = this.time;
   }
 
   private rain: RainSystem | null = null;
@@ -2155,6 +2560,18 @@ function wetlandTintSoft(m: THREE.Material): void {
   }
 }
 
+/** CYCLE 62: default tuft tint for maps without a biome pass — darkens thin
+ * blade cards one value step so they don't float as bright hairs. */
+function groundTuftTint(m: THREE.Material): void {
+  const std = m as THREE.MeshStandardMaterial;
+  if (!std.color) return;
+  std.color.multiplyScalar(0.82);
+  if (std.emissive) {
+    std.emissive.set(0x121a12);
+    std.emissiveIntensity = Math.max(std.emissiveIntensity ?? 0, 0.06);
+  }
+}
+
 /** Warm shared rock assets into ASHARA's dry sandstone/basalt range. */
 function desertRockTint(m: THREE.Material): void {
   const std = m as THREE.MeshStandardMaterial;
@@ -2254,11 +2671,10 @@ function retoneRockMap(std: THREE.MeshStandardMaterial, color: number, amount: n
   texture.anisotropy = 16;
   texture.userData.worldViewOwned = true;
   std.map = texture;
-  // The source atlas contains useful cracks and strata but previously only
-  // affected albedo. Reusing it at restrained strength gives grazing light a
-  // material response without fabricating a normal map or changing geometry.
-  std.bumpMap = texture;
-  std.bumpScale = 0.085;
+  // CYCLE 57: the bumpMap reuse is DISABLED — map+bumpMap on one standard
+  // material trips the r185 node-pipeline defect that zeroes ALL direct
+  // lighting (see vista.ts buildTerrain). Rocks were rendering sun-dead;
+  // the atlas cracks stay as albedo contrast only.
   std.color.set(0xffffff);
   std.needsUpdate = true;
 }
@@ -2274,7 +2690,7 @@ function retoneRockMap(std: THREE.MeshStandardMaterial, color: number, amount: n
  */
 const RARITY_RANKS = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
 
-const hologramMaterialPool: { shader: THREE.ShaderMaterial[]; basic: THREE.MeshBasicMaterial[] } = {
+const hologramMaterialPool: { shader: MeshBasicNodeMaterial[]; basic: THREE.MeshBasicMaterial[] } = {
   shader: [],
   basic: [],
 };
@@ -2303,20 +2719,7 @@ function hologramMaterialFor(rarityRank: number, hasNormals: boolean): THREE.Mat
   }
   let material = hologramMaterialPool.shader[rank];
   if (!material) {
-    material = new THREE.ShaderMaterial({
-      vertexShader: RARITY_HOLOGRAM_VERT,
-      fragmentShader: RARITY_HOLOGRAM_FRAG,
-      uniforms: {
-        uColor: { value: new THREE.Color(RARITY_COLORS[RARITY_RANKS[rank]!]) },
-        uOpacity: { value: 0.14 + rank * 0.022 },
-      },
-      transparent: true,
-      depthTest: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      toneMapped: false,
-    });
+    material = buildHologramMaterial(RARITY_COLORS[RARITY_RANKS[rank]!], 0.14 + rank * 0.022);
     material.userData.weaponHologram = true;
     material.userData.externalShared = true;
     hologramMaterialPool.shader[rank] = material;

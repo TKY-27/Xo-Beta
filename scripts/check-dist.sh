@@ -65,9 +65,11 @@ if grep -R -E -q \
 fi
 
 # Multiplayer is direct-P2P and STUN-only. Scan executable production assets,
-# not documentation that explains the forbidden schemes.
+# not documentation that explains the forbidden schemes. The scheme match
+# requires a non-word character before "turn" so minified tokens like
+# `return:` (iterator protocol / object keys) don't false-positive.
 if find dist/assets -type f -name '*.js' -print0 \
-  | xargs -0 grep -E -i -q 'turns?:'; then
+  | xargs -0 grep -E -i -q '(^|[^A-Za-z0-9_])turns?:'; then
   echo "dist audit FAILED — TURN URI scheme found in production JavaScript"
   exit 1
 fi

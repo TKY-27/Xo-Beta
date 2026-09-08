@@ -1,18 +1,24 @@
 /**
  * First-person viewmodel: composed weapon models (CC0 Kenney blaster parts),
- * arms, sway, inertia, walking bob, procedural recoil, ADS transition,
+ * sway, inertia, walking bob, procedural recoil, ADS transition,
  * sprint lowering, tactical/empty reload animation, bolt cycling.
  */
 
 import * as THREE from 'three';
-import { WEAPONS, type Rarity, type WeaponId } from '../core/balance';
+import { WEAPONS, RARITY_MODS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
+import { ArmSolver, createFistRig, createHandRig, type FistRig, type HandRig, type SupportStyle } from './hands';
 
-const HIP_POS = new THREE.Vector3(0.185, -0.17, -0.06);
-const ADS_POS = new THREE.Vector3(0, -0.075, -0.14);
-const SPRINT_POS = new THREE.Vector3(0.12, -0.26, -0.1);
+function smooth(t: number): number {
+  const c = Math.min(1, Math.max(0, t));
+  return c * c * (3 - 2 * c);
+}
+
+const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.3);
+const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
+const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
 
 export class ViewModel {
   /**
@@ -28,16 +34,29 @@ export class ViewModel {
   private readonly pivot = new THREE.Group();
   private factory: WeaponModelFactory;
   private models = new Map<string, WeaponModel>();
-  private armMat: THREE.MeshStandardMaterial;
-  private gloveMat: THREE.MeshStandardMaterial;
+  /** CYCLE 35: hands rig attached inside each weapon model clone. */
+  private rigs = new Map<string, HandRig>();
+  /** CYCLE 36 (user pass): connected shoulder→elbow→wrist arm chains — the
+   * hands are the END of the character's arms, never floating mittens. */
+  readonly armSolver: ArmSolver;
+  private static readonly _wristQuat = new THREE.Quaternion();
+  private static readonly _wristOffset = new THREE.Vector3();
+  private static readonly _wristWorldR = new THREE.Vector3();
+  private static readonly _wristWorldL = new THREE.Vector3();
+  /** Reusable wrist-target pair (B5: solveArms/updateFists run per frame). */
+  private static readonly _wristPair: [THREE.Vector3, THREE.Vector3] = [
+    new THREE.Vector3(), new THREE.Vector3(),
+  ];
   private currentId: WeaponId | null = null;
   private currentKey: string | null = null;
   private currentModel: WeaponModel | null = null;
   private t = 0;
 
-  // Fists (permanent melee pseudo-weapon)
-  private fistsR = new THREE.Group();
-  private fistsL = new THREE.Group();
+  // Fists (permanent melee pseudo-weapon) — CYCLE 52: shared gloved-hand
+  // builder + ArmSolver sleeves replace the legacy black capsule fists.
+  private fistRig: FistRig;
+  private fistsR: THREE.Group;
+  private fistsL: THREE.Group;
   private punchT = 0;
   private punchHand = 0;
 
@@ -47,6 +66,8 @@ export class ViewModel {
   private swayRoll = 0;
   private recoilZ = 0;
   private recoilPitch = 0;
+  private recoilRoll = 0;
+  private slideT = 0;
   private reloadT = 0;
   private swapT = 0;
   private adsSmooth = 0;
@@ -55,6 +76,88 @@ export class ViewModel {
   // Inspect flourish: <0 inactive, else elapsed seconds into the sweep.
   private inspectT = -1;
   private static readonly INSPECT_DURATION = 2.2;
+
+  // CYCLE 48: presentation-only combat timelines for the ONLINE LOCAL player.
+  // Replica ActorViews deliberately carry no combat runtime (no wpn timers —
+  // they are host authority and absent from GameStateView), so updateView()
+  // used to hardcode reload/bolt phases to -1/0 and the local hands never
+  // animated. The guest cannot reconstruct the authoritative timeline, but the
+  // fire/reload presentation events it already consumes (kick/muzzle,
+  // reloadStarted) are enough to run the SAME choreography curves
+  // approximately: notify*() seeds a local stopwatch, updateView() advances it
+  // and mirrors update()'s math. Remote players never reach updateView, so
+  // the documented read-only replica contract holds.
+  private presentReloadElapsed = -1;
+  private presentReloadTotal = 0;
+  private presentReloadEmpty = false;
+  private presentBoltElapsed = -1;
+  private presentBoltTotal = 0.9;
+  /** Presentation bolt/pump travel duration — update() animates both modes
+   * over 0.9 s regardless of the combat runtime's exact boltTimer. */
+  private static readonly BOLT_PRESENT_SECONDS = 0.9;
+
+  /** Seed the bolt/pump presentation timeline for the weapon just fired.
+   * Called from the online fire handlers next to kick()/muzzlePulse(); no-op
+   * for semi/auto weapons (their slide/recoil springs already run). */
+  notifyShotFired(weaponId: WeaponId): void {
+    const def = WEAPONS[weaponId];
+    if (!def || (def.fireMode !== 'bolt' && def.fireMode !== 'pump')) return;
+    this.presentBoltElapsed = 0;
+    this.presentBoltTotal = ViewModel.BOLT_PRESENT_SECONDS;
+  }
+
+  /** Seed the reload presentation timeline from the online reloadStarted
+   * event. Duration mirrors the combat runtime's formula (WEAPONS def ×
+   * rarity reload modifier) so the sweep lands with the authoritative refill. */
+  notifyReloadStarted(weaponId: WeaponId, rarity: Rarity, empty: boolean): void {
+    const def = WEAPONS[weaponId];
+    if (!def) return;
+    this.presentReloadElapsed = 0;
+    this.presentReloadTotal = (empty ? def.reloadEmpty : def.reloadTactical)
+      * RARITY_MODS[rarity].reloadMult;
+    this.presentReloadEmpty = empty;
+  }
+
+  /** Advance and retire the presentation timelines. Returns the reload phase
+   * (0..1, or -1 when inactive) and the bolt anim amplitude (0..1). */
+  private advancePresentationTimelines(dt: number): { reloadPhase: number; boltAnim: number; reloadingEmpty: boolean } {
+    let reloadPhase = -1;
+    let boltAnim = 0;
+    let reloadingEmpty = false;
+    if (this.presentReloadElapsed >= 0) {
+      this.presentReloadElapsed += dt;
+      if (this.presentReloadElapsed >= this.presentReloadTotal) {
+        this.presentReloadElapsed = -1;
+        this.presentReloadTotal = 0;
+      } else {
+        reloadPhase = this.presentReloadElapsed / this.presentReloadTotal;
+        reloadingEmpty = this.presentReloadEmpty;
+      }
+    }
+    if (this.presentBoltElapsed >= 0) {
+      this.presentBoltElapsed += dt;
+      if (this.presentBoltElapsed >= this.presentBoltTotal) {
+        this.presentBoltElapsed = -1;
+      } else {
+        boltAnim = Math.sin((1 - this.presentBoltElapsed / this.presentBoltTotal) * Math.PI);
+      }
+    }
+    return { reloadPhase, boltAnim, reloadingEmpty };
+  }
+
+  /** Cancel any running presentation timelines (weapon swap, death, hide). */
+  private clearPresentationTimelines(): void {
+    this.presentReloadElapsed = -1;
+    this.presentReloadTotal = 0;
+    this.presentBoltElapsed = -1;
+  }
+
+  /** Test/QA probe: active reload phase of the presentation timeline. */
+  get presentationReloadPhase(): number {
+    return this.presentReloadElapsed >= 0
+      ? this.presentReloadElapsed / this.presentReloadTotal
+      : -1;
+  }
 
   /**
    * Begin (or restart) the weapon-inspect flourish. Fails while unarmed or
@@ -113,11 +216,15 @@ export class ViewModel {
 
   constructor(factory: WeaponModelFactory) {
     this.factory = factory;
-    this.armMat = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.62, metalness: 0.22 });
-    this.gloveMat = new THREE.MeshStandardMaterial({ color: 0x191d22, roughness: 0.55, metalness: 0.3 });
+    this.group.name = 'viewmodel-root';
     this.group.add(this.pivot);
-    this.buildArms();
-    this.buildFists();
+    this.fistRig = createFistRig();
+    this.fistsR = this.fistRig.right;
+    this.fistsL = this.fistRig.left;
+    this.fistRig.group.visible = false;
+    this.pivot.add(this.fistRig.group);
+    this.armSolver = new ArmSolver();
+    this.pivot.add(this.armSolver.group);
 
     this.muzzleFlashLight = new THREE.PointLight(0xffc878, 0, 7, 2);
   }
@@ -132,60 +239,34 @@ export class ViewModel {
     this.group.quaternion.copy(camera.quaternion);
   }
 
-  private buildArms(): void {
-    // Right arm (trigger hand)
-    const armR = new THREE.Mesh(new THREE.CapsuleGeometry(0.047, 0.3, 4, 10), this.armMat);
-    armR.position.set(0.175, -0.235, -0.16);
-    armR.rotation.set(1.25, -0.12, 0.1);
-    const gloveR = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.085, 0.115), this.gloveMat);
-    gloveR.position.set(0.055, -0.145, -0.31);
-    gloveR.rotation.x = 0.35;
-    // Left support arm
-    const armL = new THREE.Mesh(new THREE.CapsuleGeometry(0.044, 0.27, 4, 10), this.armMat);
-    armL.position.set(-0.135, -0.255, -0.4);
-    armL.rotation.set(1.32, 0.42, 0);
-    const gloveL = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.082, 0.11), this.gloveMat);
-    gloveL.position.set(-0.062, -0.185, -0.545);
-    gloveL.rotation.set(0.3, 0, -0.15);
-    // Forearm guard accent
-    const guardR = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.02, 0.14), this.gloveMat);
-    guardR.position.set(0.09, -0.19, -0.24);
-    guardR.rotation.x = 1.25;
-    for (const m of [armR, armL, gloveR, gloveL, guardR]) m.castShadow = false;
-    this.pivot.add(armR, armL, gloveR, gloveL, guardR);
-  }
-
-  private buildFists(): void {
-    const mkHand = (side: 1 | -1, group: THREE.Group): void => {
-      const forearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.3, 4, 10), this.armMat);
-      forearm.position.set(0.02 * side, -0.06, 0.14);
-      forearm.rotation.set(1.15, -0.18 * side, -0.22 * side);
-      const fist = new THREE.Mesh(new THREE.CapsuleGeometry(0.058, 0.075, 4, 12), this.gloveMat);
-      fist.rotation.z = Math.PI / 2;
-      const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.028, 0.03), this.armMat);
-      ridge.position.set(0, 0.048, 0);
-      // Knuckle plate accent
-      const plate = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.02, 0.05), this.gloveMat);
-      plate.position.set(0, 0.01, -0.045);
-      plate.rotation.x = -0.25;
-      const wrap = new THREE.Group();
-      wrap.add(fist, ridge, plate);
-      wrap.position.set(0.11 * side, -0.16, -0.34);
-      wrap.rotation.set(0.32, 0.24 * side, -0.12 * side);
-      group.add(forearm, wrap);
-      for (const m of [forearm, fist, ridge, plate]) m.castShadow = false;
-      group.visible = false;
-      this.pivot.add(group);
-    };
-    mkHand(1, this.fistsR);
-    mkHand(-1, this.fistsL);
-  }
-
   /** View-space scale for the hand-held weapon. The factory builds to real
    * canonical length (~1 m AR) for world/loot presentation; at the hip offset
    * (~6 cm from the eye) that fills half the screen, so the viewmodel carries
    * its own presentation scale, like every shipped FPS does. */
-  private static readonly WEAPON_VIEW_SCALE = 0.55;
+  /** Per-class presentation scale (round-6 weapon review): the flat 0.6
+   * left the pistol at ~5% of frame while long guns filled 20%. */
+  private static readonly WEAPON_VIEW_SCALE: Record<WeaponId, number> = {
+    pistol: 0.95, smg: 0.78, ar: 0.82, shotgun: 0.85, sniper: 0.78,
+  };
+
+  /** Extra per-class ADS pose offsets (metres, applied through the ads
+   * blend). Y drops the sniper so the box magazine falls out of the aim
+   * point and the scope reads on the bore line. */
+  private static readonly ADS_EXTRA_Y: Record<WeaponId, number> = {
+    // CYCLE 61 (review): the sniper's box mag sat dead-centre through the
+    // ADS blend — drop the weapon further so the mag leaves the aim point.
+    pistol: 0, smg: 0, ar: 0, shotgun: -0.006, sniper: -0.028,
+  };
+
+  /** Hands-review fix: extra forward pose offset at full ADS (metres, applied
+   * through the ads blend). The shared ADS_POS leaves a long gun's buttstock
+   * ~9 cm from the eye — inside the 8 cm near plane, so the stock renders as
+   * a giant clipped slab (and on the shotgun the hollow interior of the
+   * clipped butt fills the aim point). Long guns ride further forward; the
+   * pistol barely moves. */
+  private static readonly ADS_EXTRA_FORWARD: Record<WeaponId, number> = {
+    pistol: 0.02, smg: 0.1, ar: 0.12, shotgun: 0.14, sniper: 0.09,
+  };
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
     const key = `${id}:${rarity}`;
@@ -194,7 +275,8 @@ export class ViewModel {
       const built = this.factory.build(id, rarity);
       if (!built) return null;
       m = built;
-      m.group.scale.setScalar(ViewModel.WEAPON_VIEW_SCALE);
+      const viewScale = ViewModel.WEAPON_VIEW_SCALE[id];
+      m.group.scale.setScalar(viewScale);
       // viewmodel render tuning: draw over world, no shadow casting
       m.group.traverse((o) => {
         const mesh = o as THREE.Mesh;
@@ -202,6 +284,19 @@ export class ViewModel {
         const mat = mesh.material as THREE.Material | undefined;
         if (mat && 'depthTest' in mat) { /* keep depth test; weapon clips handled by proximity */ }
       });
+      // CYCLE 35: gloved hands parented inside the weapon so every weapon
+      // motion (sway/ADS/recoil/reload) carries them; counter-scaled to stay
+      // human-size against the presentation scale.
+      const rig = createHandRig();
+      rig.configure({ gripR: m.gripR, gripL: m.gripL, scale: viewScale });
+      for (const handGroup of [rig.right, rig.left]) {
+        handGroup.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (mesh.isMesh) { mesh.castShadow = false; mesh.receiveShadow = false; }
+        });
+        m.group.add(handGroup);
+      }
+      this.rigs.set(key, rig);
       m.group.visible = false;
       this.models.set(key, m);
       this.pivot.add(m.group);
@@ -211,32 +306,35 @@ export class ViewModel {
 
   setWeapon(id: WeaponId | null, rarity: Rarity): void {
     const key = id ? `${id}:${rarity}` : null;
+    // Unarmed visibility must not depend on the model-change early-return
+    // below: a guest who spawns unarmed (currentKey already null) never
+    // crossed a weapon→none transition, so the fists stayed hidden forever.
+    const unarmed = !id;
+    if (this.fistRig.group.visible !== unarmed) {
+      this.fistRig.group.visible = unarmed;
+    }
     if (this.currentKey === key) return;
     if (this.currentModel) this.currentModel.group.visible = false;
     this.currentId = id;
     this.currentKey = key;
     this.currentModel = id ? this.modelFor(id, rarity) : null;
     if (this.currentModel) this.currentModel.group.visible = true;
-    const unarmed = !id;
-    if (this.fistsR.visible !== unarmed) {
-      this.fistsR.visible = unarmed;
-      this.fistsL.visible = unarmed;
-    }
+    // A swap cancels the in-flight reload/bolt presentation timelines — the
+    // old weapon's choreography must not bleed onto the new model.
+    this.clearPresentationTimelines();
     this.swapT = 0.32;
   }
 
   dispose(): void {
     // Weapon instances share resources with the page-lifetime factory; detach
     // them before releasing the viewmodel's own arms/fists geometry.
-    for (const model of this.models.values()) this.group.remove(model.group);
+    for (const model of this.models.values()) model.group.removeFromParent();
     const geometries = new Set<THREE.BufferGeometry>();
     this.group.traverse((object) => {
       const mesh = object as THREE.Mesh;
       if (mesh.isMesh) geometries.add(mesh.geometry);
     });
     for (const geometry of geometries) geometry.dispose();
-    this.armMat.dispose();
-    this.gloveMat.dispose();
     this.currentKey = null;
     this.currentModel = null;
     this.models.clear();
@@ -264,8 +362,9 @@ export class ViewModel {
   update(actor: Actor | null, dt: number, lookDx: number, lookDy: number, movingSpeed: number): void {
     this.t += dt;
     this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
-    if (!actor || (!this.currentId && !this.fistsR.visible)) {
+    if (!actor || (!this.currentId && !this.fistRig.group.visible)) {
       this.group.visible = false;
+      this.armSolver.setVisible(false);
       return;
     }
     this.group.visible = true;
@@ -282,7 +381,18 @@ export class ViewModel {
 
     // Recoil recovery (spring)
     this.recoilZ *= Math.exp(-8.5 * dt);
-    this.recoilPitch *= Math.exp(-7 * dt);
+    this.recoilPitch *= Math.exp(-6.5 * dt);
+    this.recoilRoll *= Math.exp(-9 * dt);
+    // Pistol slide return spring.
+    this.slideT = Math.max(0, this.slideT - dt);
+    const slide = this.currentModel?.bolt ?? null;
+    if (slide && this.currentKey?.startsWith('pistol')) {
+      if (slide.userData.baseZ === undefined) slide.userData.baseZ = slide.position.z;
+      const slideCurve = this.slideT > 0 ? Math.sin((1 - this.slideT / 0.09) * Math.PI) : 0;
+      // CYCLE 37 (review): slides travel REARWARD (+z) — v2 moved it into
+      // the barrel.
+      slide.position.z = (slide.userData.baseZ as number) + slideCurve * 0.035;
+    }
 
     // Swap-in dip
     this.swapT = Math.max(0, this.swapT - dt);
@@ -293,7 +403,8 @@ export class ViewModel {
       return;
     }
 
-    const def = WEAPONS[actor.inv.selectedWeapon?.weaponId ?? 'pistol'];
+    const weaponId = actor.inv.selectedWeapon?.weaponId ?? 'pistol';
+    const def = WEAPONS[weaponId];
     const adsTarget = actor.wpn.adsAmount;
     this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
     const ads = this.adsSmooth;
@@ -316,20 +427,41 @@ export class ViewModel {
     if (reloading) {
       const phase = 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal;
       const curve = Math.sin(phase * Math.PI);
-      reloadPitch = curve * 0.55;
-      reloadRoll = curve * 0.38;
+      // CYCLE 36 (review): port-side cant + slight muzzle-down — the former
+      // muzzle-up 0.55 pitch read as 'presenting arms'.
+      reloadPitch = curve * 0.14;
+      reloadRoll = curve * 0.3;
       reloadDrop = curve * 0.055;
       if (mag) {
-        if (mag.userData.baseY === undefined) mag.userData.baseY = mag.position.y;
+        if (mag.userData.baseY === undefined) {
+          mag.userData.baseY = mag.position.y;
+          mag.userData.baseRot = mag.rotation.z;
+        }
+        // CYCLE 36 (review): the v1 formula levitated the mag to baseY+0.2 on
+        // the second half. Proper reload: slide DOWN out of the well through
+        // the first half, then carry a fresh mag back UP to exactly baseY.
         const baseY = mag.userData.baseY as number;
-        const dropPhase = Math.min(1, phase * 2.4);
-        mag.position.y = baseY - dropPhase * 0.2 * (phase < 0.52 ? 1 : -1);
-        mag.visible = !(phase < 0.44 && actor.wpn.reloadingEmpty);
+        const drop = 0.14;
+        let magY: number;
+        let rock: number;
+        if (phase < 0.5) {
+          const t = smooth(Math.min(1, phase / 0.5));
+          magY = baseY - drop * t;
+          rock = 0.3 * t;
+        } else {
+          const t = smooth(Math.min(1, (phase - 0.5) / 0.35));
+          magY = baseY - drop * (1 - t);
+          rock = 0.3 * (1 - t);
+        }
+        mag.position.y = magY;
+        mag.rotation.z = (mag.userData.baseRot as number) + rock;
+        mag.visible = !(phase < 0.25 && actor.wpn.reloadingEmpty);
       }
     } else {
       if (mag && mag.userData.baseY !== undefined) {
         mag.visible = true;
         mag.position.y = mag.userData.baseY;
+        mag.rotation.z = mag.userData.baseRot as number;
       }
     }
 
@@ -341,43 +473,110 @@ export class ViewModel {
       boltAnim = Math.sin((1 - actor.wpn.boltTimer / total) * Math.PI);
     }
     const bolt = this.currentModel?.bolt ?? null;
+    let pumpOffset = 0;
     if (bolt) {
       if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
-      const dir = def2.fireMode === 'pump' ? -0.085 : 0.06;
-      bolt.position.z = (bolt.userData.baseZ as number) + boltAnim * dir;
+      // CYCLE 36 (review): a pump PULLS rearward (+z) to eject, then returns.
+      const dir = def2.fireMode === 'pump' ? 0.085 : 0.06;
+      pumpOffset = boltAnim * dir;
+      bolt.position.z = (bolt.userData.baseZ as number) + pumpOffset;
+    }
+
+    // CYCLE 35/36: drive the hand rig with the same choreography the weapon
+    // already follows (reload timeline, pump/bolt travel, ADS tuck).
+    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
+    if (rig) {
+      const reloadPhase = reloading ? 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal : -1;
+      const boltMode = def2.fireMode === 'bolt';
+      const supportStyle: SupportStyle = weaponId === 'pistol'
+        ? 'over'
+        : def2.fireMode === 'pump'
+          ? 'pump'
+          : weaponId === 'smg' ? 'side' : 'under';
+      rig.pose({
+        reloadPhase,
+        supportStyle,
+        magLocal: mag ? mag.position : null,
+        pumpOffset,
+        pumpHand: def2.fireMode === 'pump',
+        ads,
+        boltPhase: boltMode && actor.wpn.boltTimer > 0
+          ? 1 - actor.wpn.boltTimer / 0.9
+          : -1,
+        boltLocal: boltMode && bolt ? bolt.position : null,
+      });
     }
 
     // Compose position: hip → ADS → sprint offsets
     const inspect = this.inspectPose(dt, ads, this.sprintBlend, reloading);
     const iw = inspect.weight;
+    const adsFwd = ViewModel.ADS_EXTRA_FORWARD[weaponId] * ads;
+    const adsDrop = ViewModel.ADS_EXTRA_Y[weaponId] * ads;
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
       bobX + this.swayX - 0.1 * inspect.lift * iw;
     const py =
-      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
+      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads - adsDrop +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
       bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
     const pz =
-      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
+      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads - adsFwd +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
       this.recoilZ + 0.14 * inspect.lift * iw;
 
     this.pivot.position.set(px, py, pz);
+    // Base hip stance angles the receiver inward across the lower-right
+    // frame (muzzle toward center) like a real ready position; ADS removes it.
+    const hipYaw = 0.28 * (1 - ads);
+    const hipRoll = -0.1 * (1 - ads);
     this.pivot.rotation.set(
       -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
-      reloadRoll + this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
+      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
     );
+
+    // CYCLE 36 (user pass): connect the arms shoulder→elbow→wrist to the
+    // posed hands so nothing floats.
+    this.solveArms(ads);
+  }
+
+  /** Solve the arm chains against the live hand positions (world → view). */
+  private solveArms(ads = 0): void {
+    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
+    if (!rig) {
+      this.armSolver.setVisible(false);
+      return;
+    }
+    this.pivot.updateMatrixWorld(true);
+    const wR = ViewModel._wristWorldR;
+    // Attach the sleeves at each hand's CUFF RIDGE (an anchor riding the
+    // hand's own cuff barrel), not behind the palm and not a hand-orientation
+    // guess: the grip pose rotates the hand's local +z up-and-across (the old
+    // +z offset dragged the sniper ADS sleeve through the scope line), while
+    // a fixed view-space offset gapped the sleeve off the under-hand. The
+    // elbow droop (ArmSolver bend hints) does the below-the-bore routing.
+    rig.wristR.getWorldPosition(wR);
+    const wL = ViewModel._wristWorldL;
+    rig.wristL.getWorldPosition(wL);
+    const pair = ViewModel._wristPair;
+    pair[0].copy(wR);
+    pair[1].copy(wL);
+    this.armSolver.solve(this.pivot, pair, ads);
   }
 
   /**
-   * Per-frame presentation update for a read-only replica actor.
+   * Per-frame presentation update for the local player's read-only replica
+   * actor (online matches). Only reaches this path for the owning
+   * participant — remote players render through CharacterRig, never here.
    *
    * ActorView deliberately does not expose reload, bolt, recoil, or combat
-   * timers. Those details must remain local presentation state, so this path
-   * only consumes the equipped weapon, owner-scoped inventory metadata, and
-   * movement pose. ADS is supplied by the local input/presentation layer.
+   * timers (host authority, absent from GameStateView), so the combat
+   * choreography cannot be read from the view. Instead the online fire/
+   * reload handlers seed presentation-only timelines via notifyShotFired()/
+   * notifyReloadStarted(); this method advances them and runs the same
+   * curves as update(). ADS is supplied by the local input/presentation
+   * layer via opts.adsAmount.
    */
   updateView(
     actor: ActorView | null,
@@ -391,6 +590,8 @@ export class ViewModel {
     this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
     if (!actor || !actor.alive) {
       this.group.visible = false;
+      // Death/hide retires any in-flight presentation reload/bolt sweep.
+      this.clearPresentationTimelines();
       return;
     }
 
@@ -414,7 +615,17 @@ export class ViewModel {
     // Recoil is a local presentation spring. Replica state does not invent
     // or reconstruct authoritative fire/combat timing.
     this.recoilZ *= Math.exp(-8.5 * dt);
-    this.recoilPitch *= Math.exp(-7 * dt);
+    this.recoilPitch *= Math.exp(-6.5 * dt);
+    this.recoilRoll *= Math.exp(-9 * dt);
+    // Pistol slide return spring — kick() (online fire handlers) sets slideT
+    // exactly like the offline path; the replica path just never applied it.
+    this.slideT = Math.max(0, this.slideT - dt);
+    const slide = this.currentModel?.bolt ?? null;
+    if (slide && this.currentKey?.startsWith('pistol')) {
+      if (slide.userData.baseZ === undefined) slide.userData.baseZ = slide.position.z;
+      const slideCurve = this.slideT > 0 ? Math.sin((1 - this.slideT / 0.09) * Math.PI) : 0;
+      slide.position.z = (slide.userData.baseZ as number) + slideCurve * 0.035;
+    }
 
     // Swap-in dip is presentation-only and remains valid for replica views.
     this.swapT = Math.max(0, this.swapT - dt);
@@ -425,6 +636,7 @@ export class ViewModel {
       return;
     }
 
+    const def = WEAPONS[weaponId];
     const adsTarget = THREE.MathUtils.clamp(opts.adsAmount ?? 0, 0, 1);
     this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
     const ads = this.adsSmooth;
@@ -436,34 +648,122 @@ export class ViewModel {
     const bobX = Math.sin(this.t * bobFreq) * 0.0105 * bobAmp * (1 - ads * 0.88);
     const bobY = Math.abs(Math.cos(this.t * bobFreq)) * 0.0125 * bobAmp * (1 - ads * 0.88);
 
-    // Replica views intentionally do not animate reload/bolt state: those
-    // timers are private combat authority and are absent from ActorView.
-    const inspect = this.inspectPose(dt, ads, this.sprintBlend, false);
+    // CYCLE 48: presentation combat timelines (seeded by the online fire/
+    // reload event handlers) drive the SAME choreography curves update()
+    // runs offline: reload cant + mag travel, bolt/pump travel, hand rig.
+    const { reloadPhase, boltAnim, reloadingEmpty } = this.advancePresentationTimelines(dt);
+    const reloading = reloadPhase >= 0;
+    let reloadPitch = 0;
+    let reloadRoll = 0;
+    let reloadDrop = 0;
+    const mag = this.currentModel?.mag ?? null;
+    if (reloading) {
+      const curve = Math.sin(reloadPhase * Math.PI);
+      reloadPitch = curve * 0.14;
+      reloadRoll = curve * 0.3;
+      reloadDrop = curve * 0.055;
+      if (mag) {
+        if (mag.userData.baseY === undefined) {
+          mag.userData.baseY = mag.position.y;
+          mag.userData.baseRot = mag.rotation.z;
+        }
+        const baseY = mag.userData.baseY as number;
+        const drop = 0.14;
+        let magY: number;
+        let rock: number;
+        if (reloadPhase < 0.5) {
+          const t = smooth(Math.min(1, reloadPhase / 0.5));
+          magY = baseY - drop * t;
+          rock = 0.3 * t;
+        } else {
+          const t = smooth(Math.min(1, (reloadPhase - 0.5) / 0.35));
+          magY = baseY - drop * (1 - t);
+          rock = 0.3 * (1 - t);
+        }
+        mag.position.y = magY;
+        mag.rotation.z = (mag.userData.baseRot as number) + rock;
+        mag.visible = !(reloadPhase < 0.25 && reloadingEmpty);
+      }
+    } else if (mag && mag.userData.baseY !== undefined) {
+      mag.visible = true;
+      mag.position.y = mag.userData.baseY;
+      mag.rotation.z = mag.userData.baseRot as number;
+    }
+
+    // Bolt / pump cycling for the weapon just fired (presentation timeline).
+    const bolt = this.currentModel?.bolt ?? null;
+    let pumpOffset = 0;
+    if (bolt && boltAnim > 0 && (def.fireMode === 'bolt' || def.fireMode === 'pump')) {
+      if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
+      const dir = def.fireMode === 'pump' ? 0.085 : 0.06;
+      pumpOffset = boltAnim * dir;
+      bolt.position.z = (bolt.userData.baseZ as number) + pumpOffset;
+    }
+
+    // CYCLE 36 (review): the online path must pose hands too — v1 left them
+    // frozen at configure defaults. The pose now follows the presentation
+    // timelines instead of hardcoded inactive phases.
+    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
+    if (rig) {
+      const supportStyle: SupportStyle = weaponId === 'pistol'
+        ? 'over'
+        : def.fireMode === 'pump'
+          ? 'pump'
+          : weaponId === 'smg' ? 'side' : 'under';
+      rig.pose({
+        reloadPhase,
+        supportStyle,
+        magLocal: mag ? mag.position : null,
+        pumpOffset,
+        pumpHand: def.fireMode === 'pump',
+        ads,
+        boltPhase: def.fireMode === 'bolt' && boltAnim > 0
+          ? 1 - this.presentBoltElapsed / this.presentBoltTotal
+          : -1,
+        boltLocal: def.fireMode === 'bolt' && bolt ? bolt.position : null,
+      });
+    }
+
+    const inspect = this.inspectPose(dt, ads, this.sprintBlend, reloading);
     const iw = inspect.weight;
+    const adsFwd = ViewModel.ADS_EXTRA_FORWARD[weaponId] * ads;
+    const adsDrop = ViewModel.ADS_EXTRA_Y[weaponId] * ads;
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
       bobX + this.swayX - 0.1 * inspect.lift * iw;
     const py =
-      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
+      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads - adsDrop +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - swapDip + 0.04 * inspect.lift * iw;
+      bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
     const pz =
-      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
+      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads - adsFwd +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
       this.recoilZ + 0.14 * inspect.lift * iw;
 
     this.pivot.position.set(px, py, pz);
+    // Base hip stance angles the receiver inward across the lower-right
+    // frame (muzzle toward center) like a real ready position; ADS removes it.
+    // Parity with update(): the online weapon previously lost this stance.
+    const hipYaw = 0.28 * (1 - ads);
+    const hipRoll = -0.1 * (1 - ads);
     this.pivot.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
-      this.swayRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
+      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
+      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
     );
+    this.solveArms();
   }
 
   kick(strength: number): void {
-    this.recoilZ += strength * 0.055;
-    this.recoilPitch += strength * 0.03;
+    // CYCLE 33: reference-feel recoil — a sharp backward+up kick with a
+    // randomized roll flick, recovering on the existing springs.
+    this.recoilZ += strength * 0.085;
+    this.recoilPitch += strength * 0.05;
+    this.recoilRoll += (Math.random() - 0.5) * strength * 0.05;
+    // CYCLE 36 (review): semi-auto slide cycling — a frozen slide read as a
+    // toy. Snap the slide back; the update loop returns it on a spring.
+    if (this.currentKey?.startsWith('pistol')) this.slideT = 0.09;
   }
 
   private updateFists(crouched: boolean, dt: number, movingSpeed: number, swapDip: number): void {
@@ -484,27 +784,35 @@ export class ViewModel {
     const ext = this.punchT > 0 ? Math.sin(Math.min(1, p) * Math.PI) : 0;
     const rightActive = this.punchHand === 0;
 
-    const drive = (g: THREE.Group, side: 1 | -1): void => {
+    // CYCLE 52: guard bases authored in the (centered) pivot space; the
+    // active hand jabs forward-down the sight line. The authored guard
+    // orientation is composed on TOP of the dynamic Eulers — rotation.set
+    // alone resets the fist pose to identity every frame.
+    const drive = (g: THREE.Group, side: 1 | -1, bx: number, by: number, bz: number, base: THREE.Quaternion): void => {
       const active = (side === 1) === (rightActive === true) && ext > 0;
       const e = active ? ext : 0;
       g.position.set(
-        -side * e * 0.13 + bobX,
-        e * 0.02 + bobY + breathe - swapDip + this.swayY,
-        -e * 0.3 + this.recoilZ * 0.4,
+        bx - side * e * 0.13 + bobX,
+        by + e * 0.02 + bobY + breathe - swapDip + this.swayY,
+        bz - e * 0.3 + this.recoilZ * 0.4,
       );
       g.rotation.set(
         -this.swayY * 1.6 + e * -0.18,
         this.swayX * 1.7 + side * e * 0.14,
         this.swayRoll + side * e * -0.22 - bobX * 1.2,
       );
+      g.quaternion.multiply(base);
     };
-    drive(this.fistsR, 1);
-    drive(this.fistsL, -1);
+    drive(this.fistsR, 1, 0.16, -0.16, -0.34, this.fistRig.baseQuatR);
+    drive(this.fistsL, -1, -0.15, -0.19, -0.38, this.fistRig.baseQuatL);
 
+    // Unarmed guard sits centered (the weapon hip x-offset would shove the
+    // lead fist off-line); pulled closer than the weapon hip so the fists
+    // read at fight distance.
     this.pivot.position.set(
-      HIP_POS.x * 0.55 + (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * 0.6 + this.swayX,
-      HIP_POS.y + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
-      HIP_POS.z + this.recoilZ * 0.4,
+      this.swayX,
+      -0.105 + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
+      HIP_POS.z * 0.6 + this.recoilZ * 0.4,
     );
     if (crouched) this.pivot.position.y += 0.02;
     this.pivot.rotation.set(
@@ -512,13 +820,17 @@ export class ViewModel {
       this.swayX * 1.5 - this.sprintBlend * 0.34,
       this.swayRoll + this.sprintBlend * 0.14 - bobX * 1.2,
     );
-  }
 
-  /** Muzzle world position for effects. */
-  muzzleWorld(_camera: THREE.Camera): THREE.Vector3 {
-    const m = this.currentModel;
-    if (m) return m.group.localToWorld(m.muzzle.clone());
-    const v = new THREE.Vector3(0, 0.02, -0.62);
-    return this.group.localToWorld(v);
+    // Same connected arm chains as the weapon path (B6): sleeves meet the
+    // cuffs through the fist rig's wrist anchors.
+    this.pivot.updateMatrixWorld(true);
+    const wR = ViewModel._wristWorldR;
+    this.fistRig.wristR.getWorldPosition(wR);
+    const wL = ViewModel._wristWorldL;
+    this.fistRig.wristL.getWorldPosition(wL);
+    const pair = ViewModel._wristPair;
+    pair[0].copy(wR);
+    pair[1].copy(wL);
+    this.armSolver.solve(this.pivot, pair);
   }
 }
