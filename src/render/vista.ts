@@ -2080,8 +2080,13 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
  * UV transform (three.js derives normal-map UVs from the base map), so it
  * tiles at the same ~5 m scale with no extra draw cost. 128px, one canvas
  * per terrain build, disposed with it.
+ *
+ * Exported but currently UNUSED at runtime: combining it with the terrain's
+ * albedo map trips the three.js r185 node-pipeline direct-light kill (see
+ * buildTerrain). Kept for the three.js upgrade that fixes the node normal
+ * path — re-enable by assigning mat.normalMap in buildTerrain.
  */
-function buildMicroNormalTexture(isDesert = false): THREE.CanvasTexture | null {
+export function buildMicroNormalTexture(isDesert = false): THREE.CanvasTexture | null {
   // Headless/QA environments have no DOM; the detail map is cosmetic, so
   // simply skip it there instead of failing the build.
   if (typeof document === 'undefined') return null;

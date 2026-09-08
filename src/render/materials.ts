@@ -112,7 +112,9 @@ const TINTS: Partial<Record<MatKey, number>> = {
   facadeA: 0xaebcc8,
   facadeB: 0xd6d9d2,
   facadeC: 0xb4bec6,
-  marble: 0xc9c5bd,
+  // CYCLE 60 (review): darkened one step — the cathedral floor blew near-white
+  // under the overcast rig while exteriors sat mid-grey.
+  marble: 0xa9a59d,
   facilityFloor: 0xaab2bc,
   sidewalk: 0x9a9da1,
 };
@@ -501,7 +503,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // CYCLE 24: roughness 0.45 made oldfront's trims/pier decks read as
   // polished marble under the overcast rig (round-4 critic). Weathered
   // outdoor stone: mostly diffuse, just a hint of sheen.
-  mats.set('marble', std('marble', 'marble', { roughness: 0.78 }));
+  mats.set('marble', std('marble', 'marble', { roughness: 0.88 }));
   mats.set('facadeA', std('facadeA', 'facadeA'));
   mats.set('facadeB', std('facadeB', 'bricksOld'));
   mats.set('facadeC', std('facadeC', 'corrugated', { metalness: 0.15 }));
@@ -564,10 +566,12 @@ export async function createMaterials(): Promise<MaterialLibrary> {
     new MeshStandardNodeMaterial({
       color: 0x111111, emissive: color, emissiveIntensity: intensity, roughness: 0.4, metalness: 0.1,
     });
-  mats.set('neonCyan', neon(0x53e0ff, 2.6));
-  mats.set('neonMagenta', neon(0xff53c8, 2.6));
-  mats.set('neonOrange', neon(0xff9040, 2.4));
-  mats.set('neonGreen', neon(0x54ff9f, 2.6));
+  // CYCLE 60 (review): large sign panels bloomed into white slabs at close
+  // range — intensities capped so the neon hue survives under 5 m.
+  mats.set('neonCyan', neon(0x53e0ff, 1.7));
+  mats.set('neonMagenta', neon(0xff53c8, 1.7));
+  mats.set('neonOrange', neon(0xff9040, 1.6));
+  mats.set('neonGreen', neon(0x54ff9f, 1.7));
   mats.set('neonBlue', neon(0x5f8cff, 2.6));
   // CYCLE 42 (candy-LED finding): night window palettes desaturated toward
   // warm/cool whites — the former saturated orange/cyan panes read as neon

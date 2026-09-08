@@ -166,7 +166,10 @@ export class GameRenderer {
    * CYCLE 56 (review): surface WebGPU device loss. A driver reset or
    * backgrounded-tab eviction kills the device and silently freezes the
    * frame; one automatic reload recovers, and the sessionStorage guard keeps
-   * a persistent device failure from becoming a reload loop.
+   * a persistent device failure from becoming a reload loop. The guard is
+   * cleared only AFTER a successful (re)initialization — clearing it at
+   * construction would wipe the flag on the reload itself and defeat the
+   * loop protection (cycle-60 review P1).
    */
   private watchDeviceLoss(): void {
     const backend = this.renderer as unknown as {
@@ -174,7 +177,6 @@ export class GameRenderer {
     };
     const lost = backend.backend?.device?.lost;
     if (!lost || typeof lost.then !== 'function') return;
-    sessionStorage.removeItem('xo-device-loss-reload');
     lost.then((info) => {
       console.error(`[xo] GPU device lost (${info.reason ?? 'unknown'}) — reloading`);
       // QA probes are long single-session headless captures where the WebGPU
@@ -199,6 +201,8 @@ export class GameRenderer {
       } else {
         this.gpuDevice = 'webgl2';
       }
+      // Successful (re)initialization re-arms the device-loss auto-reload.
+      sessionStorage.removeItem('xo-device-loss-reload');
     } catch {
       this.gpuDevice = isWebGPUBackend(this.renderer) ? 'webgpu' : 'webgl2';
     }

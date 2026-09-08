@@ -244,13 +244,15 @@ const _quatB = new THREE.Quaternion();
  * way the open palm faces) and `fingers` (the way the finger chain extends
  * at the knuckles). Replaces v3's hand-solved Euler triples — poses are now
  * authored as "palm here, fingers there", which is how a grip is described.
- * `mirrored` selects the left-hand chirality (thumb = palm×fingers).
+ * `_mirrored` remains in the signature for call-site documentation only —
+ * since the CYCLE 56 chirality fix both hands share the same right-handed
+ * basis (the mirror lives in the meshes via thumbSide and wrapper groups).
  */
 function handBasisQuat(
   out: THREE.Quaternion,
   palm: THREE.Vector3,
   fingers: THREE.Vector3,
-  mirrored: boolean,
+  _mirrored: boolean,
 ): THREE.Quaternion {
   _bp.copy(palm).normalize();
   _bf.copy(fingers).addScaledVector(_bp, -fingers.dot(_bp)).normalize();
@@ -294,9 +296,12 @@ export function createHandRig(): HandRig {
 
   // Cuff-ridge anchors for the sleeve solve (same offset the fist rig uses):
   // one per hand, riding the hand's own cuff barrel at the wrist.
-  const wristR = new THREE.Object3D();
-  wristR.position.set(0, -0.002, 0.073);
-  right.add(wristR);
+      // CYCLE 61 (review): bias the right wrist anchor toward the grip's
+      // right-rear so the sleeve approaches from lower-right and leaves the
+      // rolled knuckle row unobstructed.
+      const wristR = new THREE.Object3D();
+      wristR.position.set(0.007, -0.002, 0.073);
+      right.add(wristR);
   const wristL = new THREE.Object3D();
   wristL.position.set(0, -0.002, 0.073);
   left.add(wristL);
@@ -323,16 +328,17 @@ export function createHandRig(): HandRig {
     },
     pose({ reloadPhase, supportStyle, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal }) {
       // ---- Right (trigger) hand ---------------------------------------
-      // High power grip: the palm presses the grip's right FACE (normal -x)
-      // with a down-forward bias, and the fingers extend DOWN-slightly-
-      // inboard so their segments wrap the grip's front-right corner — the
-      // knuckle row and middle phalanges stay visible on the camera side.
-      // v4's forward-pressing palm (-z normal) sent the finger chain around
-      // the front strap out of sight while the palm floated a centimetre
-      // off the face: the hand read as a smooth mitt beside the receiver
-      // (hands-review: "zero readable fingers").
-      const gripPalm = _palm.set(-0.88, -0.28, -0.38);
-      const gripFingers = _fingers.set(-0.15, -0.85, -0.5);
+      // High power grip: the palm presses the grip's right face with a strong
+      // inward tilt and the fingers extend down-FORWARD so their segments
+      // wrap the grip's front-right corner. CYCLE 61 (review blocker): the
+      // previous finger axis (-0.15,-0.85,-0.5) ran nearly straight down —
+      // collinear with the rising forearm — so the whole finger chain hid
+      // behind the sleeve and the hand read as a featureless grey dome.
+      // Rolling the basis camera-up-left (-0.35,-0.6,-0.7 fingers, palm
+      // (-0.75,-0.5,-0.4)) swings the knuckle row and middle phalanges into
+      // the camera's view while the palm stays seated on the grip's face.
+      const gripPalm = _palm.set(-0.75, -0.5, -0.4);
+      const gripFingers = _fingers.set(-0.35, -0.6, -0.7);
       if (ads > 0) {
         gripPalm.z += ads * 0.08;
         gripFingers.x -= ads * 0.06;
