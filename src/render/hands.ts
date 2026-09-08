@@ -146,7 +146,7 @@ function makeHandMats(): HandMats {
  * extending -z. The four fingers spread along the hand's WIDTH axis (x) —
  * v3 stacked them down the palm normal, which read as dangling finger
  * chains. `thumbSide` picks the chirality: -1 = anatomical right hand
- * (thumb on -x), +1 = anatomical left hand. 15 meshes/hand (38 total with
+ * (thumb on -x), +1 = anatomical left hand. 20 meshes/hand (43 total with
  * the ArmSolver — inside the low-poly budget). */
 function buildHand(mats: HandMats, thumbSide: 1 | -1, curlBoost = 0): THREE.Group {
   const hand = new THREE.Group();
@@ -161,33 +161,54 @@ function buildHand(mats: HandMats, thumbSide: 1 | -1, curlBoost = 0): THREE.Grou
   hand.add(palmPad);
 
   // Hard-shell back panel + knuckle armour across the back of the hand.
+  // Hands-review pass: the single small plate only read on the deep-curled
+  // fists — on weapon grips the rolled dorsum showed mostly bare shell and
+  // read as smooth grey. The plate now covers most of the panel AND a second
+  // thin strip rides the proximal knuckle row (where the fingers meet the
+  // palm), with a sliver of shell showing between — segmented armour, not a
+  // gauntlet. Same `plate` material as the fists' knuckle armour.
   const backPanel = new THREE.Mesh(new RoundedBoxGeometry(0.046, 0.012, 0.062, 2, 0.005), mats.shell);
   backPanel.position.set(0, 0.017, 0.014);
   hand.add(backPanel);
-  const plate = new THREE.Mesh(new RoundedBoxGeometry(0.05, 0.014, 0.034, 2, 0.005), mats.plate);
-  plate.position.set(0, 0.024, 0.006);
+  const plate = new THREE.Mesh(new RoundedBoxGeometry(0.052, 0.015, 0.046, 2, 0.005), mats.plate);
+  plate.position.set(0, 0.0245, 0.012);
   hand.add(plate);
+  const knuckleStrip = new THREE.Mesh(new RoundedBoxGeometry(0.052, 0.011, 0.014, 2, 0.004), mats.plate);
+  knuckleStrip.position.set(0, 0.0195, -0.0245);
+  hand.add(knuckleStrip);
 
   // Four fingers side by side along x (spacing slightly under the segment
-  // diameter so the silhouette unifies but separations still read), two
+  // diameter so the silhouette unifies but separations still read), THREE
   // segments each with a gentle wrap curl that grows toward the pinky, and
   // a deterministic per-finger rotation variance so they never read as a
-  // comb. Leather-toned distal segments do the contacting.
+  // comb. Hands-review pass: the old merged proximal capsule read as chunky
+  // 2-lobe sausages at ADS — the wrap now splits into proximal / mid (with
+  // a slight PIP kink that deepens with curl, plus a mild length stagger
+  // index→pinky) / dark distal pad, so three lobes sell the grip. The mid
+  // + distal placement keeps the distal pad EXACTLY on its proven contact
+  // orbit — only the bridging segment is new.
   for (let i = 0; i < 4; i++) {
     const wig = Math.sin(i * 12.9898 + 4.1) * 0.5; // -0.5..0.5 pseudo-random
     const finger = new THREE.Group();
     finger.position.set((i - 1.5) * 0.0142 + wig * 0.0012, -0.004 - Math.abs(wig) * 0.0012, -0.032 + (i === 1 ? -0.002 : i === 3 ? 0.004 : 0));
     finger.rotation.y = thumbSide * ((i - 1.5) * 0.045 + wig * 0.05);
-    // Proximal segment: fabric glove.
-    const seg1 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0098, 0.024, 3, 10), mats.glove);
+    const curl = 0.72 + i * 0.09 + wig * 0.1;
+    const c2 = curl + curlBoost;
+    // Proximal segment: fabric glove, straight out of the palm.
+    const seg1 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0098, 0.015, 3, 10), mats.glove);
     seg1.rotation.x = Math.PI / 2;
-    seg1.position.set(0, -0.01, -0.012);
+    seg1.position.set(0, -0.01, -0.001);
     finger.add(seg1);
+    // Mid segment: glove with a slight PIP kink (fists deepen it further so
+    // the guard wrap stays closed), tapering toward the pinky.
+    const kink = 0.16 + curl * 0.2 + curlBoost * 0.12;
+    const seg1b = new THREE.Mesh(new THREE.CapsuleGeometry(0.0095, 0.0135 - i * 0.0009, 3, 10), mats.glove);
+    seg1b.rotation.x = Math.PI / 2 - kink;
+    seg1b.position.set(0, -0.0105 - Math.sin(kink) * 0.0115, -0.0225 - (1 - Math.cos(kink)) * 0.0115);
+    finger.add(seg1b);
     // Distal segment: leather pad, curled down-and-under the grip surface.
     // curlBoost (CYCLE 52): unarmed fists wrap ~120° around their own palm
     // instead of the weapon grip's half-curl, so they read as CLOSED hands.
-    const curl = 0.72 + i * 0.09 + wig * 0.1;
-    const c2 = curl + curlBoost;
     const seg2 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0092, 0.02, 3, 10), mats.skin);
     seg2.rotation.x = Math.PI / 2 - c2;
     seg2.position.set(0, -0.01 - Math.sin(c2) * 0.015, -0.034 - (1 - Math.cos(c2)) * 0.015);
