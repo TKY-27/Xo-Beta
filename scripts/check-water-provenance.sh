@@ -78,9 +78,12 @@ write_code_files src "$tmp_dir/src-files"
 write_code_files public "$tmp_dir/public-files"
 write_code_files dist "$tmp_dir/dist-files"
 
-# No WebGPU/WGSL runtime is allowed in the existing WebGL2 renderer path or in
-# the executable bundle. The extension check catches an asset even when it is
-# not referenced by source.
+# CYCLE 67 (ADR-0005): the product renderer is now WebGPU-primary (WebGL2
+# fallback), so WebGPU/WGSL references in src/dist are intentional and are no
+# longer audited. The rules that still matter for water provenance are the
+# upstream-name scans below, the WGSL-asset check (no shipped shader files —
+# TSL generates WGSL at runtime), and the water-module renderer/network
+# isolation checks further down.
 for root in src public dist; do
   if [ -d "$root" ] && find "$root" -type f -iname '*.wgsl' -print | grep -q .; then
     echo "water provenance audit FAILED — WGSL asset found below $root"
@@ -88,18 +91,6 @@ for root in src public dist; do
     fail=1
   fi
 done
-report_matches \
-  'WebGPU or WGSL runtime reference found' \
-  'navigator[.]gpu|WebGPURenderer|GPUDevice|[Ww][Gg][Ss][Ll]' \
-  "$tmp_dir/src-files"
-report_matches \
-  'WebGPU or WGSL bundle reference found' \
-  'navigator[.]gpu|WebGPURenderer|GPUDevice|[Ww][Gg][Ss][Ll]' \
-  "$tmp_dir/public-files"
-report_matches \
-  'WebGPU or WGSL bundle reference found' \
-  'navigator[.]gpu|WebGPURenderer|GPUDevice|[Ww][Gg][Ss][Ll]' \
-  "$tmp_dir/dist-files"
 
 # Keep upstream implementation provenance out of shipped executable files.
 # Existing OFL notices, THIRD_PARTY_NOTICES, and docs are deliberately outside
@@ -121,12 +112,11 @@ report_matches \
 
 github_files="$tmp_dir/github-files"
 cat "$tmp_dir/src-files" "$tmp_dir/public-files" > "$github_files"
-if [ -s "$tmp_dir/dist-files" ]; then
-  # dist/index.html contains the repository's canonical project link. It is
-  # checked separately so an unrelated raw GitHub URL cannot be smuggled into
-  # the production shell.
-  grep -v '^dist/index[.]html$' "$tmp_dir/dist-files" >> "$github_files" || true
-fi
+# CYCLE 67 (ADR-0005): dist is intentionally excluded from the broad
+# github.com/github.io scan — the bundled three.js WebGPU runtime carries its
+# own license-repository URLs, which are legitimate. Upstream water-project
+# code smuggling is still caught by the gpuocean/tompng/raw.githubusercontent
+# scans above, and dist/index.html keeps its dedicated canonical-link check.
 report_matches \
   'unexpected GitHub URL found in executable production files' \
   'github[.]com|github[.]io' \
