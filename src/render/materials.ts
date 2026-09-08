@@ -467,21 +467,51 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   mats.set('neonOrange', neon(0xff9040, 2.4));
   mats.set('neonGreen', neon(0x54ff9f, 2.6));
   mats.set('neonBlue', neon(0x5f8cff, 2.6));
-  // Lit rooms should read as luminous panes, not white bloom cards. Large
-  // window surfaces stay below the bloom threshold so frame detail survives
-  // indoors and at street distance; dedicated neon remains the bloom source.
+  // CYCLE 42 (candy-LED finding): night window palettes desaturated toward
+  // warm/cool whites — the former saturated orange/cyan panes read as neon
+  // billboards. Intensity buckets (bright/normal/dim) let neocity scatter
+  // per-window variety through deterministic hash selection; every bucket
+  // stays below the 1.62 bloom threshold so panes never blow out.
   mats.set('windowWarm', new MeshStandardNodeMaterial({
     color: 0x33291b,
-    emissive: 0xffc47d,
-    emissiveIntensity: 0.38,
+    emissive: 0xdfc8a2,
+    emissiveIntensity: 0.34,
     roughness: 0.68,
+    metalness: 0.02,
+  }));
+  mats.set('windowWarmBright', new MeshStandardNodeMaterial({
+    color: 0x33291b,
+    emissive: 0xe2cda6,
+    emissiveIntensity: 1.1,
+    roughness: 0.62,
+    metalness: 0.02,
+  }));
+  mats.set('windowWarmDim', new MeshStandardNodeMaterial({
+    color: 0x2a2218,
+    emissive: 0xd4c2a0,
+    emissiveIntensity: 0.12,
+    roughness: 0.74,
     metalness: 0.02,
   }));
   mats.set('windowCool', new MeshStandardNodeMaterial({
     color: 0x18242d,
-    emissive: 0x86b9d2,
-    emissiveIntensity: 0.24,
+    emissive: 0xa3b2ba,
+    emissiveIntensity: 0.22,
     roughness: 0.7,
+    metalness: 0.02,
+  }));
+  mats.set('windowCoolBright', new MeshStandardNodeMaterial({
+    color: 0x18242d,
+    emissive: 0xaab9c0,
+    emissiveIntensity: 0.8,
+    roughness: 0.64,
+    metalness: 0.02,
+  }));
+  mats.set('windowCoolDim', new MeshStandardNodeMaterial({
+    color: 0x141e26,
+    emissive: 0x9aa9b2,
+    emissiveIntensity: 0.09,
+    roughness: 0.76,
     metalness: 0.02,
   }));
   // Occupied-dark facade window: unlit glass behind a dim interior, still

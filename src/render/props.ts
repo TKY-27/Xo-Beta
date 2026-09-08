@@ -48,6 +48,116 @@ export interface InstancedProp {
   readonly buckets: number;
 }
 
+/**
+ * Shared lazily-built canvas textures for the organic prop passes below
+ * (one GPU upload each, reused by every variant that needs them).
+ */
+let leafVeinNormalTex: THREE.CanvasTexture | null = null;
+let barkStreakRoughTex: THREE.CanvasTexture | null = null;
+
+/**
+ * Procedural leaf-vein tangent-space normal map. The pattern is generated
+ * per-pixel from phase-locked sinusoids whose frequencies are whole cycles
+ * across the canvas, so the texture tiles seamlessly without relying on
+ * texture.repeat (node-material UV transforms differ per backend). Two
+ * diagonal vein systems at different densities read as leaf ribbing at
+ * gameplay distances while staying invisible up close (normalScale 0.55).
+ * Verified: MeshLambertMaterial renders normalMap through the r185 node path
+ * (MeshLambertNodeMaterial → materialNormal reads material.normalMap), so the
+ * foliage stays on the cheap Lambert shader instead of the full PBR stack.
+ * Returns null in headless/DOM-less environments (unit tests, workers) —
+ * the plain lambert response is the pre-existing fallback there.
+ */
+function leafVeinNormalTexture(): THREE.CanvasTexture | null {
+  if (leafVeinNormalTex) return leafVeinNormalTex;
+  if (typeof document === 'undefined') return null;
+  const s = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = s;
+  canvas.height = s;
+  const ctx = canvas.getContext('2d')!;
+  const img = ctx.createImageData(s, s);
+  const d = img.data;
+  // Diagonal vein directions (radians) and integer cycle counts — whole
+  // cycles keep the wrap seamless.
+  const a1 = 0.62, a2 = -0.55, cycles1 = 5, cycles2 = 9;
+  const c1 = Math.cos(a1), s1 = Math.sin(a1);
+  const c2 = Math.cos(a2), s2 = Math.sin(a2);
+  for (let y = 0; y < s; y++) {
+    for (let x = 0; x < s; x++) {
+      const t1 = ((x * c1 + y * s1) / s) * Math.PI * 2 * cycles1;
+      const t2 = ((x * c2 + y * s2) / s) * Math.PI * 2 * cycles2;
+      // Crest of each vein (sharp) plus a narrower groove offset in phase.
+      const crest = Math.pow(Math.max(0, Math.sin(t1)), 6) * 0.75
+        + Math.pow(Math.max(0, Math.sin(t2)), 6) * 0.45;
+      const groove = Math.pow(Math.max(0, Math.sin(t1 + 1.1)), 14) * 0.55
+        + Math.pow(Math.max(0, Math.sin(t2 + 1.2)), 14) * 0.3;
+      // Micro cell noise so the ramp is not perfectly smooth.
+      const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      const jitter = ((n - Math.floor(n)) - 0.5) * 10;
+      const r = 128 + crest * 62 - groove * 52 + jitter;
+      const g = 128 + crest * 58 - groove * 48 + jitter * 0.6;
+      const i = (y * s + x) * 4;
+      d[i] = Math.max(0, Math.min(255, r));
+      d[i + 1] = Math.max(0, Math.min(255, g));
+      d[i + 2] = 255;
+      d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.name = 'leafVeinNormal';
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  leafVeinNormalTex = tex;
+  return tex;
+}
+
+/**
+ * Procedural bark-streak roughness map for dead-tree trunks: vertical
+ * fibrous streaks (rough crevices, slightly polished ridges) with wrap-safe
+ * whole-cycle frequencies. Encoded in the green channel as three.js reads
+ * roughnessMap.g; consumed at roughness=1 so the map carries the full range.
+ * Returns null in headless/DOM-less environments (unit tests, workers).
+ */
+function barkStreakRoughTexture(): THREE.CanvasTexture | null {
+  if (barkStreakRoughTex) return barkStreakRoughTex;
+  if (typeof document === 'undefined') return null;
+  const s = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = s;
+  canvas.height = s;
+  const ctx = canvas.getContext('2d')!;
+  const img = ctx.createImageData(s, s);
+  const d = img.data;
+  const cyclesX = 12, freqY = Math.PI * 2 * 3 / s;
+  for (let y = 0; y < s; y++) {
+    for (let x = 0; x < s; x++) {
+      // Vertical streak field: per-column hash depth + slow vertical wobble.
+      const col = Math.sin((x / s) * Math.PI * 2 * cyclesX) * 0.5 + 0.5;
+      const wob = Math.sin(y * freqY + x * 0.21) * 0.5 + 0.5;
+      const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+      const grain = n - Math.floor(n);
+      let v = 118 + col * 52 + wob * 34 + grain * 34;
+      // A few bright (smoother) weathered ridges crossing the streaks.
+      v -= Math.pow(Math.max(0, Math.sin(y * freqY * 1.0 + x * 0.05)), 8) * 26;
+      const i = (y * s + x) * 4;
+      const b = Math.max(60, Math.min(235, v));
+      d[i] = b;
+      d[i + 1] = b;
+      d[i + 2] = b;
+      d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.name = 'barkStreakRough';
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  barkStreakRoughTex = tex;
+  return tex;
+}
+
 interface VariantSource {
   geoms: THREE.BufferGeometry[];
   materials: (THREE.Material | null)[];
@@ -626,12 +736,12 @@ export function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGe
     geo.computeBoundingSphere();
     geoms.push(geo);
     let mat = Array.isArray(mesh.material) ? mesh.material[0] ?? null : mesh.material;
+    const materialIdentity = `${(mat as THREE.MeshStandardMaterial | null)?.name ?? ''}|${(mat as THREE.MeshStandardMaterial & { map?: THREE.Texture } | null)?.map?.name ?? ''}`;
     // Foliage (alpha-cutout organic materials) renders through MeshLambert:
     // visually equivalent for matte organic surfaces, ~20% cheaper per
     // shaded pixel than the full PBR stack — foliage dominates the fragment
     // load on forest maps (measured on the reference GPU).
     if (mat instanceof THREE.MeshStandardMaterial && mat.alphaTest > 0) {
-      const materialIdentity = `${mat.name ?? ''}|${mat.map?.name ?? ''}`;
       const organicCutout = !/bark/i.test(materialIdentity);
       const lambert = new THREE.MeshLambertMaterial({
         map: mat.map,
@@ -643,12 +753,41 @@ export function extractGeometries(root: THREE.Object3D): { geoms: THREE.BufferGe
         side: mat.side, fog: true,
       });
       lambert.name = mat.name;
+      if (organicCutout) {
+        // CYCLE 42 (paper-cutout finding): the flat lambert response made
+        // every leaf card read as flat cardstock. A shared procedural vein
+        // normal map gives the canopy micro-relief, and the classic
+        // translucency trick (darker base + faint green emissive lift) keeps
+        // shaded undersides inside foliage-green instead of crushing black.
+        // The 0.9 color multiplier lands BEFORE the per-variant lift tints
+        // (addVariant 1.3 / bush tints), so it is a uniform relative -10%
+        // across species.
+        const veinNormal = leafVeinNormalTexture();
+        if (veinNormal) {
+          lambert.normalMap = veinNormal;
+          lambert.normalScale.set(0.55, 0.55);
+        }
+        lambert.color.multiplyScalar(0.9);
+        lambert.emissive.setHex(0x0a140a);
+      }
       mat.dispose();
       mat = lambert;
     }
     // Remaining plain PBR materials (bark, rock, vehicle paint) go through
     // the node twin — see toNodeStandard for the WebGPU instancing bug.
     if (mat instanceof THREE.MeshStandardMaterial) {
+      if (/bark/i.test(materialIdentity)) {
+        // CYCLE 42 (dead-tree finding): the flat authored roughness made bark
+        // read as smooth plastic. Procedural vertical streak roughness at
+        // roughness=1 (the map carries the whole range) plus a slightly
+        // stronger authored normal response raise trunk contrast.
+        const barkRough = barkStreakRoughTexture();
+        if (barkRough) {
+          mat.roughnessMap = barkRough;
+          mat.roughness = 1;
+          mat.normalScale.set(1.15, 1.15);
+        }
+      }
       const node = toNodeStandard(mat);
       mat.dispose();
       mat = node;

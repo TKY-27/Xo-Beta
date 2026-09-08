@@ -52,6 +52,177 @@ export interface PresentationTransport {
   yaw?: number;
 }
 
+/**
+ * CYCLE 42 (toy-flat finding): procedural dropship weathering. One 256px
+ * sheet drives both the albedo (panel seams, rivet dots, grime blotches,
+ * drip streaks, per-panel tone variation) and the roughness response (seams
+ * and grime stay rough, occasional polished wear patches). The lathe/extrude
+ * primitives tile UVs per face, so the sheet is designed full-cover: every
+ * feature repeats on a seamless wrap (whole-cycle sinusoid layouts and
+ * wrap-around draw offsets), and nothing is placement-specific — wherever a
+ * face's UV window lands, the pattern reads as hull plating.
+ */
+interface HullWeathering {
+  map: THREE.CanvasTexture;
+  roughnessMap: THREE.CanvasTexture;
+}
+
+let hullWeatheringCache: HullWeathering | null = null;
+
+function mulberry(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function makeHullWeathering(): HullWeathering | null {
+  // Headless/DOM-less guard (unit tests, workers): fall back to the plain
+  // pre-cycle-42 material response.
+  if (typeof document === 'undefined') return null;
+  if (hullWeatheringCache) return hullWeatheringCache;
+  const s = 256;
+  const albedo = document.createElement('canvas');
+  albedo.width = s;
+  albedo.height = s;
+  const rough = document.createElement('canvas');
+  rough.width = s;
+  rough.height = s;
+  const aCtx = albedo.getContext('2d')!;
+  const rCtx = rough.getContext('2d')!;
+  const rand = mulberry(0xc0ffee);
+
+  // Base: near-white so the material color carries the hue; roughness base
+  // ~0.58 (148) at roughness=1.
+  aCtx.fillStyle = '#e6e8ea';
+  aCtx.fillRect(0, 0, s, s);
+  rCtx.fillStyle = 'rgb(148,148,148)';
+  rCtx.fillRect(0, 0, s, s);
+
+  // Per-panel tone variation + roughness drift on a 64px plate grid (wraps).
+  for (let py = 0; py < 4; py++) {
+    for (let px = 0; px < 4; px++) {
+      const tone = 232 + Math.round(rand() * 36 - 18);
+      aCtx.fillStyle = `rgb(${tone},${tone + 1},${tone + 3})`;
+      aCtx.fillRect(px * 64, py * 64, 64, 64);
+      const rl = 128 + Math.round(rand() * 60 - 30);
+      rCtx.fillStyle = `rgb(${rl},${rl},${rl})`;
+      rCtx.fillRect(px * 64, py * 64, 64, 64);
+    }
+  }
+
+  // Grime blotches: soft dark mottling, denser toward nothing in particular
+  // (uniform scatter — placement must not assume a UV layout).
+  for (let i = 0; i < 60; i++) {
+    const x = rand() * s;
+    const y = rand() * s;
+    const r = 6 + rand() * 26;
+    const g = aCtx.createRadialGradient(x, y, 0, x, y, r);
+    const dark = 120 + Math.round(rand() * 60);
+    g.addColorStop(0, `rgba(${dark},${dark + 2},${dark + 4},0.16)`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    aCtx.fillStyle = g;
+    aCtx.fillRect(x - r, y - r, r * 2, r * 2);
+    const rr = 90 + Math.round(rand() * 110);
+    rCtx.fillStyle = `rgba(${rr},${rr},${rr},0.22)`;
+    rCtx.beginPath();
+    rCtx.arc(x, y, r * 0.8, 0, Math.PI * 2);
+    rCtx.fill();
+  }
+
+  // Vertical drip streaks (wrap-drawn so edges stay seamless).
+  for (let i = 0; i < 26; i++) {
+    const x = Math.floor(rand() * s);
+    const y0 = Math.floor(rand() * s);
+    const len = 20 + Math.floor(rand() * 70);
+    const w = 1 + Math.floor(rand() * 2);
+    const alpha = 0.10 + rand() * 0.14;
+    for (const off of [-s, 0, s]) {
+      const grad = aCtx.createLinearGradient(x, y0 + off, x, y0 + off + len);
+      grad.addColorStop(0, `rgba(70,74,78,${alpha})`);
+      grad.addColorStop(1, 'rgba(70,74,78,0)');
+      aCtx.fillStyle = grad;
+      aCtx.fillRect(x - w / 2, y0 + off, w, len);
+      rCtx.fillStyle = `rgba(190,190,190,${alpha})`;
+      rCtx.fillRect(x - w / 2, y0 + off, w, len);
+    }
+  }
+
+  // Panel seams: strong verticals every 64px, fainter horizontals every
+  // 128px, plus rivet rows hugging the seams. Drawn with wrap offsets.
+  const seam = (x0: number, y0: number, x1: number, y1: number, w: number, dark: string) => {
+    for (const ox of [-s, 0, s]) {
+      for (const oy of [-s, 0, s]) {
+        aCtx.strokeStyle = dark;
+        aCtx.lineWidth = w;
+        aCtx.beginPath();
+        aCtx.moveTo(x0 + ox, y0 + oy);
+        aCtx.lineTo(x1 + ox, y1 + oy);
+        aCtx.stroke();
+      }
+    }
+  };
+  for (let i = 0; i < 4; i++) {
+    seam(i * 64 + 0.5, 0, i * 64 + 0.5, s, 2, 'rgba(48,52,56,0.55)');
+    seam(i * 64 + 1.5, 0, i * 64 + 1.5, s, 1, 'rgba(255,255,255,0.16)');
+    // Rougher (dirt-catching) seam grooves.
+    rCtx.fillStyle = 'rgba(205,205,205,0.6)';
+    rCtx.fillRect(i * 64, 0, 2, s);
+  }
+  for (let i = 0; i < 2; i++) {
+    seam(0, i * 128 + 0.5, s, i * 128 + 0.5, 1, 'rgba(48,52,56,0.34)');
+    rCtx.fillStyle = 'rgba(190,190,190,0.45)';
+    rCtx.fillRect(0, i * 128, s, 1);
+  }
+  // Rivets: two-dot clusters beside each vertical seam, every 32px.
+  aCtx.fillStyle = 'rgba(40,44,48,0.5)';
+  for (let i = 0; i < 4; i++) {
+    for (let y = 8; y < s; y += 32) {
+      for (const rx of [i * 64 + 5, i * 64 + 59]) {
+        for (const ox of [-s, 0, s]) {
+          aCtx.beginPath();
+          aCtx.arc(rx + ox, y, 1.6, 0, Math.PI * 2);
+          aCtx.fill();
+        }
+      }
+    }
+  }
+
+  // Chipped scratches: short bright/dark diagonal nicks (wrap-drawn).
+  for (let i = 0; i < 22; i++) {
+    const x = rand() * s;
+    const y = rand() * s;
+    const dx = (rand() - 0.5) * 18;
+    const dy = (rand() - 0.5) * 6;
+    for (const ox of [-s, 0, s]) {
+      for (const oy of [-s, 0, s]) {
+        aCtx.strokeStyle = rand() > 0.4 ? 'rgba(200,204,208,0.5)' : 'rgba(58,62,66,0.45)';
+        aCtx.lineWidth = 1;
+        aCtx.beginPath();
+        aCtx.moveTo(x + ox, y + oy);
+        aCtx.lineTo(x + dx + ox, y + dy + oy);
+        aCtx.stroke();
+      }
+    }
+  }
+
+  const map = new THREE.CanvasTexture(albedo);
+  map.name = 'dropshipGrunge';
+  map.wrapS = THREE.RepeatWrapping;
+  map.wrapT = THREE.RepeatWrapping;
+  map.anisotropy = 8;
+  const roughnessMap = new THREE.CanvasTexture(rough);
+  roughnessMap.name = 'dropshipGrungeRough';
+  roughnessMap.wrapS = THREE.RepeatWrapping;
+  roughnessMap.wrapT = THREE.RepeatWrapping;
+  roughnessMap.anisotropy = 8;
+  hullWeatheringCache = { map, roughnessMap };
+  return hullWeatheringCache;
+}
+
 /** Merge authored chest parts without allowing a silent null geometry. */
 function mergeChestParts(parts: THREE.BufferGeometry[], label: string): THREE.BufferGeometry {
   const firstIsIndexed = parts[0]?.index !== null;
@@ -2001,6 +2172,23 @@ export class WorldView {
     const hullMat = new THREE.MeshStandardMaterial({ color: 0x3a4249, roughness: 0.55, metalness: 0.55 });
     const darkMat = new THREE.MeshStandardMaterial({ color: 0x22282e, roughness: 0.6, metalness: 0.5 });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x565f68, roughness: 0.42, metalness: 0.7 });
+    // CYCLE 42 (toy-flat finding): full-cover grunge + panel seams on the two
+    // large hull finishes. The map is near-white so the base colors still set
+    // the hue; roughness moves to 1.0 with the whole range baked into the
+    // shared roughness sheet (seams/grime rough, wear patches polished).
+    // Silhouette and trim/emissive materials are untouched. Headless runs
+    // (no canvas) keep the plain materials.
+    const weather = makeHullWeathering();
+    if (weather) {
+      hullMat.map = weather.map;
+      hullMat.roughnessMap = weather.roughnessMap;
+      hullMat.roughness = 1;
+      hullMat.needsUpdate = true;
+      darkMat.map = weather.map;
+      darkMat.roughnessMap = weather.roughnessMap;
+      darkMat.roughness = 1;
+      darkMat.needsUpdate = true;
+    }
     const glassMat = new THREE.MeshStandardMaterial({
       color: 0x0c1218, emissive: 0x9fd8e8, emissiveIntensity: 0.45, roughness: 0.25, metalness: 0.4,
     });

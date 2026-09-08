@@ -6,6 +6,10 @@ export type MatKey =
   | 'glass' | 'grass' | 'dirt' | 'rock' | 'roofTile' | 'gold'
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
   | 'windowWarm' | 'windowCool' | 'windowDark'
+  // CYCLE 42: emissive-intensity buckets for night window grids — per-window
+  // variety without per-instance materials (static geo batches one
+  // InstancedMesh per material key, so a bucket IS a draw).
+  | 'windowWarmBright' | 'windowWarmDim' | 'windowCoolBright' | 'windowCoolDim'
   | 'facadeA' | 'facadeB' | 'facadeC' | 'marble' | 'sandbag' | 'hay'
   | 'corrugated' | 'bricksOld' | 'facilityFloor'
   | 'interiorCeiling'
