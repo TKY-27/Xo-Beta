@@ -216,9 +216,12 @@ function buildHand(mats: HandMats, thumbSide: 1 | -1, curlBoost = 0): THREE.Grou
   // Wrist cuff: 16-segment barrel aligned to the wrist joint (+z axis),
   // flaring toward the forearm where the ArmSolver sleeve meets it. Kept
   // narrower than the palm — v4's 5.7 cm cuff read as a second palm.
-  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.0235, 0.0205, 0.032, 16), mats.shell);
+  // CYCLE 64: slimmed again — with the grip pose rolled camera-up the cuff
+  // sits end-on to the hip camera, and the old 4.7 cm barrel + the solver's
+  // wrist sphere/cuff ring rendered as a dome occluding the knuckle row.
+  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.0205, 0.018, 0.03, 16), mats.shell);
   cuff.rotation.x = Math.PI / 2;
-  cuff.position.set(0, -0.002, 0.062);
+  cuff.position.set(0, -0.002, 0.06);
   hand.add(cuff);
 
   return hand;
@@ -328,17 +331,24 @@ export function createHandRig(): HandRig {
     },
     pose({ reloadPhase, supportStyle, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal }) {
       // ---- Right (trigger) hand ---------------------------------------
-      // High power grip: the palm presses the grip's right face with a strong
-      // inward tilt and the fingers extend down-FORWARD so their segments
-      // wrap the grip's front-right corner. CYCLE 61 (review blocker): the
-      // previous finger axis (-0.15,-0.85,-0.5) ran nearly straight down —
-      // collinear with the rising forearm — so the whole finger chain hid
-      // behind the sleeve and the hand read as a featureless grey dome.
-      // Rolling the basis camera-up-left (-0.35,-0.6,-0.7 fingers, palm
-      // (-0.75,-0.5,-0.4)) swings the knuckle row and middle phalanges into
-      // the camera's view while the palm stays seated on the grip's face.
-      const gripPalm = _palm.set(-0.75, -0.5, -0.4);
-      const gripFingers = _fingers.set(-0.35, -0.6, -0.7);
+      // High power grip. CYCLE 64 (hands-review: "smooth grey dome"): the
+      // previous long-gun basis pointed the hand's wrist axis (local +z =
+      // -fingers) up-back almost straight INTO the camera, so at hip and
+      // aim-right framing the cuff barrel + wrist sphere + sleeve cuff ring
+      // stack rendered as an end-on grey dome that occluded the palm, the
+      // knuckle plate AND the whole finger chain (fingers pointed along the
+      // camera ray — zero foreshortened length). The fix rolls the basis so
+      // the BACK OF THE HAND faces up-right-toward the key light (knuckle
+      // plate reads proud above the wrist stack), the finger knuckle axis
+      // runs forward-right (mesh curl then wraps 2-3 segments around the
+      // grip's front-right corner, camera-side), and the cuff exits level
+      // back-right instead of skyward. The pistol keeps its proven basis —
+      // its steeper grip rake reads well with the deeper-down finger wrap.
+      const longGun = supportStyle !== 'over';
+      const gripPalm = longGun ? _palm.set(-0.7, -0.65, -0.3) : _palm.set(-0.75, -0.5, -0.4);
+      const gripFingers = longGun
+        ? _fingers.set(0.2, 0.15, -0.95)
+        : _fingers.set(-0.35, -0.6, -0.7);
       if (ads > 0) {
         gripPalm.z += ads * 0.08;
         gripFingers.x -= ads * 0.06;
@@ -571,7 +581,9 @@ export class ArmSolver {
       // Slimmed ~15% (hands-review): the 8-10 cm tubes crowded the ADS frame.
       this.sleeves.push({ upper: make(0.034, 0.044), fore: make(0.022, 0.031) });
       // Cuff ring bridging the forearm end into the hand's own cuff barrel.
-      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.031, 1, 12, 1, true), sleeveMat);
+      // CYCLE 64: slimmed to match the narrower hand cuff — the old 6.2 cm
+      // ring end-on at the hip camera read as the "grey dome" itself.
+      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.028, 1, 12, 1, true), sleeveMat);
       cuff.castShadow = false;
       cuff.receiveShadow = false;
       this.group.add(cuff);
@@ -579,11 +591,13 @@ export class ArmSolver {
     }
     // Elbow joint spheres close the open cylinder ends; wrist spheres cover
     // the forearm-to-cuff seam (round-3: hollow tube rims showed on clamp).
+    // CYCLE 64: the wrist spheres slimmed to sit INSIDE the hand's cuff
+    // silhouette — at hip framing they used to bulge past it as a second dome.
     this.joints = [
       new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), sleeveMat),
       new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), sleeveMat),
-      new THREE.Mesh(new THREE.SphereGeometry(0.024, 10, 8), sleeveMat),
-      new THREE.Mesh(new THREE.SphereGeometry(0.024, 10, 8), sleeveMat),
+      new THREE.Mesh(new THREE.SphereGeometry(0.0205, 10, 8), sleeveMat),
+      new THREE.Mesh(new THREE.SphereGeometry(0.0205, 10, 8), sleeveMat),
     ];
     for (const j of this.joints) {
       j.castShadow = false;
