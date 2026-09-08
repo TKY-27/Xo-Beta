@@ -2654,11 +2654,10 @@ function retoneRockMap(std: THREE.MeshStandardMaterial, color: number, amount: n
   texture.anisotropy = 16;
   texture.userData.worldViewOwned = true;
   std.map = texture;
-  // The source atlas contains useful cracks and strata but previously only
-  // affected albedo. Reusing it at restrained strength gives grazing light a
-  // material response without fabricating a normal map or changing geometry.
-  std.bumpMap = texture;
-  std.bumpScale = 0.085;
+  // CYCLE 57: the bumpMap reuse is DISABLED — map+bumpMap on one standard
+  // material trips the r185 node-pipeline defect that zeroes ALL direct
+  // lighting (see vista.ts buildTerrain). Rocks were rendering sun-dead;
+  // the atlas cracks stay as albedo contrast only.
   std.color.set(0xffffff);
   std.needsUpdate = true;
 }

@@ -21,7 +21,11 @@ export function toNodeStandard(mat: THREE.MeshStandardMaterial): MeshStandardNod
   const node = new MeshStandardNodeMaterial({
     color: mat.color.clone(),
     map: mat.map ?? null,
-    normalMap: mat.normalMap ?? null,
+    // CYCLE 57: normalMap is deliberately NOT carried through. three.js r185's
+    // node pipeline zeroes ALL direct lighting for a standard material whose
+    // normalMap/bumpMap is combined with any other map (the terrain bug — see
+    // vista.ts buildTerrain). Authored GLB normal maps are low-value relief;
+    // dropping them keeps sun + shadows alive on every prop/vehicle.
     roughnessMap: mat.roughnessMap ?? null,
     metalnessMap: mat.metalnessMap ?? null,
     aoMap: mat.aoMap ?? null,

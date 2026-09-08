@@ -2032,27 +2032,17 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
     mat.map = map;
     // CYCLE 26: the former bumpMap copy of the sand albedo shone as foil
     // crinkle at grazing angles (bump shading has no range control there).
-    // The meandering normal map below carries the micro relief instead.
   }
-  // Small-scale surface response shared by every terrain: a generated
-  // near-neutral normal map (grass blade grain / sand ripple micro relief)
-  // plus a roughness breakup map so wet/dry and trampled patches read without
-  // changing the collider or adding per-cell materials. Deterministic: one
-  // fixed-seed canvas per map build, disposed with the terrain.
-  const micro = buildMicroNormalTexture(isDesert);
-  if (micro) {
-    // Node materials (the auto-converted standard material on WebGPU
-    // included) honour per-texture UV transforms: give the micro relief its
-    // own near-field tiling. The previous repeat (1,1) stretched one tile
-    // across the whole span, collapsing the relief to nothing on WebGPU.
-    const microTile = isDesert ? 2.4 : 3;
-    micro.repeat.set(span / microTile, span / microTile);
-    mat.normalMap = micro;
-    // Desert 0.25 predates the per-texture tiling fix (the relief was
-    // stretched to invisibility on WebGPU); 0.38 keeps the ripples faint but
-    // actually present at the 2.4 m tile scale.
-    mat.normalScale.set(isDesert ? 0.38 : 0.7, isDesert ? 0.38 : 0.7);
-  }
+  // CYCLE 57 (sun-light fix): the micro normal map is DISABLED. three.js
+  // r185's node pipeline (WebGPU and the WebGL2 fallback alike) zeroes ALL
+  // direct lighting for a standard material whose normalMap (or bumpMap) is
+  // combined with any other map: sun and sky-fill contribute exactly zero —
+  // the terrain read as flat ambient/IBL wash and never received shadows —
+  // while the same material without the normal map lights fully. Verified
+  // in-engine via tests/browser/qa-boot-probe.ts pixel readbacks
+  // (qa/boot-probe-eden). Terrain keeps map + roughnessMap + vertexColors,
+  // which all light correctly; buildMicroNormalTexture is kept for the
+  // three.js upgrade that fixes the node normal path.
   // Roughness breakup: ~1.2 m neutral grain so the 1-5 m band responds to
   // light (grass, sand and city asphalt alike) instead of reading as flat
   // clay. Its own UV transform keeps it independent of the albedo's 5-8 m
@@ -2077,7 +2067,6 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
     dispose: () => {
       geo.dispose();
       map?.dispose();
-      micro?.dispose();
       detailRough?.dispose();
       mat.dispose();
     },

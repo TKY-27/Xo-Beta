@@ -20,7 +20,13 @@ const server = await createServer({ server: { port: PORT }, logLevel: 'silent' }
 await server.listen();
 const errors: string[] = [];
 
-const browser = await chromium.launch({ channel: 'chrome', headless: process.env.HEADLESS === '1' });
+const browser = await chromium.launch({
+  channel: 'chrome',
+  headless: process.env.HEADLESS === '1',
+  // Headless Chrome defaults to a software GL path that intermittently loses
+  // the WebGPU device mid-probe; force the native Metal ANGLE backend.
+  args: process.env.HEADLESS === '1' ? ['--use-angle=metal'] : [],
+});
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 page.on('console', (msg) => {
   if (msg.type() === 'error') {
@@ -42,7 +48,7 @@ const gfxConfigs: Record<string, Record<string, unknown>> = {
   smaa: { quality: 'high', postProcessing: true, bloom: false, ao: false, aa: 'smaa', resolutionScale: 1 },
   full: { quality: 'ultra', postProcessing: true, bloom: true, ao: true, aa: 'smaa', resolutionScale: 1 },
 };
-const gfxSettings: Record<string, unknown> = { cameraMode: 'fps', playerSkin: process.env.QA_SKIN ?? 'vanguard', ...gfxConfigs[gfx] };
+const gfxSettings: Record<string, unknown> = { cameraMode: 'fps', playerSkin: process.env.QA_SKIN ?? 'vanguard', onboarded: true, ...gfxConfigs[gfx] };
 await page.addInitScript((settings) => {
   window.localStorage.setItem('xo-beta-settings-v1', JSON.stringify(settings));
 }, gfxSettings);
