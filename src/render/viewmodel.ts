@@ -536,11 +536,11 @@ export class ViewModel {
 
     // CYCLE 36 (user pass): connect the arms shoulder→elbow→wrist to the
     // posed hands so nothing floats.
-    this.solveArms(ads);
+    this.solveArms();
   }
 
   /** Solve the arm chains against the live hand positions (world → view). */
-  private solveArms(ads: number): void {
+  private solveArms(): void {
     const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
     if (!rig) {
       this.armSolver.setVisible(false);
@@ -749,7 +749,7 @@ export class ViewModel {
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
       reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
     );
-    this.solveArms(ads);
+    this.solveArms();
   }
 
   kick(strength: number): void {

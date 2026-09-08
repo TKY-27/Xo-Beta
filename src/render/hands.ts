@@ -270,8 +270,8 @@ export function createHandRig(): HandRig {
 
   const right = buildHand(mats, -1);
 
-  let gripR = new THREE.Vector3();
-  let gripL = new THREE.Vector3();
+  const gripR = new THREE.Vector3();
+  const gripL = new THREE.Vector3();
 
   return {
     right,

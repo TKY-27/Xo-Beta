@@ -118,6 +118,8 @@ five cycles.
 
 | 49 | repo hygiene sweep | Removed stale QA artifacts: old probe dirs, superseded round-3/4 capture sets, qa/water (134 MB legacy), obsolete weapon-bisect/isolate diagnostic pages (superseded by qa-hands-isolate). qa/ 302 MB → 53 MB; review evidence kept in qa/reference/ | working tree clean; typecheck green |
 
+| 50 | final verification (eden FP capture + full gates) | CYCLE-45 REVIEW ITEMS CLOSED: hands top-5 all landed (quaternion wrist offset, under/over poses, wrist sphere/taper/cloth, reload quat continuity, online choreography via event timelines); bug analyst B1-B4 fixed (dispose-safety, headless guards, skin-texture leak); graphics top fix (neocity ground seams) landed; B5-B8 + grass/dropship octave watch-items remain as documented follow-ups. Final gates: tsc clean, eslint clean on hands/viewmodel/weaponGeometry, 547/547 unit tests, eden probe zero console errors. — CYCLE 50 REACHED: campaign paused per user instruction (resume with Phase H/I/J/K) | working tree committed and pushed |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
