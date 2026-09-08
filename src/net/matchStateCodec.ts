@@ -99,6 +99,11 @@ const AUTHORITATIVE_EVENT_TYPES = new Set<AuthoritativeMatchEvent['type']>([
   'reloadStarted', 'healStarted', 'healCancelled', 'healDone', 'stormWaiting',
   'stormShrinking', 'stormFinal', 'phaseChanged', 'matchWon', 'playerLeave',
   'playerRejoin', 'tacticalPing',
+  // CYCLE 65 (audit P1): the host session forwards meleeSwing to guests
+  // (hostMatchSession AUTHORITATIVE_EVENT_TYPES) and the guest presentation
+  // layer consumes it — without it here the decoder threw a protocolFailure
+  // on the FIRST host melee swing, failing the guest's whole match.
+  'meleeSwing',
 ]);
 
 export type ReliablePacketKind =
@@ -648,6 +653,17 @@ export class ReliableEventDeduplicator {
   }
 
   reset(): void { this.highestEventId = 0; this.highestRevision = 0; }
+}
+
+/**
+ * CYCLE 65 (audit P1 regression guard): whether the guest decoder accepts an
+ * authoritative event type. The host forward list (hostMatchSession's
+ * AUTHORITATIVE_EVENT_TYPES) and this codec set MUST stay in sync — a type
+ * forwarded but not decodable here fails the guest's whole match with a
+ * protocolFailure (this exact bug shipped for meleeSwing).
+ */
+export function isDecodableAuthoritativeEvent(type: string): boolean {
+  return AUTHORITATIVE_EVENT_TYPES.has(type as AuthoritativeMatchEvent['type']);
 }
 
 export function sessionBindingId(binding: string): number {
