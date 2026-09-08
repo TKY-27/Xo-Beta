@@ -1,6 +1,6 @@
 # ADR-0001: Renderer choice — Three.js (WebGL2)
 
-**Status:** Accepted · **Date:** 2026-08
+**Status:** Superseded by [ADR-0005](ADR-0005-webgpu-primary-renderer.md) (WebGPU-primary renderer with WebGL2 fallback) · **Date:** 2026-08
 
 ## Context
 
