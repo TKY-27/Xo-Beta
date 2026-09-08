@@ -12,7 +12,9 @@ import { createServer } from 'vite';
 const mapArg = (process.argv[2] ?? 'ashara').toLowerCase();
 const mapIndex = ['neocity', 'oldfront', 'eden', 'ashara'].indexOf(mapArg) + 1;
 
-const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
+// QA_PORT lets parallel review agents run probes without port conflicts.
+const PORT = Number(process.env.QA_PORT ?? 5199);
+const server = await createServer({ server: { port: PORT }, logLevel: 'silent' });
 await server.listen();
 const browser = await chromium.launch({ channel: 'chrome' });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
@@ -27,7 +29,7 @@ await page.addInitScript((settings) => {
   return base;
 })());
 
-await page.goto(`http://localhost:5199/?qa=1&seed=42042`, { waitUntil: 'networkidle' });
+await page.goto(`http://localhost:${PORT}/?qa=1&seed=42042`, { waitUntil: 'networkidle' });
 for (let i = 0; i < 60; i++) {
   const onboarding = await page.$('#onboarding-screen:not(.hidden)');
   if (onboarding) {

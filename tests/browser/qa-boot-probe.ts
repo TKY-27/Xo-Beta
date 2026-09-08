@@ -14,7 +14,9 @@ const mapIndex = ['neocity', 'oldfront', 'eden', 'ashara'].indexOf(mapArg) + 1;
 const OUT = `qa/boot-probe-${mapArg}`;
 mkdirSync(OUT, { recursive: true });
 
-const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
+// QA_PORT lets parallel review agents run probes without port conflicts.
+const PORT = Number(process.env.QA_PORT ?? 5199);
+const server = await createServer({ server: { port: PORT }, logLevel: 'silent' });
 await server.listen();
 const errors: string[] = [];
 
@@ -53,7 +55,7 @@ if (process.env.QA_FORCE_WEBGL === '1') {
 const qaHide = process.env.QA_HIDE ?? '';
 const seed = process.env.QA_SEED ?? '42042';
 const qaQuery = `${qaHide ? `&qaHide=${qaHide}` : ''}&seed=${seed}`;
-await page.goto(`http://localhost:5199/?qa=1${qaQuery}`, { waitUntil: 'networkidle' });
+await page.goto(`http://localhost:${PORT}/?qa=1${qaQuery}`, { waitUntil: 'networkidle' });
 // Fresh profiles land on the first-run onboarding overlay; its handlers only
 // attach once boot completes, so poll for whichever screen appears first and
 // clear onboarding before waiting for the menu.
