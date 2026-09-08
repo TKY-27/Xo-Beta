@@ -178,6 +178,102 @@ try {
     console.log(`center pick: ${JSON.stringify(picked)}`);
     await page.screenshot({ path: `${OUT}/05-teleport.png` });
   }
+  // Optional shadow-pipeline introspection (env QA_INTROSPECT=1).
+  if (process.env.QA_INTROSPECT === '1') {
+    const shadow = await page.evaluate(() => {
+      type LightRec = {
+        isDirectionalLight?: boolean;
+        intensity?: number;
+        castShadow?: boolean;
+        position?: { x: number; y: number; z: number };
+        target?: { position: { x: number; y: number; z: number } };
+        shadow?: null | {
+          mapSize: { x: number; y: number };
+          camera: { near: number; far: number };
+          bias: number;
+          normalBias: number;
+          map?: { texture?: unknown } | null;
+        };
+      };
+      type MeshRec = { isMesh?: boolean; receiveShadow?: boolean; castShadow?: boolean };
+      type SceneRec = { traverse: (cb: (o: LightRec & MeshRec) => void) => void };
+      const s = (window as unknown as {
+        __xoState?: {
+          threeRenderer?: { shadowMap?: { enabled?: boolean; type?: number } };
+          scene?: SceneRec;
+        };
+      }).__xoState;
+      if (!s?.scene) return 'no-scene';
+      const suns: unknown[] = [];
+      let recvCount = 0;
+      let castCount = 0;
+      let meshCount = 0;
+      s.scene.traverse((o) => {
+        if (o.isDirectionalLight) {
+          suns.push({
+            intensity: o.intensity,
+            castShadow: o.castShadow,
+            pos: o.position ? [o.position.x, o.position.y, o.position.z].map(Math.round) : null,
+            target: o.target ? [o.target.position.x, o.target.position.y, o.target.position.z].map(Math.round) : null,
+            shadow: o.shadow
+              ? {
+                  mapSize: [o.shadow.mapSize.x, o.shadow.mapSize.y],
+                  near: o.shadow.camera.near,
+                  far: o.shadow.camera.far,
+                  bias: o.shadow.bias,
+                  normalBias: o.shadow.normalBias,
+                  mapAllocated: Boolean(o.shadow.map && o.shadow.map.texture),
+                }
+              : null,
+          });
+        }
+        if (o.isMesh) {
+          meshCount++;
+          if (o.receiveShadow) recvCount++;
+          if (o.castShadow) castCount++;
+        }
+      });
+      return {
+        shadowMapEnabled: s.threeRenderer?.shadowMap?.enabled ?? 'n/a',
+        suns, meshCount, recvCount, castCount,
+      };
+    });
+    console.log(`shadow introspect: ${JSON.stringify(shadow)}`);
+    const bigMeshes = await page.evaluate(() => {
+      type MeshRec = {
+        name?: string;
+        geometry?: { attributes?: { position?: { count?: number } } };
+        material?: { type?: string };
+        receiveShadow?: boolean;
+        castShadow?: boolean;
+        parent?: { name?: string; type?: string } | null;
+      };
+      const scene = (window as unknown as { __xoState?: { scene?: { traverse: (cb: (o: MeshRec) => void) => void } } }).__xoState?.scene;
+      if (!scene) return 'no-scene';
+      const out: unknown[] = [];
+      scene.traverse((o) => {
+        const count = o.geometry?.attributes?.position?.count ?? 0;
+        if (count > 20000 || /terrain|ground/i.test(String(o.name ?? ''))) {
+          out.push({
+            name: o.name || '(unnamed)',
+            verts: count,
+            receive: o.receiveShadow,
+            cast: o.castShadow,
+            mat: o.material?.type,
+            parent: o.parent ? (o.parent.name || o.parent.type) : '?',
+          });
+        }
+      });
+      return out;
+    });
+    console.log(`big meshes: ${JSON.stringify(bigMeshes)}`);
+  }
+  // Generic live-eval hook (env QA_EVAL='() => { ... }') for in-game probes.
+  if (process.env.QA_EVAL) {
+    const evalFn = new Function(`return (${process.env.QA_EVAL})()`) as () => unknown;
+    const result = await page.evaluate(evalFn);
+    console.log(`QA_EVAL: ${JSON.stringify(result)}`);
+  }
 } catch (err) {
   errors.push(`match entry failed: ${err}`);
 }

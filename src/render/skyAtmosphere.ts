@@ -111,13 +111,16 @@ export class SkyAtmosphereSystem {
       // Remap around the coverage control: 0 = clear, 1 = heavy overcast.
       return smoothstep(float(1.0).sub(u.cloudCover.mul(1.2)), float(1.0).sub(u.cloudCover.mul(0.3)), d);
     };
-    const plane = dir.xz.div(max(dir.y.add(0.22), 0.14));
+    // CYCLE 56 (review): raise the projection floor and start the horizon
+    // fade higher — near the horizon the plane UVs explode and the 256px
+    // noise exposed hard-edged translucent rectangles; haze owns that band.
+    const plane = dir.xz.div(max(dir.y.add(0.22), 0.18));
     const wind = u.time.mul(u.windSpeed);
     const c1 = density(plane.mul(0.055).add(vec2(wind.mul(0.9), wind.mul(0.32))));
     const c2 = density(plane.mul(0.11).add(vec2(wind.mul(-0.55), wind.mul(0.7))).add(13.7));
     const clouds = clamp(c1.mul(0.78).add(c2.mul(0.34)), 0.0, 1.0)
       // Fade clouds toward the horizon line into the haze.
-      .mul(smoothstep(-0.02, 0.16, height));
+      .mul(smoothstep(0.05, 0.26, height));
     // Cloud shading: brighter toward the sun, cooler away.
     const cloudColor = mix(u.cloudShade, u.cloudTint, float(0.45).add(glow.mul(0.55)));
     color = mix(color, cloudColor, clouds);

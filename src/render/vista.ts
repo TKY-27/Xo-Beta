@@ -130,7 +130,7 @@ class BoundaryBarrier {
     geo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
     for (let i = 0; i < 4; i++) {
       const mat = new THREE.LineBasicMaterial({
-        color: 0xff4038,
+        color: 0x37d8ff,
         transparent: true,
         opacity: 0,
         depthWrite: false,
@@ -164,9 +164,12 @@ class BoundaryBarrier {
     ];
     for (const [dist, idx] of walls) {
       const mat = this.mats[idx]!;
+      // CYCLE 56 (review): the near-invisible alpha-red hairline read as a
+      // stray debug line. Electric-cyan at a slightly higher ceiling with a
+      // livelier pulse reads as an intentional containment fence.
       const near = 22;
-      let target = dist < near ? Math.min(0.08, ((near - dist) / near) * 0.11) : 0;
-      target *= 0.92 + 0.08 * Math.sin(time * 2.6 + idx);
+      let target = dist < near ? Math.min(0.2, ((near - dist) / near) * 0.28) : 0;
+      target *= 0.86 + 0.14 * Math.sin(time * 3.4 + idx);
       mat.opacity += (target - mat.opacity) * 0.18;
       // Hard visibility gate: an invisible-but-rendered transparent plane
       // still costs a draw call and can interact with post processing.
@@ -223,6 +226,10 @@ function buildSkyline(size: number): THREE.Group {
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
     texture.repeat.set(family === 1 ? 2.7 : 3.2, family === 2 ? 5.2 : 4.2);
+    // CYCLE 56 (review): grazing-angle minification collapsed the window
+    // atlas into a mauve checkerboard on one tower — anisotropic filtering
+    // keeps the grid legible at skyline distance.
+    texture.anisotropy = 8;
     return texture;
   });
   const skylineMaterials = windowTextures.map((texture, family) => new THREE.MeshStandardMaterial({
@@ -278,9 +285,11 @@ function buildSkyline(size: number): THREE.Group {
     const family = i % 3;
     const towerIndex = towerIndices[family]!;
     towers[family]!.setMatrixAt(towerIndex, m);
+    // CYCLE 56 (review): widen the per-tone value range — the old 0.14-0.22
+    // lightness band read as one flat navy value wall at mid distance.
     towers[family]!.setColorAt(
       towerIndex,
-      new THREE.Color().setHSL(0.56 + random() * 0.045, 0.1 + random() * 0.08, 0.14 + random() * 0.08),
+      new THREE.Color().setHSL(0.55 + random() * 0.07, 0.09 + random() * 0.1, 0.11 + random() * 0.19),
     );
     towerIndices[family] = towerIndex + 1;
 
@@ -1365,7 +1374,10 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
     fog: true,
   });
   const farMat = new THREE.MeshBasicMaterial({
-    color: new THREE.Color(0x6c6870).lerp(fog, 0.52),
+    // CYCLE 56 (review): the cool grey-violet 0x6c6870 clashed with the warm
+    // desert sun/sand as a foreign violet band on the horizon — warm the base
+    // toward sand-shadow and sink it deeper into the fog colour.
+    color: new THREE.Color(0x9c8266).lerp(fog, 0.66),
     fog: false,
   });
   const far = new THREE.Mesh(buildRidgeBandGeometry(half + 515, 118, 4.2), farMat);
