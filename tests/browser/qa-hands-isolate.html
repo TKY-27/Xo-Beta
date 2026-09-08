@@ -48,16 +48,19 @@ scene.add(viewmodel.group);
 viewmodel.syncCamera(camera);
 
 const rarity = params.get('rarity') ?? 'epic';
+const unarmed = weapon === 'none';
 const actor = {
   id: 1, displayName: 'LOCAL', ownership: { kind: 'local-human', peerId: 'p' },
   connectionState: 'connected', teamId: null, skinId: 'vanguard', accentColor: 0x33aaff,
   alive: true, health: 100, shield: 100,
   position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 },
   yaw: 0, pitch: 0, grounded: true, moveState: 'ground', crouched: false, deployed: true,
-  equippedWeapon: weapon,
+  equippedWeapon: unarmed ? null : weapon,
   inventory: {
     selected: 0,
-    slots: [{ kind: 'weapon', weaponId: weapon, rarity, ammoInMag: 30 }, null, null, null, null],
+    slots: unarmed
+      ? [null, null, null, null, null]
+      : [{ kind: 'weapon', weaponId: weapon, rarity, ammoInMag: 30 }, null, null, null, null],
     ammo: { light: 0, medium: 90, shells: 0, heavy: 0 }, healing: null,
   },
   placement: 0,
@@ -76,6 +79,7 @@ if (zoom > 0) {
   camera.updateProjectionMatrix();
 }
 window.__ready = true;
+window.__vm = viewmodel;
 
 const errors = [];
 window.addEventListener('error', (e) => errors.push(String(e.error ?? e.message)));

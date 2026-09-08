@@ -9,7 +9,7 @@ import { WEAPONS, RARITY_MODS, type Rarity, type WeaponId } from '../core/balanc
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
-import { ArmSolver, createHandRig, type HandRig, type SupportStyle } from './hands';
+import { ArmSolver, createFistRig, createHandRig, type FistRig, type HandRig, type SupportStyle } from './hands';
 
 function smooth(t: number): number {
   const c = Math.min(1, Math.max(0, t));
@@ -41,16 +41,18 @@ export class ViewModel {
   readonly armSolver: ArmSolver;
   private static readonly _wristQuat = new THREE.Quaternion();
   private static readonly _wristOffset = new THREE.Vector3();
-  private armMat: THREE.MeshStandardMaterial;
-  private gloveMat: THREE.MeshStandardMaterial;
+  private static readonly _wristWorldR = new THREE.Vector3();
+  private static readonly _wristWorldL = new THREE.Vector3();
   private currentId: WeaponId | null = null;
   private currentKey: string | null = null;
   private currentModel: WeaponModel | null = null;
   private t = 0;
 
-  // Fists (permanent melee pseudo-weapon)
-  private fistsR = new THREE.Group();
-  private fistsL = new THREE.Group();
+  // Fists (permanent melee pseudo-weapon) — CYCLE 52: shared gloved-hand
+  // builder + ArmSolver sleeves replace the legacy black capsule fists.
+  private fistRig: FistRig;
+  private fistsR: THREE.Group;
+  private fistsL: THREE.Group;
   private punchT = 0;
   private punchHand = 0;
 
@@ -210,11 +212,13 @@ export class ViewModel {
 
   constructor(factory: WeaponModelFactory) {
     this.factory = factory;
-    this.armMat = new THREE.MeshStandardMaterial({ color: 0x2e3a44, roughness: 0.62, metalness: 0.22 });
-    this.gloveMat = new THREE.MeshStandardMaterial({ color: 0x191d22, roughness: 0.55, metalness: 0.3 });
     this.group.name = 'viewmodel-root';
     this.group.add(this.pivot);
-    this.buildFists();
+    this.fistRig = createFistRig();
+    this.fistsR = this.fistRig.right;
+    this.fistsL = this.fistRig.left;
+    this.fistRig.group.visible = false;
+    this.pivot.add(this.fistRig.group);
     this.armSolver = new ArmSolver();
     this.pivot.add(this.armSolver.group);
 
@@ -229,32 +233,6 @@ export class ViewModel {
   syncCamera(camera: THREE.Camera): void {
     this.group.position.copy(camera.position);
     this.group.quaternion.copy(camera.quaternion);
-  }
-
-  private buildFists(): void {
-    const mkHand = (side: 1 | -1, group: THREE.Group): void => {
-      const forearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.05, 0.3, 4, 10), this.armMat);
-      forearm.position.set(0.02 * side, -0.06, 0.14);
-      forearm.rotation.set(1.15, -0.18 * side, -0.22 * side);
-      const fist = new THREE.Mesh(new THREE.CapsuleGeometry(0.058, 0.075, 4, 12), this.gloveMat);
-      fist.rotation.z = Math.PI / 2;
-      const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.028, 0.03), this.armMat);
-      ridge.position.set(0, 0.048, 0);
-      // Knuckle plate accent
-      const plate = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.02, 0.05), this.gloveMat);
-      plate.position.set(0, 0.01, -0.045);
-      plate.rotation.x = -0.25;
-      const wrap = new THREE.Group();
-      wrap.add(fist, ridge, plate);
-      wrap.position.set(0.11 * side, -0.16, -0.34);
-      wrap.rotation.set(0.32, 0.24 * side, -0.12 * side);
-      group.add(forearm, wrap);
-      for (const m of [forearm, fist, ridge, plate]) m.castShadow = false;
-      group.visible = false;
-      this.pivot.add(group);
-    };
-    mkHand(1, this.fistsR);
-    mkHand(-1, this.fistsL);
   }
 
   /** View-space scale for the hand-held weapon. The factory builds to real
@@ -305,17 +283,19 @@ export class ViewModel {
 
   setWeapon(id: WeaponId | null, rarity: Rarity): void {
     const key = id ? `${id}:${rarity}` : null;
+    // Unarmed visibility must not depend on the model-change early-return
+    // below: a guest who spawns unarmed (currentKey already null) never
+    // crossed a weapon→none transition, so the fists stayed hidden forever.
+    const unarmed = !id;
+    if (this.fistRig.group.visible !== unarmed) {
+      this.fistRig.group.visible = unarmed;
+    }
     if (this.currentKey === key) return;
     if (this.currentModel) this.currentModel.group.visible = false;
     this.currentId = id;
     this.currentKey = key;
     this.currentModel = id ? this.modelFor(id, rarity) : null;
     if (this.currentModel) this.currentModel.group.visible = true;
-    const unarmed = !id;
-    if (this.fistsR.visible !== unarmed) {
-      this.fistsR.visible = unarmed;
-      this.fistsL.visible = unarmed;
-    }
     // A swap cancels the in-flight reload/bolt presentation timelines — the
     // old weapon's choreography must not bleed onto the new model.
     this.clearPresentationTimelines();
@@ -332,8 +312,6 @@ export class ViewModel {
       if (mesh.isMesh) geometries.add(mesh.geometry);
     });
     for (const geometry of geometries) geometry.dispose();
-    this.armMat.dispose();
-    this.gloveMat.dispose();
     this.currentKey = null;
     this.currentModel = null;
     this.models.clear();
@@ -361,7 +339,7 @@ export class ViewModel {
   update(actor: Actor | null, dt: number, lookDx: number, lookDy: number, movingSpeed: number): void {
     this.t += dt;
     this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
-    if (!actor || (!this.currentId && !this.fistsR.visible)) {
+    if (!actor || (!this.currentId && !this.fistRig.group.visible)) {
       this.group.visible = false;
       this.armSolver.setVisible(false);
       return;
@@ -398,7 +376,6 @@ export class ViewModel {
     const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
 
     if (!this.currentId) {
-      this.armSolver.setVisible(false);
       this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
       return;
     }
@@ -547,9 +524,9 @@ export class ViewModel {
       return;
     }
     this.pivot.updateMatrixWorld(true);
-    const wR = new THREE.Vector3();
+    const wR = ViewModel._wristWorldR;
     rig.right.getWorldPosition(wR);
-    const wL = new THREE.Vector3();
+    const wL = ViewModel._wristWorldL;
     rig.left.getWorldPosition(wL);
     // Wrist targets sit BEHIND each palm (toward the eye) so the sleeve
     // ends at the cuff — the v2 joint sphere covered the hand entirely.
@@ -630,7 +607,6 @@ export class ViewModel {
     const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
 
     if (!weaponId) {
-      this.armSolver.setVisible(false);
       this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
       return;
     }
@@ -781,27 +757,35 @@ export class ViewModel {
     const ext = this.punchT > 0 ? Math.sin(Math.min(1, p) * Math.PI) : 0;
     const rightActive = this.punchHand === 0;
 
-    const drive = (g: THREE.Group, side: 1 | -1): void => {
+    // CYCLE 52: guard bases authored in the (centered) pivot space; the
+    // active hand jabs forward-down the sight line. The authored guard
+    // orientation is composed on TOP of the dynamic Eulers — rotation.set
+    // alone resets the fist pose to identity every frame.
+    const drive = (g: THREE.Group, side: 1 | -1, bx: number, by: number, bz: number, base: THREE.Quaternion): void => {
       const active = (side === 1) === (rightActive === true) && ext > 0;
       const e = active ? ext : 0;
       g.position.set(
-        -side * e * 0.13 + bobX,
-        e * 0.02 + bobY + breathe - swapDip + this.swayY,
-        -e * 0.3 + this.recoilZ * 0.4,
+        bx - side * e * 0.13 + bobX,
+        by + e * 0.02 + bobY + breathe - swapDip + this.swayY,
+        bz - e * 0.3 + this.recoilZ * 0.4,
       );
       g.rotation.set(
         -this.swayY * 1.6 + e * -0.18,
         this.swayX * 1.7 + side * e * 0.14,
         this.swayRoll + side * e * -0.22 - bobX * 1.2,
       );
+      g.quaternion.multiply(base);
     };
-    drive(this.fistsR, 1);
-    drive(this.fistsL, -1);
+    drive(this.fistsR, 1, 0.16, -0.16, -0.34, this.fistRig.baseQuatR);
+    drive(this.fistsL, -1, -0.15, -0.19, -0.38, this.fistRig.baseQuatL);
 
+    // Unarmed guard sits centered (the weapon hip x-offset would shove the
+    // lead fist off-line); pulled closer than the weapon hip so the fists
+    // read at fight distance.
     this.pivot.position.set(
-      HIP_POS.x * 0.55 + (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * 0.6 + this.swayX,
-      HIP_POS.y + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
-      HIP_POS.z + this.recoilZ * 0.4,
+      this.swayX,
+      -0.105 + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
+      HIP_POS.z * 0.6 + this.recoilZ * 0.4,
     );
     if (crouched) this.pivot.position.y += 0.02;
     this.pivot.rotation.set(
@@ -809,13 +793,14 @@ export class ViewModel {
       this.swayX * 1.5 - this.sprintBlend * 0.34,
       this.swayRoll + this.sprintBlend * 0.14 - bobX * 1.2,
     );
-  }
 
-  /** Muzzle world position for effects. */
-  muzzleWorld(_camera: THREE.Camera): THREE.Vector3 {
-    const m = this.currentModel;
-    if (m) return m.group.localToWorld(m.muzzle.clone());
-    const v = new THREE.Vector3(0, 0.02, -0.62);
-    return this.group.localToWorld(v);
+    // Same connected arm chains as the weapon path (B6): sleeves meet the
+    // cuffs through the fist rig's wrist anchors.
+    this.pivot.updateMatrixWorld(true);
+    const wR = ViewModel._wristWorldR;
+    this.fistRig.wristR.getWorldPosition(wR);
+    const wL = ViewModel._wristWorldL;
+    this.fistRig.wristL.getWorldPosition(wL);
+    this.armSolver.solve(this.pivot, [wR, wL]);
   }
 }

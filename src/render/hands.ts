@@ -140,7 +140,7 @@ function makeHandMats(): HandMats {
  * chains. `thumbSide` picks the chirality: -1 = anatomical right hand
  * (thumb on -x), +1 = anatomical left hand. 15 meshes/hand (38 total with
  * the ArmSolver — inside the low-poly budget). */
-function buildHand(mats: HandMats, thumbSide: 1 | -1): THREE.Group {
+function buildHand(mats: HandMats, thumbSide: 1 | -1, curlBoost = 0): THREE.Group {
   const hand = new THREE.Group();
 
   // Palm: widened (real palms are ~as wide as long) with a proud rubber
@@ -176,10 +176,13 @@ function buildHand(mats: HandMats, thumbSide: 1 | -1): THREE.Group {
     seg1.position.set(0, -0.01, -0.012);
     finger.add(seg1);
     // Distal segment: leather pad, curled down-and-under the grip surface.
+    // curlBoost (CYCLE 52): unarmed fists wrap ~120° around their own palm
+    // instead of the weapon grip's half-curl, so they read as CLOSED hands.
     const curl = 0.72 + i * 0.09 + wig * 0.1;
+    const c2 = curl + curlBoost;
     const seg2 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0092, 0.02, 3, 10), mats.skin);
-    seg2.rotation.x = Math.PI / 2 - curl;
-    seg2.position.set(0, -0.01 - Math.sin(curl) * 0.015, -0.034 - (1 - Math.cos(curl)) * 0.015);
+    seg2.rotation.x = Math.PI / 2 - c2;
+    seg2.position.set(0, -0.01 - Math.sin(c2) * 0.015, -0.034 - (1 - Math.cos(c2)) * 0.015);
     finger.add(seg2);
     hand.add(finger);
   }
@@ -213,7 +216,9 @@ function buildHand(mats: HandMats, thumbSide: 1 | -1): THREE.Group {
 
 // Pose-scratch vectors/quats (module-level: pose() runs once per frame).
 const _palm = new THREE.Vector3();
-const _boltRest = new THREE.Vector3();
+const _target = new THREE.Vector3();
+/** Frozen +Y basis vector for sleeve alignment (setFromUnitVectors reads only). */
+const _upY = new THREE.Vector3(0, 1, 0);
 const _fingers = new THREE.Vector3();
 const _bp = new THREE.Vector3();
 const _bf = new THREE.Vector3();
@@ -300,7 +305,7 @@ export function createHandRig(): HandRig {
       if (boltPhase >= 0 && boltLocal) {
         // Sniper: the firing hand leaves the grip and works the bolt through
         // the cycle, then re-seats. Grip → bolt → ride → return.
-        const target = new THREE.Vector3();
+        const target = _target;
         if (boltPhase < 0.3) {
           target.lerpVectors(gripR, boltLocal, smooth(boltPhase / 0.3));
         } else if (boltPhase < 0.7) {
@@ -334,7 +339,7 @@ export function createHandRig(): HandRig {
         // the mag body; orientation blends from the support grip to a
         // mag-carry cup and back.
         const p = reloadPhase;
-        const target = new THREE.Vector3();
+        const target = _target;
         let blend: number;
         if (p < 0.3) {
           target.lerpVectors(gripL, magLocal, smooth(p / 0.3));
@@ -391,6 +396,60 @@ export function createHandRig(): HandRig {
   };
 }
 
+export interface FistRig {
+  group: THREE.Group;
+  right: THREE.Group;
+  left: THREE.Group;
+  /** Sleeve meeting points, parented behind each cuff. */
+  wristR: THREE.Object3D;
+  wristL: THREE.Object3D;
+  /** Authored guard orientations — updateFists composes its dynamic
+   * sway/punch Eulers with these every frame (rotation.set would otherwise
+   * clobber the pose back to identity). */
+  baseQuatR: THREE.Quaternion;
+  baseQuatL: THREE.Quaternion;
+}
+
+/**
+ * CYCLE 52 (B6) — unarmed guard hands. The legacy capsule fists rendered
+ * void-black on WebGPU (plain MeshStandardMaterial, same fault family as the
+ * instanced props) and floated forearm-less. These are the SAME gloved hands
+ * the weapon rig uses, posed in a boxing guard (palms inward, knuckles up),
+ * so the character reads as one person with or without a gun.
+ */
+export function createFistRig(): FistRig {
+  const mats = getHandMaterialSet();
+  const group = new THREE.Group();
+
+  const right = buildHand(mats, -1, 0.55);
+  const left = new THREE.Group();
+  left.rotation.y = Math.PI;
+  left.add(buildHand(mats, 1, 0.55));
+  group.add(right, left);
+
+  // Guard pose, authored palm/fingers like every other hand pose. The BACK
+  // of the hand (knuckle plate) faces UP and TOWARD the camera — the classic
+  // FPS fist read: a plate-topped ball with the fingers folded under and
+  // away, thumb toward the centre line.
+  orientHand(right, _palm.set(-0.2, -0.9, -0.38), _fingers.set(-0.12, 0.12, -0.99), false);
+  orientHand(left, _palm.set(0.2, -0.9, -0.38), _fingers.set(0.12, 0.12, -0.99), true);
+  // Same counter-scale the weapon-rig hands get (they sit at the weapon's
+  // presentation scale); without it the fists read half-size next to sleeves.
+  right.position.set(0.16, -0.16, -0.34);
+  right.scale.setScalar(1.18);
+  left.position.set(-0.15, -0.19, -0.38);
+  left.scale.setScalar(1.18);
+
+  const wristR = new THREE.Object3D();
+  wristR.position.set(0, -0.002, 0.075);
+  right.add(wristR);
+  const wristL = new THREE.Object3D();
+  wristL.position.set(0, -0.002, 0.075);
+  left.add(wristL);
+
+  return { group, right, left, wristR, wristL, baseQuatR: right.quaternion.clone(), baseQuatL: left.quaternion.clone() };
+}
+
 /**
  * CYCLE 36 (user pass) — connected arm chain.
  *
@@ -421,6 +480,10 @@ export class ArmSolver {
   private tmpA = new THREE.Vector3();
   private tmpB = new THREE.Vector3();
   private tmpElbow = new THREE.Vector3();
+  // Per-frame solve scratch (B5: no allocations in the hot path).
+  private tmpWristC = new THREE.Vector3();
+  private tmpAlong = new THREE.Vector3();
+  private tmpBend = new THREE.Vector3();
 
   constructor() {
     const shell = getHandMaterialSet().shell;
@@ -465,7 +528,7 @@ export class ArmSolver {
     }
     mesh.visible = true;
     mesh.position.copy(a).addScaledVector(this.tmpA, 0.5);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), this.tmpA.multiplyScalar(1 / len));
+    mesh.quaternion.setFromUnitVectors(_upY, this.tmpA.multiplyScalar(1 / len));
     mesh.scale.set(1, len, 1);
   }
 
@@ -492,12 +555,12 @@ export class ArmSolver {
       const clamped = Math.min(d, maxReach);
       delta.multiplyScalar(d > 1e-5 ? clamped / d : 0);
       d = Math.max(clamped, Math.abs(this.upperLen - this.foreLen) + 0.02);
-      const wristC = shoulder.clone().add(delta);
+      const wristC = this.tmpWristC.copy(shoulder).add(delta);
 
       const cosA = (this.upperLen * this.upperLen + d * d - this.foreLen * this.foreLen) / (2 * this.upperLen * d);
       const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA)) * elbowDamp;
-      const along = delta.clone().normalize();
-      const bend = this.bends[i]!.clone().addScaledVector(along, -this.bends[i]!.dot(along));
+      const along = this.tmpAlong.copy(delta).normalize();
+      const bend = this.tmpBend.copy(this.bends[i]!).addScaledVector(along, -this.bends[i]!.dot(along));
       if (bend.lengthSq() < 1e-6) bend.set(0, -1, 0);
       bend.normalize();
       this.tmpElbow.copy(shoulder)
