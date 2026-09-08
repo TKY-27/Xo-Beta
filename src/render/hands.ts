@@ -361,7 +361,11 @@ export function createHandRig(): HandRig {
         right.position.copy(target);
         orientHand(right, gripPalm, gripFingers, false);
       } else {
-        right.position.set(gripR.x + 0.008, gripR.y - 0.004 + ads * 0.004, gripR.z + 0.002);
+        // CYCLE 61: the palm centre rides proud of the grip's right face —
+        // seated ON the surface (not half-embedded in the grip volume), so
+        // the wrapped fingers emerge around the front strap where the
+        // camera can read them.
+        right.position.set(gripR.x + 0.018, gripR.y - 0.006 + ads * 0.004, gripR.z + 0.004);
         orientHand(right, gripPalm, gripFingers, false);
       }
 

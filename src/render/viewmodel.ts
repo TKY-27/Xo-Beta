@@ -253,7 +253,9 @@ export class ViewModel {
    * blend). Y drops the sniper so the box magazine falls out of the aim
    * point and the scope reads on the bore line. */
   private static readonly ADS_EXTRA_Y: Record<WeaponId, number> = {
-    pistol: 0, smg: 0, ar: 0, shotgun: -0.006, sniper: -0.006,
+    // CYCLE 61 (review): the sniper's box mag sat dead-centre through the
+    // ADS blend — drop the weapon further so the mag leaves the aim point.
+    pistol: 0, smg: 0, ar: 0, shotgun: -0.006, sniper: -0.028,
   };
 
   /** Hands-review fix: extra forward pose offset at full ADS (metres, applied
