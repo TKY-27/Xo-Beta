@@ -15,6 +15,67 @@ import {
 import { loadTextureSet, type TextureSet } from '../assets/assets';
 import type { MatKey } from '../world/types';
 
+/**
+ * CYCLE 48: neutral-grey multi-octave grain for ground roughness — the same
+ * treatment vista.ts gives the heightfield terrain (shared generator, moved
+ * here so the flat ground materials can carry the identical field). Adjacent
+ * ground planes (asphalt base / concreteDark roads & lots / paving sidewalks)
+ * previously met at razor-straight tone edges with no shared texture
+ * character; a common world-projected grain keeps their micro-roughness
+ * continuous across plane boundaries so seams read as material change, not
+ * decal edges. Values hug the top of the range: base roughness is untouched,
+ * only the variation is new information.
+ */
+export function buildDetailGrainRoughness(): THREE.CanvasTexture | null {
+  // Headless/QA environments have no DOM; the detail map is cosmetic.
+  if (typeof document === 'undefined') return null;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const image = ctx.createImageData(size, size);
+  const lattice = (x: number, y: number, seed: number): number => {
+    const h = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+    return h - Math.floor(h);
+  };
+  const smooth = (t: number): number => t * t * (3 - 2 * t);
+  const noise = (x: number, y: number, period: number, seed: number): number => {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = smooth(x - xi), yf = smooth(y - yi);
+    const wrap = (v: number, p: number): number => ((v % p) + p) % p;
+    const a = lattice(wrap(xi, period), wrap(yi, period), seed);
+    const b = lattice(wrap(xi + 1, period), wrap(yi, period), seed);
+    const c = lattice(wrap(xi, period), wrap(yi + 1, period), seed);
+    const d = lattice(wrap(xi + 1, period), wrap(yi + 1, period), seed);
+    return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf;
+  };
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = x / size;
+      const v = y / size;
+      const n = noise(u * 6, v * 6, 6, 71) * 0.5
+        + noise(u * 14, v * 14, 14, 72) * 0.3
+        + noise(u * 32, v * 32, 32, 73) * 0.2;
+      const shade = THREE.MathUtils.clamp(0.93 + (n - 0.5) * 0.14, 0.84, 1);
+      const g = Math.round(shade * 255);
+      const i = (y * size + x) * 4;
+      image.data[i] = g;
+      image.data[i + 1] = g;
+      image.data[i + 2] = g;
+      image.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const textureOut = new THREE.CanvasTexture(canvas);
+  textureOut.wrapS = THREE.RepeatWrapping;
+  textureOut.wrapT = THREE.RepeatWrapping;
+  textureOut.colorSpace = THREE.NoColorSpace;
+  textureOut.anisotropy = 8;
+  textureOut.needsUpdate = true;
+  return textureOut;
+}
+
 export interface MaterialLibrary {
   get(key: MatKey): THREE.Material;
   /** Raw set access for bespoke prop materials. */
@@ -141,7 +202,9 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
       metalness?: number;
       envMapIntensity?: number;
       normalScale?: number;
+      detailRoughMeters?: number;
     } = {},
+    detailRough?: THREE.Texture | null,
   ) {
     super({ metalness: opts.metalness ?? 0 });
     // Material.clone() constructs with zero arguments and then copies state
@@ -149,12 +212,12 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
     // the source had one, so per-map retints, weather wetness and the road/
     // path polygon-offset clones keep their projected texture.
     if (!set) return;
-    this.projectionSource = { set, opts };
+    this.projectionSource = { set, opts, detailRough: detailRough ?? undefined };
     const u = this.uniforms();
     u.tint.value = new THREE.Color(opts.color ?? 0xffffff);
     u.rough.value = opts.roughness ?? 1;
     u.ns.value.set(opts.normalScale ?? 1, opts.normalScale ?? 1);
-    this.buildProjectionGraph(set, opts.metersPerTile);
+    this.buildProjectionGraph(set, opts.metersPerTile, detailRough, opts.detailRoughMeters);
     if (opts.envMapIntensity !== undefined) this.envMapIntensity = opts.envMapIntensity;
   }
 
@@ -162,7 +225,8 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
    * from the source's record via copy(). */
   private declare projectionSource?: {
     set: TextureSet;
-    opts: { metersPerTile?: number; color?: number; roughness?: number; metalness?: number; envMapIntensity?: number; normalScale?: number };
+    opts: { metersPerTile?: number; color?: number; roughness?: number; metalness?: number; envMapIntensity?: number; normalScale?: number; detailRoughMeters?: number };
+    detailRough?: THREE.Texture;
   };
   private declare normalTex?: THREE.Texture;
 
@@ -171,15 +235,28 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
     const src = source as ProjectedStandardMaterial;
     if (src.projectionSource) {
       this.projectionSource = src.projectionSource;
-      this.buildProjectionGraph(src.projectionSource.set, src.projectionSource.opts.metersPerTile);
+      this.buildProjectionGraph(
+        src.projectionSource.set,
+        src.projectionSource.opts.metersPerTile,
+        src.projectionSource.detailRough,
+        src.projectionSource.opts.detailRoughMeters,
+      );
     }
     return this;
   }
 
   /** Build the triplanar node graph sampling the given set, tinted by the
    * CURRENT uniform values (not constructor options) so clones and runtime
-   * retints keep their state. */
-  private buildProjectionGraph(set: TextureSet, metersPerTile?: number): void {
+   * retints keep their state. `detailRough` (optional) multiplies a shared
+   * world-projected grain into the roughness so every material carrying it
+   * shares one continuous micro-roughness field — adjacent ground planes
+   * keep texture character across their seams. */
+  private buildProjectionGraph(
+    set: TextureSet,
+    metersPerTile?: number,
+    detailRough?: THREE.Texture | null,
+    detailRoughMeters?: number,
+  ): void {
     const u = this.uniforms();
     this.colorTex = set.color ? finalize(set.color.clone()) : undefined;
     this.roughTex = set.rough ? finalize(set.rough.clone()) : undefined;
@@ -202,7 +279,18 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
 
     if (this.colorTex) this.colorNode = texture(this.colorTex).sample(puv).mul(u.tint);
     if (this.roughTex) {
-      this.roughnessNode = u.rough.mul(texture(this.roughTex).sample(puv).g);
+      const rough = u.rough.mul(texture(this.roughTex).sample(puv).g);
+      if (detailRough && detailRoughMeters && detailRoughMeters > 0) {
+        // Same projection as the base rough scan, but at the grain's own tile
+        // scale — the field stays continuous across every box that shares the
+        // material (world-space UVs), which is what softens plane seams.
+        const grain = texture(detailRough).sample(
+          puv.mul(float(Math.max(0.001, metersPerTile ?? 4) / detailRoughMeters)),
+        ).g;
+        this.roughnessNode = rough.mul(grain);
+      } else {
+        this.roughnessNode = rough;
+      }
     }
     if (this.normalTex) {
       const mapN = texture(this.normalTex).sample(puv).xyz.mul(2).sub(1);
@@ -270,6 +358,17 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
 export async function createMaterials(): Promise<MaterialLibrary> {
   const mats = new Map<MatKey, THREE.Material>();
 
+  // CYCLE 48: one shared grain field for the flat ground material family
+  // (asphalt / sidewalk / concrete / concreteDark / paving). The same 1.2 m
+  // grain scale the terrain heightfield uses, so streets, lots and sidewalks
+  // share micro-roughness character with the terrain and with each other.
+  const groundGrain = buildDetailGrainRoughness();
+  // Meters per grain tile. 1.2 matches vista's terrain detail roughness so
+  // the in-bounds ground and the surrounding heightfield read as one world.
+  const GROUND_GRAIN_METERS = 1.2;
+  /** Keys of the ground family carrying the shared grain. */
+  const GRAIN_KEYS: ReadonlySet<string> = new Set(['asphalt', 'sidewalk', 'concrete', 'concreteDark', 'paving']);
+
   const dirsByMat: Record<string, string> = {
     concrete: 'concrete', concreteDark: 'concreteDark', asphalt: 'asphalt',
     sidewalk: 'sidewalk', metal: 'metal', metalDark: 'metalDark', rust: 'rust',
@@ -305,7 +404,8 @@ export async function createMaterials(): Promise<MaterialLibrary> {
         metalness: opts.metalness ?? 0,
         envMapIntensity: opts.envMapIntensity,
         normalScale: opts.normalScale,
-      });
+        detailRoughMeters: GRAIN_KEYS.has(key) ? GROUND_GRAIN_METERS : undefined,
+      }, groundGrain);
       m.name = String(key);
       return m;
     }
@@ -550,6 +650,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
       for (const m of mats.values()) m.dispose();
       mats.clear();
       sets.clear();
+      groundGrain?.dispose();
     },
   };
 }

@@ -5,7 +5,7 @@
  */
 
 import * as THREE from 'three';
-import { WEAPONS, type Rarity, type WeaponId } from '../core/balance';
+import { WEAPONS, RARITY_MODS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { WeaponModelFactory, type WeaponModel } from './weaponModels';
@@ -70,6 +70,88 @@ export class ViewModel {
   // Inspect flourish: <0 inactive, else elapsed seconds into the sweep.
   private inspectT = -1;
   private static readonly INSPECT_DURATION = 2.2;
+
+  // CYCLE 48: presentation-only combat timelines for the ONLINE LOCAL player.
+  // Replica ActorViews deliberately carry no combat runtime (no wpn timers —
+  // they are host authority and absent from GameStateView), so updateView()
+  // used to hardcode reload/bolt phases to -1/0 and the local hands never
+  // animated. The guest cannot reconstruct the authoritative timeline, but the
+  // fire/reload presentation events it already consumes (kick/muzzle,
+  // reloadStarted) are enough to run the SAME choreography curves
+  // approximately: notify*() seeds a local stopwatch, updateView() advances it
+  // and mirrors update()'s math. Remote players never reach updateView, so
+  // the documented read-only replica contract holds.
+  private presentReloadElapsed = -1;
+  private presentReloadTotal = 0;
+  private presentReloadEmpty = false;
+  private presentBoltElapsed = -1;
+  private presentBoltTotal = 0.9;
+  /** Presentation bolt/pump travel duration — update() animates both modes
+   * over 0.9 s regardless of the combat runtime's exact boltTimer. */
+  private static readonly BOLT_PRESENT_SECONDS = 0.9;
+
+  /** Seed the bolt/pump presentation timeline for the weapon just fired.
+   * Called from the online fire handlers next to kick()/muzzlePulse(); no-op
+   * for semi/auto weapons (their slide/recoil springs already run). */
+  notifyShotFired(weaponId: WeaponId): void {
+    const def = WEAPONS[weaponId];
+    if (!def || (def.fireMode !== 'bolt' && def.fireMode !== 'pump')) return;
+    this.presentBoltElapsed = 0;
+    this.presentBoltTotal = ViewModel.BOLT_PRESENT_SECONDS;
+  }
+
+  /** Seed the reload presentation timeline from the online reloadStarted
+   * event. Duration mirrors the combat runtime's formula (WEAPONS def ×
+   * rarity reload modifier) so the sweep lands with the authoritative refill. */
+  notifyReloadStarted(weaponId: WeaponId, rarity: Rarity, empty: boolean): void {
+    const def = WEAPONS[weaponId];
+    if (!def) return;
+    this.presentReloadElapsed = 0;
+    this.presentReloadTotal = (empty ? def.reloadEmpty : def.reloadTactical)
+      * RARITY_MODS[rarity].reloadMult;
+    this.presentReloadEmpty = empty;
+  }
+
+  /** Advance and retire the presentation timelines. Returns the reload phase
+   * (0..1, or -1 when inactive) and the bolt anim amplitude (0..1). */
+  private advancePresentationTimelines(dt: number): { reloadPhase: number; boltAnim: number; reloadingEmpty: boolean } {
+    let reloadPhase = -1;
+    let boltAnim = 0;
+    let reloadingEmpty = false;
+    if (this.presentReloadElapsed >= 0) {
+      this.presentReloadElapsed += dt;
+      if (this.presentReloadElapsed >= this.presentReloadTotal) {
+        this.presentReloadElapsed = -1;
+        this.presentReloadTotal = 0;
+      } else {
+        reloadPhase = this.presentReloadElapsed / this.presentReloadTotal;
+        reloadingEmpty = this.presentReloadEmpty;
+      }
+    }
+    if (this.presentBoltElapsed >= 0) {
+      this.presentBoltElapsed += dt;
+      if (this.presentBoltElapsed >= this.presentBoltTotal) {
+        this.presentBoltElapsed = -1;
+      } else {
+        boltAnim = Math.sin((1 - this.presentBoltElapsed / this.presentBoltTotal) * Math.PI);
+      }
+    }
+    return { reloadPhase, boltAnim, reloadingEmpty };
+  }
+
+  /** Cancel any running presentation timelines (weapon swap, death, hide). */
+  private clearPresentationTimelines(): void {
+    this.presentReloadElapsed = -1;
+    this.presentReloadTotal = 0;
+    this.presentBoltElapsed = -1;
+  }
+
+  /** Test/QA probe: active reload phase of the presentation timeline. */
+  get presentationReloadPhase(): number {
+    return this.presentReloadElapsed >= 0
+      ? this.presentReloadElapsed / this.presentReloadTotal
+      : -1;
+  }
 
   /**
    * Begin (or restart) the weapon-inspect flourish. Fails while unarmed or
@@ -234,6 +316,9 @@ export class ViewModel {
       this.fistsR.visible = unarmed;
       this.fistsL.visible = unarmed;
     }
+    // A swap cancels the in-flight reload/bolt presentation timelines — the
+    // old weapon's choreography must not bleed onto the new model.
+    this.clearPresentationTimelines();
     this.swapT = 0.32;
   }
 
@@ -479,12 +564,17 @@ export class ViewModel {
   }
 
   /**
-   * Per-frame presentation update for a read-only replica actor.
+   * Per-frame presentation update for the local player's read-only replica
+   * actor (online matches). Only reaches this path for the owning
+   * participant — remote players render through CharacterRig, never here.
    *
    * ActorView deliberately does not expose reload, bolt, recoil, or combat
-   * timers. Those details must remain local presentation state, so this path
-   * only consumes the equipped weapon, owner-scoped inventory metadata, and
-   * movement pose. ADS is supplied by the local input/presentation layer.
+   * timers (host authority, absent from GameStateView), so the combat
+   * choreography cannot be read from the view. Instead the online fire/
+   * reload handlers seed presentation-only timelines via notifyShotFired()/
+   * notifyReloadStarted(); this method advances them and runs the same
+   * curves as update(). ADS is supplied by the local input/presentation
+   * layer via opts.adsAmount.
    */
   updateView(
     actor: ActorView | null,
@@ -498,6 +588,8 @@ export class ViewModel {
     this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
     if (!actor || !actor.alive) {
       this.group.visible = false;
+      // Death/hide retires any in-flight presentation reload/bolt sweep.
+      this.clearPresentationTimelines();
       return;
     }
 
@@ -523,6 +615,15 @@ export class ViewModel {
     this.recoilZ *= Math.exp(-8.5 * dt);
     this.recoilPitch *= Math.exp(-6.5 * dt);
     this.recoilRoll *= Math.exp(-9 * dt);
+    // Pistol slide return spring — kick() (online fire handlers) sets slideT
+    // exactly like the offline path; the replica path just never applied it.
+    this.slideT = Math.max(0, this.slideT - dt);
+    const slide = this.currentModel?.bolt ?? null;
+    if (slide && this.currentKey?.startsWith('pistol')) {
+      if (slide.userData.baseZ === undefined) slide.userData.baseZ = slide.position.z;
+      const slideCurve = this.slideT > 0 ? Math.sin((1 - this.slideT / 0.09) * Math.PI) : 0;
+      slide.position.z = (slide.userData.baseZ as number) + slideCurve * 0.035;
+    }
 
     // Swap-in dip is presentation-only and remains valid for replica views.
     this.swapT = Math.max(0, this.swapT - dt);
@@ -534,6 +635,7 @@ export class ViewModel {
       return;
     }
 
+    const def = WEAPONS[weaponId];
     const adsTarget = THREE.MathUtils.clamp(opts.adsAmount ?? 0, 0, 1);
     this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
     const ads = this.adsSmooth;
@@ -545,27 +647,83 @@ export class ViewModel {
     const bobX = Math.sin(this.t * bobFreq) * 0.0105 * bobAmp * (1 - ads * 0.88);
     const bobY = Math.abs(Math.cos(this.t * bobFreq)) * 0.0125 * bobAmp * (1 - ads * 0.88);
 
-    // Replica views intentionally do not animate reload/bolt state: those
-    // timers are private combat authority and are absent from ActorView.
+    // CYCLE 48: presentation combat timelines (seeded by the online fire/
+    // reload event handlers) drive the SAME choreography curves update()
+    // runs offline: reload cant + mag travel, bolt/pump travel, hand rig.
+    const { reloadPhase, boltAnim, reloadingEmpty } = this.advancePresentationTimelines(dt);
+    const reloading = reloadPhase >= 0;
+    let reloadPitch = 0;
+    let reloadRoll = 0;
+    let reloadDrop = 0;
+    const mag = this.currentModel?.mag ?? null;
+    if (reloading) {
+      const curve = Math.sin(reloadPhase * Math.PI);
+      reloadPitch = curve * 0.14;
+      reloadRoll = curve * 0.3;
+      reloadDrop = curve * 0.055;
+      if (mag) {
+        if (mag.userData.baseY === undefined) {
+          mag.userData.baseY = mag.position.y;
+          mag.userData.baseRot = mag.rotation.z;
+        }
+        const baseY = mag.userData.baseY as number;
+        const drop = 0.14;
+        let magY: number;
+        let rock: number;
+        if (reloadPhase < 0.5) {
+          const t = smooth(Math.min(1, reloadPhase / 0.5));
+          magY = baseY - drop * t;
+          rock = 0.3 * t;
+        } else {
+          const t = smooth(Math.min(1, (reloadPhase - 0.5) / 0.35));
+          magY = baseY - drop * (1 - t);
+          rock = 0.3 * (1 - t);
+        }
+        mag.position.y = magY;
+        mag.rotation.z = (mag.userData.baseRot as number) + rock;
+        mag.visible = !(reloadPhase < 0.25 && reloadingEmpty);
+      }
+    } else if (mag && mag.userData.baseY !== undefined) {
+      mag.visible = true;
+      mag.position.y = mag.userData.baseY;
+      mag.rotation.z = mag.userData.baseRot as number;
+    }
+
+    // Bolt / pump cycling for the weapon just fired (presentation timeline).
+    const bolt = this.currentModel?.bolt ?? null;
+    let pumpOffset = 0;
+    if (bolt && boltAnim > 0 && (def.fireMode === 'bolt' || def.fireMode === 'pump')) {
+      if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
+      const dir = def.fireMode === 'pump' ? 0.085 : 0.06;
+      pumpOffset = boltAnim * dir;
+      bolt.position.z = (bolt.userData.baseZ as number) + pumpOffset;
+    }
+
     // CYCLE 36 (review): the online path must pose hands too — v1 left them
-    // frozen at configure defaults for every remote player.
+    // frozen at configure defaults. The pose now follows the presentation
+    // timelines instead of hardcoded inactive phases.
     const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
     if (rig) {
+      const supportStyle: SupportStyle = weaponId === 'pistol'
+        ? 'over'
+        : def.fireMode === 'pump'
+          ? 'pump'
+          : weaponId === 'smg' ? 'side' : 'under';
       rig.pose({
-        reloadPhase: -1,
-        supportStyle: weaponId === 'pistol' ? 'over'
-          : weaponId === 'shotgun' ? 'pump'
-            : weaponId === 'smg' ? 'side' : 'under',
-        magLocal: this.currentModel?.mag?.position ?? null,
-        pumpOffset: 0,
-        pumpHand: weaponId === 'shotgun',
+        reloadPhase,
+        supportStyle,
+        magLocal: mag ? mag.position : null,
+        pumpOffset,
+        pumpHand: def.fireMode === 'pump',
         ads,
-        boltPhase: -1,
-        boltLocal: null,
+        boltPhase: def.fireMode === 'bolt' && boltAnim > 0
+          ? 1 - this.presentBoltElapsed / this.presentBoltTotal
+          : -1,
+        boltLocal: def.fireMode === 'bolt' && bolt ? bolt.position : null,
       });
     }
 
-    const inspect = this.inspectPose(dt, ads, this.sprintBlend, false);
+    const inspect = this.inspectPose(dt, ads, this.sprintBlend, reloading);
     const iw = inspect.weight;
     const px =
       HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
@@ -574,17 +732,22 @@ export class ViewModel {
     const py =
       HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - swapDip + 0.04 * inspect.lift * iw;
+      bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
     const pz =
       HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
       this.recoilZ + 0.14 * inspect.lift * iw;
 
     this.pivot.position.set(px, py, pz);
+    // Base hip stance angles the receiver inward across the lower-right
+    // frame (muzzle toward center) like a real ready position; ADS removes it.
+    // Parity with update(): the online weapon previously lost this stance.
+    const hipYaw = 0.28 * (1 - ads);
+    const hipRoll = -0.1 * (1 - ads);
     this.pivot.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + inspect.yaw * iw,
-      this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + inspect.roll * iw,
+      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
+      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
+      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
     );
     this.solveArms(ads);
   }

@@ -114,6 +114,8 @@ five cycles.
 
 | 47 | unit suite | Bug-analyst fixes: B1 ViewModel.dispose used group.remove (no-op for pivot children) then traverse-disposed SHARED page-lifetime weapon geometries every match end → removeFromParent; B3 headless canvas guards in weaponGeometry (brushed/stipple/skin textures null-safe, consumers tolerate); B4 skin-panel textures disposed with their materials; confirmed 4 armSolver.setVisible(false) sites cover both unarmed branches | 542/542 unit tests pass |
 
+| 48 | neocity street captures + viewmodel unit tests | (1) Graphics-P0 ground-plane seams: the terrain grain generator moved to materials.ts as shared buildDetailGrainRoughness, applied INSIDE ProjectedStandardMaterial roughnessNode at its own 1.2 m world-projected tile — continuous across asphalt/sidewalk/concrete/concreteDark/paving planes and every instance; survives clone() (road strips/wet retints). The value-jump 'sticker' lot read is gone. (2) Online local player hand choreography: guests have no authoritative combat runtime, so notifyShotFired/notifyReloadStarted seed presentation timelines (exact reload formula with rarity mult) from the predicted/confirmed fire + reloadStarted handlers; updateView now runs the same reload/bolt/pump/slide curves as update(); 5 new unit tests (547 total green) | zero console errors; heavier Match tests time out only under concurrent load (pass in isolation) |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.

@@ -2654,6 +2654,9 @@ function presentOnlineAuthoritativeEvent(
     if (isLocal && game.rig.mode === 'fps') {
       game.viewmodel.kick(weaponViewmodelKick(weaponId));
       game.viewmodel.muzzlePulse(0.8);
+      // CYCLE 48: authoritative confirm path (unpredicted shots) — same bolt/
+      // pump presentation seeding as the predicted fire handler above.
+      game.viewmodel.notifyShotFired(weaponId);
       return;
     }
     const hasMuzzle = game.rigs.get(actorId)?.muzzleWorld?.(
@@ -2790,7 +2793,22 @@ function presentOnlineAuthoritativeEvent(
     return;
   }
   if (event.type === 'reloadStarted') {
-    if (integer('actorId') === localActorId) audio.reloadClick(payload.empty === true);
+    if (integer('actorId') === localActorId) {
+      audio.reloadClick(payload.empty === true);
+      // CYCLE 48: drive the local viewmodel's reload choreography from the
+      // authoritative reloadStarted event — guests have no combat runtime,
+      // so the presentation timeline is seeded from the event stream.
+      const reloader = actorView(localActorId);
+      const weaponId = reloader?.equippedWeapon;
+      if (reloader && weaponId) {
+        const slot = reloader.inventory && reloader.inventory.selected >= 0
+          ? reloader.inventory.slots[reloader.inventory.selected]
+          : null;
+        const rarity: Rarity = slot?.kind === 'weapon' && slot.weaponId === weaponId
+          ? slot.rarity : 'common';
+        game.viewmodel.notifyReloadStarted(weaponId, rarity, payload.empty === true);
+      }
+    }
     return;
   }
   if (event.type === 'healDone') {
@@ -2837,6 +2855,9 @@ function predictGuestFirePresentation(inputSequence: number, command: Readonly<I
   if (game.rig.mode === 'fps') {
     game.viewmodel.kick(weaponViewmodelKick(weaponId));
     game.viewmodel.muzzlePulse(0.8);
+    // CYCLE 48: seed the bolt/pump presentation timeline so the online local
+    // hands cycle like the offline path (no combat runtime exists on guests).
+    game.viewmodel.notifyShotFired(weaponId);
   } else {
     const yaw = actor.yaw;
     const pitch = actor.pitch;
