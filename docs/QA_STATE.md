@@ -116,6 +116,8 @@ five cycles.
 
 | 48 | neocity street captures + viewmodel unit tests | (1) Graphics-P0 ground-plane seams: the terrain grain generator moved to materials.ts as shared buildDetailGrainRoughness, applied INSIDE ProjectedStandardMaterial roughnessNode at its own 1.2 m world-projected tile — continuous across asphalt/sidewalk/concrete/concreteDark/paving planes and every instance; survives clone() (road strips/wet retints). The value-jump 'sticker' lot read is gone. (2) Online local player hand choreography: guests have no authoritative combat runtime, so notifyShotFired/notifyReloadStarted seed presentation timelines (exact reload formula with rarity mult) from the predicted/confirmed fire + reloadStarted handlers; updateView now runs the same reload/bolt/pump/slide curves as update(); 5 new unit tests (547 total green) | zero console errors; heavier Match tests time out only under concurrent load (pass in isolation) |
 
+| 49 | repo hygiene sweep | Removed stale QA artifacts: old probe dirs, superseded round-3/4 capture sets, qa/water (134 MB legacy), obsolete weapon-bisect/isolate diagnostic pages (superseded by qa-hands-isolate). qa/ 302 MB → 53 MB; review evidence kept in qa/reference/ | working tree clean; typecheck green |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
