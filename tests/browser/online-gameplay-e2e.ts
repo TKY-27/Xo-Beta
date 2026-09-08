@@ -637,7 +637,6 @@ async function main(): Promise<void> {
     await waitUntil(async () => (await snapshot(guest)).screen === 'main' && (await snapshot(guest)).role === 'idle', 'return to menu');
 
     const finalHost = await snapshot(host);
-    const finalGuest = await snapshot(guest);
     assert.ok(finalHost.hostTick > 0, 'host fixed simulation advanced');
     assert.ok(finalHost.inputPackets === 0, 'host does not sample guest input');
     assert.ok(guestInputPacketsInMatch > 0, 'guest sends compact input ticks');
