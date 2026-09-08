@@ -766,7 +766,10 @@ function buildGableRoofGeometry(): THREE.BufferGeometry {
   // cone into the pyramid roofs that previously dominated Old Front's vista.
   const positions = new Float32Array([
     -0.55, 0, -0.55, 0.55, 0, -0.55, 0, 0.5, -0.55,
-    -0.55, 0, 0.55, 0, 0.5, 0.55, 0.55, 0, 0.55,
+    // End caps wound OUTWARD (cycle 53): both caps were inward-facing, so
+    // the gable ends backface-culled and street-axis views read hollow.
+    -0.55, 0, -0.55, 0, 0.5, -0.55, 0.55, 0, -0.55,
+    -0.55, 0, 0.55, 0.55, 0, 0.55, 0, 0.5, 0.55,
     -0.55, 0, -0.55, -0.55, 0, 0.55, 0, 0.5, 0.55,
     -0.55, 0, -0.55, 0, 0.5, 0.55, 0, 0.5, -0.55,
     0.55, 0, -0.55, 0, 0.5, -0.55, 0, 0.5, 0.55,
