@@ -114,6 +114,29 @@ function makeHullWeathering(): HullWeathering | null {
     }
   }
 
+  // CYCLE 54 (review watch-item): second variation octaves — the lone 4×4
+  // plate grid read as a regular checker at transport distance. A fine 8×8
+  // drift plus coarse 2×2 tone bands break the periodicity (both wrap).
+  for (let py = 0; py < 8; py++) {
+    for (let px = 0; px < 8; px++) {
+      const d = rand() * 2 - 1;
+      if (Math.abs(d) < 0.18) continue;
+      aCtx.fillStyle = d > 0
+        ? `rgba(255,255,255,${(d * 0.09).toFixed(3)})`
+        : `rgba(20,22,24,${(-d * 0.09).toFixed(3)})`;
+      aCtx.fillRect(px * 32, py * 32, 32, 32);
+    }
+  }
+  for (let py = 0; py < 2; py++) {
+    for (let px = 0; px < 2; px++) {
+      const d = rand() * 2 - 1;
+      aCtx.fillStyle = d > 0
+        ? `rgba(255,255,255,${(d * 0.05).toFixed(3)})`
+        : `rgba(20,22,24,${(-d * 0.05).toFixed(3)})`;
+      aCtx.fillRect(px * 128, py * 128, 128, 128);
+    }
+  }
+
   // Grime blotches: soft dark mottling, denser toward nothing in particular
   // (uniform scatter — placement must not assume a UV layout).
   for (let i = 0; i < 60; i++) {

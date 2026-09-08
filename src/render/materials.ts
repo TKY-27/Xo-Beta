@@ -54,9 +54,11 @@ export function buildDetailGrainRoughness(): THREE.CanvasTexture | null {
     for (let x = 0; x < size; x++) {
       const u = x / size;
       const v = y / size;
+      // CYCLE 54: mid-octave trimmed in favour of the fine octave — the
+      // 14-period band read as a combed mid-frequency stripe on grass.
       const n = noise(u * 6, v * 6, 6, 71) * 0.5
-        + noise(u * 14, v * 14, 14, 72) * 0.3
-        + noise(u * 32, v * 32, 32, 73) * 0.2;
+        + noise(u * 14, v * 14, 14, 72) * 0.22
+        + noise(u * 32, v * 32, 32, 73) * 0.28;
       const shade = THREE.MathUtils.clamp(0.93 + (n - 0.5) * 0.14, 0.84, 1);
       const g = Math.round(shade * 255);
       const i = (y * size + x) * 4;
