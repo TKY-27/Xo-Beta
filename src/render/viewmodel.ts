@@ -240,7 +240,7 @@ export class ViewModel {
   dispose(): void {
     // Weapon instances share resources with the page-lifetime factory; detach
     // them before releasing the viewmodel's own arms/fists geometry.
-    for (const model of this.models.values()) this.group.remove(model.group);
+    for (const model of this.models.values()) model.group.removeFromParent();
     const geometries = new Set<THREE.BufferGeometry>();
     this.group.traverse((object) => {
       const mesh = object as THREE.Mesh;

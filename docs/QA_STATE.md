@@ -112,6 +112,8 @@ five cycles.
 
 | 46 | eden FP AR capture | Cycle-45 hands-specialist top-4: (1) wrist offset quaternion-corrected — the world-space +z pointed camera-LEFT at other yaws, detaching arm from cuff on every turn (also bug-analyst B2); (2) 'under' pose raised to the handguard's near-left face (was fully occluded); (3) 'over' pistol pose re-based to palm-presses-left-flank with the back of hand toward camera (was a merged grey cluster); (4) reload quatA now derives from the ACTIVE supportStyle (was hardcoded 'under' cup → 50-70° snaps on pistol/SMG); plus wrist spheres 0.021→0.028, fore tube wrist end 0.04→0.026 (rim read), shell cloth-read (rough 0.68/metal 0.08 + fabric bump), SMG ADS tuck 0.035→0.012 (grip glide), pistol view scale 1.2→0.95 (hands 30% small), bolt-cycle endpoints from the rest offset (no 2 cm snap) | hands+arms read connected at hip; zero console errors |
 
+| 47 | unit suite | Bug-analyst fixes: B1 ViewModel.dispose used group.remove (no-op for pivot children) then traverse-disposed SHARED page-lifetime weapon geometries every match end → removeFromParent; B3 headless canvas guards in weaponGeometry (brushed/stipple/skin textures null-safe, consumers tolerate); B4 skin-panel textures disposed with their materials; confirmed 4 armSolver.setVisible(false) sites cover both unarmed branches | 542/542 unit tests pass |
+
 ## Known open items
 
 - GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.

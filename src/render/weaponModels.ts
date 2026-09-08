@@ -248,7 +248,10 @@ export class WeaponModelFactory {
     for (const geometry of geometries) geometry.dispose();
     for (const material of Object.values(this.mats)) material.dispose();
     for (const byBase of this.skinPanels.values()) {
-      for (const material of byBase.values()) material.dispose();
+      for (const material of byBase.values()) {
+        material.map?.dispose();
+        material.dispose();
+      }
     }
     this.skinPanels.clear();
     this.templates.clear();

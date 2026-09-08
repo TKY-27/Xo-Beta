@@ -35,7 +35,8 @@ let brushedRough: THREE.CanvasTexture | null = null;
 let stippleBump: THREE.CanvasTexture | null = null;
 
 /** Horizontal brush grain + random machining scratches as a roughness map. */
-function getBrushedRoughness(): THREE.CanvasTexture {
+function getBrushedRoughness(): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
   if (brushedRough) return brushedRough;
   const size = 256;
   const canvas = document.createElement('canvas');
@@ -78,7 +79,8 @@ function getBrushedRoughness(): THREE.CanvasTexture {
 }
 
 /** Polymer stipple: staggered dot grid as a bump map (grip texture). */
-function getStippleBump(): THREE.CanvasTexture {
+function getStippleBump(): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
   if (stippleBump) return stippleBump;
   const size = 128;
   const canvas = document.createElement('canvas');
@@ -116,7 +118,8 @@ function getStippleBump(): THREE.CanvasTexture {
  * weapon skins; flat single-colour receivers read as toys. One canvas per
  * rarity, shared by every weapon class.
  */
-export function makeSkinTexture(rarity: Rarity, tint: string): THREE.CanvasTexture {
+export function makeSkinTexture(rarity: Rarity, tint: string): THREE.CanvasTexture | null {
+  if (typeof document === 'undefined') return null;
   const size = 256;
   const canvas = document.createElement('canvas');
   canvas.width = size;
