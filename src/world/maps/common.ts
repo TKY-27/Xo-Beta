@@ -34,6 +34,32 @@ export interface BuildingOpts {
   chimney?: boolean;
   /** Material for the exterior fire-escape stair flights (default metal). */
   stairMat?: MatKey;
+  /**
+   * Facade flavour for the depth dressing (window sills/lintels/reveals,
+   * plinth, door portals, cornice, rooftop plant). Derived automatically from
+   * the map id, then the wall material, so map files need no changes.
+   */
+  facadeStyle?: 'city' | 'heritage' | 'facility' | 'desert';
+}
+
+type FacadeStyle = NonNullable<BuildingOpts['facadeStyle']>;
+
+const FACADE_STYLE_BY_MAP: Partial<Record<string, FacadeStyle>> = {
+  neocity: 'city',
+  oldfront: 'heritage',
+  eden: 'facility',
+  ashara: 'desert',
+};
+
+/** Facade flavour for a building: explicit opt, then map id, then wall material. */
+function resolveFacadeStyle(mapId: string, wallMat: MatKey, override?: FacadeStyle): FacadeStyle {
+  if (override) return override;
+  const byMap = FACADE_STYLE_BY_MAP[mapId];
+  if (byMap) return byMap;
+  if (wallMat === 'mudbrick') return 'desert';
+  if (wallMat === 'stoneBrick' || wallMat === 'bricksOld' || wallMat === 'marble') return 'heritage';
+  if (wallMat === 'concrete' || wallMat === 'concreteDark' || wallMat === 'facilityFloor') return 'facility';
+  return 'city';
 }
 
 /**
@@ -320,6 +346,99 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   };
   const windowMaterial = (family: 'single' | 'dual' | 'transom' | 'dark'): MatKey => family === 'dark' ? 'windowDark' : 'windowCool';
 
+  // --- Facade depth system (W7) -------------------------------------------
+  // Turns the flat wall/glass compositions into authored elevations: every
+  // dressed window gains a proud sill ledge and a lintel band (plus recessed
+  // reveal jambs on heritage/desert styles), the footprint gains a plinth
+  // course, each door a portal with a real stoop, the wall top a projecting
+  // cornice, and flat roofs bounded rooftop plant. Placement follows the
+  // file's offset discipline: pieces bury into the wall body, protrude a few
+  // centimetres, and never share a top plane with neighbouring geometry
+  // (z-fighting guard). Everything derives from position hashes so repeated
+  // map builds stay byte-identical, and decorations are noCollide except the
+  // deliberately walkable stoops.
+  const style = resolveFacadeStyle(b.def.id, o.wallMat, o.facadeStyle);
+  const darkTrim: MatKey = style === 'heritage' || style === 'desert' ? 'stoneBrick' : 'concreteDark';
+  const windowTrim: MatKey = trim !== o.wallMat
+    ? trim
+    : style === 'desert' ? 'woodDark'
+    : style === 'facility' ? 'metalDark'
+    : darkTrim;
+  const facadeHash = (side: number, along: number, floor: number, salt: number): number => {
+    let h = hashOf(o.x, o.z) ^ 0x9e3779b9;
+    h = Math.imul(h ^ Math.imul(side + 1, 0x9e3779b9), 2654435761);
+    h = Math.imul(h ^ Math.round(along * 61.7), 2654435761);
+    h = Math.imul(h ^ Math.imul(floor + 1, 0x85ebca6b), 2654435761);
+    h = Math.imul(h ^ Math.imul(salt + 1, 0xc2b2ae35), 2654435761);
+    return h >>> 0;
+  };
+  /**
+   * Trim band on one facade. `along` is the piece centre relative to the
+   * building centre along the wall axis; `offset` is the piece's outer face
+   * relative to the wall's outer face (positive proud, negative recessed
+   * into the reveal). Pieces always bury into the wall body so no seam is
+   * coplanar, and runs clamp to the wall span so edge trims never overhang
+   * a corner. Decoration by default; pass noCollide:false for walkable pieces.
+   */
+  const facePiece = (
+    side: 0 | 1 | 2 | 3,
+    along: number,
+    y: number,
+    len: number,
+    sy: number,
+    depth: number,
+    offset: number,
+    mat: MatKey,
+    opts?: { noCollide?: boolean; pitch?: number; roll?: number },
+  ): void => {
+    const alongX = side === 0 || side === 2;
+    const s = side === 0 || side === 1 ? 1 : -1;
+    const maxAlong = (alongX ? hw : hd) - 0.06;
+    const lo = Math.max(along - len / 2, -maxAlong);
+    const hi = Math.min(along + len / 2, maxAlong);
+    if (hi - lo < 0.1) return;
+    const centre = (alongX ? hd : hw) + 0.2 + offset - depth / 2;
+    const mid = (lo + hi) / 2;
+    if (alongX) {
+      b.box(x + mid, y, z + s * centre, hi - lo, sy, depth, mat, 0, {
+        noCollide: opts?.noCollide ?? true,
+        pitch: opts?.pitch,
+        roll: opts?.roll,
+      });
+    } else {
+      b.box(x + s * centre, y, z + mid, depth, sy, hi - lo, mat, 0, {
+        noCollide: opts?.noCollide ?? true,
+        pitch: opts?.pitch,
+        roll: opts?.roll,
+      });
+    }
+  };
+  /** Sill ledge + lintel band (+ reveal jambs / AC unit by style) per window. */
+  const dressWindow = (
+    side: 0 | 1 | 2 | 3,
+    along: number,
+    floor: number,
+    width: number,
+    glassLo: number,
+    glassHi: number,
+  ): void => {
+    const heritage = style === 'heritage';
+    const headH = heritage ? 0.18 : 0.14;
+    facePiece(side, along, glassLo - 0.085, width + 0.26, 0.1, 0.34, 0.12, windowTrim);
+    facePiece(side, along, glassHi + 0.04 + headH / 2, width + 0.26, headH, 0.3, heritage ? 0.12 : 0.08, windowTrim);
+    if (heritage || style === 'desert') {
+      // Reveal jambs recessed 6 cm into the opening shadow: heritage stone
+      // toe-lines and desert sun-shading depth.
+      for (const edge of [-1, 1]) {
+        facePiece(side, along + edge * (width / 2 + 0.045), (glassLo + glassHi) / 2, 0.09, glassHi - glassLo, 0.16, -0.06, windowTrim);
+      }
+    }
+    if (style === 'city' && facadeHash(side, along, floor, 1) % 10 < 3) {
+      // Bracket-mounted AC unit under the sill on some city openings.
+      facePiece(side, along, glassLo - 0.36, 0.55, 0.28, 0.42, 0.3, 'metalExterior');
+    }
+  };
+
   const addGroundFacadeWindow = (
     side: 1 | 2 | 3,
     offset: number,
@@ -502,17 +621,23 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat,
         windowGapsLeft, sillH, y0, windowGapsLeft);
       if (o.windows !== false) {
+        const upperPaneH = Math.max(0.8, fh - sillH - 0.5);
+        const glassHi = y0 + sillH + upperPaneH;
         for (const [offset, width] of windowGapsFront) {
           addUpperWindowGlass(0, offset, width, y0, sillH);
+          dressWindow(0, offset + width / 2 - hw, f, width, y0 + sillH, glassHi);
         }
         for (const [offset, width] of windowGapsBack) {
           addUpperWindowGlass(2, offset, width, y0, sillH);
+          dressWindow(2, offset + width / 2 - hw, f, width, y0 + sillH, glassHi);
         }
         for (const [offset, width] of windowGapsRight) {
           addUpperWindowGlass(1, offset, width, y0, sillH);
+          dressWindow(1, offset + width / 2 - hd, f, width, y0 + sillH, glassHi);
         }
         for (const [offset, width] of windowGapsLeft) {
           addUpperWindowGlass(3, offset, width, y0, sillH);
+          dressWindow(3, offset + width / 2 - hd, f, width, y0 + sillH, glassHi);
         }
       }
     }
@@ -558,6 +683,76 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     }
   }
 
+  // Plinth course: a slightly proud base band wrapping the footprint,
+  // split around every door so entrances stay visually and physically
+  // clear. It grounds the mass against the ground plane and breaks the
+  // wall/ground seam (bottom buried, so sloping terrain never floats it).
+  const plinthSegments = (length: number, doors: Array<[number, number]>): Array<[number, number]> => {
+    const segs: Array<[number, number]> = [];
+    let cursor = 0;
+    for (const [start, width] of doors.map(([dOff, dW]) => [dOff - 0.18, dW + 0.36] as [number, number]).sort((m, n) => m[0] - n[0])) {
+      const lo = Math.max(0, start);
+      const hi = Math.min(length, start + Math.max(0, width));
+      if (lo > cursor + 0.05) segs.push([cursor, lo]);
+      cursor = Math.max(cursor, hi);
+    }
+    if (length > cursor + 0.05) segs.push([cursor, length]);
+    return segs;
+  };
+  for (const side of [0, 1, 2, 3] as const) {
+    const sideLen = side === 0 || side === 2 ? o.w : o.d;
+    const sideDoors = (o.doors ?? []).filter((dd) => dd[0] === side).map((dd) => [dd[1], dd[2]] as [number, number]);
+    for (const [a, bEnd] of plinthSegments(sideLen, sideDoors)) {
+      facePiece(side, (a + bEnd) / 2 - sideLen / 2, baseY - 0.01, bEnd - a, 0.58, 0.52, 0.06, darkTrim);
+    }
+  }
+
+  // Entrance portals: proud jamb pilasters and a header define each door
+  // (walls leave doors full-storey height, so the header reads as the
+  // lintel over a real opening). Two low collidable stoop steps ground the
+  // approach — actors stand on them, and both stay far below the KCC step
+  // gate so door navigation is untouched. Some deterministically chosen
+  // doors also get a pitched canopy.
+  const canopyMat: MatKey = style === 'heritage' ? 'roofTile'
+    : style === 'desert' ? 'woodDark'
+    : style === 'facility' ? 'metalExterior'
+    : 'metalDark';
+  for (const [side, offset, width] of o.doors ?? []) {
+    const alongX = side === 0 || side === 2;
+    const along = offset + width / 2 - (alongX ? hw : hd);
+    for (const edge of [-1, 1]) {
+      facePiece(side, along + edge * (width / 2 + 0.09), baseY + fh / 2, 0.18, fh, 0.52, 0.06, windowTrim);
+    }
+    const doorHead = Math.min(2.25, fh - 0.85);
+    facePiece(side, along, baseY + doorHead + 0.1, width + 0.36, 0.2, 0.56, 0.1, windowTrim);
+    // Transom glazing over the header: walls leave doors full-storey height,
+    // so the slot above the portal would otherwise read as open sky. Fixed
+    // dark glazing fills the transom; it is noCollide like the rest of the
+    // dressing, so sightline-blocking stays exactly as authored.
+    facePiece(side, along, baseY + doorHead + 0.2 + Math.max(0.1, fh - doorHead - 0.55) / 2, width + 0.04, Math.max(0.2, fh - doorHead - 0.55), 0.06, -0.01, 'windowDark');
+    const s = side === 0 || side === 1 ? 1 : -1;
+    const face = (alongX ? hd : hw) + 0.2;
+    for (let stepIdx = 0; stepIdx < 2; stepIdx++) {
+      const top = baseY + 0.22 - stepIdx * 0.08;
+      const centreDist = face + 0.25 + stepIdx * 0.5;
+      b.box(
+        alongX ? x + along : x + s * centreDist,
+        top - 0.35,
+        alongX ? z + s * centreDist : z + along,
+        alongX ? width + 0.7 : 0.5,
+        0.7,
+        alongX ? 0.5 : width + 0.7,
+        darkTrim,
+      );
+    }
+    if (facadeHash(side, along, 0, 3) % 10 < 5) {
+      facePiece(side, along, baseY + doorHead + 0.5, width + 0.5, 0.09, 1.0, 1.06, canopyMat, {
+        pitch: alongX ? s * 0.3 : 0,
+        roll: alongX ? 0 : -s * 0.3,
+      });
+    }
+  }
+
   // Roof
   const roofY = baseY + floors * fh + 0.2;
   b.slab(x, roofY, z, o.w + 0.5, o.d + 0.5, 0.35, roofMat);
@@ -591,7 +786,26 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       b.box(x - hw - 0.25, roofY + ph / 2, z, 0.25, ph, o.d + 0.5, trim);
     }
     b.platform(x - hw - 0.4, x + hw + 0.4, z - hd - 0.4, z + hd + 0.4, roofY);
+    // Parapet caps: proud weathering strips topping every straight run
+    // (the fire-escape side keeps its gated opening uncapped).
+    const capY = roofY + 0.815;
+    b.box(x, capY, z + hd + 0.25, o.w + 0.5, 0.09, 0.35, darkTrim, 0, { noCollide: true });
+    b.box(x, capY, z - hd - 0.25, o.w + 0.5, 0.09, 0.35, darkTrim, 0, { noCollide: true });
+    b.box(x + hw + 0.25, capY, z, 0.35, 0.09, o.d + 0.5, darkTrim, 0, { noCollide: true });
+    if (!o.roofAccess) {
+      b.box(x - hw - 0.25, capY, z, 0.35, 0.09, o.d + 0.5, darkTrim, 0, { noCollide: true });
+    }
   }
+
+  // Cornice: a projecting band wrapping the wall top, slightly darker than
+  // the wall so the roofline reads as a finished edge instead of a cut box.
+  // Runs overlap the corners only within the z-fighting guard's exemption
+  // (side runs stop short; front/back runs carry the corner return).
+  const wallTop = baseY + floors * fh;
+  facePiece(0, 0, wallTop - 0.02, o.w + 0.64, 0.2, 0.64, 0.12, darkTrim);
+  facePiece(2, 0, wallTop - 0.02, o.w + 0.64, 0.2, 0.64, 0.12, darkTrim);
+  facePiece(1, 0, wallTop - 0.02, o.d - 0.8, 0.2, 0.64, 0.12, darkTrim);
+  facePiece(3, 0, wallTop - 0.02, o.d - 0.8, 0.2, 0.64, 0.12, darkTrim);
 
   // Pitched-roof shell: pure silhouette dressing floated above the flat
   // gameplay roof — traversal, nav and roof platforms are untouched.
@@ -648,6 +862,66 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       const chH = rise + 0.85;
       b.box(chX, shellY + chH / 2, chZ, 0.55, chH, 0.55, 'bricksOld', 0, { noCollide: true });
       b.box(chX, shellY + chH + 0.06, chZ, 0.72, 0.14, 0.72, trim, 0, { noCollide: true });
+    }
+  }
+
+  // Rooftop plant (flat roofs, larger footprints): deterministic HVAC/vent/
+  // pipe clusters kept in the right half of the roof, clear of the back-left
+  // interior stairwell and the exterior-stair landing on the left edge.
+  // Decoration only — the roof platform stays fully walkable.
+  if (o.roofStyle !== 'gable') {
+    const roofArea = o.w * o.d;
+    const gearBudget = style === 'city'
+      ? roofArea >= 320 ? 3 : roofArea >= 180 ? 2 : roofArea >= 90 ? 1 : 0
+      : style === 'facility'
+        ? roofArea >= 200 ? 2 : roofArea >= 90 ? 1 : 0
+        : roofArea >= 150 ? 1 : 0;
+    const gearSpots: Array<[number, number]> = [
+      [x + hw * 0.45, z + hd * 0.42],
+      [x + hw * 0.45, z - hd * 0.42],
+      [x, z + hd * 0.42],
+    ];
+    const gearSeed = facadeHash(9, 0, floors, 5);
+    for (let gi = 0; gi < gearBudget; gi++) {
+      const [gx, gz] = gearSpots[(gearSeed + gi) % 3]!;
+      const kind = facadeHash(9, gx, gz, 6) % 3;
+      if (kind === 0) {
+        // HVAC pack with a roof-mounted fan and a supply duct beside it.
+        b.box(gx, roofY + 0.29, gz, 0.95, 0.65, 0.7, 'metalExterior', 0, { noCollide: true });
+        b.cyl(gx, roofY + 0.69, gz, 0.22, 0.14, 'metalDark', { segments: 10, noCollide: true });
+        b.box(gx + 0.78, roofY + 0.19, gz, 0.5, 0.38, 0.4, 'metalDark', 0, { noCollide: true });
+      } else if (kind === 1) {
+        // Staggered vent stack pair joined by a low crossover pipe.
+        b.cyl(gx, roofY + 0.245, gz, 0.2, 0.55, 'metalDark', { segments: 10, noCollide: true });
+        b.cyl(gx + 0.55, roofY + 0.395, gz, 0.15, 0.85, 'rust', { segments: 10, noCollide: true });
+        b.box(gx + 0.27, roofY + 0.36, gz, 0.55, 0.12, 0.12, 'metalDark', 0, { noCollide: true });
+      } else {
+        // Low pipe run on stanchions with one rising stack.
+        for (const px of [gx - 1.1, gx, gx + 1.1]) {
+          b.box(px, roofY + 0.145, gz, 0.11, 0.35, 0.11, 'metalDark', 0, { noCollide: true });
+        }
+        b.box(gx, roofY + 0.375, gz, 2.4, 0.14, 0.14, 'metalExterior', 0, { noCollide: true });
+        b.cyl(gx + 1.2, roofY + 0.67, gz, 0.16, 0.5, 'rust', { segments: 10, noCollide: true });
+      }
+    }
+    if (style === 'facility') {
+      // Service conduit dropping down one facade corner with a clip band
+      // per storey — the industrial tell that the elevations are serviced.
+      const cs = facadeHash(8, 0, 0, 7) % 4;
+      const faceSide = cs < 2 ? 0 : 2;
+      const offSign = cs % 2 === 0 ? 1 : -1;
+      const fromStart = offSign > 0 ? o.w - 0.4 : 0.4;
+      const blockedByDoor = (o.doors ?? []).some(([dSide, dOff, dW]) => (
+        dSide === faceSide && dOff - 0.3 < fromStart + 0.3 && fromStart - 0.3 < dOff + dW + 0.3
+      ));
+      const conduitH = floors * fh - 1.3;
+      if (conduitH > 1 && !blockedByDoor) {
+        const conduitAlong = offSign * (hw - 0.4);
+        facePiece(faceSide, conduitAlong, baseY + 0.3 + conduitH / 2, 0.15, conduitH, 0.16, 0.09, 'metalExterior');
+        for (let fl = 0; fl < floors; fl++) {
+          facePiece(faceSide, conduitAlong, baseY + fl * fh + fh - 0.55, 0.34, 0.07, 0.2, 0.13, 'metalExterior');
+        }
+      }
     }
   }
 
@@ -865,6 +1139,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       if (frontDoors.some((door) => gapsOverlap(windowGap, door))) continue;
       const wx = x - hw + o.w * (0.28 + i * 0.44);
       b.glassPane(wx, gy, z + hd - t / 2 - 0.08, 1.5, fh - 1.6, 'x');
+      dressWindow(0, o.w * (0.28 + i * 0.44) - hw, 0, 1.5, gy - (fh - 1.6) / 2, gy + (fh - 1.6) / 2);
     }
   }
 
@@ -999,5 +1274,192 @@ export function scatterRocks(
     ))) continue;
     b.rock(x, z, heightAt ? heightAt(x, z) : 0, scale);
     placed++;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POI density helpers (W8 street-level dressing). Appended for the maps that
+// share a prop family; existing helpers above are untouched.
+// ---------------------------------------------------------------------------
+
+export interface MarketStallOpts {
+  x: number;
+  z: number;
+  /** World-space support surface (ground/paving) under the stall. */
+  baseY: number;
+  /** Table run direction (radians). 0 = table runs along X. */
+  yaw?: number;
+  w?: number;
+  d?: number;
+  tableMat?: MatKey;
+  postMat?: MatKey;
+  awningMat?: MatKey;
+  /** Ground cloth under the stall (market rug). */
+  rugMat?: MatKey;
+  /** Small goods boxes on the table top. */
+  goods?: boolean;
+}
+
+/**
+ * One market stall: timber table, four posts, sloped fabric awning and an
+ * optional rug. The table is the only collidable piece (waist-high cover);
+ * posts, awning, rug and goods are presentation-only so lanes stay clear.
+ * Tops are deliberately non-coincident with the common paving/curb planes.
+ */
+export function addMarketStall(b: WorldBuilder, o: MarketStallOpts): void {
+  const w = o.w ?? 3.6;
+  const d = o.d ?? 1.9;
+  const yaw = o.yaw ?? 0;
+  const tableMat = o.tableMat ?? 'wood';
+  const postMat = o.postMat ?? 'woodDark';
+  const baseY = o.baseY;
+  const c = Math.cos(yaw);
+  const s = Math.sin(yaw);
+  const at = (lx: number, lz: number): { x: number; z: number } => ({
+    x: o.x + lx * c - lz * s,
+    z: o.z + lx * s + lz * c,
+  });
+  // Rug first so the table legs read as standing on it.
+  if (o.rugMat) {
+    const rug = at(0, 0);
+    b.box(rug.x, baseY + 0.045, rug.z, w + 1.1, 0.02, d + 1.3, o.rugMat, yaw, {
+      noCollide: true,
+      castShadow: false,
+    });
+  }
+  // Table top (collidable, waist height).
+  const top = at(0, 0);
+  b.box(top.x, baseY + 0.95, top.z, w, 0.16, d, tableMat, yaw);
+  // Four corner legs.
+  for (const lx of [-w / 2 + 0.14, w / 2 - 0.14]) {
+    for (const lz of [-d / 2 + 0.12, d / 2 - 0.12]) {
+      const leg = at(lx, lz);
+      b.box(leg.x, baseY + 0.44, leg.z, 0.12, 0.86, 0.12, postMat, 0, {
+        noCollide: true,
+        castShadow: false,
+      });
+    }
+  }
+  // Awning: sloped cloth on two rear posts over the table.
+  for (const lx of [-w / 2 + 0.2, w / 2 - 0.2]) {
+    const post = at(lx, -d / 2 - 0.25);
+    b.box(post.x, baseY + 1.15, post.z, 0.11, 2.3, 0.11, postMat, 0, {
+      noCollide: true,
+      castShadow: false,
+    });
+  }
+  const awning = at(0, -d / 4);
+  b.box(awning.x, baseY + 2.42, awning.z, w + 0.7, 0.09, d + 1.5, o.awningMat ?? 'plasterOld', yaw, {
+    noCollide: true,
+    castShadow: false,
+    pitch: 0.14,
+  });
+  // A couple of goods boxes on the table.
+  if (o.goods) {
+    for (const [lx, lz, gw, gd] of [[-w * 0.22, 0.1, 0.5, 0.4], [w * 0.2, -0.15, 0.42, 0.34]] as Array<[number, number, number, number]>) {
+      const good = at(lx, lz);
+      b.box(good.x, baseY + 1.2, good.z, gw, 0.28, gd, 'woodDark', yaw + 0.2, {
+        noCollide: true,
+        castShadow: false,
+      });
+    }
+  }
+}
+
+export interface DrumClusterOpts {
+  /** Support surface under the drums. */
+  baseY: number;
+  count?: number;
+  uprightMat?: MatKey;
+  /** One drum stacked on the cluster when true. */
+  stack?: boolean;
+}
+
+/**
+ * True when an axis-aligned dressing footprint (hx/hz half extents, spanning
+ * yLow..yHigh) has no meaningful overlap with authored world content: visible
+ * or proxy geometry, destructible props and (optionally) parked vehicles.
+ * Used by the late street/POI density passes so decoration can never bury a
+ * chest, snag a doorway or interpenetrate a parked car. `margin` grows every
+ * solid by the same amount (metres).
+ */
+export function dressingSpotClear(
+  def: MapDef,
+  x: number,
+  z: number,
+  hx: number,
+  hz: number,
+  yLow: number,
+  yHigh: number,
+  opts?: { crates?: boolean; vehicles?: boolean; margin?: number },
+): boolean {
+  const m = opts?.margin ?? 0;
+  const overlapsY = (lo: number, hi: number): boolean => hi > yLow - m && lo < yHigh + m;
+  for (const g of def.geo) {
+    // A shape whose top is at/below the dressing support surface IS the floor
+    // the prop stands on (ground slab, road strip, paving, raised sidewalk)
+    // — not an obstacle. 26 cm covers the sidewalk table above nominal ground
+    // while still treating kerb lips and plinths as real obstacles.
+    const top = g.kind === 'box' ? g.y + g.sy / 2 : g.kind === 'cyl' ? g.y + g.h / 2 : g.y + g.r;
+    if (top <= yLow + 0.26) continue;
+    if (g.kind === 'box') {
+      const c = Math.abs(Math.cos(g.yaw));
+      const s = Math.abs(Math.sin(g.yaw));
+      const ghx = (g.sx * c + g.sz * s) / 2;
+      const ghz = (g.sx * s + g.sz * c) / 2;
+      if (Math.abs(x - g.x) < hx + ghx + m && Math.abs(z - g.z) < hz + ghz + m
+        && overlapsY(g.y - g.sy / 2, top)) return false;
+    } else {
+      const r = g.r;
+      const lo = g.kind === 'cyl' ? g.y - g.h / 2 : g.y - g.r;
+      if (Math.hypot(x - g.x, z - g.z) < hx + r + m && overlapsY(lo, top)) return false;
+    }
+  }
+  if (opts?.crates) {
+    for (const d of def.destructibles) {
+      const g = d.geo;
+      const radius = g.kind === 'box' ? Math.hypot(g.sx, g.sz) / 2 : g.r;
+      const lo = g.kind === 'box' ? g.y - g.sy / 2 : g.kind === 'cyl' ? g.y - g.h / 2 : g.y - g.r;
+      const hi = g.kind === 'box' ? g.y + g.sy / 2 : g.kind === 'cyl' ? g.y + g.h / 2 : g.y + g.r;
+      if (Math.hypot(x - g.x, z - g.z) < hx + radius + m && overlapsY(lo, hi)) return false;
+    }
+  }
+  // Chests are not props: a dressing piece in a chest column either deletes
+  // the chest at finish() or becomes the support the chest support-snap
+  // resolves onto (both break the loot placement guarantees). Keep a
+  // capsule-scale vertical exclusion around every authored chest.
+  for (const chest of def.chests) {
+    if (Math.abs(x - chest.x) < hx + 0.7 + m && Math.abs(z - chest.z) < hz + 0.7 + m
+      && yHigh > chest.y - 1.7 && yLow < chest.y + 1.3) return false;
+  }
+  if (opts?.vehicles) {
+    for (const v of def.vehicles) {
+      if (Math.abs(x - v.x) < hx + 3.4 + m && Math.abs(z - v.z) < hz + 3.4 + m
+        && overlapsY(v.y, v.y + 2.4)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Fuel/water drum cluster: upright cylinders spaced so equal-height tops
+ * never overlap radially, plus one deterministic stacked pair. All drums are
+ * collidable, crouch-height cover.
+ */
+export function addDrumCluster(b: WorldBuilder, x: number, z: number, o: DrumClusterOpts): void {
+  const count = o.count ?? 3;
+  const mat = o.uprightMat ?? 'rust';
+  const r = 0.32;
+  const h = 0.92;
+  const offsets: Array<[number, number]> = [[0, 0], [0.86, 0.12], [0.34, 0.84], [-0.72, 0.5], [0.1, -0.88]];
+  for (let i = 0; i < count && i < offsets.length; i++) {
+    const [ox, oz] = offsets[i]!;
+    b.cyl(x + ox, o.baseY + h / 2, z + oz, r, h, mat, { segments: 10 });
+  }
+  if (o.stack) {
+    // Stacked pair: the lower top plane is unique because nothing else that
+    // overlaps this footprint shares it (neighbours are offset 0.86+ away).
+    b.cyl(x + 1.72, o.baseY + h / 2, z - 0.2, r, h, mat, { segments: 10 });
+    b.cyl(x + 1.78, o.baseY + h + h / 2, z - 0.14, r, h, mat, { segments: 10, noCollide: true });
   }
 }
