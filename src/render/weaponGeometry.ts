@@ -223,12 +223,12 @@ export function makeGunMaterials(): GunMaterials {
   aluminum.roughnessMap = rough;
   aluminum.name = 'aluminum';
   const polymer = new THREE.MeshStandardMaterial({ color: 0x3d4147, roughness: 0.8, metalness: 0.06 });
-  polymer.normalMap = stipple;
-  polymer.normalScale.set(0.35, 0.35);
+  polymer.bumpMap = stipple;
+  polymer.bumpScale = 0.00018;
   polymer.name = 'polymer';
   const rubber = new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.94, metalness: 0.02 });
-  rubber.normalMap = stipple;
-  rubber.normalScale.set(0.5, 0.5);
+  rubber.bumpMap = stipple;
+  rubber.bumpScale = 0.00025;
   rubber.name = 'rubber';
   const hardware = new THREE.MeshStandardMaterial({ color: 0x666d75, roughness: 0.3, metalness: 0.92 });
   hardware.name = 'hardware';
@@ -292,7 +292,38 @@ function handguardVents(parent: THREE.Object3D, mat: THREE.Material, zFrom: numb
   }
 }
 
-/** Picatinny rail ridge running along the top of a part. */
+function openHandguard(parent: THREE.Object3D, mat: THREE.Material): void {
+  const side = new THREE.Shape();
+  side.moveTo(-0.64, -0.02);
+  side.lineTo(-0.34, -0.02);
+  side.lineTo(-0.34, 0.022);
+  side.lineTo(-0.64, 0.022);
+  side.closePath();
+  for (let i = 0; i < 7; i++) {
+    const z = -0.622 + i * 0.038;
+    const hole = new THREE.Path();
+    hole.moveTo(z, -0.008);
+    hole.lineTo(z, 0.008);
+    hole.lineTo(z + 0.025, 0.008);
+    hole.lineTo(z + 0.025, -0.008);
+    hole.closePath();
+    side.holes.push(hole);
+  }
+  const wall = new THREE.ExtrudeGeometry(side, {
+    depth: 0.003, bevelEnabled: true, bevelSize: 0.0006,
+    bevelThickness: 0.0006, bevelSegments: 1, steps: 1,
+  });
+  wall.rotateY(-Math.PI / 2);
+  for (const x of [-0.021, 0.024]) {
+    const mesh = new THREE.Mesh(wall, mat);
+    mesh.name = 'open-handguard-wall';
+    mesh.position.set(x, 0.026, 0);
+    parent.add(mesh);
+  }
+  box(parent, mat, 0.044, 0.004, 0.3, 0, 0.05, -0.49, 0.001);
+  box(parent, mat, 0.044, 0.004, 0.3, 0, 0.002, -0.49, 0.001);
+}
+
 function topRail(parent: THREE.Object3D, mat: THREE.Material, zFrom: number, zTo: number, y: number): void {
   const length = zFrom - zTo;
   box(parent, mat, 0.018, 0.007, length, 0, y, (zFrom + zTo) / 2, 0.0015);
@@ -357,26 +388,37 @@ function chargingDetail(parent: THREE.Object3D, mats: GunMaterials, x: number, y
   return handle;
 }
 
-/** Curved-look magazine: stacked slight-angle segments descending from a well. */
 function boxMagazine(parent: THREE.Object3D, mats: GunMaterials, x: number, yTop: number, z: number, w: number, frontAngle: number, length = 0.16): { group: THREE.Group; tip: number } {
   const mag = new THREE.Group();
   mag.position.set(x, yTop, z);
-  const segments = 3;
-  const segLen = length / segments;
-  let angle = 0;
-  for (let i = 0; i < segments; i++) {
-    angle += frontAngle / segments;
-    const seg = box(
-      mag,
-      i === 0 ? mats.aluminum : mats.polymer,
-      w, segLen + 0.004, 0.052,
-      0, -(segLen * (i + 0.5)), Math.sin(angle) * segLen * (i + 0.5) * -0.5,
-      0.006,
-    );
-    seg.rotation.x = angle * (i + 1) * 0.35;
+  const bend = Math.sin(frontAngle) * length * -0.35;
+  const profile = new THREE.Shape();
+  profile.moveTo(-0.024, 0);
+  profile.lineTo(0.024, 0);
+  profile.bezierCurveTo(0.025, -length * 0.35, 0.025 + bend * 0.4, -length * 0.7, 0.025 + bend, -length);
+  profile.lineTo(-0.025 + bend, -length);
+  profile.bezierCurveTo(-0.025 + bend * 0.4, -length * 0.7, -0.025, -length * 0.35, -0.024, 0);
+  const geometry = new THREE.ExtrudeGeometry(profile, {
+    depth: w - 0.004, bevelEnabled: true, bevelSegments: 2,
+    steps: 1, bevelSize: 0.002, bevelThickness: 0.002, curveSegments: 12,
+  });
+  geometry.translate(0, 0, -(w - 0.004) / 2);
+  geometry.rotateY(-Math.PI / 2);
+  const body = new THREE.Mesh(geometry, mats.polymer);
+  body.name = 'magazine-body';
+  mag.add(body);
+  box(mag, mats.rubber, w + 0.004, 0.008, 0.058, 0, -length - 0.003, bend, 0.003);
+  for (const side of [-1, 1]) {
+    for (const zOffset of [-0.012, 0.012]) {
+      const points: THREE.Vector3[] = [];
+      for (let i = 0; i <= 8; i++) {
+        const t = 0.15 + i / 8 * 0.72;
+        points.push(new THREE.Vector3(side * (w / 2 + 0.0005), -length * t, zOffset + bend * t * t));
+      }
+      const rib = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 10, 0.0011, 4, false), mats.aluminum);
+      mag.add(rib);
+    }
   }
-  // Baseplate
-  box(mag, mats.rubber, w + 0.004, 0.012, 0.058, 0, -length - 0.004, Math.sin(frontAngle) * length * -0.35, 0.004);
   parent.add(mag);
   return { group: mag, tip: yTop - length - 0.012 };
 }
@@ -421,8 +463,7 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
   }
   ring(g, mats.steel, 0.0165, 0.004, 0, 0.024, -0.655);
   // Handguard with vents + top rail
-  box(g, mats.aluminum, 0.048, 0.052, 0.3, 0, 0.026, -0.49, 0.008);
-  handguardVents(g, mats.polymer, -0.37, -0.62, 0.026, 0.025);
+  openHandguard(g, mats.aluminum);
   topRail(g, mats.aluminum, -0.34, -0.64, 0.055);
   topRail(g, mats.aluminum, -0.06, -0.35, 0.055);
   // Front sight block on the handguard
@@ -467,17 +508,21 @@ function buildPistol(mats: GunMaterials): ProceduralWeapon {
   pistolGrip(g, mats, 0, -0.01, -0.045);
   triggerGroup(g, mats, 0.0, -0.075);
   // Slide: steel with serrations + ejection port
-  const slide = box(g, mats.steel, 0.032, 0.03, 0.21, 0, 0.033, -0.13, 0.005);
+  const slide = new THREE.Group();
+  slide.position.set(0, 0.033, -0.13);
   slide.name = 'bolt';
+  g.add(slide);
+  box(slide, mats.steel, 0.032, 0.03, 0.21, 0, 0, 0, 0.005);
   for (let i = 0; i < 6; i++) {
-    box(g, mats.steel, 0.034, 0.026, 0.003, 0, 0.033, -0.045 - i * 0.009, 0.0008);
+    box(slide, mats.steel, 0.034, 0.026, 0.003, 0, 0, 0.085 - i * 0.009, 0.0008);
   }
-  box(g, mats.polymer, 0.034, 0.012, 0.045, 0, 0.033, -0.175, 0.002);
+  box(slide, mats.polymer, 0.034, 0.012, 0.045, 0, 0, -0.045, 0.002);
   // Barrel visible at the muzzle + guide rod
   cyl(g, mats.steel, 0.009, 0.009, 0.014, 0, 0.031, -0.238, 14);
   cyl(g, mats.hardware, 0.005, 0.005, 0.012, 0, 0.006, -0.166, 10);
   // Magazine inside the grip (baseplate visible)
-  const mag = boxMagazine(g, mats, 0, -0.075, -0.045, 0.028, 0.12, 0.09);
+  const mag = boxMagazine(g, mats, 0, -0.025, -0.041, 0.026, 0, 0.105);
+  mag.group.rotation.x = -0.32;
   mag.group.name = 'mag';
   // Sights
   ironSights(g, mats, 0.048, -0.225, -0.035);
@@ -517,7 +562,7 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
   pistolGrip(g, mats, 0, 0.0, -0.1);
   triggerGroup(g, mats, 0.006, -0.13);
   // Long straight mag
-  const mag = boxMagazine(g, mats, 0, -0.026, -0.19, 0.032, 0.16, 0.15);
+  const mag = boxMagazine(g, mats, 0, -0.026, -0.19, 0.032, 0, 0.15);
   mag.group.name = 'mag';
   const bolt = chargingDetail(g, mats, 0.026, 0.04, -0.085);
   bolt.name = 'bolt';
@@ -534,7 +579,23 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
 /** Shotgun anatomy (canonical 1.0 m): tube magazine, pump, bead sight. */
 function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   const g = new THREE.Group();
-  receiver(g, mats, 0.044, 0.056, -0.36, -0.1, 0.046);
+  box(g, mats.aluminum, 0.044, 0.032, 0.26, 0, 0.034, -0.23, 0.005);
+  for (const x of [-0.018, 0.018]) box(g, mats.aluminum, 0.008, 0.026, 0.26, x, 0.006, -0.23, 0.002);
+  box(g, mats.steel, 0.028, 0.006, 0.082, 0, -0.005, -0.31, 0.001);
+  box(g, mats.aluminum, 0.03, 0.02, 0.056, 0, 0.001, -0.128, 0.003);
+  const loadingPort = new THREE.Object3D();
+  loadingPort.name = 'loading-port';
+  loadingPort.position.set(0, -0.012, -0.226);
+  g.add(loadingPort);
+  const shell = new THREE.Group();
+  shell.name = 'reload-shell';
+  const hull = new THREE.MeshStandardMaterial({ color: 0x8f3028, roughness: 0.52, metalness: 0.08 });
+  const brass = new THREE.MeshStandardMaterial({ color: 0xb39048, roughness: 0.3, metalness: 0.82 });
+  cyl(shell, hull, 0.009, 0.009, 0.052, 0, 0, -0.006, 16);
+  cyl(shell, brass, 0.0095, 0.0095, 0.012, 0, 0, 0.026, 16);
+  ring(shell, brass, 0.0092, 0.001, 0, 0, 0.032);
+  shell.visible = false;
+  g.add(shell);
   // Barrel + underbarrel tube magazine
   cyl(g, mats.steel, 0.011, 0.012, 0.56, 0, 0.03, -0.64, 14);
   cyl(g, mats.aluminum, 0.013, 0.013, 0.46, 0, 0.002, -0.58, 12);

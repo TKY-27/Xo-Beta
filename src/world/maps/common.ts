@@ -4,6 +4,7 @@
  */
 
 import { planStairs, WorldBuilder } from '../builder';
+import { sampleTerrainHeightfield } from '../terrainMesh';
 import { ROCK_CLEARANCE_RADIUS, type MapDef, type MatKey, type TerrainCutout } from '../types';
 import { Rng } from '../../core/rng';
 
@@ -77,6 +78,24 @@ const coverCache = new Map<string, Array<{ x: number; z: number; yaw: number }>>
 
 export function hardenExposedFlanks(b: WorldBuilder, opts: { mat: MatKey; maxProps: number }): void {
   const def = b.def;
+  const heightAt = def.terrainHeight ?? ((x: number, z: number): number => (
+    def.heightfield ? sampleTerrainHeightfield(def.heightfield, def.size, x, z) : 0
+  ));
+  const addCover = (x: number, z: number, yaw: number): void => {
+    const sx = yaw === 0 ? 1.6 : 0.55;
+    const sz = yaw === 0 ? 0.55 : 1.6;
+    let lowest = Infinity;
+    let highest = -Infinity;
+    for (let iz = 0; iz <= 8; iz++) {
+      for (let ix = 0; ix <= 8; ix++) {
+        const height = heightAt(x - sx / 2 + sx * ix / 8, z - sz / 2 + sz * iz / 8);
+        lowest = Math.min(lowest, height);
+        highest = Math.max(highest, height);
+      }
+    }
+    const top = highest + 0.56;
+    b.box(x, (lowest + top) / 2, z, sx, top - lowest, sz, opts.mat, 0, { hint: 'stone' });
+  };
   // The analysis is deterministic per map build; cache it so repeated
   // loadMap calls (tests, replicas, reconnects) replay the placements
   // instantly instead of re-running the exposure sweep.
@@ -84,8 +103,7 @@ export function hardenExposedFlanks(b: WorldBuilder, opts: { mat: MatKey; maxPro
   const cached = coverCache.get(cacheKey);
   if (cached) {
     for (const placement of cached) {
-      b.box(placement.x, 0.28, placement.z, placement.yaw === 0 ? 1.6 : 0.55, 0.56,
-        placement.yaw === 0 ? 0.55 : 1.6, opts.mat, 0, { hint: 'stone' });
+      addCover(placement.x, placement.z, placement.yaw);
     }
     return;
   }
@@ -147,9 +165,7 @@ export function hardenExposedFlanks(b: WorldBuilder, opts: { mat: MatKey; maxPro
       // Alternate orientation for variety; 0.55 m tall crouch cover that bots
       // can also step over (below the stepHeight nav gate).
       const yaw = added.length % 2 === 0 ? 0 : Math.PI / 2;
-      const sx = yaw === 0 ? 1.6 : 0.55;
-      const sz = yaw === 0 ? 0.55 : 1.6;
-      b.box(cell.x, 0.28, cell.z, sx, 0.56, sz, opts.mat, 0, { hint: 'stone' });
+      addCover(cell.x, cell.z, yaw);
       added.push({ x: cell.x, z: cell.z, yaw });
       if (added.length === opts.maxProps) coverCache.set(cacheKey, added.slice());
     }

@@ -22,6 +22,50 @@ export interface WeaponModel {
   /** CYCLE 35: first-person hand anchors (weapon-local metres). */
   gripR: THREE.Vector3;
   gripL: THREE.Vector3;
+  reloadSockets?: WeaponReloadSockets;
+}
+
+export interface WeaponReloadSockets {
+  seated: THREE.Object3D;
+  withdrawn: THREE.Object3D;
+  stow: THREE.Object3D;
+  spare: THREE.Object3D;
+  approach: THREE.Object3D;
+  magazineContact: THREE.Object3D;
+  actionContact: THREE.Object3D;
+  port: THREE.Object3D;
+  shellContact: THREE.Object3D;
+}
+
+export function createWeaponReloadSockets(model: WeaponModel, id: WeaponId): WeaponReloadSockets {
+  const anchor = (name: string, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0): THREE.Object3D => {
+    const socket = new THREE.Object3D();
+    socket.name = `reload-${name}`;
+    socket.position.set(x, y, z);
+    socket.rotation.set(rx, ry, rz);
+    model.group.add(socket);
+    return socket;
+  };
+  const seated = anchor('seated', 0, 0, 0);
+  if (model.mag) {
+    seated.position.copy(model.mag.position);
+    seated.quaternion.copy(model.mag.quaternion);
+  }
+  const withdrawn = anchor('withdrawn', seated.position.x, seated.position.y - (id === 'pistol' ? 0.14 : 0.2), seated.position.z + (id === 'ar' ? 0.065 : 0), id === 'ar' ? -0.38 : 0);
+  const stow = anchor('stow', -0.19, -0.85, 0.02, -0.25, 0, -0.12);
+  const spare = anchor('spare', -0.19, -0.85, 0.02, -0.25, 0, -0.12);
+  const approach = anchor('approach', -0.015, seated.position.y - (id === 'pistol' ? 0.13 : 0.18), seated.position.z + (id === 'ar' ? 0.065 : 0.01), id === 'ar' ? -0.38 : 0);
+  if (id === 'pistol') {
+    withdrawn.position.set(0, -0.14, 0).applyQuaternion(seated.quaternion).add(seated.position);
+    withdrawn.quaternion.copy(seated.quaternion);
+    approach.position.copy(withdrawn.position);
+    approach.quaternion.copy(seated.quaternion);
+  }
+  const magazineContact = anchor('magazine-contact', -0.04, id === 'sniper' || id === 'pistol' ? -0.06 : -0.1, 0.016, 0.25, 0.2, Math.PI / 2);
+  const actionContact = anchor('action-contact', id === 'sniper' ? 0.044 : -0.025, 0.015, 0.024, 0.2, -0.15, -Math.PI / 2);
+  const port = anchor('port', 0, -0.022, -0.226, -0.15);
+  const shellContact = anchor('shell-contact', -0.025, -0.046, 0.028, Math.PI, 0, 0.2);
+  return { seated, withdrawn, stow, spare, approach, magazineContact, actionContact, port, shellContact };
 }
 
 const ALL_RARITIES = RARITIES;

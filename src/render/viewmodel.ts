@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { WEAPONS, RARITY_MODS, type Rarity, type WeaponId } from '../core/balance';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
-import { WeaponModelFactory, type WeaponModel } from './weaponModels';
+import { WeaponModelFactory, createWeaponReloadSockets, type WeaponModel, type WeaponReloadSockets } from './weaponModels';
 import { ArmSolver, createFistRig, createHandRig, type FistRig, type HandRig, type SupportStyle } from './hands';
 
 function smooth(t: number): number {
@@ -19,6 +19,254 @@ function smooth(t: number): number {
 const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.3);
 const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
 const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
+
+type PresentationInput = Readonly<{
+  crouched: boolean;
+  adsAmount: number;
+  reloadPhase: number;
+  reloadCompleted: boolean;
+  empty: boolean;
+  boltPhase: number;
+  reloadShells: number;
+}>;
+
+function boltDuration(weaponId: WeaponId): number {
+  const def = WEAPONS[weaponId];
+  if (def.fireMode === 'bolt') return Math.max(0.9, 60 / def.rpm - 0.35);
+  if (def.fireMode === 'pump') return Math.max(0.55, 60 / def.rpm - 0.3);
+  return 0;
+}
+
+type ReloadOwner = 'seated' | 'old-hand' | 'stowed' | 'new-hand' | 'inserting' | 'ready';
+
+type ReloadTrack = Readonly<{
+  contact: number; extracted: number; stowed: number; fetched: number;
+  aligned: number; seated: number; released: number; action: number;
+  pitch: number; roll: number; drop: number;
+}>;
+
+const RELOAD_TRACKS: Record<WeaponId, ReloadTrack> = {
+  pistol: { contact: 0.13, extracted: 0.24, stowed: 0.36, fetched: 0.44, aligned: 0.57, seated: 0.69, released: 0.75, action: 0.8, pitch: -0.12, roll: 0.42, drop: 0.014 },
+  smg: { contact: 0.12, extracted: 0.23, stowed: 0.35, fetched: 0.43, aligned: 0.58, seated: 0.72, released: 0.78, action: 0.82, pitch: 0.08, roll: 0.3, drop: 0.024 },
+  ar: { contact: 0.16, extracted: 0.29, stowed: 0.41, fetched: 0.49, aligned: 0.63, seated: 0.77, released: 0.82, action: 0.86, pitch: 0.11, roll: 0.36, drop: 0.018 },
+  sniper: { contact: 0.18, extracted: 0.31, stowed: 0.43, fetched: 0.51, aligned: 0.64, seated: 0.76, released: 0.8, action: 0.83, pitch: 0.06, roll: 0.27, drop: 0.018 },
+  shotgun: { contact: 0.1, extracted: 0.2, stowed: 0.3, fetched: 0.4, aligned: 0.5, seated: 0.84, released: 0.89, action: 0.91, pitch: -0.06, roll: 0.65, drop: 0.008 },
+};
+
+function blendPose(out: THREE.Object3D, a: THREE.Object3D, b: THREE.Object3D, t: number): void {
+  const weight = smooth(t);
+  out.position.lerpVectors(a.position, b.position, weight);
+  if (out === b) out.quaternion.slerp(a.quaternion, 1 - weight);
+  else out.quaternion.slerpQuaternions(a.quaternion, b.quaternion, weight);
+}
+
+class ReloadPresentation {
+  readonly sockets: WeaponReloadSockets;
+  readonly leftRest = new THREE.Object3D();
+  readonly rightRest = new THREE.Object3D();
+  readonly boltRest = new THREE.Object3D();
+  readonly contact = new THREE.Object3D();
+  readonly shellInserted = new THREE.Object3D();
+  readonly shellHandInserted = new THREE.Object3D();
+  readonly shell: THREE.Object3D | null;
+  private oldMagazine: THREE.Object3D | null;
+  private newMagazine: THREE.Object3D | null;
+  private owner: ReloadOwner = 'seated';
+  private active = false;
+  private readonly thumb: THREE.Object3D | undefined;
+  private readonly actionRotation = new THREE.Quaternion();
+  private readonly actionEuler = new THREE.Euler();
+
+  constructor(private readonly model: WeaponModel, readonly id: WeaponId, rig: HandRig) {
+    this.sockets = model.reloadSockets ?? createWeaponReloadSockets(model, id);
+    model.reloadSockets = this.sockets;
+    this.oldMagazine = model.mag;
+    this.newMagazine = model.mag?.clone(true) ?? null;
+    if (this.newMagazine) {
+      this.newMagazine.name = 'reload-spare-magazine';
+      this.newMagazine.visible = false;
+      model.group.add(this.newMagazine);
+    }
+    this.shell = model.group.getObjectByName('reload-shell') ?? null;
+    this.thumb = rig.left.getObjectByName('thumb-cmc');
+    blendPose(this.leftRest, rig.left, rig.left, 0);
+    blendPose(this.rightRest, rig.right, rig.right, 0);
+    if (model.bolt) blendPose(this.boltRest, model.bolt, model.bolt, 0);
+    blendPose(this.shellInserted, this.sockets.port, this.sockets.port, 0);
+    this.shellInserted.position.set(0, 0.002, -0.385);
+    this.shellInserted.rotation.set(0, 0, 0);
+    blendPose(this.shellHandInserted, this.sockets.port, this.sockets.port, 0);
+    this.shellHandInserted.position.z -= 0.025;
+  }
+
+  reset(completed = false): void {
+    if (this.oldMagazine && this.newMagazine) {
+      if (completed && this.id !== 'shotgun') {
+        const previous = this.oldMagazine;
+        this.oldMagazine = this.newMagazine;
+        this.newMagazine = previous;
+      }
+      blendPose(this.oldMagazine, this.sockets.seated, this.sockets.seated, 0);
+      this.oldMagazine.visible = true;
+      this.oldMagazine.name = 'mag';
+      this.newMagazine.visible = false;
+      blendPose(this.newMagazine, this.sockets.spare, this.sockets.spare, 0);
+      this.newMagazine.name = 'reload-spare-magazine';
+      this.model.mag = this.oldMagazine;
+    }
+    if (this.model.bolt) blendPose(this.model.bolt, this.boltRest, this.boltRest, 0);
+    if (this.shell) this.shell.visible = false;
+    this.owner = 'seated';
+    this.active = false;
+    this.model.group.userData.reloadOwner = this.owner;
+  }
+
+  private grip(out: THREE.Object3D, item: THREE.Object3D, socket: THREE.Object3D): void {
+    out.position.copy(socket.position).applyQuaternion(item.quaternion).add(item.position);
+    out.quaternion.copy(item.quaternion).multiply(socket.quaternion);
+  }
+
+  fingerPhase(phase: number): number {
+    const track = RELOAD_TRACKS[this.id];
+    if (phase < 0) return -1;
+    if (phase < track.contact) return phase / track.contact * 0.3;
+    if (phase < track.released) return 0.5;
+    return 0.85 + (phase - track.released) / (1 - track.released) * 0.15;
+  }
+
+  pose(rig: HandRig, phase: number, empty: boolean, shells: number): void {
+    if (phase < 0) {
+      if (this.active) this.reset();
+      return;
+    }
+    this.active = true;
+    if (this.id === 'shotgun') this.poseShell(rig, phase, empty, shells);
+    else this.poseMagazine(rig, phase, empty);
+    this.model.group.userData.reloadOwner = this.owner;
+  }
+
+  private poseMagazine(rig: HandRig, phase: number, empty: boolean): void {
+    const old = this.oldMagazine;
+    const fresh = this.newMagazine;
+    if (!old || !fresh) return;
+    const s = this.sockets;
+    const t = RELOAD_TRACKS[this.id];
+    blendPose(rig.right, this.rightRest, this.rightRest, 0);
+    this.poseAction(rig, phase, empty);
+    if (phase < t.contact) {
+      this.owner = 'seated';
+      blendPose(old, s.seated, s.seated, 0);
+      this.grip(this.contact, old, s.magazineContact);
+      blendPose(rig.left, this.leftRest, this.contact, phase / t.contact);
+    } else if (phase < t.stowed) {
+      this.owner = 'old-hand';
+      if (phase < t.extracted) blendPose(old, s.seated, s.withdrawn, (phase - t.contact) / (t.extracted - t.contact));
+      else blendPose(old, s.withdrawn, s.stow, (phase - t.extracted) / (t.stowed - t.extracted));
+      this.grip(rig.left, old, s.magazineContact);
+    } else if (phase < t.fetched) {
+      this.owner = 'stowed';
+      blendPose(old, s.stow, s.stow, 0);
+      this.grip(this.contact, s.spare, s.magazineContact);
+      blendPose(rig.left, this.contact, this.contact, 0);
+    } else if (phase < t.seated) {
+      this.owner = phase < t.aligned ? 'new-hand' : 'inserting';
+      if (phase < t.aligned) blendPose(fresh, s.spare, s.approach, (phase - t.fetched) / (t.aligned - t.fetched));
+      else blendPose(fresh, s.approach, s.seated, (phase - t.aligned) / (t.seated - t.aligned));
+      this.grip(rig.left, fresh, s.magazineContact);
+    } else {
+      this.owner = 'ready';
+      blendPose(fresh, s.seated, s.seated, 0);
+      this.grip(this.contact, fresh, s.magazineContact);
+      if (this.id !== 'sniper' && empty) {
+        const action = this.model.bolt;
+        if (action) {
+          this.grip(this.contact, action, s.actionContact);
+          this.contact.position.x = -Math.abs(this.contact.position.x);
+          if (phase < t.action) {
+            this.grip(rig.left, fresh, s.magazineContact);
+            blendPose(rig.left, rig.left, this.contact, (phase - t.seated) / (t.action - t.seated));
+          } else if (phase < 0.94) blendPose(rig.left, this.contact, this.contact, 0);
+          else blendPose(rig.left, this.contact, this.leftRest, (phase - 0.94) / 0.06);
+        }
+      } else blendPose(rig.left, this.contact, this.leftRest, (phase - t.seated) / (t.released - t.seated));
+    }
+    old.visible = phase < t.stowed;
+    fresh.visible = phase >= t.fetched;
+    if (phase >= t.stowed) blendPose(old, s.stow, s.stow, 0);
+  }
+
+  private poseAction(rig: HandRig, phase: number, empty: boolean): void {
+    const bolt = this.model.bolt;
+    if (!bolt) return;
+    const t = RELOAD_TRACKS[this.id];
+    blendPose(bolt, this.boltRest, this.boltRest, 0);
+    if (!empty) return;
+    if (this.id === 'pistol') {
+      bolt.position.z += 0.035 * (1 - smooth((phase - 0.9) / 0.035));
+      return;
+    }
+    const p = THREE.MathUtils.clamp((phase - t.action) / (0.96 - t.action), 0, 1);
+    const pull = p < 0.5 ? smooth(p * 2) : 1 - smooth((p - 0.5) * 2);
+    bolt.position.z += pull * (this.id === 'sniper' ? 0.065 : 0.04);
+    if (this.id === 'sniper') {
+      const lift = smooth(p / 0.2) * (1 - smooth((p - 0.8) / 0.2));
+      this.actionRotation.setFromEuler(this.actionEuler.set(0, 0, -lift * 0.8));
+      bolt.quaternion.multiply(this.actionRotation);
+      this.grip(this.contact, bolt, this.sockets.actionContact);
+      if (phase < t.action) blendPose(rig.right, this.rightRest, this.contact, (phase - t.released) / (t.action - t.released));
+      else if (phase < 0.96) blendPose(rig.right, this.contact, this.contact, 0);
+      else blendPose(rig.right, this.contact, this.rightRest, (phase - 0.96) / 0.04);
+    } else if (phase >= t.action && phase < 0.94) {
+      this.grip(rig.left, bolt, this.sockets.actionContact);
+      rig.left.position.x = -Math.abs(rig.left.position.x);
+    }
+  }
+
+  private poseShell(rig: HandRig, phase: number, empty: boolean, shells: number): void {
+    const shell = this.shell;
+    if (!shell) return;
+    const s = this.sockets;
+    const count = Math.max(1, Math.min(WEAPONS.shotgun.magSize, shells));
+    const progress = Math.round(THREE.MathUtils.clamp((phase - 0.1) / 0.72, 0, 0.999999) * count * 1e12) / 1e12;
+    const cycle = progress - Math.floor(progress);
+    blendPose(rig.right, this.rightRest, this.rightRest, 0);
+    if (phase < 0.1) {
+      this.grip(this.contact, s.spare, s.shellContact);
+      blendPose(rig.left, this.leftRest, this.contact, phase / 0.1);
+      shell.visible = false;
+    } else if (phase < 0.82) {
+      this.owner = cycle < 0.55 ? 'new-hand' : 'inserting';
+      if (cycle < 0.55) blendPose(shell, s.spare, s.port, cycle / 0.55);
+      else blendPose(shell, s.port, this.shellInserted, (cycle - 0.55) / 0.25);
+      if (cycle < 0.55) this.grip(rig.left, shell, s.shellContact);
+      else if (cycle < 0.8) {
+        blendPose(this.contact, s.port, this.shellHandInserted, (cycle - 0.55) / 0.25);
+        this.grip(rig.left, this.contact, s.shellContact);
+      } else {
+        this.grip(this.contact, this.shellHandInserted, s.shellContact);
+        this.grip(rig.left, s.spare, s.shellContact);
+        blendPose(rig.left, this.contact, rig.left, (cycle - 0.8) / 0.2);
+      }
+      shell.visible = cycle < 0.8;
+      if (this.thumb) {
+        const push = smooth((cycle - 0.55) / 0.1) * (1 - smooth((cycle - 0.75) / 0.1));
+        this.thumb.rotation.y -= push * 0.45;
+        this.thumb.rotation.z += push * 0.3;
+      }
+    } else {
+      this.owner = 'ready';
+      shell.visible = false;
+      this.grip(this.contact, s.spare, s.shellContact);
+      blendPose(rig.left, this.contact, this.leftRest, (phase - 0.82) / 0.07);
+      if (empty && this.model.bolt) {
+        const p = (phase - 0.89) / 0.11;
+        const pump = p <= 0 ? 0 : Math.sin(Math.min(1, p) * Math.PI) * 0.085;
+        this.model.bolt.position.z = this.boltRest.position.z + pump;
+        rig.left.position.z += pump;
+      }
+    }
+  }
+}
 
 export class ViewModel {
   /**
@@ -36,6 +284,9 @@ export class ViewModel {
   private models = new Map<string, WeaponModel>();
   /** CYCLE 35: hands rig attached inside each weapon model clone. */
   private rigs = new Map<string, HandRig>();
+  private reloads = new Map<string, ReloadPresentation>();
+  private lastAmmoInMag = 0;
+  private presentReloadShells = 1;
   /** CYCLE 36 (user pass): connected shoulder→elbow→wrist arm chains — the
    * hands are the END of the character's arms, never floating mittens. */
   readonly armSolver: ArmSolver;
@@ -77,61 +328,53 @@ export class ViewModel {
   private inspectT = -1;
   private static readonly INSPECT_DURATION = 2.2;
 
-  // CYCLE 48: presentation-only combat timelines for the ONLINE LOCAL player.
-  // Replica ActorViews deliberately carry no combat runtime (no wpn timers —
-  // they are host authority and absent from GameStateView), so updateView()
-  // used to hardcode reload/bolt phases to -1/0 and the local hands never
-  // animated. The guest cannot reconstruct the authoritative timeline, but the
-  // fire/reload presentation events it already consumes (kick/muzzle,
-  // reloadStarted) are enough to run the SAME choreography curves
-  // approximately: notify*() seeds a local stopwatch, updateView() advances it
-  // and mirrors update()'s math. Remote players never reach updateView, so
-  // the documented read-only replica contract holds.
+  private offlineReloadRemaining = 0;
   private presentReloadElapsed = -1;
   private presentReloadTotal = 0;
   private presentReloadEmpty = false;
   private presentBoltElapsed = -1;
-  private presentBoltTotal = 0.9;
-  /** Presentation bolt/pump travel duration — update() animates both modes
-   * over 0.9 s regardless of the combat runtime's exact boltTimer. */
-  private static readonly BOLT_PRESENT_SECONDS = 0.9;
+  private presentBoltTotal = 0;
 
   /** Seed the bolt/pump presentation timeline for the weapon just fired.
    * Called from the online fire handlers next to kick()/muzzlePulse(); no-op
    * for semi/auto weapons (their slide/recoil springs already run). */
   notifyShotFired(weaponId: WeaponId): void {
-    const def = WEAPONS[weaponId];
-    if (!def || (def.fireMode !== 'bolt' && def.fireMode !== 'pump')) return;
+    if (weaponId !== this.currentId || !this.group.visible) return;
+    const duration = boltDuration(weaponId);
+    if (duration <= 0) return;
     this.presentBoltElapsed = 0;
-    this.presentBoltTotal = ViewModel.BOLT_PRESENT_SECONDS;
+    this.presentBoltTotal = duration;
   }
 
   /** Seed the reload presentation timeline from the online reloadStarted
    * event. Duration mirrors the combat runtime's formula (WEAPONS def ×
    * rarity reload modifier) so the sweep lands with the authoritative refill. */
   notifyReloadStarted(weaponId: WeaponId, rarity: Rarity, empty: boolean): void {
+    if (weaponId !== this.currentId || !this.group.visible) return;
     const def = WEAPONS[weaponId];
     if (!def) return;
     this.presentReloadElapsed = 0;
     this.presentReloadTotal = (empty ? def.reloadEmpty : def.reloadTactical)
       * RARITY_MODS[rarity].reloadMult;
     this.presentReloadEmpty = empty;
+    this.presentReloadShells = Math.min(def.magSize, Math.max(1, empty ? def.magSize : def.magSize - this.lastAmmoInMag));
   }
 
-  /** Advance and retire the presentation timelines. Returns the reload phase
-   * (0..1, or -1 when inactive) and the bolt anim amplitude (0..1). */
-  private advancePresentationTimelines(dt: number): { reloadPhase: number; boltAnim: number; reloadingEmpty: boolean } {
+  private advancePresentationTimelines(dt: number): Pick<PresentationInput, 'reloadPhase' | 'reloadCompleted' | 'boltPhase' | 'empty' | 'reloadShells'> {
     let reloadPhase = -1;
-    let boltAnim = 0;
-    let reloadingEmpty = false;
+    let reloadCompleted = false;
+    let boltPhase = -1;
+    let empty = false;
+    const reloadShells = this.presentReloadShells;
     if (this.presentReloadElapsed >= 0) {
       this.presentReloadElapsed += dt;
       if (this.presentReloadElapsed >= this.presentReloadTotal) {
+        reloadCompleted = true;
         this.presentReloadElapsed = -1;
         this.presentReloadTotal = 0;
       } else {
         reloadPhase = this.presentReloadElapsed / this.presentReloadTotal;
-        reloadingEmpty = this.presentReloadEmpty;
+        empty = this.presentReloadEmpty;
       }
     }
     if (this.presentBoltElapsed >= 0) {
@@ -139,17 +382,19 @@ export class ViewModel {
       if (this.presentBoltElapsed >= this.presentBoltTotal) {
         this.presentBoltElapsed = -1;
       } else {
-        boltAnim = Math.sin((1 - this.presentBoltElapsed / this.presentBoltTotal) * Math.PI);
+        boltPhase = this.presentBoltElapsed / this.presentBoltTotal;
       }
     }
-    return { reloadPhase, boltAnim, reloadingEmpty };
+    return { reloadPhase, reloadCompleted, boltPhase, empty, reloadShells };
   }
 
-  /** Cancel any running presentation timelines (weapon swap, death, hide). */
   private clearPresentationTimelines(): void {
+    this.offlineReloadRemaining = 0;
     this.presentReloadElapsed = -1;
     this.presentReloadTotal = 0;
+    this.presentReloadEmpty = false;
     this.presentBoltElapsed = -1;
+    this.presentBoltTotal = 0;
   }
 
   /** Test/QA probe: active reload phase of the presentation timeline. */
@@ -297,6 +542,12 @@ export class ViewModel {
         m.group.add(handGroup);
       }
       this.rigs.set(key, rig);
+      rig.pose({
+        reloadPhase: -1, supportStyle: id === 'pistol' ? 'over' : id === 'smg' ? 'side' : id === 'shotgun' ? 'pump' : 'under',
+        magLocal: m.mag?.position ?? null, pumpOffset: 0, pumpHand: id === 'shotgun',
+        ads: 0, boltPhase: -1, boltLocal: null,
+      });
+      this.reloads.set(key, new ReloadPresentation(m, id, rig));
       m.group.visible = false;
       this.models.set(key, m);
       this.pivot.add(m.group);
@@ -314,15 +565,33 @@ export class ViewModel {
       this.fistRig.group.visible = unarmed;
     }
     if (this.currentKey === key) return;
+    this.resetPresentation();
     if (this.currentModel) this.currentModel.group.visible = false;
     this.currentId = id;
     this.currentKey = key;
     this.currentModel = id ? this.modelFor(id, rarity) : null;
     if (this.currentModel) this.currentModel.group.visible = true;
-    // A swap cancels the in-flight reload/bolt presentation timelines — the
-    // old weapon's choreography must not bleed onto the new model.
-    this.clearPresentationTimelines();
+    this.restoreMovableParts();
     this.swapT = 0.32;
+  }
+
+  private restoreMovableParts(): void {
+    if (this.currentKey) this.reloads.get(this.currentKey)?.reset();
+  }
+
+  private resetPresentation(): void {
+    this.clearPresentationTimelines();
+    this.slideT = 0;
+    this.reloadT = 0;
+    this.swapT = 0;
+    this.punchT = 0;
+    this.inspectT = -1;
+    this.recoilZ = 0;
+    this.recoilPitch = 0;
+    this.recoilRoll = 0;
+    this.adsSmooth = 0;
+    this.sprintBlend = 0;
+    this.restoreMovableParts();
   }
 
   dispose(): void {
@@ -338,6 +607,8 @@ export class ViewModel {
     this.currentKey = null;
     this.currentModel = null;
     this.models.clear();
+    this.reloads.clear();
+    this.rigs.clear();
     this.group.clear();
   }
 
@@ -360,11 +631,36 @@ export class ViewModel {
 
   /** Per-frame presentation update driven by actor state. */
   update(actor: Actor | null, dt: number, lookDx: number, lookDy: number, movingSpeed: number): void {
+    if (!actor || !actor.alive) {
+      this.evaluate(null, dt, lookDx, lookDy, movingSpeed);
+      return;
+    }
+    const selected = actor.inv.selectedWeapon;
+    this.setWeapon(selected?.weaponId ?? null, selected?.rarity ?? 'common');
+    const total = selected ? boltDuration(selected.weaponId) : 0;
+    const reloadCompleted = actor.wpn.reloadTimer <= 0 && this.offlineReloadRemaining > 0
+      && this.offlineReloadRemaining <= Math.max(0, dt) + 1e-9;
+    this.offlineReloadRemaining = actor.wpn.reloadTimer;
+    this.evaluate({
+      crouched: actor.crouched,
+      adsAmount: actor.wpn.adsAmount,
+      reloadPhase: actor.wpn.reloadTimer > 0 && actor.wpn.reloadTotal > 0
+        ? THREE.MathUtils.clamp(1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal, 0, 1) : -1,
+      reloadCompleted,
+      empty: actor.wpn.reloadingEmpty,
+      reloadShells: selected ? Math.max(1, WEAPONS[selected.weaponId].magSize - actor.wpn.reloadInitialAmmo) : 1,
+      boltPhase: actor.wpn.boltTimer > 0 && total > 0
+        ? THREE.MathUtils.clamp(1 - actor.wpn.boltTimer / total, 0, 1) : -1,
+    }, dt, lookDx, lookDy, movingSpeed);
+  }
+
+  private evaluate(input: PresentationInput | null, dt: number, lookDx: number, lookDy: number, movingSpeed: number): void {
     this.t += dt;
     this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
-    if (!actor || (!this.currentId && !this.fistRig.group.visible)) {
+    if (!input || (!this.currentId && !this.fistRig.group.visible)) {
       this.group.visible = false;
       this.armSolver.setVisible(false);
+      this.resetPresentation();
       return;
     }
     this.group.visible = true;
@@ -399,13 +695,13 @@ export class ViewModel {
     const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
 
     if (!this.currentId) {
-      this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
+      this.updateFists(input.crouched, dt, movingSpeed, swapDip);
       return;
     }
 
-    const weaponId = actor.inv.selectedWeapon?.weaponId ?? 'pistol';
+    const weaponId = this.currentId;
     const def = WEAPONS[weaponId];
-    const adsTarget = actor.wpn.adsAmount;
+    const adsTarget = THREE.MathUtils.clamp(input.adsAmount, 0, 1);
     this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
     const ads = this.adsSmooth;
 
@@ -418,66 +714,25 @@ export class ViewModel {
     const bobX = Math.sin(this.t * bobFreq) * 0.0105 * bobAmp * (1 - ads * 0.88);
     const bobY = Math.abs(Math.cos(this.t * bobFreq)) * 0.0125 * bobAmp * (1 - ads * 0.88);
 
-    // Reload choreography
-    const reloading = actor.wpn.reloadTimer > 0;
-    let reloadPitch = 0;
-    let reloadRoll = 0;
-    let reloadDrop = 0;
+    const { reloadPhase, boltPhase, empty, reloadShells } = input;
+    const reloading = reloadPhase >= 0;
+    const reload = this.currentKey ? this.reloads.get(this.currentKey) : undefined;
+    if (input.reloadCompleted) reload?.reset(true);
+    const track = RELOAD_TRACKS[weaponId];
+    const reloadWeight = reloading ? smooth(reloadPhase / 0.14) * (1 - smooth((reloadPhase - 0.88) / 0.12)) : 0;
+    const reloadPitch = track.pitch * reloadWeight;
+    const reloadRoll = track.roll * reloadWeight;
+    const reloadDrop = track.drop * reloadWeight;
     const mag = this.currentModel?.mag ?? null;
-    if (reloading) {
-      const phase = 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal;
-      const curve = Math.sin(phase * Math.PI);
-      // CYCLE 36 (review): port-side cant + slight muzzle-down — the former
-      // muzzle-up 0.55 pitch read as 'presenting arms'.
-      reloadPitch = curve * 0.14;
-      reloadRoll = curve * 0.3;
-      reloadDrop = curve * 0.055;
-      if (mag) {
-        if (mag.userData.baseY === undefined) {
-          mag.userData.baseY = mag.position.y;
-          mag.userData.baseRot = mag.rotation.z;
-        }
-        // CYCLE 36 (review): the v1 formula levitated the mag to baseY+0.2 on
-        // the second half. Proper reload: slide DOWN out of the well through
-        // the first half, then carry a fresh mag back UP to exactly baseY.
-        const baseY = mag.userData.baseY as number;
-        const drop = 0.14;
-        let magY: number;
-        let rock: number;
-        if (phase < 0.5) {
-          const t = smooth(Math.min(1, phase / 0.5));
-          magY = baseY - drop * t;
-          rock = 0.3 * t;
-        } else {
-          const t = smooth(Math.min(1, (phase - 0.5) / 0.35));
-          magY = baseY - drop * (1 - t);
-          rock = 0.3 * (1 - t);
-        }
-        mag.position.y = magY;
-        mag.rotation.z = (mag.userData.baseRot as number) + rock;
-        mag.visible = !(phase < 0.25 && actor.wpn.reloadingEmpty);
-      }
-    } else {
-      if (mag && mag.userData.baseY !== undefined) {
-        mag.visible = true;
-        mag.position.y = mag.userData.baseY;
-        mag.rotation.z = mag.userData.baseRot as number;
-      }
-    }
 
     // Bolt / pump cycling
-    const def2 = def;
-    let boltAnim = 0;
-    if (actor.wpn.boltTimer > 0 && (def2.fireMode === 'bolt' || def2.fireMode === 'pump')) {
-      const total = def2.fireMode === 'pump' ? 0.9 : 0.9;
-      boltAnim = Math.sin((1 - actor.wpn.boltTimer / total) * Math.PI);
-    }
+    const boltAnim = boltPhase > 0 && boltPhase < 1 ? Math.sin(boltPhase * Math.PI) : 0;
     const bolt = this.currentModel?.bolt ?? null;
     let pumpOffset = 0;
-    if (bolt) {
+    if (bolt && (def.fireMode === 'bolt' || def.fireMode === 'pump')) {
       if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
       // CYCLE 36 (review): a pump PULLS rearward (+z) to eject, then returns.
-      const dir = def2.fireMode === 'pump' ? 0.085 : 0.06;
+      const dir = def.fireMode === 'pump' ? 0.085 : 0.06;
       pumpOffset = boltAnim * dir;
       bolt.position.z = (bolt.userData.baseZ as number) + pumpOffset;
     }
@@ -486,25 +741,23 @@ export class ViewModel {
     // already follows (reload timeline, pump/bolt travel, ADS tuck).
     const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
     if (rig) {
-      const reloadPhase = reloading ? 1 - actor.wpn.reloadTimer / actor.wpn.reloadTotal : -1;
-      const boltMode = def2.fireMode === 'bolt';
+      const boltMode = def.fireMode === 'bolt';
       const supportStyle: SupportStyle = weaponId === 'pistol'
         ? 'over'
-        : def2.fireMode === 'pump'
+        : def.fireMode === 'pump'
           ? 'pump'
           : weaponId === 'smg' ? 'side' : 'under';
       rig.pose({
-        reloadPhase,
+        reloadPhase: reload?.fingerPhase(reloadPhase) ?? reloadPhase,
         supportStyle,
         magLocal: mag ? mag.position : null,
         pumpOffset,
-        pumpHand: def2.fireMode === 'pump',
+        pumpHand: def.fireMode === 'pump',
         ads,
-        boltPhase: boltMode && actor.wpn.boltTimer > 0
-          ? 1 - actor.wpn.boltTimer / 0.9
-          : -1,
+        boltPhase: boltMode ? boltPhase : -1,
         boltLocal: boltMode && bolt ? bolt.position : null,
       });
+      reload?.pose(rig, reloadPhase, empty, reloadShells);
     }
 
     // Compose position: hip → ADS → sprint offsets
@@ -586,12 +839,8 @@ export class ViewModel {
     movingSpeed: number,
     opts: { adsAmount?: number } = {},
   ): void {
-    this.t += dt;
-    this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
     if (!actor || !actor.alive) {
-      this.group.visible = false;
-      // Death/hide retires any in-flight presentation reload/bolt sweep.
-      this.clearPresentationTimelines();
+      this.evaluate(null, dt, lookDx, lookDy, movingSpeed);
       return;
     }
 
@@ -605,157 +854,19 @@ export class ViewModel {
     const rarity: Rarity = weaponId && selected?.kind === 'weapon' && selected.weaponId === weaponId
       ? selected.rarity : 'common';
     this.setWeapon(weaponId, rarity);
-    this.group.visible = true;
-
-    // Sway from local look input (inertia: the viewmodel lags behind aim).
-    this.swayX += (-lookDx * 0.00095 - this.swayX) * Math.min(1, dt * 9);
-    this.swayY += (-lookDy * 0.00085 - this.swayY) * Math.min(1, dt * 9);
-    this.swayRoll += (-lookDx * 0.00045 - this.swayRoll) * Math.min(1, dt * 7);
-
-    // Recoil is a local presentation spring. Replica state does not invent
-    // or reconstruct authoritative fire/combat timing.
-    this.recoilZ *= Math.exp(-8.5 * dt);
-    this.recoilPitch *= Math.exp(-6.5 * dt);
-    this.recoilRoll *= Math.exp(-9 * dt);
-    // Pistol slide return spring — kick() (online fire handlers) sets slideT
-    // exactly like the offline path; the replica path just never applied it.
-    this.slideT = Math.max(0, this.slideT - dt);
-    const slide = this.currentModel?.bolt ?? null;
-    if (slide && this.currentKey?.startsWith('pistol')) {
-      if (slide.userData.baseZ === undefined) slide.userData.baseZ = slide.position.z;
-      const slideCurve = this.slideT > 0 ? Math.sin((1 - this.slideT / 0.09) * Math.PI) : 0;
-      slide.position.z = (slide.userData.baseZ as number) + slideCurve * 0.035;
-    }
-
-    // Swap-in dip is presentation-only and remains valid for replica views.
-    this.swapT = Math.max(0, this.swapT - dt);
-    const swapDip = Math.sin((this.swapT / 0.32) * Math.PI) * 0.16;
-
-    if (!weaponId) {
-      this.updateFists(actor.crouched, dt, movingSpeed, swapDip);
-      return;
-    }
-
-    const def = WEAPONS[weaponId];
-    const adsTarget = THREE.MathUtils.clamp(opts.adsAmount ?? 0, 0, 1);
-    this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
-    const ads = this.adsSmooth;
-    const sprinting = movingSpeed > 8.6 && !adsTarget;
-    this.sprintBlend += ((sprinting ? 1 : 0) - this.sprintBlend) * Math.min(1, dt * 7);
-
-    const bobAmp = movingSpeed > 0.5 ? Math.min(1, movingSpeed / 9.5) : 0;
-    const bobFreq = Math.max(6, movingSpeed * 0.92);
-    const bobX = Math.sin(this.t * bobFreq) * 0.0105 * bobAmp * (1 - ads * 0.88);
-    const bobY = Math.abs(Math.cos(this.t * bobFreq)) * 0.0125 * bobAmp * (1 - ads * 0.88);
-
-    // CYCLE 48: presentation combat timelines (seeded by the online fire/
-    // reload event handlers) drive the SAME choreography curves update()
-    // runs offline: reload cant + mag travel, bolt/pump travel, hand rig.
-    const { reloadPhase, boltAnim, reloadingEmpty } = this.advancePresentationTimelines(dt);
-    const reloading = reloadPhase >= 0;
-    let reloadPitch = 0;
-    let reloadRoll = 0;
-    let reloadDrop = 0;
-    const mag = this.currentModel?.mag ?? null;
-    if (reloading) {
-      const curve = Math.sin(reloadPhase * Math.PI);
-      reloadPitch = curve * 0.14;
-      reloadRoll = curve * 0.3;
-      reloadDrop = curve * 0.055;
-      if (mag) {
-        if (mag.userData.baseY === undefined) {
-          mag.userData.baseY = mag.position.y;
-          mag.userData.baseRot = mag.rotation.z;
-        }
-        const baseY = mag.userData.baseY as number;
-        const drop = 0.14;
-        let magY: number;
-        let rock: number;
-        if (reloadPhase < 0.5) {
-          const t = smooth(Math.min(1, reloadPhase / 0.5));
-          magY = baseY - drop * t;
-          rock = 0.3 * t;
-        } else {
-          const t = smooth(Math.min(1, (reloadPhase - 0.5) / 0.35));
-          magY = baseY - drop * (1 - t);
-          rock = 0.3 * (1 - t);
-        }
-        mag.position.y = magY;
-        mag.rotation.z = (mag.userData.baseRot as number) + rock;
-        mag.visible = !(reloadPhase < 0.25 && reloadingEmpty);
-      }
-    } else if (mag && mag.userData.baseY !== undefined) {
-      mag.visible = true;
-      mag.position.y = mag.userData.baseY;
-      mag.rotation.z = mag.userData.baseRot as number;
-    }
-
-    // Bolt / pump cycling for the weapon just fired (presentation timeline).
-    const bolt = this.currentModel?.bolt ?? null;
-    let pumpOffset = 0;
-    if (bolt && boltAnim > 0 && (def.fireMode === 'bolt' || def.fireMode === 'pump')) {
-      if (bolt.userData.baseZ === undefined) bolt.userData.baseZ = bolt.position.z;
-      const dir = def.fireMode === 'pump' ? 0.085 : 0.06;
-      pumpOffset = boltAnim * dir;
-      bolt.position.z = (bolt.userData.baseZ as number) + pumpOffset;
-    }
-
-    // CYCLE 36 (review): the online path must pose hands too — v1 left them
-    // frozen at configure defaults. The pose now follows the presentation
-    // timelines instead of hardcoded inactive phases.
-    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
-    if (rig) {
-      const supportStyle: SupportStyle = weaponId === 'pistol'
-        ? 'over'
-        : def.fireMode === 'pump'
-          ? 'pump'
-          : weaponId === 'smg' ? 'side' : 'under';
-      rig.pose({
-        reloadPhase,
-        supportStyle,
-        magLocal: mag ? mag.position : null,
-        pumpOffset,
-        pumpHand: def.fireMode === 'pump',
-        ads,
-        boltPhase: def.fireMode === 'bolt' && boltAnim > 0
-          ? 1 - this.presentBoltElapsed / this.presentBoltTotal
-          : -1,
-        boltLocal: def.fireMode === 'bolt' && bolt ? bolt.position : null,
-      });
-    }
-
-    const inspect = this.inspectPose(dt, ads, this.sprintBlend, reloading);
-    const iw = inspect.weight;
-    const adsFwd = ViewModel.ADS_EXTRA_FORWARD[weaponId] * ads;
-    const adsDrop = ViewModel.ADS_EXTRA_Y[weaponId] * ads;
-    const px =
-      HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
-      (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
-      bobX + this.swayX - 0.1 * inspect.lift * iw;
-    const py =
-      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads - adsDrop +
-      (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
-    const pz =
-      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads - adsFwd +
-      (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
-      this.recoilZ + 0.14 * inspect.lift * iw;
-
-    this.pivot.position.set(px, py, pz);
-    // Base hip stance angles the receiver inward across the lower-right
-    // frame (muzzle toward center) like a real ready position; ADS removes it.
-    // Parity with update(): the online weapon previously lost this stance.
-    const hipYaw = 0.28 * (1 - ads);
-    const hipRoll = -0.1 * (1 - ads);
-    this.pivot.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
-      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
-    );
-    this.solveArms();
+    if (selected?.kind === 'weapon') this.lastAmmoInMag = selected.ammoInMag;
+    this.evaluate({
+      crouched: actor.crouched,
+      adsAmount: opts.adsAmount ?? 0,
+      ...this.advancePresentationTimelines(dt),
+    }, dt, lookDx, lookDy, movingSpeed);
   }
 
   kick(strength: number): void {
+    if (this.presentReloadElapsed >= 0 || this.offlineReloadRemaining > 0) {
+      this.clearPresentationTimelines();
+      this.restoreMovableParts();
+    }
     // CYCLE 33: reference-feel recoil — a sharp backward+up kick with a
     // randomized roll flick, recovering on the existing springs.
     this.recoilZ += strength * 0.085;
