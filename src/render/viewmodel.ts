@@ -16,7 +16,7 @@ function smooth(t: number): number {
   return c * c * (3 - 2 * c);
 }
 
-const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.3);
+const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.285);
 const SPRINT_POS = new THREE.Vector3(0.06, -0.24, -0.28);
 
 /**
@@ -27,11 +27,11 @@ const SPRINT_POS = new THREE.Vector3(0.06, -0.24, -0.28);
  * the crosshair. Z keeps the buttstock comfortably clear of the eye.
  */
 const ADS_POSE: Record<WeaponId, { y: number; z: number }> = {
-  pistol: { y: -0.044, z: -0.24 },
-  smg: { y: -0.043, z: -0.24 },
-  ar: { y: -0.046, z: -0.33 },
-  shotgun: { y: -0.026, z: -0.34 },
-  sniper: { y: -0.049, z: -0.3 },
+  pistol: { y: -0.048, z: -0.24 },
+  smg: { y: -0.047, z: -0.24 },
+  ar: { y: -0.051, z: -0.33 },
+  shotgun: { y: -0.029, z: -0.34 },
+  sniper: { y: -0.055, z: -0.3 },
 };
 
 type PresentationInput = Readonly<{
@@ -514,7 +514,7 @@ export class ViewModel {
    * (vs the world's 80°), so scales are ~0.62x of the old shared-camera
    * values to keep the same on-screen fraction. */
   private static readonly WEAPON_VIEW_SCALE: Record<WeaponId, number> = {
-    pistol: 0.6, smg: 0.5, ar: 0.52, shotgun: 0.54, sniper: 0.5,
+    pistol: 0.66, smg: 0.56, ar: 0.58, shotgun: 0.6, sniper: 0.56,
   };
 
   /** Per-class ADS pose offsets (metres, applied through the ads blend).
