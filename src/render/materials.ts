@@ -7,9 +7,10 @@
 
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
-import type { UniformNode } from 'three/webgpu';
+import type { Node, UniformNode } from 'three/webgpu';
 import {
-  abs, cross, float, normalize, normalWorld, positionWorld, sign, texture,
+  abs, color, cross, float, max, mix, mx_fractal_noise_float, mx_noise_float,
+  normalize, normalWorld, positionWorld, sign, smoothstep, texture,
   transformNormalToView, uniform, vec2, vec3,
 } from 'three/tsl';
 import { loadTextureSet, type TextureSet } from '../assets/assets';
@@ -365,6 +366,246 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
       this.roughTex = v;
     }
   }
+}
+
+/**
+ * W6 TERRAIN OVERHAUL: splat-blended terrain surface as a TSL node graph.
+ *
+ * Replaces the terrain's stock `map`/`roughnessMap` (and the cycle-57
+ * disabled `normalMap`) with world-space UV samples blended per layer:
+ * a base layer (grass/sand), an optional noise-patched mid layer (dirt)
+ * and an optional slope/height-driven top layer (rock). Every layer rides
+ * `colorNode`/`roughnessNode`/`normalNode`, which — unlike the stock
+ * normalMap slot — is immune to the r185 direct-light kill (QA_STATE
+ * cycle 57) and runs on both the WebGPU and WebGL2 backends.
+ *
+ * Graph cost is bounded: at most four texture samples per layer (base
+ * color+normal+rough, plus one optional detail re-sample of the SAME
+ * color/normal texture for two-scale tiling), one shared mx perlin family
+ * for all masks, no loops.
+ */
+export interface TerrainLayerSpec {
+  /** ambientCG-style set; any slot may be missing — missing maps degrade to
+   * flat tint/scalar fallbacks so headless QA (no DOM, no preload) stays
+   * null-safe. */
+  set?: TextureSet | null;
+  /** Metres of world per albedo tile. */
+  metersPerTile: number;
+  /** Albedo multiplier (sRGB hex; defaults white). */
+  tint?: number;
+  normalScale?: number;
+  /** Two-scale blend: re-sample the same color/normal texture at this tile
+   * size and lerp toward it (grass ~1.15 m detail kills the flat-carpet
+   * read at walking distance). */
+  detailMeters?: number;
+  /** 0..1 blend weight of the detail sample (default 0.22). */
+  detailAmount?: number;
+  /** 0..1 = how much of the rough-map sample carries through (1 = full).
+   * Terrain wants a matte floor: full ambientCG rough ranges read as wet
+   * sheen at grazing sun (blend toward 1 to lift the floor). */
+  roughStrength?: number;
+}
+
+export interface TerrainSplatSpec {
+  /** [base, mid?, top?] — e.g. [grass, dirt, rock] or [sand, rock]. */
+  layers: TerrainLayerSpec[];
+  /** Steepness range (1 - normal.y) fading the TOP layer in (rock on slopes). */
+  topBySlope?: [number, number];
+  /** World-Y band fading the TOP layer in (high ridges), aligned with the
+   * map palette's `rise`. */
+  topByHeight?: { y: number; fade: number };
+  /** Macro noise patches driving the MID layer (dirt/dry swaths). */
+  midByNoise?: {
+    /** Approx metres between patches. */
+    meters: number;
+    /** 0..1 field thresholds (the field is 2-octave perlin mapped to 0..1). */
+    lo: number;
+    hi: number;
+    /** High-frequency jitter on mask edges so patch borders never read as
+     * smoothstep arcs (defaults: meters/5, amount 0.14). */
+    jitterMeters?: number;
+    jitterAmount?: number;
+  };
+  roughness?: number;
+  /** Base-layer brightness drift strength (0 = off, ~0.36 typical). Reuses
+   * the midByNoise macro field; centered on 1.0 so exposure is unchanged. */
+  baseBrightness?: number;
+  /** Shared ~1.2 m grain multiplied into roughness (see
+   * `buildDetailGrainRoughness`) so terrain and flat ground planes keep one
+   * continuous micro-roughness field. */
+  grain?: THREE.Texture | null;
+  grainMeters?: number;
+  envMapIntensity?: number;
+}
+
+const finalizeTerrainTex = (tex: THREE.Texture): THREE.Texture => {
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
+  return tex;
+};
+
+class TerrainSplatMaterial extends MeshStandardNodeMaterial {
+  private declare ownedTextures: THREE.Texture[];
+
+  constructor(spec: TerrainSplatSpec) {
+    super({ metalness: 0, roughness: spec.roughness ?? 1, vertexColors: true });
+    this.ownedTextures = [];
+    if (spec.envMapIntensity !== undefined) this.envMapIntensity = spec.envMapIntensity;
+    if (spec.layers.length > 0) this.buildSplatGraph(spec);
+  }
+
+  /** Textures cloned from the shared sets; the caller disposes them via the
+   * createTerrainSplatMaterial() teardown (never the shared sources). */
+  get textures(): THREE.Texture[] {
+    return this.ownedTextures;
+  }
+
+  private buildSplatGraph(spec: TerrainSplatSpec): void {
+    const layers = spec.layers;
+    const wPos = positionWorld;
+    const wNrm = normalize(normalWorld);
+    const pXZ = vec2(wPos.x, wPos.z);
+
+    // ---- Layer weights (macro masks, sum to exactly 1) -----------------
+    let wTop: Node<'float'> = float(0);
+    if (layers.length >= 3) {
+      const [s0, s1] = spec.topBySlope ?? [0.3, 0.55];
+      const steep = float(1).sub(abs(wNrm.y)).clamp(0, 1);
+      wTop = smoothstep(float(s0), float(s1), steep);
+      if (spec.topByHeight) {
+        const hBand = smoothstep(
+          float(spec.topByHeight.y),
+          float(spec.topByHeight.y + spec.topByHeight.fade),
+          wPos.y,
+        );
+        wTop = max(wTop, hBand);
+      }
+    }
+    let wMid: Node<'float'> = float(0);
+    // 2-octave macro field, shared by the mid mask AND the base layer's
+    // brightness modulation — one noise family drives all macro breakup.
+    let macroField: Node<'float'> | null = null;
+    if (layers.length >= 2 && spec.midByNoise) {
+      const m = spec.midByNoise;
+      // One shared perlin family at two frequencies: a 2-octave macro field
+      // places the patches, a 1-octave jitter gnaws the borders so mask
+      // edges never read as smoothstep arcs.
+      let field: Node<'float'> = mx_fractal_noise_float(
+        pXZ.mul(1 / Math.max(0.001, m.meters)), 2, 2.1, 0.55,
+      ).mul(0.5).add(0.5);
+      field = field.add(mx_noise_float(
+        pXZ.mul(1 / Math.max(0.001, m.jitterMeters ?? m.meters * 0.2)),
+      ).mul(m.jitterAmount ?? 0.14));
+      macroField = field;
+      wMid = smoothstep(float(m.lo), float(m.hi), field).mul(float(1).sub(wTop));
+    }
+    const wBase = float(1).sub(wTop).sub(wMid);
+    const weights: Array<Node<'float'>> = [wBase, wMid, wTop];
+
+    // ---- Per-layer samples, weighted and summed ------------------------
+    const colorParts: Array<Node<'vec4'>> = [];
+    const roughParts: Array<Node<'float'>> = [];
+    const normalParts: Array<Node<'vec3'>> = [];
+    layers.forEach((layer, i) => {
+      const set = layer.set ?? {};
+      // Single-layer graphs (city bed, texture-less fallback) are fully
+      // driven by vertex colors — no weighting needed.
+      const weight = layers.length > 1 ? weights[i] ?? float(1) : float(1);
+      const uvBase = pXZ.mul(1 / Math.max(0.001, layer.metersPerTile));
+
+      let col: Node<'vec4'>;
+      if (set.color) {
+        const colorNode = texture(finalizeTerrainTex(set.color.clone()));
+        this.ownedTextures.push(colorNode.value as THREE.Texture);
+        col = colorNode.sample(uvBase);
+        if (layer.detailMeters) {
+          col = mix(
+            col,
+            colorNode.sample(pXZ.mul(1 / Math.max(0.001, layer.detailMeters))),
+            float(layer.detailAmount ?? 0.22),
+          );
+        }
+        col = col.mul(color(layer.tint ?? 0xffffff));
+      } else {
+        // Flat layer fallback (missing set or headless QA): tint only; the
+        // vertex-color multiply below keeps the palette in charge.
+        col = color(layer.tint ?? 0xffffff) as unknown as Node<'vec4'>;
+      }
+      // Base layer only: large-scale brightness drift (grass clumps, worn
+      // strips) so sunlit meadows never read as one flat albedo value.
+      // Centered on 1.0 so it never shifts overall exposure.
+      if (i === 0 && macroField) {
+        col = col.mul(macroField.sub(0.5).mul(spec.baseBrightness ?? 0.36).add(1).clamp(0.7, 1.2));
+      }
+
+      let rough: Node<'float'>;
+      if (set.rough) {
+        const roughNode = texture(finalizeTerrainTex(set.rough.clone()));
+        this.ownedTextures.push(roughNode.value as THREE.Texture);
+        rough = roughNode.sample(uvBase).g;
+        const strength = layer.roughStrength ?? 1;
+        if (strength < 1) rough = mix(float(1), rough, float(strength));
+      } else {
+        rough = float(1);
+      }
+
+      let nrm: Node<'vec3'> = wNrm;
+      if (set.normal) {
+        const normalNode = texture(finalizeTerrainTex(set.normal.clone()));
+        this.ownedTextures.push(normalNode.value as THREE.Texture);
+        let nT: Node<'vec3'> = normalNode.sample(uvBase).xyz.mul(2).sub(1);
+        if (layer.detailMeters) {
+          nT = mix(
+            nT,
+            normalNode.sample(pXZ.mul(1 / Math.max(0.001, layer.detailMeters))).xyz.mul(2).sub(1),
+            float(layer.detailAmount ?? 0.22),
+          );
+        }
+        // Face-tangent frame from the world normal (terrain is mostly
+        // up-pointing; the flat branch keeps slopes well-formed).
+        const ns = layer.normalScale ?? 1;
+        const nxy = nT.xy.mul(float(ns));
+        const T0 = normalize(cross(vec3(0.0, 1.0, 0.0), wNrm));
+        const flat = abs(wNrm.y).greaterThan(0.99);
+        const T = flat.select(vec3(1.0, 0.0, 0.0), T0);
+        const B = flat.select(vec3(0.0, 0.0, 1.0), cross(wNrm, T0));
+        nrm = normalize(T.mul(nxy.x).add(B.mul(nxy.y)).add(wNrm.mul(nT.z)));
+      }
+
+      colorParts.push(col.mul(weight));
+      roughParts.push(rough.mul(weight));
+      normalParts.push(nrm.mul(weight));
+    });
+
+    this.colorNode = colorParts.reduce((a, b) => a.add(b));
+    let roughNode: Node<'float'> = roughParts.reduce((a, b) => a.add(b));
+    if (spec.grain && spec.grainMeters) {
+      roughNode = roughNode.mul(texture(spec.grain).sample(
+        pXZ.mul(1 / Math.max(0.001, spec.grainMeters)),
+      ).g);
+    }
+    this.roughnessNode = roughNode.clamp(0, 1);
+    // All micro-normal work rides the TSL normalNode — NEVER the stock
+    // normalMap slot, which zeroes direct lighting under r185 (cycle 57).
+    this.normalNode = transformNormalToView(
+      normalize(normalParts.reduce((a, b) => a.add(b))),
+    );
+  }
+}
+
+export function createTerrainSplatMaterial(spec: TerrainSplatSpec): {
+  material: THREE.Material;
+  dispose: () => void;
+} {
+  const material = new TerrainSplatMaterial(spec);
+  return {
+    material,
+    dispose: () => {
+      for (const tex of material.textures) tex.dispose();
+      material.dispose();
+    },
+  };
 }
 
 export async function createMaterials(): Promise<MaterialLibrary> {

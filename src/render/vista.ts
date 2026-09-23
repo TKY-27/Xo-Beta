@@ -20,8 +20,8 @@ import {
 } from '../world/terrainMesh';
 import type { TerrainGridMesh } from '../world/types';
 import type { MaterialLibrary } from './materials';
-import { buildDetailGrainRoughness } from './materials';
-import { peekTextureSet } from '../assets/assets';
+import { buildDetailGrainRoughness, createTerrainSplatMaterial, type TerrainSplatSpec } from './materials';
+import { peekTextureSet, type TextureSet } from '../assets/assets';
 
 const SEG = 150;
 
@@ -1836,10 +1836,78 @@ function buildSandMicroTexture(): THREE.DataTexture {
  */
 
 /**
+ * W6: coarse shoulder field of the authored path/road ribbons
+ * (`def.surfacePaths`). Terrain vertices near a ground-material ribbon warm
+ * and darken into a trodden-earth shoulder so paths no longer hit the
+ * meadow/desert with a razor-sharp albedo border. The ribbon geometry itself
+ * covers the stamped core — only the fade band outside the ribbon edge is
+ * visible. Baked once per terrain build into a ~1.5 m cell grid (O(1) lookup
+ * in the vertex loop), deterministic, disposed with the terrain.
+ */
+const PATH_SHOULDER_MATS = new Set<string>(['dirt', 'concrete', 'sidewalk', 'asphalt']);
+const PATH_FIELD_CELL = 1.5;
+
+function buildPathShoulderField(def: MapDef, span: number): Float32Array | null {
+  const paths = def.surfacePaths.filter((p) => (
+    PATH_SHOULDER_MATS.has(p.mat) && p.points.length > 1
+  ));
+  if (paths.length === 0) return null;
+  const n = Math.ceil(span / PATH_FIELD_CELL) + 1;
+  const field = new Float32Array(n * n);
+  const shoulder = 1.7;
+  const stamp = (wx: number, wz: number, halfW: number, strength: number): void => {
+    const r = halfW + shoulder;
+    const x0 = Math.max(0, Math.floor((wx - r) / PATH_FIELD_CELL + (n - 1) / 2));
+    const x1 = Math.min(n - 1, Math.ceil((wx + r) / PATH_FIELD_CELL + (n - 1) / 2));
+    const z0 = Math.max(0, Math.floor((wz - r) / PATH_FIELD_CELL + (n - 1) / 2));
+    const z1 = Math.min(n - 1, Math.ceil((wz + r) / PATH_FIELD_CELL + (n - 1) / 2));
+    for (let iz = z0; iz <= z1; iz++) {
+      for (let ix = x0; ix <= x1; ix++) {
+        const cx = (ix - (n - 1) / 2) * PATH_FIELD_CELL;
+        const cz = (iz - (n - 1) / 2) * PATH_FIELD_CELL;
+        const dist = Math.hypot(cx - wx, cz - wz);
+        if (dist >= r) continue;
+        const t = Math.min(1, Math.max(0, (r - dist) / shoulder));
+        const w = strength * (t * t * (3 - 2 * t));
+        const idx = iz * n + ix;
+        if (w > field[idx]!) field[idx] = w;
+      }
+    }
+  };
+  for (const path of paths) {
+    const pts = path.points;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i]!;
+      const b = pts[i + 1]!;
+      const halfW = Math.max(a.width, b.width) * 0.5;
+      if (halfW * 2 < 0.9) continue; // hairline drains get no shoulder
+      const len = Math.hypot(b.x - a.x, b.z - a.z);
+      const steps = Math.max(1, Math.ceil(len / (PATH_FIELD_CELL * 0.75)));
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        stamp(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t, halfW, 0.8);
+      }
+    }
+  }
+  return field;
+}
+
+function samplePathShoulderField(field: Float32Array, span: number, x: number, z: number): number {
+  const n = Math.ceil(span / PATH_FIELD_CELL) + 1;
+  const ix = Math.round(x / PATH_FIELD_CELL + (n - 1) / 2);
+  const iz = Math.round(z / PATH_FIELD_CELL + (n - 1) / 2);
+  if (ix < 0 || iz < 0 || ix >= n || iz >= n) return 0;
+  return field[iz * n + ix] ?? 0;
+}
+
+/**
  * One terrain mesh covering the playable area (exact heightfield match)
  * plus a wide skirt continuing the landscape beyond the boundary.
  */
-function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THREE.Mesh; dispose: () => void } | null {
+function buildTerrain(
+  def: MapDef,
+  sets: { grass: TextureSet | null; dirt: TextureSet | null; rock: TextureSet | null },
+): { mesh: THREE.Mesh; dispose: () => void } | null {
   const sample = def.terrainHeight ?? null;
   const isCity = def.id === 'neocity';
   const isDesert = def.id === 'ashara';
@@ -1925,8 +1993,9 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   const colors = new Float32Array(pos.count * 3);
   // With a real albedo texture the vertex layer becomes a near-white
   // multiplier (the texture carries hue); without it the palette colors
-  // carry the look on their own.
-  const texMode = !!grassTex;
+  // carry the look on their own. The desert keeps its palette-driven sand
+  // field (the DataTexture is a near-white breakup layer).
+  const texMode = !!sets.grass?.color;
   const cGrass = new THREE.Color(texMode ? (isDesert ? 0xd8c39d : 0xf4f6ec) : pal.grass);
   // Far/skirt tints must stay clearly green even under the warm sun — the
   // raw grass albedo reads as tan dunes at distance otherwise.
@@ -1942,7 +2011,11 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   const cBedDeep = cBed.clone().multiplyScalar(0.5);
   const cAsphalt = new THREE.Color(0x23262b);
   const cDry = new THREE.Color(texMode ? (isDesert ? 0xb0956a : 0xb5ad8c) : 0x9a9160);
+  // W6: trodden-earth shoulder tone stamped around path ribbons.
+  const cPathWear = new THREE.Color(isDesert ? 0x9a8465 : 0x8f7d5e);
   const tmp = new THREE.Color();
+  // Path ribbons only exist in-bounds; the city bed hides under plates.
+  const pathField = isCity ? null : buildPathShoulderField(def, span);
 
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i)!;
@@ -1962,9 +2035,10 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
       // a texture is present (the albedo already provides detail).
       const patch = fbm(x * 0.013 + 40.7, z * 0.013 - 17.3);
       const patch2 = fbm(x * 0.045 - 9.1, z * 0.045 + 23.8);
-      // Full-strength macro variation even with the albedo texture: the
-      // critic pass showed 0.4 leaves open fields reading as one flat color.
-      const varAmt = 1;
+      // W6: trimmed from 1.0 — the splat graph's noise patches + two-scale
+      // albedo now carry macro breakup; the vertex pass only adds broad hue
+      // drift so the two layers don't fight at the same scale.
+      const varAmt = 0.6;
       tmp.offsetHSL(
         patch2 * 0.014 * varAmt,
         patch * 0.05 * varAmt,
@@ -1992,6 +2066,14 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
         }
         break;
       }
+      // W6: warm/darken vertices near authored path ribbons into a trodden
+      // shoulder (see buildPathShoulderField). The ribbon geometry covers the
+      // stamped core; the fade band outside it breaks the razor-sharp
+      // ribbon/terrain border.
+      if (pathField) {
+        const shoulderW = samplePathShoulderField(pathField, span, x, z);
+        if (shoulderW > 0.001) tmp.lerp(cPathWear, Math.min(1, shoulderW));
+      }
       // Ashara low-end albedo breakup: deterministic ±3% value jitter per
       // grid vertex (hash of world position, stable across builds/clients)
       // so near-field sand never reads as one flat clay tone.
@@ -2007,55 +2089,79 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geo.computeVertexNormals();
 
-  // Base surface: CC0 ambientCG grass albedo, UV-tiled (~5 m per tile) so the
-  // huge terrain never shows stretching. Albedo only — the projected PBR
-  // normal map reads as shiny swirls at terrain grazing angles. Vertex colors
-  // keep the large-scale meadow/rock/sand variation on top.
-  let map: THREE.Texture | null = null;
-  if (grassTex) {
-    map = grassTex.clone();
-    map.wrapS = THREE.RepeatWrapping;
-    map.wrapT = THREE.RepeatWrapping;
-    map.repeat.set(span / 5, span / 5);
-    map.needsUpdate = true;
-  } else if (isDesert) {
-    map = buildSandMicroTexture();
-    // Repeat the seamless field every 8 m: thirteen internal ridges then read
-    // as sub-metre wind ripples instead of broad water-like corrugation.
-    // Broad colour breakup remains in the vertex palette.
-    map.repeat.set(span / 8, span / 8);
-  }
-  const mat = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: 0xffffff,
-    roughness: 1,
-    metalness: 0,
-  });
-  if (map) {
-    mat.map = map;
-    // CYCLE 26: the former bumpMap copy of the sand albedo shone as foil
-    // crinkle at grazing angles (bump shading has no range control there).
-  }
-  // CYCLE 57 (sun-light fix): the micro normal map is DISABLED. three.js
-  // r185's node pipeline (WebGPU and the WebGL2 fallback alike) zeroes ALL
-  // direct lighting for a standard material whose normalMap (or bumpMap) is
-  // combined with any other map: sun and sky-fill contribute exactly zero —
-  // the terrain read as flat ambient/IBL wash and never received shadows —
-  // while the same material without the normal map lights fully. Verified
-  // in-engine via tests/browser/qa-boot-probe.ts pixel readbacks
-  // (qa/boot-probe-eden). Terrain keeps map + roughnessMap + vertexColors,
-  // which all light correctly; buildMicroNormalTexture is kept for the
-  // three.js upgrade that fixes the node normal path.
-  // Roughness breakup: ~1.2 m neutral grain so the 1-5 m band responds to
-  // light (grass, sand and city asphalt alike) instead of reading as flat
-  // clay. Its own UV transform keeps it independent of the albedo's 5-8 m
-  // repeat on WebGPU; the WebGL fallback shares the albedo tiling, which
-  // still reads.
+  // W6 TERRAIN OVERHAUL: splat-blended TSL node material (see
+  // createTerrainSplatMaterial in materials.ts). Layers blend by slope
+  // (normal.y), height bands and 2-octave perlin patches; grass rides a
+  // two-scale blend (~4.6 m base, ~1.15 m detail) and every layer carries
+  // micro normals through the TSL normalNode. The stock normalMap/bumpMap
+  // slots stay UNUSED — r185's node pipeline zeroes all direct lighting when
+  // they combine with other maps (QA_STATE cycle 57); colorNode /
+  // roughnessNode / normalNode are immune (same proven pattern as
+  // ProjectedStandardMaterial).
   const detailRough = buildDetailGrainRoughness();
-  if (detailRough) {
-    detailRough.repeat.set(span / 1.2, span / 1.2);
-    mat.roughnessMap = detailRough;
+  const extraTextures: THREE.Texture[] = [];
+  let spec: TerrainSplatSpec;
+  if (isCity) {
+    // Hidden service bed under the city plates: white × vertex color + the
+    // shared 1.2 m roughness grain, now as a node graph (world materials
+    // must all be node materials).
+    spec = {
+      layers: [{ set: null, metersPerTile: 4 }],
+      roughness: 1,
+      grain: detailRough,
+      grainMeters: 1.2,
+    };
+  } else if (isDesert) {
+    // ASHARA keeps its seamless procedural sand field (palette-driven
+    // vertex colors on top) but gains the same two-scale detail + TSL
+    // micro-normal treatment as the meadow maps.
+    const sand = buildSandMicroTexture();
+    extraTextures.push(sand);
+    const sandNormal = buildMicroNormalTexture(true);
+    if (sandNormal) extraTextures.push(sandNormal);
+    spec = {
+      layers: [
+        {
+          set: { color: sand, normal: sandNormal ?? undefined },
+          metersPerTile: 8,
+          normalScale: 0.55,
+          detailMeters: 2.6,
+          detailAmount: 0.24,
+        },
+        { set: sets.rock, metersPerTile: 3, tint: 0xc9b393, normalScale: 0.85 },
+      ],
+      topBySlope: [0.3, 0.58],
+      topByHeight: { y: pal.rise * 0.92, fade: 7 },
+      baseBrightness: 0.3,
+      roughness: 1,
+      grain: detailRough,
+      grainMeters: 1.2,
+    };
+  } else {
+    spec = {
+      layers: [
+        {
+          set: sets.grass,
+          metersPerTile: 4.6,
+          normalScale: 0.85,
+          detailMeters: 1.15,
+          detailAmount: 0.32,
+          roughStrength: 0.3,
+        },
+        { set: sets.dirt, metersPerTile: 3.2, tint: 0xc9ab84, normalScale: 0.75, roughStrength: 0.55 },
+        { set: sets.rock, metersPerTile: 3, tint: 0xa8a89c, normalScale: 0.85, roughStrength: 0.6 },
+      ],
+      topBySlope: [0.2, 0.48],
+      topByHeight: { y: pal.rise * 0.92, fade: 6 },
+      midByNoise: { meters: 24, lo: 0.56, hi: 0.8, jitterMeters: 5, jitterAmount: 0.16 },
+      baseBrightness: 0.38,
+      roughness: 1,
+      grain: detailRough,
+      grainMeters: 1.2,
+    };
   }
+  const built = createTerrainSplatMaterial(spec);
+  const mat = built.material;
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.matrixAutoUpdate = false;
@@ -2069,9 +2175,9 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
     mesh,
     dispose: () => {
       geo.dispose();
-      map?.dispose();
+      for (const tex of extraTextures) tex.dispose();
       detailRough?.dispose();
-      mat.dispose();
+      built.dispose();
     },
   };
 }
@@ -2079,15 +2185,12 @@ function buildTerrain(def: MapDef, grassTex?: THREE.Texture | null): { mesh: THR
 /**
  * Generated micro-detail normal map: a deterministic bumpy relief (grass
  * blade thatch; anisotropic dune ripples for the desert) so terrain responds
- * to moving light instead of reading as one flat albedo. Rides the albedo's
- * UV transform (three.js derives normal-map UVs from the base map), so it
- * tiles at the same ~5 m scale with no extra draw cost. 128px, one canvas
+ * to moving light instead of reading as one flat albedo. 128px, one canvas
  * per terrain build, disposed with it.
  *
- * Exported but currently UNUSED at runtime: combining it with the terrain's
- * albedo map trips the three.js r185 node-pipeline direct-light kill (see
- * buildTerrain). Kept for the three.js upgrade that fixes the node normal
- * path — re-enable by assigning mat.normalMap in buildTerrain.
+ * W6: consumed by the ASHARA terrain splat graph through the TSL normalNode
+ * (see createTerrainSplatMaterial) — never the stock normalMap slot, which
+ * zeroes direct lighting under r185 (QA_STATE cycle 57).
  */
 export function buildMicroNormalTexture(isDesert = false): THREE.CanvasTexture | null {
   // Headless/QA environments have no DOM; the detail map is cosmetic, so
@@ -2155,10 +2258,18 @@ export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
   const group = new THREE.Group();
   const disposables: Array<() => void> = [];
 
-  // The available dirt scan is dark, damp forest soil. Desert terrain uses
-  // the dedicated vertex palette until a provenance-cleared sand scan ships.
-  const terrainSet = mats && def.id !== 'ashara' && def.id !== 'neocity' ? peekTextureSet('grass') : null;
-  const terrain = buildTerrain(def, terrainSet?.color ?? null);
+  // W6: the terrain splat graph consumes full grass/dirt/rock texture sets
+  // (color + normal + rough) from the shared preload. Sets are null before
+  // preload / in headless QA, where every layer degrades to its flat tint.
+  const meadow = def.id !== 'ashara' && def.id !== 'neocity';
+  const terrainSets = mats
+    ? {
+        grass: meadow ? peekTextureSet('grass') : null,
+        dirt: meadow ? peekTextureSet('dirt') : null,
+        rock: def.id !== 'neocity' ? peekTextureSet('rock') : null,
+      }
+    : { grass: null, dirt: null, rock: null };
+  const terrain = buildTerrain(def, terrainSets);
   if (terrain) {
     group.add(terrain.mesh);
     disposables.push(terrain.dispose);
