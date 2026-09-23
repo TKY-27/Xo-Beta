@@ -7,7 +7,7 @@
 import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, addDrumCluster, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { addBuilding, addDrumCluster, addGroundDecay, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
@@ -169,6 +169,8 @@ export function buildEdenFacility(): MapDef {
   decorateEden(b, rng);
 
   facilityDensity(b, rng);
+
+  groundDecay(b);
 
   hardenExposedFlanks(b, { mat: 'concreteDark', maxProps: 36 });
 
@@ -1211,4 +1213,33 @@ function facilityDensity(b: WorldBuilder, rng: Rng): void {
     b.cyl(mx + 0.02, roofY + 2.82, mz, 0.09, 0.06, 'metalDark', { segments: 8, noCollide: true });
     b.cyl(mx + 0.55, roofY + 2.72, mz, 0.14, 0.9, 'neonOrange', { segments: 8, noCollide: true, pitch: 0.3 });
   }
+}
+
+/**
+ * Ground-decay micro-scatter along the campus service paths (connective
+ * tissue): mud stains, gravel wash, scattered litter and tyre-track pairs
+ * where vehicles crossed, plus decay rings around the ground props. Follows
+ * the authored path spines; deterministic and dressingSpotClear-gated.
+ */
+function groundDecay(b: WorldBuilder): void {
+  addGroundDecay(b, {
+    heightAt: terrainH,
+    corridors: [
+      { x1: -95, z1: -30, x2: -55, z2: 12, width: 5.6 },
+      { x1: -95, z1: -30, x2: -110, z2: 100, width: 5.6 },
+      { x1: -110, z1: 100, x2: 10, z2: 30, width: 5.6 },
+      { x1: 10, z1: 30, x2: 118, z2: 42, width: 5.6 },
+      { x1: -95, z1: -30, x2: -170, z2: -120, width: 5.6 },
+      { x1: -60, z1: -55, x2: 10, z2: -195, width: 5.2 },
+      { x1: 60, z1: 175, x2: 160, z2: 150, width: 5.2 },
+      // Forest approach spurs (open ground the QA frame at 40,120 crosses).
+      { x1: 10, z1: 30, x2: 40, z2: 120, width: 5.2 },
+      { x1: 40, z1: 120, x2: 60, z2: 175, width: 5.2 },
+    ],
+    stainMat: 'dirt',
+    trackMat: 'dirt',
+    spacing: 9,
+    maxPieces: 44,
+    stainBias: 0.7,
+  });
 }

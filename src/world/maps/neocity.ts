@@ -7,7 +7,7 @@
 import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding as addBaseBuilding, addGround, dressingSpotClear, hardenExposedFlanks, slabWithHole, type BuildingOpts } from './common';
+import { addBuilding as addBaseBuilding, addGround, addGroundDecay, dressingSpotClear, hardenExposedFlanks, slabWithHole, type BuildingOpts } from './common';
 
 const S = 500; // map size
 const TRANSIT_CUTOUT = { minX: 117.7, maxX: 121.3, minZ: -140, maxZ: -127, surfaceY: 0 };
@@ -373,6 +373,7 @@ export function buildNeoCity(): MapDef {
   streetDressing(b, rng);
   lotDressing(b, rng);
   streetDensity(b, rng);
+  groundDecay(b);
   applyNeoCityShadowBudget(b);
   removeRoadPaintUnderFoundations(b);
 
@@ -890,6 +891,105 @@ function parkingGarage(b: WorldBuilder, cx: number, cz: number): void {
   b.chest(cx - 10, 0.6, cz - 6, 'standard');
   b.chest(cx + 8, 4.2, cz + 6, 'elite');
   b.loot(cx, 0.6, cz);
+
+  garageFacadeBreakup(b, cx, cz);
+}
+
+/**
+ * Exterior breakup for the parking-garage shell (connective-tissue pass): the
+ * two stacked 30x20 'concrete' wall rings previously read as one unbroken
+ * blue-grey slab from the southern approach and the crossing at (12,62).
+ * Adds the deck-joint lines at the slab edges, a dark base course wrapping
+ * the podium, dark garage-opening insets with proud reveals and a ramp hint
+ * on the street-facing face, side service doors, and thin vertical grime
+ * streaks. All pieces are noCollide dressing buried a few centimetres into
+ * the wall body, so collision, nav and the authored openings are untouched.
+ */
+function garageFacadeBreakup(b: WorldBuilder, cx: number, cz: number): void {
+  const trim: MatKey = 'concreteDark';
+  const dark: MatKey = 'metalDark';
+  const fx = 15.2; // outer face of the side walls
+  const fz = 10.2; // outer face of the front/back walls
+  const opts = { noCollide: true, castShadow: false } as const;
+
+  // Horizontal joint bands: base course on the podium, deck line where the
+  // upper slab meets the walls, and a pre-roof joint near the parapet.
+  const band = (y: number, sy: number): void => {
+    b.box(cx, y, cz + fz, 30.8, sy, 0.14, trim, 0, opts);
+    b.box(cx, y, cz - fz, 30.8, sy, 0.14, trim, 0, opts);
+    b.box(cx + fx, y, cz, 0.14, sy, 20.8, trim, 0, opts);
+    b.box(cx - fx, y, cz, 0.14, sy, 20.8, trim, 0, opts);
+  };
+  band(0.34, 0.68);
+  band(4.02, 0.3);
+  band(6.98, 0.22);
+
+  // Dark garage-opening insets with proud reveal frames on the street-facing
+  // (south, -z) face — the elevation the spawn view and the (30,138) frame
+  // actually see. Ground level gets two wide openings, the upper deck one.
+  const opening = (px: number, y: number, w: number, h: number): void => {
+    b.box(px, y, cz - fz, w, h, 0.12, dark, 0, opts);
+    for (const jx of [-w / 2 - 0.18, w / 2 + 0.18]) {
+      b.box(px + jx, y, cz - fz + 0.04, 0.24, h + 0.3, 0.26, trim, 0, opts);
+    }
+    b.box(px, y + h / 2 + 0.18, cz - fz + 0.04, w + 0.6, 0.24, 0.26, trim, 0, opts);
+  };
+  opening(cx - 8.5, 1.95, 5.6, 3.0);
+  opening(cx + 8.5, 1.95, 5.6, 3.0);
+  opening(cx, 5.55, 6.0, 2.6);
+  // Ramp hint: a lighter sloped strip rising across the right-hand opening,
+  // plus a kerb, so the dark inset reads as an actual ramped garage mouth.
+  b.box(cx + 8.1, 1.72, cz - fz - 0.13, 4.4, 0.42, 0.1, 'concrete', 0, {
+    ...opts,
+    pitch: 0.2,
+  });
+  b.box(cx + 8.5, 0.62, cz - fz - 0.13, 5.2, 0.22, 0.12, trim, 0, opts);
+
+  // Side service doors with the same reveal language.
+  for (const sx of [-1, 1]) {
+    const wx = cx + sx * fx;
+    b.box(wx, 1.75, cz + 3.4, 0.12, 2.5, 2.3, dark, 0, opts);
+    b.box(wx + sx * 0.04, 1.75, cz + 3.4, 0.26, 2.8, 2.66, trim, 0, opts);
+    b.box(wx, 5.45, cz - 4.2, 0.12, 2.1, 3.2, dark, 0, opts);
+    b.box(wx + sx * 0.04, 5.45, cz - 4.2, 0.26, 2.4, 3.56, trim, 0, opts);
+  }
+
+  // Vertical grime streaks: thin dark plates flush against the wall faces,
+  // placed at position hashes so repeated builds stay identical. Offsets skip
+  // the opening bays.
+  const streakHash = (i: number): number => ((Math.imul(i + 1, 0x9e3779b1) >>> 8) % 1000) / 1000;
+  const streak = (along: number, face: 'back' | 'front' | 'west' | 'east'): void => {
+    const h = Math.max(2.2, streakHash(Math.round(along * 7 + face.length)) * 2.4);
+    const w = 0.45 + streakHash(Math.round(along * 13)) * 0.5;
+    if (face === 'back' || face === 'front') {
+      const s = face === 'back' ? -1 : 1;
+      b.box(cx + along, 3.7, cz + s * (fz + 0.018), w, h, 0.035, trim, 0, opts);
+    } else {
+      const s = face === 'east' ? 1 : -1;
+      b.box(cx + s * (fx + 0.018), 3.7, cz + along, 0.035, h, w, trim, 0, opts);
+    }
+  };
+  for (const along of [-13.4, -11.9, -4.9, -1.1, 2.3, 6.4, 12.1, 13.8]) streak(along, 'back');
+  for (const along of [-12.8, -5.6, 5.1, 12.6]) streak(along, 'front');
+  for (const along of [-7.6, -1.4, 7.9]) streak(along, 'west');
+  for (const along of [-8.4, 0.9, 8.1]) streak(along, 'east');
+}
+
+/** Ground-decay micro-scatter along the city's road grid (connective tissue). */
+function groundDecay(b: WorldBuilder): void {
+  const corridors = [];
+  for (let i = -2; i <= 2; i++) {
+    corridors.push({ x1: i * 100, z1: -248, x2: i * 100, z2: 248, width: 14 });
+    corridors.push({ x1: -248, z1: i * 100, x2: 248, z2: i * 100, width: 14 });
+  }
+  addGroundDecay(b, {
+    heightAt: () => 0,
+    corridors,
+    stainMat: 'asphalt',
+    trackMat: 'asphalt',
+    spacing: 9,
+    maxPieces: 148,
+  });
 }
 
 function miniPlaza(b: WorldBuilder, cx: number, cz: number): void {

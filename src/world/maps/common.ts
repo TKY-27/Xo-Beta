@@ -1478,3 +1478,328 @@ export function addDrumCluster(b: WorldBuilder, x: number, z: number, o: DrumClu
     b.cyl(x + 1.78, o.baseY + h + h / 2, z - 0.14, r, h, mat, { segments: 10, noCollide: true });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Ground-decay micro-scatter (connective-tissue pass). Appended after the W8
+// density helpers; the helpers above are untouched.
+// ---------------------------------------------------------------------------
+
+export interface GroundDecayCorridor {
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+  /** Full paved/corridor width; marks hug the margins and the wheel lines. */
+  width: number;
+}
+
+export interface GroundDecayOpts {
+  /** Terrain sampler for the map (flat maps pass () => 0). */
+  heightAt: (x: number, z: number) => number;
+  /** Road spines / path runs the decay distributes along. */
+  corridors: GroundDecayCorridor[];
+  /** Metres of corridor per decay family. Default 9. */
+  spacing?: number;
+  /** Shared-library material for damp stain patches (a dark key). */
+  stainMat?: MatKey;
+  /** Shared-library material for tyre-track strips on the wheel lines. */
+  trackMat?: MatKey;
+  /** Marks far from every POI are thinned to this fraction (0..1). Default 0.4. */
+  offPoiKeep?: number;
+  /**
+   * Hard cap on geo pieces this layer may emit (the <=2% added-triangle gate).
+   * Marks are planned for every corridor, then emitted round-robin until the
+   * budget is spent, so thinning stays even across the network. Default 120.
+   */
+  maxPieces?: number;
+  /**
+   * Optional 0..1 bias forcing this fraction of marks to the single-piece
+   * stain family (cheapest per mark) before the normal mix rolls in. Budget
+   * starved maps raise it to stretch coverage.
+   */
+  stainBias?: number;
+}
+
+/**
+ * Deterministic ground-decay layer for the connective tissue between POIs:
+ * damp stain patches, gravel/pebble clusters, scattered litter and tyre-track
+ * strips along road approaches, plus decay rings around existing ground props.
+ *
+ * Distribution concentrates near POIs (spawn views, approaches) and thins
+ * off-corridor map edges, while any walked stretch still picks up marks. Every
+ * placement is gated by dressingSpotClear so doors, chests, crates and props
+ * stay clear, and each mark is a thin noCollide, castShadow:false plate that
+ * sits a couple of centimetres proud of the local paved surface (the road-paint
+ * idiom), with per-mark height jitter so overlapping plates never share a top
+ * plane. The layer runs after roads and props exist; placement replays
+ * byte-identically per build from its own fixed seed.
+ */
+export function addGroundDecay(b: WorldBuilder, o: GroundDecayOpts): void {
+  const def = b.def;
+  const stainMat = o.stainMat ?? 'concreteDark';
+  const trackMat = o.trackMat ?? stainMat;
+  const spacing = o.spacing ?? 9;
+  const offPoiKeep = o.offPoiKeep ?? 0.4;
+  // Own seed (folded with the built geo count) so repeated builds of one map
+  // replay identically without disturbing the caller's rng sequence.
+  const rng = new Rng(0xdec4a11 ^ def.geo.length);
+
+  const isNearPoi = (x: number, z: number): boolean =>
+    def.pois.some((p) => Math.hypot(p.x - x, p.z - z) < p.radius + 45);
+  const keepOffPoi = (x: number, z: number): boolean => {
+    const h = Math.imul(Math.round(x * 12.9898) ^ Math.round(z * 78.233), 2654435761) >>> 0;
+    return (h % 100) / 100 < offPoiKeep;
+  };
+
+  /**
+   * Top of the paved/finished layer under a point (road strip, sidewalk,
+   * curb, plinth, stoop), capped just above kerb height so furniture tops
+   * never become the support plane a mark would sit on.
+   */
+  const surfaceTopAt = (x: number, z: number): number => {
+    let best = o.heightAt(x, z);
+    const cap = best + 0.85;
+    for (const g of def.geo) {
+      if (g.noRender) continue;
+      if (g.kind === 'box') {
+        const top = g.y + g.sy / 2;
+        if (top > cap || top <= best) continue;
+        const c = Math.abs(Math.cos(g.yaw));
+        const s = Math.abs(Math.sin(g.yaw));
+        if (Math.abs(x - g.x) >= (g.sx * c + g.sz * s) / 2) continue;
+        if (Math.abs(z - g.z) >= (g.sx * s + g.sz * c) / 2) continue;
+        best = top;
+      } else {
+        const top = g.kind === 'cyl' ? g.y + g.h / 2 : g.y + g.r;
+        if (top > cap || top <= best) continue;
+        if (Math.hypot(x - g.x, z - g.z) >= g.r) continue;
+        best = top;
+      }
+    }
+    return best;
+  };
+
+  const gated = (x: number, z: number, hx: number, hz: number, yLow: number): boolean =>
+    dressingSpotClear(def, x, z, hx, hz, yLow, yLow + 0.1, { crates: true, margin: 0.12 });
+
+  let salt = 0;
+
+  /**
+   * Marks are planned first (all rng spent up front so planning order never
+   * depends on gate outcomes), then emitted round-robin across corridors under
+   * a hard piece budget — the <=2% triangle gate per map. Emit functions
+   * return the pieces actually placed (0 when a gate rejected the spot), so a
+   * rejected mark frees budget for a later one.
+   */
+  interface PlannedMark {
+    emit: () => number;
+  }
+  const planned: Array<PlannedMark[]> = [];
+  const planInto = (corridorIdx: number, emit: () => number): void => {
+    while (planned.length <= corridorIdx) planned.push([]);
+    planned[corridorIdx]!.push({ emit });
+  };
+
+  /** One dark stain plate; a couple of centimetres proud of the surface. */
+  const stain = (x: number, z: number, yaw: number, w: number, d: number, mark: number): number => {
+    const gy = surfaceTopAt(x, z);
+    const hx = Math.max(w, d) / 2 + 0.15;
+    if (!gated(x, z, hx, hx, gy)) return 0;
+    b.box(x, gy + 0.012 + (mark % 5) * 0.004, z, w, 0.03, d, stainMat, yaw, {
+      noCollide: true,
+      castShadow: false,
+    });
+    return 1;
+  };
+
+  /** Gravel/pebble cluster: a few tiny rock chips in a ~1.7 m patch. */
+  const gravel = (x: number, z: number, mark: number, chips: number, a0: number, radii: number[], sizes: number[], yaws: number[]): number => {
+    const gy = surfaceTopAt(x, z);
+    if (!gated(x, z, 1.3, 1.3, gy)) return 0;
+    for (let i = 0; i < chips; i++) {
+      const s = sizes[i]!;
+      b.box(
+        x + Math.cos(a0 + i * 2.4) * radii[i]!,
+        gy + s / 2 + 0.006 + (i % 3) * 0.004,
+        z + Math.sin(a0 + i * 2.4) * radii[i]!,
+        s * 1.25,
+        s,
+        s,
+        'rock',
+        yaws[i]!,
+        { noCollide: true, castShadow: false },
+      );
+    }
+    void mark;
+    return chips;
+  };
+
+  /** Scattered litter: one or two small crumpled plates. */
+  const litter = (x: number, z: number, mark: number, w1: number, h1: number, d1: number, w2: number, h2: number, d2: number, second: boolean): number => {
+    const gy = surfaceTopAt(x, z);
+    if (!gated(x, z, 0.7, 0.7, gy)) return 0;
+    const mats: MatKey[] = ['woodDark', 'concreteDark', 'metalDark'];
+    b.box(x, gy + 0.035 + (mark % 4) * 0.003, z, w1, h1, d1, mats[mark % mats.length]!, mark * 0.7, {
+      noCollide: true,
+      castShadow: false,
+    });
+    if (second) {
+      b.box(
+        x + ((mark % 3) - 1) * 0.45,
+        gy + 0.028 + ((mark + 1) % 4) * 0.003,
+        z + ((mark % 2) - 0.5) * 0.8,
+        w2,
+        h2,
+        d2,
+        mats[(mark + 1) % mats.length]!,
+        mark * 1.3,
+        { noCollide: true, castShadow: false },
+      );
+      return 2;
+    }
+    return 1;
+  };
+
+  /** Tyre-track strip pair on the wheel lines, elongated along the road. */
+  const tracks = (
+    cx: number, cz: number,
+    ux: number, uz: number, nx: number, nz: number,
+    width: number, mark: number, len: number, w2: number,
+  ): number => {
+    const yaw = Math.atan2(uz, ux);
+    const lane = Math.max(1.1, width * 0.2);
+    let placed = 0;
+    for (const side of [-1, 1]) {
+      const tx = cx + nx * side * lane;
+      const tz = cz + nz * side * lane;
+      const gy = surfaceTopAt(tx, tz);
+      if (!gated(tx, tz, len / 2, len / 2, gy)) continue;
+      b.box(tx, gy + 0.01 + ((mark + side + 2) % 3) * 0.004, tz, len, 0.024, w2, trackMat, yaw, {
+        noCollide: true,
+        castShadow: false,
+      });
+      placed++;
+    }
+    return placed;
+  };
+
+  for (let corIdx = 0; corIdx < o.corridors.length; corIdx++) {
+    const cor = o.corridors[corIdx]!;
+    const dx = cor.x2 - cor.x1;
+    const dz = cor.z2 - cor.z1;
+    const len = Math.hypot(dx, dz);
+    if (len < 4) continue;
+    const ux = dx / len;
+    const uz = dz / len;
+    const nx = -uz;
+    const nz = ux;
+    const count = Math.max(1, Math.round(len / spacing));
+    for (let i = 0; i < count; i++) {
+      const t = len * ((i + 0.5) / count) + rng.range(-spacing * 0.3, spacing * 0.3);
+      if (t < 2 || t > len - 2) continue;
+      const cx = cor.x1 + ux * t;
+      const cz = cor.z1 + uz * t;
+      if (!isNearPoi(cx, cz) && !keepOffPoi(cx, cz)) continue;
+      const roll = rng.next();
+      const side = rng.bool() ? 1 : -1;
+      const lat = side * Math.max(0.8, cor.width / 2 - rng.range(0.5, Math.min(2.4, cor.width / 2)));
+      const mx = cx + nx * lat;
+      const mz = cz + nz * lat;
+      const mark = salt++;
+      // The optional bias widens the stain band and squeezes the rest of the
+      // mix proportionally, so budget-starved maps trade cluster variety for
+      // corridor coverage instead of losing marks wholesale.
+      const bias = o.stainBias ?? 0;
+      const stainUpTo = bias + 0.52 * (1 - bias);
+      const gravelUpTo = stainUpTo + 0.22 * (1 - bias);
+      const litterUpTo = gravelUpTo + 0.16 * (1 - bias);
+      if (roll < stainUpTo) {
+        const yaw = Math.atan2(uz, ux) + rng.range(-0.6, 0.6);
+        const w = rng.range(0.7, 1.9);
+        const d = rng.range(0.5, 1.3);
+        planInto(corIdx, () => stain(mx, mz, yaw, w, d, mark));
+      } else if (roll < gravelUpTo) {
+        const chips = 3;
+        const a0 = rng.angle();
+        const radii = [rng.range(0.05, 0.85), rng.range(0.05, 0.85), rng.range(0.05, 0.85)];
+        const sizes = [rng.range(0.06, 0.16), rng.range(0.06, 0.16), rng.range(0.06, 0.16)];
+        const yaws = [rng.angle(), rng.angle(), rng.angle()];
+        planInto(corIdx, () => gravel(mx, mz, mark, chips, a0, radii, sizes, yaws));
+      } else if (roll < litterUpTo) {
+        const w1 = rng.range(0.16, 0.42);
+        const h1 = rng.range(0.06, 0.14);
+        const d1 = rng.range(0.12, 0.3);
+        const w2 = rng.range(0.2, 0.38);
+        const h2 = rng.range(0.04, 0.09);
+        const d2 = rng.range(0.16, 0.3);
+        const second = rng.bool(0.45);
+        planInto(corIdx, () => litter(mx, mz, mark, w1, h1, d1, w2, h2, d2, second));
+      } else {
+        const tLen = rng.range(4.5, 7.5);
+        const tw = rng.range(0.4, 0.6);
+        planInto(corIdx, () => tracks(cx, cz, ux, uz, nx, nz, cor.width, mark, tLen, tw));
+      }
+    }
+  }
+
+  // Decay rings around existing ground props (crates, cabinets, dumpsters,
+  // drums, planters): every third eligible prop gets a stain or gravel patch
+  // just off its footprint, so cluttered corners read trodden and damp. These
+  // join the same round-robin pool as the corridor marks.
+  const props: Array<{ x: number; z: number }> = [];
+  for (const g of def.geo) {
+    if (props.length >= 160) break;
+    if (g.noRender) continue;
+    let base: number;
+    if (g.kind === 'box') {
+      const span = Math.max(g.sx, g.sz);
+      const thick = Math.min(g.sx, g.sz);
+      if (span < 0.5 || span > 5.5 || g.sy < 0.5 || g.sy > 4.5) continue;
+      if (thick <= 0.7 && span >= 4) continue; // wall run, not a prop
+      base = g.y - g.sy / 2;
+    } else if (g.kind === 'cyl') {
+      if (g.r < 0.25 || g.r > 1.6 || g.h < 0.4 || g.h > 3.4) continue;
+      base = g.y - g.h / 2;
+    } else continue;
+    const terr = o.heightAt(g.x, g.z);
+    if (base < terr - 0.3 || base > terr + 0.6) continue;
+    props.push({ x: g.x, z: g.z });
+  }
+  const propGroup = planned.length;
+  planned.push([]);
+  for (let i = 0; i < props.length; i += 3) {
+    const p = props[i]!;
+    const a = rng.angle();
+    const r = 1.1 + rng.range(0, 0.9);
+    const mx = p.x + Math.cos(a) * r;
+    const mz = p.z + Math.sin(a) * r;
+    const mark = salt++;
+    const useStain = rng.bool(0.6);
+    const w = rng.range(0.6, 1.4);
+    const d = rng.range(0.5, 1.1);
+    const a0 = rng.angle();
+    const radii = [rng.range(0.05, 0.8), rng.range(0.05, 0.8), rng.range(0.05, 0.8)];
+    const sizes = [rng.range(0.06, 0.15), rng.range(0.06, 0.15), rng.range(0.06, 0.15)];
+    const yaws = [rng.angle(), rng.angle(), rng.angle()];
+    planInto(propGroup, () => (useStain
+      ? stain(mx, mz, a, w, d, mark)
+      : gravel(mx, mz, mark, 3, a0, radii, sizes, yaws)));
+  }
+
+  // Emit round-robin: one mark per corridor group per pass, until the piece
+  // budget is spent. Keeps coverage even when the budget forces thinning.
+  // Each group is shuffled first (same deterministic rng) so the kept prefix
+  // spreads along the whole corridor instead of clustering at its start.
+  for (const list of planned) rng.shuffle(list);
+  let piecesLeft = o.maxPieces ?? 120;
+  const depths = planned.map((list) => list.length);
+  for (let round = 0; piecesLeft > 0; round++) {
+    let any = false;
+    for (let g = 0; g < planned.length && piecesLeft > 0; g++) {
+      if (round >= depths[g]!) continue;
+      any = true;
+      piecesLeft -= planned[g]![round]!.emit();
+    }
+    if (!any) break;
+  }
+}

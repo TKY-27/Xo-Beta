@@ -7,7 +7,7 @@
 import { planStairs, STAIR_MAX_RISE, WorldBuilder } from '../builder';
 import { ROCK_CLEARANCE_RADIUS, type MapDef, type MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, addMarketStall, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { addBuilding, addGroundDecay, addMarketStall, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
@@ -175,6 +175,7 @@ export function buildOldFront(): MapDef {
   hedgerowsAndWalls(b, rng);
   edgeHomesteads(b, rng);
   townDensity(b, rng);
+  groundDecay(b);
 
   hardenExposedFlanks(b, { mat: 'sandbag', maxProps: 30 });
 
@@ -1352,4 +1353,32 @@ function townDensity(b: WorldBuilder, rng: Rng): void {
   woodpile(66.2, -26);
   woodpile(119.5, 30.5);
   woodpile(-28.5, 22.5);
+}
+
+/**
+ * Ground-decay micro-scatter along the worn travel corridors (connective
+ * tissue): mud stains, gravel, litter and rut pairs along the dirt roads that
+ * join the square, old town, keep, shrine, orchard, mill and farmstead, plus
+ * decay rings around existing ground props. Deterministic and
+ * dressingSpotClear-gated so lanes, doors, chests and crates stay usable.
+ */
+function groundDecay(b: WorldBuilder): void {
+  addGroundDecay(b, {
+    heightAt: terrainH,
+    corridors: [
+      { x1: 20, z1: -10, x2: 110, z2: 30, width: 7.4 },
+      { x1: 20, z1: -10, x2: -150, z2: -150, width: 7.4 },
+      { x1: -150, z1: -150, x2: -170, z2: 60, width: 7.4 },
+      { x1: 20, z1: -10, x2: 60, z2: -120, width: 7.4 },
+      { x1: 110, z1: 30, x2: 190, z2: 60, width: 7.4 },
+      { x1: 20, z1: -10, x2: -30, z2: 210, width: 7.4 },
+      { x1: 110, z1: 30, x2: 150, z2: 170, width: 7.4 },
+      // Open meadow spur west of the square (QA frame -30,40).
+      { x1: 20, z1: -10, x2: -30, z2: 60, width: 6.5 },
+    ],
+    stainMat: 'dirt',
+    trackMat: 'dirt',
+    spacing: 9,
+    maxPieces: 80,
+  });
 }
