@@ -17,8 +17,22 @@ function smooth(t: number): number {
 }
 
 const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.3);
-const ADS_POS = new THREE.Vector3(0, -0.058, -0.22);
 const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
+
+/**
+ * Per-class ADS pose, computed from each weapon's sight line: the sight
+ * height (weapon-local) × presentation scale places the AIM LINE (rear
+ * notch → front post / bead / scope body) exactly on the view centre, so
+ * ADS presents a true sight picture instead of parking the receiver over
+ * the crosshair. Z keeps the buttstock comfortably clear of the eye.
+ */
+const ADS_POSE: Record<WeaponId, { y: number; z: number }> = {
+  pistol: { y: -0.044, z: -0.2 },
+  smg: { y: -0.043, z: -0.2 },
+  ar: { y: -0.044, z: -0.245 },
+  shotgun: { y: -0.027, z: -0.27 },
+  sniper: { y: -0.05, z: -0.245 },
+};
 
 type PresentationInput = Readonly<{
   crouched: boolean;
@@ -506,14 +520,40 @@ export class ViewModel {
   /** Per-class ADS pose offsets (metres, applied through the ads blend).
    * Y drops the sniper so the box magazine falls out of the aim point. */
   private static readonly ADS_EXTRA_Y: Record<WeaponId, number> = {
-    pistol: 0, smg: 0, ar: 0, shotgun: -0.006, sniper: -0.028,
+    pistol: 0, smg: 0, ar: 0, shotgun: 0, sniper: 0,
   };
 
-  /** The stage camera's 1 cm near plane makes the old forward nudges
+  /** The stage camera's 1 cm near plane makes forward nudges
    * unnecessary — stocks stay outside the clip volume at true ADS. */
   private static readonly ADS_EXTRA_FORWARD: Record<WeaponId, number> = {
     pistol: 0, smg: 0, ar: 0, shotgun: 0, sniper: 0,
   };
+
+  /**
+   * Live body motion the viewmodel reacts to (set from the render loop):
+   * view-space lateral/forward speed, vertical velocity and grounded state.
+   * The weapon carries mass — it trails acceleration, dips on landings,
+   * rises on jumps and floats while airborne.
+   */
+  setMotionState(s: { sideVel: number; fwdVel: number; vertVel: number; grounded: boolean }): void {
+    this.motion.sideVel = s.sideVel;
+    this.motion.fwdVel = s.fwdVel;
+    this.motion.vertVel = s.vertVel;
+    if (s.grounded !== this.motion.grounded) {
+      if (!s.grounded && s.vertVel > 2) this.jumpT = 0.22;
+      if (s.grounded && this.motion.fallSpeed < -5) {
+        this.landT = Math.min(0.34, 0.14 + Math.abs(this.motion.fallSpeed) * 0.007);
+      }
+      this.motion.grounded = s.grounded;
+    }
+    this.motion.fallSpeed = s.grounded ? 0 : Math.min(0, s.vertVel);
+  }
+  private readonly motion = { sideVel: 0, fwdVel: 0, vertVel: 0, grounded: true, fallSpeed: 0 };
+  private sideLag = 0;
+  private fwdLag = 0;
+  private landT = 0;
+  private jumpT = 0;
+  private crouchBlend = 0;
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
     const key = `${id}:${rarity}`;
@@ -629,6 +669,16 @@ export class ViewModel {
     if (m) {
       m.group.localToWorld(this.muzzleFlashLight.position.copy(m.muzzle));
     }
+  }
+
+  /** Current muzzle position in VIEW space (the stage scene's coordinate
+   * space). Callers transform by the world camera matrix to place world-space
+   * first-person effects (flash sprite, smoke, shell ejecta). */
+  muzzleView(out: THREE.Vector3): THREE.Vector3 {
+    const m = this.currentModel;
+    if (!m) return out.copy(this.muzzleFlashLight.position);
+    this.pivot.updateMatrixWorld(true);
+    return m.group.localToWorld(out.copy(m.muzzle));
   }
 
   /** Per-frame presentation update driven by actor state. */
@@ -767,28 +817,56 @@ export class ViewModel {
     const iw = inspect.weight;
     const adsFwd = ViewModel.ADS_EXTRA_FORWARD[weaponId] * ads;
     const adsDrop = ViewModel.ADS_EXTRA_Y[weaponId] * ads;
+    const adsPose = ADS_POSE[weaponId];
+
+    // Movement inertia: the weapon trails lateral/forward acceleration
+    // (mass), settles back on a spring. Suppressed while aiming.
+    const inertiaScale = (1 - ads * 0.85) * (1 - this.sprintBlend * 0.4);
+    this.sideLag += (-this.motion.sideVel * 0.0052 - this.sideLag) * Math.min(1, dt * 5.5);
+    this.fwdLag += (this.motion.fwdVel * 0.0038 - this.fwdLag) * Math.min(1, dt * 5.5);
+    this.sideLag = THREE.MathUtils.clamp(this.sideLag, -0.05, 0.05) * inertiaScale;
+    this.fwdLag = THREE.MathUtils.clamp(this.fwdLag, -0.04, 0.04) * inertiaScale;
+
+    // Landing dip / jump rise / airborne float.
+    this.landT = Math.max(0, this.landT - dt);
+    const landDip = this.landT > 0 ? Math.sin((1 - this.landT / 0.34) * Math.PI) * this.landT * 0.16 : 0;
+    this.jumpT = Math.max(0, this.jumpT - dt);
+    const jumpRise = this.jumpT > 0 ? Math.sin((1 - this.jumpT / 0.22) * Math.PI) * 0.02 : 0;
+    const airFloat = !this.motion.grounded
+      ? THREE.MathUtils.clamp(-this.motion.vertVel * 0.0016, -0.012, 0.014)
+      : 0;
+
+    // Crouch pull (weapon held slightly tighter and closer).
+    this.crouchBlend += ((input.crouched ? 1 : 0) - this.crouchBlend) * Math.min(1, dt * 8);
+
+    // Idle breathing: a slow, shallow sway so the weapon never freezes.
+    const breathe = Math.sin(this.t * 1.7) * 0.0021 + Math.sin(this.t * 0.9) * 0.0012;
+
     const px =
-      HIP_POS.x + (ADS_POS.x - HIP_POS.x) * ads +
+      HIP_POS.x + (0 - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
-      bobX + this.swayX - 0.1 * inspect.lift * iw;
+      bobX + this.swayX + this.sideLag - 0.1 * inspect.lift * iw;
     const py =
-      HIP_POS.y + (ADS_POS.y - HIP_POS.y) * ads - adsDrop +
+      HIP_POS.y + (adsPose.y - HIP_POS.y) * ads - adsDrop +
       (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
-      bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw;
+      bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw +
+      breathe - landDip + jumpRise + airFloat - this.crouchBlend * 0.012;
     const pz =
-      HIP_POS.z + (ADS_POS.z - HIP_POS.z) * ads - adsFwd +
+      HIP_POS.z + (adsPose.z - HIP_POS.z) * ads - adsFwd +
       (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
-      this.recoilZ + 0.14 * inspect.lift * iw;
+      this.recoilZ + 0.14 * inspect.lift * iw + this.fwdLag + this.crouchBlend * 0.012;
 
     this.pivot.position.set(px, py, pz);
     // Base hip stance angles the receiver inward across the lower-right
     // frame (muzzle toward center) like a real ready position; ADS removes it.
     const hipYaw = 0.28 * (1 - ads);
     const hipRoll = -0.1 * (1 - ads);
+    const strafeRoll = this.sideLag * 1.6;
+    const landPitch = this.landT > 0 ? Math.sin((1 - this.landT / 0.34) * Math.PI) * 0.12 : 0;
     this.pivot.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw,
+      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw + landPitch + airFloat * 6,
       this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
-      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw,
+      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw + strafeRoll,
     );
 
     // CYCLE 36 (user pass): connect the arms shoulder→elbow→wrist to the

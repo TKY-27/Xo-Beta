@@ -2399,11 +2399,29 @@ function wirePresentation(
   };
 
   const HEAVY_FLASH: Partial<Record<WeaponId, boolean>> = { shotgun: true, sniper: true };
+  const flashMuzzle = new THREE.Vector3();
+  const flashFwd = new THREE.Vector3();
+  const flashRight = new THREE.Vector3();
   match.events.on('muzzleFlash', (e) => {
     const isPlayer = e.actorId === match.localActor?.id;
     if (isPlayer && rig.mode === 'fps') {
       viewmodel.kick(weaponViewmodelKick(e.weaponId));
       viewmodel.muzzlePulse(isPlayer ? 0.8 : 1.15);
+      // First-person feedback at the viewmodel muzzle: flash sprite, smoke
+      // puffs and shell ejecta — the world-space effects the player actually
+      // sees (the character-rig muzzle sits behind the camera in FPS).
+      viewmodel.muzzleView(flashMuzzle).applyMatrix4(rig.camera.matrixWorld);
+      flashFwd.set(0, 0, -1).applyQuaternion(rig.camera.quaternion);
+      flashRight.set(1, 0, 0).applyQuaternion(rig.camera.quaternion);
+      vfx.muzzleFlash(flashMuzzle.x, flashMuzzle.y, flashMuzzle.z, flashFwd.x, flashFwd.y, flashFwd.z, 0.85, HEAVY_FLASH[e.weaponId] === true);
+      vfx.muzzleSmoke(flashMuzzle.x, flashMuzzle.y, flashMuzzle.z, flashFwd.x, flashFwd.y, flashFwd.z);
+      vfx.shellCasing(
+        flashMuzzle.x - flashFwd.x * 0.28 + flashRight.x * 0.1,
+        flashMuzzle.y - 0.12,
+        flashMuzzle.z - flashFwd.z * 0.28 + flashRight.z * 0.1,
+        flashRight.x * 2.4 + 0.6,
+        flashRight.z * 2.4,
+      );
     } else {
       const renderedMuzzle = rigs.get(e.actorId)?.muzzleWorld?.(
         presentationMuzzle,
@@ -3091,6 +3109,25 @@ function present(dtReal: number): void {
     return;
   }
   presentMatch(live, dtReal);
+}
+
+const _vmRight = new THREE.Vector3();
+const _vmFwd = new THREE.Vector3();
+/** World velocity → view-space components for the viewmodel's motion
+ * inertia (side = camera-right axis, fwd = camera-forward axis). */
+function viewmodelMotion(
+  velocity: { x: number; y: number; z: number },
+  grounded: boolean,
+  quaternion: THREE.Quaternion,
+): { sideVel: number; fwdVel: number; vertVel: number; grounded: boolean } {
+  _vmRight.set(1, 0, 0).applyQuaternion(quaternion);
+  _vmFwd.set(0, 0, -1).applyQuaternion(quaternion);
+  return {
+    sideVel: velocity.x * _vmRight.x + velocity.z * _vmRight.z,
+    fwdVel: velocity.x * _vmFwd.x + velocity.z * _vmFwd.z,
+    vertVel: velocity.y,
+    grounded,
+  };
 }
 
 function presentMatch(game: MatchLiveGame, dtReal: number): void {
@@ -3902,6 +3939,8 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   if (m.localActor?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(m.localActor.body.velocity.x, m.localActor.body.velocity.z);
     viewmodel.syncCamera(rig.camera);
+    viewmodel.setMotionState(viewmodelMotion(m.localActor.body.velocity, m.localActor.body.grounded, rig.camera.quaternion));
+    hud.setCrosshairFade(m.localActor.wpn.adsAmount);
     viewmodel.update(m.localActor, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
     viewmodel.group.visible = true;
   } else {
@@ -4118,6 +4157,8 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
   if (local?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(local.velocity.x, local.velocity.z);
     viewmodel.syncCamera(rig.camera);
+    viewmodel.setMotionState(viewmodelMotion(local.velocity, local.grounded, rig.camera.quaternion));
+    hud.setCrosshairFade(view.localMovement?.actorId === local.id ? view.localMovement.adsAmount : 0);
     viewmodel.updateView(
       local,
       dtReal,

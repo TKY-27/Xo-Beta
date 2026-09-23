@@ -1615,6 +1615,12 @@ export class Hud {
     document.body.classList.toggle('scoped', scoped);
   }
 
+  /** Fade the crosshair out as iron sights take over the aim point. */
+  setCrosshairFade(adsAmount: number): void {
+    const ch = $('crosshair');
+    ch.style.opacity = `${(1 - Math.min(1, Math.max(0, adsAmount)) * 0.85).toFixed(3)}`;
+  }
+
   /** Magnification readout inside the scope lens (1x / 2x / 4x). */
   setScopeZoom(magnification: number): void {
     const el = document.getElementById('scope-zoom');

@@ -429,6 +429,23 @@ export class VfxSystem {
     }
   }
 
+  /** Short muzzle smoke: a few slow gray puffs drifting along the bore.
+   * Negative gravity keeps them rising; short life keeps the frame clean. */
+  muzzleSmoke(x: number, y: number, z: number, dx: number, dy: number, dz: number): void {
+    for (let i = 0; i < 3; i++) {
+      this.spawnParticle(
+        x + dx * 0.05, y + dy * 0.05, z + dz * 0.05,
+        dx * (1.1 + Math.random() * 0.9) + (Math.random() - 0.5) * 0.5,
+        dy * 1.1 + 0.35 + Math.random() * 0.5,
+        dz * (1.1 + Math.random() * 0.9) + (Math.random() - 0.5) * 0.5,
+        0.38 + Math.random() * 0.24,
+        0.045 + Math.random() * 0.03,
+        0x8f8f88,
+        -0.5,
+      );
+    }
+  }
+
   shellCasing(x: number, y: number, z: number, dx: number, dz: number): void {
     this.spawnParticle(
       x, y, z,

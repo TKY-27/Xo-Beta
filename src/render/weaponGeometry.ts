@@ -281,6 +281,20 @@ function ring(parent: THREE.Object3D, mat: THREE.Material, radius: number, tube:
   return mesh;
 }
 
+/** Muzzle bore: a recessed dark face + crown ring so the barrel end reads as
+ * a drilled hole instead of a capped cylinder disc (the capped disc reads as
+ * a black ball whenever a reload pitches the bore toward the camera). */
+function muzzleBore(parent: THREE.Object3D, mats: GunMaterials, y: number, z: number, radius: number): void {
+  const bore = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.72, 16),
+    new THREE.MeshStandardMaterial({ color: 0x0a0b0d, roughness: 0.96, metalness: 0.1 }),
+  );
+  bore.rotation.y = Math.PI;
+  bore.position.set(0, y, z - 0.001);
+  parent.add(bore);
+  ring(parent, mats.steel, radius, radius * 0.22, 0, y, z + 0.002);
+}
+
 /** Vent slots cut visually into a handguard (dark inset boxes, both sides). */
 function handguardVents(parent: THREE.Object3D, mat: THREE.Material, zFrom: number, zTo: number, y: number, halfWidth: number): void {
   const count = Math.max(3, Math.round((zFrom - zTo) / 0.028));
@@ -468,11 +482,15 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
   topRail(g, mats.aluminum, -0.06, -0.35, 0.055);
   // Front sight block on the handguard
   box(g, mats.steel, 0.016, 0.036, 0.018, 0, 0.04, -0.63, 0.003);
-  // Stock: buffer tube + adjustable shoulder stock
+  // Stock: buffer tube into a commercial-profile shoulder stock — sloped
+  // comb, hollow cheek, angled butt with rubber pad (not a straight slab).
   cyl(g, mats.aluminum, 0.016, 0.016, 0.14, 0, 0.02, -0.008, 12);
-  box(g, mats.polymer, 0.036, 0.05, 0.11, 0, 0.016, 0.09, 0.009);
-  box(g, mats.rubber, 0.036, 0.06, 0.018, 0, 0.008, 0.15, 0.006);
-  box(g, mats.polymer, 0.02, 0.03, 0.06, 0, -0.024, 0.055, 0.005);
+  const stockBody = box(g, mats.polymer, 0.038, 0.056, 0.1, 0, 0.006, 0.085, 0.009);
+  stockBody.rotation.x = 0.1;
+  box(g, mats.polymer, 0.034, 0.02, 0.09, 0, 0.036, 0.075, 0.006);
+  box(g, mats.rubber, 0.04, 0.075, 0.02, 0, 0.002, 0.138, 0.007);
+  box(g, mats.polymer, 0.024, 0.026, 0.05, 0, -0.028, 0.05, 0.005);
+  muzzleBore(g, mats, 0.024, -0.71, 0.009);
   // Pistol grip + trigger
   pistolGrip(g, mats, 0, 0.004, -0.115);
   triggerGroup(g, mats, 0.008, -0.15);
@@ -496,7 +514,7 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
     // gripL just under the handguard bottom for the palm-up under carry.
     // AR grip: top (0, 0.004, -0.115) raked -0.32, centre ≈ (0, -0.045, -0.099).
     gripR: new THREE.Vector3(0.02, -0.052, -0.096),
-    gripL: new THREE.Vector3(0, -0.006, -0.44),
+    gripL: new THREE.Vector3(-0.024, 0.004, -0.44),
   };
 }
 
@@ -520,6 +538,7 @@ function buildPistol(mats: GunMaterials): ProceduralWeapon {
   // Barrel visible at the muzzle + guide rod
   cyl(g, mats.steel, 0.009, 0.009, 0.014, 0, 0.031, -0.238, 14);
   cyl(g, mats.hardware, 0.005, 0.005, 0.012, 0, 0.006, -0.166, 10);
+  muzzleBore(g, mats, 0.031, -0.246, 0.006);
   // Magazine inside the grip (baseplate visible)
   const mag = boxMagazine(g, mats, 0, -0.025, -0.041, 0.026, 0, 0.105);
   mag.group.rotation.x = -0.32;
@@ -561,6 +580,7 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
   }
   pistolGrip(g, mats, 0, 0.0, -0.1);
   triggerGroup(g, mats, 0.006, -0.13);
+  muzzleBore(g, mats, 0.026, -0.525, 0.012);
   // Long straight mag
   const mag = boxMagazine(g, mats, 0, -0.026, -0.19, 0.032, 0, 0.15);
   mag.group.name = 'mag';
@@ -614,6 +634,7 @@ function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   box(g, mats.steel, 0.014, 0.03, 0.02, 0, 0.016, -0.72, 0.003);
   // Bead sight
   box(g, mats.hardware, 0.004, 0.006, 0.004, 0, 0.043, -0.88, 0.001);
+  muzzleBore(g, mats, 0.03, -0.925, 0.011);
   // Stock with wrist + butt pad
   box(g, mats.polymer, 0.034, 0.05, 0.08, 0, 0.014, -0.06, 0.007);
   const stock = new THREE.Group();
@@ -690,7 +711,16 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
   lens.rotation.y = Math.PI;
   lens.position.set(0, 0, -0.206);
   scope.add(lens);
+  // Eyepiece glass facing the shooter: dark coating with a cool reflective
+  // sheen — the empty tube mouth otherwise reads as a toy.
+  const eyepiece = new THREE.Mesh(
+    new THREE.CircleGeometry(0.016, 16),
+    new THREE.MeshStandardMaterial({ color: 0x0c1622, emissive: 0x1d3d5e, emissiveIntensity: 0.35, roughness: 0.12, metalness: 0.5 }),
+  );
+  eyepiece.position.set(0, 0, 0.186);
+  scope.add(eyepiece);
   g.add(scope);
+  muzzleBore(g, mats, 0.026, -1.255, 0.014);
   // Box magazine
   const mag = boxMagazine(g, mats, 0, -0.022, -0.2, 0.036, 0.1, 0.1);
   mag.group.name = 'mag';
@@ -704,7 +734,7 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
     // Grip top (0, 0.002, -0.085) raked -0.32; gripL under the chassis
     // fore-end (spans y -0.005..0.045, z -0.41..-0.75).
     gripR: new THREE.Vector3(0.02, -0.048, -0.058),
-    gripL: new THREE.Vector3(0, -0.008, -0.52),
+    gripL: new THREE.Vector3(-0.027, 0.004, -0.52),
   };
 }
 

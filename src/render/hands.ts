@@ -66,12 +66,16 @@ function getFabricBump(): THREE.CanvasTexture | null {
 export function getHandMaterialSet(): HandMats {
   if (handMatsSingleton) return handMatsSingleton;
   const bumpMap = getFabricBump();
+  // Dark tactical gloves: charcoal shell with slightly lighter armour plates,
+  // rubberised palm/finger-tip surfaces. The stage light rig exposes these
+  // albedos to night maps too, so values stay far from pure black while
+  // reading as gear, not skin or chalk.
   handMatsSingleton = {
-    glove: new THREE.MeshStandardMaterial({ color: 0x5a626b, roughness: 0.82, metalness: 0.02, bumpMap, bumpScale: 0.00018 }),
-    shell: new THREE.MeshStandardMaterial({ color: 0x646d78, roughness: 0.84, metalness: 0.02, bumpMap, bumpScale: 0.0001 }),
-    skin: new THREE.MeshStandardMaterial({ color: 0x2f343a, roughness: 0.88 }),
-    plate: new THREE.MeshStandardMaterial({ color: 0x394049, roughness: 0.54, metalness: 0.12 }),
-    palm: new THREE.MeshStandardMaterial({ color: 0x474e56, roughness: 0.9 }),
+    glove: new THREE.MeshStandardMaterial({ color: 0x272b31, roughness: 0.88, metalness: 0.02, bumpMap, bumpScale: 0.00022 }),
+    shell: new THREE.MeshStandardMaterial({ color: 0x33383f, roughness: 0.82, metalness: 0.03, bumpMap, bumpScale: 0.00012 }),
+    skin: new THREE.MeshStandardMaterial({ color: 0x1c1f24, roughness: 0.94 }),
+    plate: new THREE.MeshStandardMaterial({ color: 0x3c434b, roughness: 0.5, metalness: 0.14 }),
+    palm: new THREE.MeshStandardMaterial({ color: 0x22262b, roughness: 0.97, bumpMap, bumpScale: 0.0003 }),
   };
   return handMatsSingleton;
 }
@@ -231,10 +235,6 @@ interface Glove {
   metacarpals: THREE.Bone[];
   fingers: FingerChain[];
   thumb: THREE.Bone[];
-  contacts: number[][];
-  palmContacts: number[];
-  thumbContacts: number[];
-  gripCache: Map<string, number[]>;
   side: 1 | -1;
 }
 
@@ -274,9 +274,9 @@ function buildHand(mats: HandMats, side: 1 | -1, fist = false): Glove {
       const x = across * widths[row]!;
       const arch = 1 - across * across;
       const cuff = row < 4;
-      const fold = cuff ? Math.sin(row * 2.7 + across * 3) * 0.0012 : 0;
+      const fold = cuff ? Math.sin(row * 2.7 + across * 3) * 0.0008 : 0;
       const knuckle = Math.sin(col / 3 * Math.PI) ** 2 * Math.exp(-(((rows[row]! + 0.024) / 0.019) ** 2));
-      const dorsal = cuff ? 0.013 + arch * 0.004 + fold : 0.006 + arch * 0.009 + knuckle * 0.004;
+      const dorsal = cuff ? 0.009 + arch * 0.004 + fold : 0.006 + arch * 0.009 + knuckle * 0.004;
       const thenar = Math.exp(-((across - 0.55) ** 2) * 6) * Math.exp(-(((rows[row]! - 0.022) / 0.035) ** 2));
       const knuckleArc = row >= rows.length - 2 ? (1 - arch) * 0.009 + Math.max(0, -across) * 0.004 : 0;
       const web = row === rows.length - 1 && col > 0 && col < 12 && col % 3 === 0 ? 0.014 : 0;
@@ -370,38 +370,7 @@ function buildHand(mats: HandMats, side: 1 | -1, fist = false): Glove {
   mesh.name = 'continuous-glove';
   const group = new THREE.Group();
   group.add(mesh);
-  const contacts = fingers.map(finger => {
-    const boneIndices = finger.bones.map(bone => bones.indexOf(bone));
-    const positions = mesh.geometry.getAttribute('position');
-    const indices = mesh.geometry.getAttribute('skinIndex');
-    const weights = mesh.geometry.getAttribute('skinWeight');
-    return boneIndices.map(bone => {
-      let best = -1;
-      let score = -Infinity;
-      for (let i = 0; i < positions.count; i++) {
-        let weight = 0;
-        for (let j = 0; j < 4; j++) if (indices.getComponent(i, j) === bone) weight += weights.getComponent(i, j);
-        const candidate = weight - Math.abs(positions.getY(i) + 0.01) * 80;
-        if (candidate > score) { best = i; score = candidate; }
-      }
-      return best;
-    });
-  });
-  const positions = mesh.geometry.getAttribute('position');
-  const patch = (targets: THREE.Vector3[]): number[] => targets.map(target => {
-    let best = 0;
-    let minimum = Infinity;
-    const point = new THREE.Vector3();
-    for (let i = 0; i < positions.count; i++) {
-      point.fromBufferAttribute(positions, i);
-      const distance = point.distanceToSquared(target);
-      if (distance < minimum) { minimum = distance; best = i; }
-    }
-    return best;
-  });
-  const palmContacts = patch([-0.018, 0, 0.018].flatMap(x => [0.025, -0.012].map(z => new THREE.Vector3(x * side, -0.015, z))));
-  const thumbContacts = patch([0.018, 0.032, 0.05, 0.065].flatMap(x => [-0.012, 0.004].map(y => new THREE.Vector3(x * side, y, 0.027 - (x - 0.029) * 0.8))));
-  const glove = { group, mesh, metacarpals, fingers, thumb, contacts, palmContacts, thumbContacts, gripCache: new Map<string, number[]>(), side };
+  const glove = { group, mesh, metacarpals, fingers, thumb, side };
   articulate(glove, fist ? 1 : 0.62, 0, fist);
   return glove;
 }
@@ -428,198 +397,84 @@ function articulate(glove: Glove, curl: number, spread: number, fist = false, tr
   glove.thumb[2]!.rotation.set(-curl * 0.18, glove.side * curl * 0.48, 0);
 }
 
-function fitGrip(glove: Glove, group: THREE.Group, contact: THREE.Vector3, support: boolean, pump = false): void {
-  const key = `${support}:${pump}:${group.scale.x}:${[...contact.toArray(), ...group.quaternion.toArray(), ...(group.parent ? [...group.parent.position.toArray(), ...group.parent.quaternion.toArray(), ...group.parent.scale.toArray()] : [])].map(v => v.toFixed(3)).join(':')}`;
-  const cached = glove.gripCache.get(key);
-  if (cached) {
-    glove.fingers.forEach((finger, i) => {
-      finger.bones.forEach((bone, j) => { if (support || finger.index !== 0) bone.rotation.x = cached[i * 3 + j]!; });
-      glove.metacarpals[i]!.rotation.x = cached[12 + i]!;
-    });
-    group.position.copy(contact).add(_contactOffset.fromArray(cached, 16));
-    group.quaternion.fromArray(cached, 19);
-    glove.thumb.forEach((bone, i) => bone.rotation.set(cached[23 + i * 3]!, cached[24 + i * 3]!, cached[25 + i * 3]!));
-    return;
+/**
+ * Authored trigger-hand pose: the palm presses the grip's rear face, the
+ * middle/ring/pinky wrap the front strap with a per-finger curl gradient,
+ * the index lives at the trigger (pulling through `triggerAmount` when
+ * firing) and the thumb lays along the grip's support side. Replaces the
+ * former per-frame grip-fitting optimizer — these are fixed, art-directed
+ * curves, so the pose is deterministic and costs nothing to solve.
+ */
+function poseTriggerHand(glove: Glove, trigger: boolean, triggerAmount: number): void {
+  const curls = [0.34, 0.75, 0.85, 0.8];
+  for (const finger of glove.fingers) {
+    let c = curls[finger.index] ?? 0.75;
+    if (trigger && finger.index === 0) {
+      const pull = THREE.MathUtils.clamp(triggerAmount, 0, 1);
+      c = 0.34 - pull * 0.2;
+    }
+    finger.bones[0]!.rotation.x = -c * 1.08;
+    finger.bones[1]!.rotation.x = -c * 1.42;
+    finger.bones[2]!.rotation.x = -c * 0.92;
   }
-  const mesh = glove.mesh;
-  const position = mesh.geometry.getAttribute('position');
-  const inverse = new THREE.Matrix4();
-  const point = new THREE.Vector3();
-  const center = contact.clone();
-  if (support) center.y += pump ? -0.012 : 0.023;
-  else center.x = 0;
-  const triangles: THREE.Triangle[] = [];
-  if (group.parent) {
-    group.parent.updateWorldMatrix(true, false);
-    const parentInverse = group.parent.matrixWorld.clone().invert();
-    group.parent.traverse(object => {
-      const obstacle = object as THREE.Mesh;
-      if (!obstacle.isMesh || (obstacle as THREE.SkinnedMesh).isSkinnedMesh || !obstacle.visible) return;
-      obstacle.updateWorldMatrix(true, false);
-      const transform = parentInverse.clone().multiply(obstacle.matrixWorld);
-      const vertices = obstacle.geometry.getAttribute('position');
-      const indices = obstacle.geometry.getIndex();
-      for (let i = 0; i < (indices?.count ?? vertices.count); i += 3) {
-        const corners = [0, 1, 2].map(j => new THREE.Vector3().fromBufferAttribute(vertices, indices ? indices.getX(i + j) : i + j).applyMatrix4(transform));
-        const triangle = new THREE.Triangle(corners[0]!, corners[1]!, corners[2]!);
-        const nearest = triangle.closestPointToPoint(center, new THREE.Vector3());
-        if (nearest.distanceTo(center) < (support ? 0.08 : 0.14)) triangles.push(triangle);
-      }
-    });
+  for (let i = 0; i < glove.metacarpals.length; i++) {
+    const ulnar = (3 - i) / 3;
+    glove.metacarpals[i]!.rotation.set(-0.2 - ulnar * 0.3, glove.side * (i - 1.5) * 0.02, glove.side * (1.5 - i) * 0.1);
   }
-  const nearest = new THREE.Vector3();
-  const normal = new THREE.Vector3();
-  const difference = new THREE.Vector3();
-  const distance = (): number => {
-    if (triangles.length) {
-      let minimum = Infinity;
-      let signed = Infinity;
-      for (const triangle of triangles) {
-        triangle.closestPointToPoint(point, nearest);
-        const squared = nearest.distanceToSquared(point);
-        if (squared < minimum) {
-          minimum = squared;
-          signed = Math.sqrt(squared) * (difference.copy(point).sub(nearest).dot(triangle.getNormal(normal)) < 0 ? -1 : 1);
-        }
-      }
-      return signed;
-    }
-    const x = point.x - center.x;
-    const y = support ? point.y - center.y : (point.z - center.z) * 0.95 + (point.y - center.y) * 0.31;
-    const qx = Math.abs(x) - (support ? 0.017 : 0.01);
-    const qy = Math.abs(y) - (support ? pump ? 0.012 : 0.016 : 0.016);
-    return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - 0.006;
-  };
-  const score = (i: number): number => {
-    group.updateWorldMatrix(true, false);
-    group.updateMatrixWorld(true);
-    if (group.parent) inverse.copy(group.parent.matrixWorld).invert();
-    else inverse.identity();
-    let total = 0;
-    for (const index of glove.contacts[i]!) {
-      mesh.applyBoneTransform(index, point.fromBufferAttribute(position, index)).applyMatrix4(mesh.matrixWorld).applyMatrix4(inverse);
-      const d = distance();
-      total += d * d * (d < 0 ? 8 : 1);
-    }
-    return total;
-  };
-  glove.fingers.forEach((finger, i) => {
-    if (!support && finger.index === 0) return;
-    for (const step of [0.28, 0.14, 0.07, 0.035]) {
-      for (let pass = 0; pass < 3; pass++) {
-        for (let j = 0; j < 3; j++) {
-          const bone = finger.bones[j]!;
-          const original = bone.rotation.x;
-          let best = original;
-          let error = score(i);
-          for (const delta of [-step, step]) {
-            bone.rotation.x = THREE.MathUtils.clamp(original + delta, j === 1 ? -1.85 : -1.5, j === 0 ? -0.25 : -0.12);
-            const candidate = score(i);
-            if (candidate < error) { error = candidate; best = bone.rotation.x; }
-          }
-          bone.rotation.x = best;
-        }
-      }
-    }
-  });
-  const patchScore = (): number => {
-    group.updateWorldMatrix(true, true);
-    if (group.parent) inverse.copy(group.parent.matrixWorld).invert();
-    let total = 0;
-    for (const index of [...glove.palmContacts, ...glove.thumbContacts]) {
-      mesh.applyBoneTransform(index, point.fromBufferAttribute(position, index)).applyMatrix4(mesh.matrixWorld).applyMatrix4(inverse);
-      const d = distance() - 0.002;
-      const thumb = glove.thumbContacts.includes(index);
-      total += d * d * (d < 0 ? 32 : thumb ? 0.15 : 2);
-    }
-    return total;
-  };
-  const initialRotation = group.quaternion.clone();
-  const shoulder = new THREE.Vector3(support ? -0.2 : 0.16, support ? -0.22 : -0.16, support ? 0.02 : 0.12);
-  const weaponScale = group.parent?.scale.x ?? 1;
-  if (group.parent) shoulder.sub(group.parent.position).applyQuaternion(group.parent.quaternion.clone().invert()).divideScalar(weaponScale);
-  const wrist = new THREE.Vector3();
-  const axis = new THREE.Vector3();
-  const toWrist = new THREE.Vector3();
-  const wristScore = (): number => {
-    if (!support || !group.userData.boundWrist) return 0;
-    wrist.set(0, 0, 0.073).multiply(group.scale).applyQuaternion(group.quaternion).add(group.position);
-    axis.set(0, 0, -1).applyQuaternion(group.quaternion);
-    toWrist.copy(wrist).sub(shoulder);
-    const reach = THREE.MathUtils.clamp(toWrist.length() * weaponScale, 0.0301, 0.5699);
-    toWrist.normalize();
-    const bend = new THREE.Vector3(support ? -1.2 : 1, support ? -1.8 : -2, support ? 0.1 : -2);
-    if (group.parent) bend.applyQuaternion(group.parent.quaternion.clone().invert());
-    bend.addScaledVector(toWrist, -bend.dot(toWrist)).normalize();
-    const alongLength = (0.3 ** 2 + reach ** 2 - 0.27 ** 2) / (2 * reach);
-    const bendLength = Math.sqrt(Math.max(0, 0.3 ** 2 - alongLength ** 2));
-    const forearm = toWrist.clone().multiplyScalar(reach - alongLength).addScaledVector(bend, -bendLength);
-    const swing = axis.angleTo(forearm);
-    return Math.max(0, swing - 0.45) ** 2 * 0.08;
-  };
-  const totalScore = (): number => glove.fingers.reduce((sum, finger, i) => sum + (!support && finger.index === 0 ? 0 : score(i)), patchScore())
-    + group.quaternion.angleTo(initialRotation) ** 2 * 0.003 + wristScore();
-  for (const step of [0.008, 0.004, 0.002]) {
-    for (let pass = 0; pass < 3; pass++) {
-      for (const axis of ['x', 'y', 'z'] as const) {
-        const original = group.position[axis];
-        let best = original;
-        let error = totalScore();
-        for (const delta of [-step, step]) {
-          group.position[axis] = original + delta;
-          const candidate = totalScore();
-          if (candidate < error) { best = group.position[axis]; error = candidate; }
-        }
-        group.position[axis] = best;
-      }
-      for (const axis of ['x', 'y', 'z'] as const) {
-        const original = group.rotation[axis];
-        let best = original;
-        let error = totalScore();
-        for (const delta of support ? [-step * 24, step * 24] : [-0.06, 0.06]) {
-          group.rotation[axis] = original + delta;
-          const candidate = totalScore();
-          if (candidate < error) { error = candidate; best = group.rotation[axis]; }
-        }
-        group.rotation[axis] = best;
-        for (const bone of glove.thumb) {
-          const original = bone.rotation[axis];
-          let best = original;
-          let error = patchScore();
-          for (const delta of [-0.12, 0.12]) {
-            bone.rotation[axis] = THREE.MathUtils.clamp(original + delta, -0.9, 0.9);
-            const candidate = patchScore();
-            if (candidate < error) { error = candidate; best = bone.rotation[axis]; }
-          }
-          bone.rotation[axis] = best;
-        }
-      }
-      glove.fingers.forEach((finger, i) => {
-        if (!support && finger.index === 0) return;
-        for (const bone of [glove.metacarpals[i]!, ...finger.bones]) {
-          const original = bone.rotation.x;
-          let best = original;
-          let error = score(i);
-          for (const delta of [-0.1, 0.1]) {
-            bone.rotation.x = THREE.MathUtils.clamp(original + delta, bone === glove.metacarpals[i] ? -0.55 : -1.85, -0.08);
-            const candidate = score(i);
-            if (candidate < error) { best = bone.rotation.x; error = candidate; }
-          }
-          bone.rotation.x = best;
-        }
-      });
-    }
-  }
-  if (glove.gripCache.size > 24) glove.gripCache.clear();
-  glove.gripCache.set(key, [...glove.fingers.flatMap(finger => finger.bones.map(bone => bone.rotation.x)), ...glove.metacarpals.map(bone => bone.rotation.x), ...group.position.clone().sub(contact).toArray(), ...group.quaternion.toArray(), ...glove.thumb.flatMap(bone => [bone.rotation.x, bone.rotation.y, bone.rotation.z])]);
+  // Thumb wraps the grip's near face and locks under the palm — never a
+  // raised prong floating beside the receiver.
+  glove.thumb[0]!.rotation.set(-0.4, glove.side * 0.2, -glove.side * 0.45);
+  glove.thumb[1]!.rotation.set(-0.3, glove.side * 0.45, 0);
+  glove.thumb[2]!.rotation.set(-0.15, glove.side * 0.25, 0);
 }
 
-function wrapSupport(glove: Glove, group: THREE.Group, contact: THREE.Vector3, squeeze: number): void {
+/**
+ * Authored support-hand wrap for each grip style. `curl` shapes the finger
+ * hook, `thumbClamp` presses the thumb against the near side so the hand
+ * reads as clamping the forend rather than hovering under it.
+ */
+function poseSupportWrap(glove: Glove, curl: number, thumbClamp: number, thumbYaw = -0.3): void {
+  for (const finger of glove.fingers) {
+    const c = curl + finger.index * 0.04;
+    finger.bones[0]!.rotation.x = -c * 1.12;
+    finger.bones[1]!.rotation.x = -c * 1.38;
+    finger.bones[2]!.rotation.x = -c * 0.9;
+  }
+  for (let i = 0; i < glove.metacarpals.length; i++) {
+    const ulnar = (3 - i) / 3;
+    glove.metacarpals[i]!.rotation.set(-0.14 - ulnar * 0.26, glove.side * (i - 1.5) * 0.02, -glove.side * (1.5 - i) * 0.08);
+  }
+  // thumbYaw lays the thumb along the forend (C-clamp: forward, ~-1.15) or
+  // wraps it across the contact (pump: ~+0.25) — never a prong above the rail.
+  glove.thumb[0]!.rotation.set(-0.42, glove.side * thumbYaw, -glove.side * (0.28 + thumbClamp * 0.22));
+  glove.thumb[1]!.rotation.set(-0.4, glove.side * (0.3 - thumbClamp * 0.15), 0);
+  glove.thumb[2]!.rotation.set(-0.2, glove.side * 0.2, 0);
+}
+
+function wrapSupport(glove: Glove, group: THREE.Group, contact: THREE.Vector3, style: 'under' | 'side' | 'pump' | 'over'): void {
+  if (style === 'under') {
+    // C-clamp: palm pressed against the forend's left face, fingers wrapping
+    // around the bottom, thumb forward along the near face — the standard
+    // long-gun support grip. The palm-up cup variant dragged fingertips over
+    // the top rail.
+    orientHand(group, _palm.set(1, 0, 0), _fingers.set(0, -0.3, -0.95), true);
+    placePalm(group, contact, 0.019);
+    poseSupportWrap(glove, 0.52, 0.35, 1.35);
+    return;
+  }
+  if (style === 'pump') {
+    // Palm-up cup under the pump: fingers curl up around it, thumb clamps.
+    orientHand(group, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
+    placePalm(group, contact, 0.02);
+    poseSupportWrap(glove, 0.74, 1, 0.25);
+    return;
+  }
   const approach = new THREE.Vector3(-0.2, -0.22, 0.02).sub(contact);
   approach.z = 0;
   orientHand(group, _palm.copy(approach).negate(), _fingers.set(0, 0, -1), true);
   placePalm(group, contact, 0.018);
-  fitGrip(glove, group, contact, true, squeeze > 0);
+  const curl = style === 'side' ? 0.7 : 0.6;
+  poseSupportWrap(glove, curl, style === 'side' ? 1 : 0.5, style === 'side' ? 0.9 : 1.0);
 }
 
 function placePalm(group: THREE.Object3D, contact: THREE.Vector3, depth = 0.013): void {
@@ -723,13 +578,13 @@ export function createHandRig(): HandRig {
       } else {
         orientHand(right, gripPalm, gripFingers, false);
         placePalm(right, gripR);
-        fitGrip(gloveR, right, gripR, false);
+        poseTriggerHand(gloveR, boltPhase < 0, triggerAmount);
       }
       if (pumping) {
         orientHand(left, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
         _target.copy(gripL).y += 0.006;
         placePalm(left, _target, 0.022);
-        wrapSupport(gloveL, left, _target, 0.1);
+        wrapSupport(gloveL, left, _target, 'pump');
         left.position.z += pumpOffset;
         return;
       }
@@ -760,23 +615,28 @@ export function createHandRig(): HandRig {
         handBasisQuat(_quatB, _palm.set(0.85, -0.35, 0.2), _fingers.set(0, -0.5, -0.86), true);
         leftWrap.quaternion.slerpQuaternions(_quatA, _quatB, blend);
         left.position.y -= tuck * (1 - blend);
+        // The support hand carries the magazine through the whole timeline:
+        // fingers hook around it, thumb clamps the side.
+        poseSupportWrap(gloveL, 0.66, 0.85);
         return;
       }
       const tuck = ads * 0.012;
       if (supportStyle === 'side') {
         left.position.set(gripL.x - 0.018, gripL.y + 0.012 - tuck, gripL.z);
         orientHand(left, _palm.set(0.98, -0.15, 0.1), _fingers.set(0.05, -0.2, -0.98), true);
+        poseSupportWrap(gloveL, 0.7, 1);
         return;
       }
       if (supportStyle === 'over') {
         left.position.set(gripL.x - 0.008, gripL.y - 0.025, gripL.z - 0.028);
         orientHand(left, _palm.set(0.45, 0.7, 0.55), _fingers.set(0.1, 0.6, -0.79), true);
+        poseSupportWrap(gloveL, 0.6, 0.5);
         return;
       }
       orientHand(left, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
       _target.copy(gripL).y += 0.006;
       placePalm(left, _target, 0.022);
-      wrapSupport(gloveL, left, _target, 0);
+      wrapSupport(gloveL, left, _target, 'under');
     },
   };
 }
@@ -840,8 +700,8 @@ function buildSleeve(upperLength: number, foreLength: number, side: number): Sle
     const foreT = Math.max(0, (y - upperLength) / foreLength);
     const belly = Math.sin(Math.PI * smooth(foreT)) * (1 - foreT);
     const radius = y < upperLength
-      ? 0.052 - 0.013 * upperT + 0.008 * Math.sin(Math.PI * upperT)
-      : 0.039 - 0.015 * smooth(foreT) + 0.012 * belly;
+      ? 0.042 - 0.011 * upperT + 0.006 * Math.sin(Math.PI * upperT)
+      : 0.032 - 0.012 * smooth(foreT) + 0.009 * belly;
     const next = Array.from({ length: 16 }, (_, j) => {
       const angle = -j / 16 * Math.PI * 2;
       const elbowFold = Math.exp(-(((y - upperLength) / 0.052) ** 2)) * Math.cos((y - upperLength) * 230 + Math.sin(angle) * 2) * 0.004;
