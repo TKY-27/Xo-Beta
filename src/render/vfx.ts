@@ -450,7 +450,7 @@ export class VfxSystem {
     this.spawnParticle(
       x, y, z,
       dx * 2 + (Math.random() - 0.5), 2.4 + Math.random() * 1.4, dz * 2 + (Math.random() - 0.5),
-      1.1, 0.05, 0xd8b45a, 24,
+      0.9, 0.026, 0xd8b45a, 24,
     );
   }
 
