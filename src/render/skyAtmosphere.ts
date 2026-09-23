@@ -104,10 +104,12 @@ export class SkyAtmosphereSystem {
     const density = (uv: Node<'vec2'>): Node<'float'> => {
       const low = this.noise.sample(uv).r;
       const high = this.noise.sample(uv.mul(3.7)).g;
-      // CYCLE 30: a fine octave breaks up the bilinear cell boundaries of the
-      // low octave, which read as rectangular cloud edges at high zoom.
+      // The fine octaves break up the bilinear cell boundaries of the low
+      // octave, which otherwise read as rectangular cloud patches drifting
+      // across the sky.
       const fine = this.noise.sample(uv.mul(11.3)).g;
-      const d = low.mul(0.58).add(high.mul(0.27)).add(fine.mul(0.15));
+      const fine2 = this.noise.sample(uv.mul(27.1)).r;
+      const d = low.mul(0.42).add(high.mul(0.26)).add(fine.mul(0.2)).add(fine2.mul(0.12));
       // Remap around the coverage control: 0 = clear, 1 = heavy overcast.
       return smoothstep(float(1.0).sub(u.cloudCover.mul(1.2)), float(1.0).sub(u.cloudCover.mul(0.3)), d);
     };
@@ -119,8 +121,11 @@ export class SkyAtmosphereSystem {
     const c1 = density(plane.mul(0.055).add(vec2(wind.mul(0.9), wind.mul(0.32))));
     const c2 = density(plane.mul(0.11).add(vec2(wind.mul(-0.55), wind.mul(0.7))).add(13.7));
     const clouds = clamp(c1.mul(0.78).add(c2.mul(0.34)), 0.0, 1.0)
-      // Fade clouds toward the horizon line into the haze.
-      .mul(smoothstep(0.05, 0.26, height));
+      // Fade clouds toward the horizon line into the haze, and keep the
+      // overall layer subtle: solid cloud shapes read as floating cards at
+      // gameplay view angles.
+      .mul(0.8)
+      .mul(smoothstep(0.1, 0.34, height));
     // Cloud shading: brighter toward the sun, cooler away.
     const cloudColor = mix(u.cloudShade, u.cloudTint, float(0.45).add(glow.mul(0.55)));
     color = mix(color, cloudColor, clouds);

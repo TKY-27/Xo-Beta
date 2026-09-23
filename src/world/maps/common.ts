@@ -344,7 +344,17 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     if (bucket < 8) return 'dual';
     return 'transom';
   };
-  const windowMaterial = (family: 'single' | 'dual' | 'transom' | 'dark'): MatKey => family === 'dark' ? 'windowDark' : 'windowCool';
+  const windowMaterial = (family: 'single' | 'dual' | 'transom' | 'dark', side = 0, offset = 0, floor = 0): MatKey => {
+    if (family !== 'dark') return 'windowCool';
+    // Occupied-dark glazing: pure-dark panes read as holes punched in the
+    // facade. Heritage (OldFront) gets dim warm interiors at a hash so the
+    // town reads inhabited; other styles keep the dark pane.
+    if (style === 'heritage') {
+      const h = Math.imul(Math.round((x + z) * 173) ^ Math.round(offset * 91) ^ (side * 17) ^ (floor * 29), 2654435761) >>> 0;
+      return h % 3 === 0 ? 'windowWarmDim' : 'windowDark';
+    }
+    return 'windowDark';
+  };
 
   // --- Facade depth system (W7) -------------------------------------------
   // Turns the flat wall/glass compositions into authored elevations: every
@@ -453,7 +463,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     const paneOffset = t / 2 - 0.06;
     const frameOffset = t / 2 - 0.02;
     const family = windowFamily(side, offset, 0);
-    const mat = windowMaterial(family);
+    const mat = windowMaterial(family, side, offset, 0);
     if (side === 2) {
       const paneX = x - hw + offset + width / 2;
       const paneZ = z - hd - paneOffset;
