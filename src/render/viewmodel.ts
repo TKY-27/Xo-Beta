@@ -27,10 +27,10 @@ const SPRINT_POS = new THREE.Vector3(0.06, -0.24, -0.28);
  * the crosshair. Z keeps the buttstock comfortably clear of the eye.
  */
 const ADS_POSE: Record<WeaponId, { y: number; z: number }> = {
-  pistol: { y: -0.048, z: -0.24 },
-  smg: { y: -0.047, z: -0.24 },
-  ar: { y: -0.051, z: -0.33 },
-  shotgun: { y: -0.029, z: -0.34 },
+  pistol: { y: -0.05, z: -0.24 },
+  smg: { y: -0.05, z: -0.24 },
+  ar: { y: -0.055, z: -0.33 },
+  shotgun: { y: -0.03, z: -0.34 },
   sniper: { y: -0.055, z: -0.3 },
 };
 
@@ -696,7 +696,7 @@ export class ViewModel {
         this.flashQuad.rotation.z = Math.random() * Math.PI * 2;
         this.flashQuad.scale.setScalar(0.85 + strength * 0.35);
         this.flashQuad.visible = true;
-        this.flashT = 0.055;
+        this.flashT = 0.07;
         (this.flashQuad.material as THREE.MeshBasicMaterial).opacity = 1;
       }
     }
@@ -770,7 +770,7 @@ export class ViewModel {
   private updateFlash(dt: number): void {
     if (!this.flashQuad || this.flashT <= 0) return;
     this.flashT = Math.max(0, this.flashT - dt);
-    const k = this.flashT / 0.055;
+    const k = this.flashT / 0.07;
     this.flashQuad.scale.setScalar(0.7 + (1 - k) * 0.9);
     (this.flashQuad.material as THREE.MeshBasicMaterial).opacity = k;
     if (this.flashT <= 0) this.flashQuad.visible = false;

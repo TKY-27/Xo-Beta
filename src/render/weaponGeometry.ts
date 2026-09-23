@@ -394,18 +394,19 @@ function triggerGroup(parent: THREE.Object3D, mats: GunMaterials, y: number, z: 
 function ironSights(parent: THREE.Object3D, mats: GunMaterials, yTop: number, zFront: number, zRear: number): void {
   const front = new THREE.Group();
   front.position.set(0, yTop, zFront);
-  box(front, mats.aluminum, 0.012, 0.02, 0.008, 0, 0.008, 0, 0.002);
-  box(front, mats.hardware, 0.003, 0.014, 0.003, 0, 0.022, 0, 0.0008);
+  box(front, mats.aluminum, 0.012, 0.024, 0.008, 0, 0.01, 0, 0.002);
+  box(front, mats.hardware, 0.003, 0.016, 0.003, 0, 0.026, 0, 0.0008);
   // Bright post tip: the aiming reference the eye locks onto at ADS.
-  box(front, mats.postIvory, 0.0035, 0.004, 0.0035, 0, 0.03, 0, 0.0008);
+  box(front, mats.postIvory, 0.0035, 0.005, 0.0035, 0, 0.036, 0, 0.0008);
   parent.add(front);
   const rear = new THREE.Group();
   rear.position.set(0, yTop, zRear);
-  // Pedestal reaching down to the receiver deck, topped by a two-ear notch:
-  // ears wide of the post line so the aperture frames the front tip.
-  box(rear, mats.aluminum, 0.026, 0.022, 0.012, 0, -0.002, 0, 0.002);
+  // Pedestal reaching down to the receiver deck, topped by a tall two-ear
+  // aperture: the ears rise well clear of the deck so the notch frames the
+  // front tip instead of the receiver mass.
+  box(rear, mats.aluminum, 0.026, 0.02, 0.012, 0, -0.004, 0, 0.002);
   for (const ear of [-1, 1]) {
-    box(rear, mats.polymer, 0.006, 0.014, 0.007, ear * 0.008, 0.02, 0, 0.001);
+    box(rear, mats.polymer, 0.007, 0.02, 0.007, ear * 0.0095, 0.024, 0, 0.001);
   }
   parent.add(rear);
 }

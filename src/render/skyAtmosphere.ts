@@ -124,8 +124,8 @@ export class SkyAtmosphereSystem {
       // Fade clouds toward the horizon line into the haze, and keep the
       // overall layer subtle: solid cloud shapes read as floating cards at
       // gameplay view angles.
-      .mul(0.8)
-      .mul(smoothstep(0.1, 0.34, height));
+      .mul(0.62)
+      .mul(smoothstep(0.16, 0.42, height));
     // Cloud shading: brighter toward the sun, cooler away.
     const cloudColor = mix(u.cloudShade, u.cloudTint, float(0.45).add(glow.mul(0.55)));
     color = mix(color, cloudColor, clouds);

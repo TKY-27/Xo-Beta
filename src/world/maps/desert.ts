@@ -930,9 +930,18 @@ function desertDensity(b: WorldBuilder, rng: Rng): void {
 
   // -- Dry Canals: plank crossings + rebar stubs ----------------------------
   for (const [px, pz] of [[-196, 170], [-183, 186], [-177, 162]] as Array<[number, number]>) {
+    // Top of the plank follows the higher bank so the ends never float where
+    // the channel slopes, with pier stones carrying each end down to grade.
+    const bankLo = terrainH(px, pz - 1.4);
+    const bankHi = terrainH(px, pz + 1.4);
+    const deckY = Math.max(bankLo, bankHi) + 0.1;
     const gy = terrainH(px, pz);
     if (!clear(px, pz, 0.5, 1.7, gy, gy + 0.5)) continue;
-    b.box(px, gy + 0.28, pz, 0.6, 0.1, 3.0, 'wood', 0, { noCollide: true, castShadow: false });
+    b.box(px, deckY - 0.05, pz, 0.6, 0.1, 3.0, 'wood', 0, { noCollide: true, castShadow: false });
+    for (const [ez, bank] of [[pz - 1.35, bankLo], [pz + 1.35, bankHi]] as Array<[number, number]>) {
+      const h = Math.max(0.25, deckY - 0.05 - bank);
+      b.box(px, bank + h / 2, ez, 0.44, h, 0.55, 'concreteDark', 0, { noCollide: true });
+    }
     for (const side of [-1, 1]) {
       b.cyl(px + side * 0.5, gy + 0.3, pz + side * 1.3, 0.035, 0.7, 'rust', {
         segments: 6,
