@@ -994,15 +994,15 @@ export class ViewModel {
       );
       g.quaternion.multiply(base);
     };
-    drive(this.fistsR, 1, 0.16, -0.16, -0.34, this.fistRig.baseQuatR);
-    drive(this.fistsL, -1, -0.15, -0.19, -0.38, this.fistRig.baseQuatL);
+    drive(this.fistsR, 1, 0.17, -0.125, -0.32, this.fistRig.baseQuatR);
+    drive(this.fistsL, -1, -0.16, -0.15, -0.36, this.fistRig.baseQuatL);
 
     // Unarmed guard sits centered (the weapon hip x-offset would shove the
     // lead fist off-line); pulled closer than the weapon hip so the fists
     // read at fight distance.
     this.pivot.position.set(
       this.swayX,
-      -0.105 + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
+      -0.075 + (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * 0.6 + this.swayY,
       HIP_POS.z * 0.6 + this.recoilZ * 0.4,
     );
     if (crouched) this.pivot.position.y += 0.02;

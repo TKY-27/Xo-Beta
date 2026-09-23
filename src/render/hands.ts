@@ -660,9 +660,9 @@ export function createFistRig(): FistRig {
   group.add(right, left);
   orientHand(right, _palm.set(-0.2, -0.9, -0.38), _fingers.set(-0.12, 0.12, -0.99), false);
   orientHand(left, _palm.set(0.2, -0.9, -0.38), _fingers.set(0.12, 0.12, -0.99), true);
-  right.position.set(0.16, -0.16, -0.34);
+  right.position.set(0.17, -0.125, -0.32);
   right.scale.setScalar(1.18);
-  left.position.set(-0.15, -0.19, -0.38);
+  left.position.set(-0.16, -0.15, -0.36);
   left.scale.setScalar(1.18);
   const wristR = new THREE.Object3D();
   wristR.name = 'hand-wrist-right';
