@@ -743,6 +743,11 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
         0.7,
         alongX ? 0.5 : width + 0.7,
         darkTrim,
+        0,
+        // Visual grounding only: collidable stoops blocked the doorway
+        // character sweep and snapped chests under them, so navigation and
+        // loot rules stay authored — the steps render, physics walks through.
+        { noCollide: true },
       );
     }
     if (facadeHash(side, along, 0, 3) % 10 < 5) {

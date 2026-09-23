@@ -7,7 +7,7 @@
 import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding as addBaseBuilding, addGround, hardenExposedFlanks, slabWithHole, type BuildingOpts } from './common';
+import { addBuilding as addBaseBuilding, addGround, dressingSpotClear, hardenExposedFlanks, slabWithHole, type BuildingOpts } from './common';
 
 const S = 500; // map size
 const TRANSIT_CUTOUT = { minX: 117.7, maxX: 121.3, minZ: -140, maxZ: -127, surfaceY: 0 };
@@ -372,6 +372,7 @@ export function buildNeoCity(): MapDef {
   litWindows(b, rng);
   streetDressing(b, rng);
   lotDressing(b, rng);
+  streetDensity(b, rng);
   applyNeoCityShadowBudget(b);
   removeRoadPaintUnderFoundations(b);
 
@@ -1400,3 +1401,202 @@ const NEON_HEX: Partial<Record<MatKey, number>> = {
   neonCyan: 0x53e0ff, neonMagenta: 0xff53c8, neonGreen: 0x54ff9f,
   neonBlue: 0x5f8cff, neonOrange: 0xff9040,
 };
+
+/**
+ * W8 street-level density pass: traffic signal masts at the inner
+ * intersections, bollard rows guarding every inner crossing, utility
+ * cabinets on block corners, kerbside trash beside the kiosks and the west
+ * alley, freight pallets at the depot, cable spans across the alley and
+ * wall-mounted AC units / vent grilles at street level. Everything hugs the
+ * road/sidewalk edges; placement is gated by dressingSpotClear so no prop
+ * can bury a chest, block a door or interpenetrate a parked car.
+ */
+function streetDensity(b: WorldBuilder, rng: Rng): void {
+  const clear = (x: number, z: number, hx: number, hz: number, yLow: number, yHigh: number): boolean =>
+    dressingSpotClear(b.def, x, z, hx, hz, yLow, yHigh, { crates: true, vehicles: true, margin: 0.25 });
+
+  // -- traffic signal masts, nine inner intersections, one per diagonal -----
+  for (let i = -1; i <= 1; i++) {
+    for (let j = -1; j <= 1; j++) {
+      const ix = i * 100;
+      const iz = j * 100;
+      const servesAlongZ = (i + j + 2) % 2 === 0;
+      for (const [sx, sz] of [[1, -1], [-1, 1]] as const) {
+        const px = ix + sx * 12.6;
+        const pz = iz + sz * 12.6;
+        if (!clear(px, pz, 0.5, 0.5, 0, 6.3)) continue;
+        // Footing + mast: free-standing person-sized pole, so solid.
+        b.box(px, 0.38, pz, 0.56, 0.36, 0.56, 'concreteDark', 0, { castShadow: false });
+        b.box(px, 3.2, pz, 0.2, 5.6, 0.2, 'metalDark', 0);
+        if (servesAlongZ) {
+          // Arm reaches over the along-z road; faces read along z.
+          b.box(px - sx * 3.1, 5.82, pz, 6.2, 0.14, 0.14, 'metalDark', 0, { noCollide: true, castShadow: false });
+          const hx = px - sx * 5.9;
+          // metalExterior hosts the lamp inserts for the emissive-plate
+          // support contract (and reads as a painted signal housing).
+          b.box(hx, 5.16, pz, 0.24, 1.0, 0.42, 'metalExterior', 0, { noCollide: true, castShadow: false });
+          for (const face of [-1, 1]) {
+            b.box(hx, 5.44, pz + face * 0.23, 0.18, 0.2, 0.05, 'neonMagenta', 0, { noCollide: true, castShadow: false });
+            b.box(hx, 5.16, pz + face * 0.23, 0.18, 0.2, 0.05, 'neonOrange', 0, { noCollide: true, castShadow: false });
+            b.box(hx, 4.88, pz + face * 0.23, 0.18, 0.2, 0.05, 'neonGreen', 0, { noCollide: true, castShadow: false });
+          }
+        } else {
+          // Rotated service: arm over the along-x road, faces read along x.
+          b.box(px, 5.82, pz - sz * 3.1, 0.14, 0.14, 6.2, 'metalDark', 0, { noCollide: true, castShadow: false });
+          const hz = pz - sz * 5.9;
+          b.box(px, 5.16, hz, 0.42, 1.0, 0.24, 'metalExterior', 0, { noCollide: true, castShadow: false });
+          for (const face of [-1, 1]) {
+            b.box(px + face * 0.23, 5.44, hz, 0.05, 0.2, 0.18, 'neonMagenta', 0, { noCollide: true, castShadow: false });
+            b.box(px + face * 0.23, 5.16, hz, 0.05, 0.2, 0.18, 'neonOrange', 0, { noCollide: true, castShadow: false });
+            b.box(px + face * 0.23, 4.88, hz, 0.05, 0.2, 0.18, 'neonGreen', 0, { noCollide: true, castShadow: false });
+          }
+        }
+      }
+    }
+  }
+
+  // -- bollard rows flanking each inner crosswalk ---------------------------
+  for (let i = -1; i <= 1; i++) {
+    for (let j = -1; j <= 1; j++) {
+      const ix = i * 100;
+      const iz = j * 100;
+      for (const s of [-1, 1]) {
+        for (const k of [-1.1, 0, 1.1]) {
+          const spots: Array<[number, number]> = [
+            [ix + s * 7.9, iz + 11.5 + k], [ix + s * 7.9, iz - 11.5 + k],
+            [ix + 11.5 + k, iz + s * 7.9], [ix - 11.5 + k, iz + s * 7.9],
+          ];
+          for (const [px, pz] of spots) {
+            if (!clear(px, pz, 0.3, 0.3, 0, 1.1)) continue;
+            b.box(px, 0.62, pz, 0.16, 0.8, 0.16, 'metalExterior', 0, {
+              noCollide: true,
+              castShadow: false,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // -- utility cabinets + switch pillars on block corners -------------------
+  const blockCs = [-150, -50, 50, 150];
+  const cornerSigns: Array<[number, number]> = [[1, 1], [-1, -1], [1, -1], [-1, 1]];
+  for (const bx of blockCs) {
+    for (const bz of blockCs) {
+      const first = rng.int(0, 3);
+      const second = (first + 1 + rng.int(0, 2)) % 4;
+      for (const idx of [first, second]) {
+        const [cxSign, czSign] = cornerSigns[idx]!;
+        const px = bx + cxSign * 23;
+        const pz = bz + czSign * 23;
+        if (!clear(px, pz, 1.2, 1.2, 0, 2)) continue;
+        b.box(px, 0.08, pz, 2.1, 0.16, 2.1, 'concreteDark', 0, { castShadow: false });
+        b.box(px - 0.35, 0.98, pz, 1.0, 1.5, 0.68, 'metalExterior', 0, { hint: 'metal' });
+        for (const louverY of [0.72, 0.98, 1.24]) {
+          b.box(px - 0.35, louverY, pz - 0.37, 0.72, 0.07, 0.05, 'metal', 0, {
+            noCollide: true,
+            castShadow: false,
+          });
+        }
+        b.box(px + 0.72, 0.88, pz + 0.45, 0.5, 1.32, 0.5, 'concrete', 0, { hint: 'stone' });
+        b.box(px + 0.72, 1.58, pz + 0.45, 0.56, 0.1, 0.56, 'metalDark', 0, { noCollide: true, castShadow: false });
+      }
+    }
+  }
+
+  // -- kerbside trash: bins + bags beside the kiosks, alley and depot -------
+  const bag = (x: number, z: number, r: number): void => {
+    if (!clear(x, z, r + 0.1, r + 0.1, 0, r * 2)) return;
+    b.sphere(x, r, z, r, 'concreteDark', { noCollide: true });
+  };
+  const bin = (x: number, z: number): void => {
+    if (!clear(x, z, 0.5, 0.5, 0, 1.2)) return;
+    b.cyl(x, 0.6, z, 0.36, 1.05, 'metalDark', { segments: 10 });
+    b.cyl(x, 1.15, z, 0.4, 0.08, 'metalExterior', { segments: 10, noCollide: true });
+  };
+  for (const kx of [185, 194, 203]) {
+    bin(kx + 3.1, 23.7);
+    bag(kx + 4.0, 23.1, 0.32);
+    bag(kx + 3.7, 24.4, 0.4);
+  }
+  bin(-77.2, 58.5);
+  bag(-82.8, 69, 0.34);
+  bag(-82.6, 70.3, 0.28);
+  bin(78.5, 215.2);
+  bag(79.6, 216.4, 0.36);
+
+  // -- freight depot: pallet stacks, leaning spare, cable span --------------
+  {
+    const pallet = (x: number, z: number): void => {
+      if (!clear(x, z, 0.9, 0.8, 0, 1.6)) return;
+      b.box(x, 0.09, z, 1.5, 0.14, 1.2, 'woodDark', 0, { castShadow: false });
+      b.crate(x, 0.16, z, 1.0);
+    };
+    pallet(84.5, 216);
+    pallet(87.6, 218.4);
+    if (clear(83.1, 208, 0.5, 1.0, 0, 2.2)) {
+      b.box(83.1, 0.85, 208, 0.14, 1.6, 1.35, 'woodDark', 0, {
+        noCollide: true,
+        roll: 0.16,
+        castShadow: false,
+      });
+    }
+    addCableSpan(b, -83.4, 53, -76.6, 53, 5.7, 0.5);
+    addCableSpan(b, -83.4, 61, -76.6, 61, 5.7, 0.5);
+  }
+
+  // -- wall-mounted AC units + vent grilles at street level -----------------
+  const wallMats: MatKey[] = ['facadeA', 'facadeB', 'facadeC', 'plasterOld'];
+  let mounted = 0;
+  for (const g of [...b.def.geo]) {
+    if (mounted >= 16) break;
+    if (g.kind !== 'box' || !wallMats.includes(g.mat)) continue;
+    const thick = Math.min(g.sx, g.sz);
+    const span = Math.max(g.sx, g.sz);
+    if (thick > 0.5 || g.sy < 3 || g.sy > 4.4 || span < 3.4) continue;
+    const base = g.y - g.sy / 2;
+    if (base > 1.6) continue;
+    if (!rng.bool(0.55)) continue;
+    const along = rng.range(-0.28, 0.28);
+    const sign = Math.abs(Math.round(g.x * 3 + g.z * 7)) % 2 === 0 ? 1 : -1;
+    const unitY = base + 2.28;
+    if (g.sx >= g.sz) {
+      const ux = g.x + along * g.sx;
+      const uz = g.z + sign * (g.sz / 2 + 0.27);
+      if (!clear(ux, uz, 0.6, 0.35, unitY - 0.4, unitY + 0.4)) continue;
+      b.box(ux, unitY - 0.34, uz, 0.5, 0.08, 0.3, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(ux, unitY, uz, 0.88, 0.62, 0.42, 'metalExterior', 0, { noCollide: true, castShadow: false });
+      b.box(ux, unitY + 0.14, uz + sign * 0.23, 0.62, 0.08, 0.05, 'metal', 0, { noCollide: true, castShadow: false });
+      b.box(ux, unitY - 0.06, uz + sign * 0.23, 0.62, 0.08, 0.05, 'metal', 0, { noCollide: true, castShadow: false });
+    } else {
+      const uz = g.z + along * g.sz;
+      const ux = g.x + sign * (g.sx / 2 + 0.27);
+      if (!clear(ux, uz, 0.35, 0.6, unitY - 0.4, unitY + 0.4)) continue;
+      b.box(ux, unitY - 0.34, uz, 0.3, 0.08, 0.5, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(ux, unitY, uz, 0.42, 0.62, 0.88, 'metalExterior', 0, { noCollide: true, castShadow: false });
+      b.box(ux + sign * 0.23, unitY + 0.14, uz, 0.05, 0.08, 0.62, 'metal', 0, { noCollide: true, castShadow: false });
+      b.box(ux + sign * 0.23, unitY - 0.06, uz, 0.05, 0.08, 0.62, 'metal', 0, { noCollide: true, castShadow: false });
+    }
+    mounted++;
+  }
+}
+
+/** Thin sagging cable span between two wall/fixture points (5 segments). */
+function addCableSpan(
+  b: WorldBuilder,
+  x1: number, z1: number, x2: number, z2: number,
+  y: number, sag: number,
+): void {
+  const segs = 5;
+  for (let i = 0; i < segs; i++) {
+    const t0 = i / segs;
+    const t1 = (i + 1) / segs;
+    const y0 = y - Math.sin(t0 * Math.PI) * sag;
+    const y1 = y - Math.sin(t1 * Math.PI) * sag;
+    const mx = x1 + ((x2 - x1) * (t0 + t1)) / 2;
+    const mz = z1 + ((z2 - z1) * (t0 + t1)) / 2;
+    const len = Math.hypot(x2 - x1, z2 - z1) / segs;
+    const yaw = Math.atan2(z1 - z2, x1 - x2);
+    b.box(mx, (y0 + y1) / 2, mz, len, 0.06, 0.06, 'metalDark', yaw, { noCollide: true, castShadow: false });
+  }
+}
