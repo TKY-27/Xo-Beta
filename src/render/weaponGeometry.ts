@@ -22,6 +22,8 @@ export interface GunMaterials {
   rubber: THREE.MeshStandardMaterial;
   /** Bright steel: pins, small hardware. */
   hardware: THREE.MeshStandardMaterial;
+  /** Ivory-white sight post insert: the ADS aiming reference. */
+  postIvory: THREE.MeshStandardMaterial;
 }
 
 /**
@@ -240,7 +242,9 @@ export function makeGunMaterials(): GunMaterials {
   const hardware = new THREE.MeshStandardMaterial({ color: 0x71787f, roughness: 0.3, metalness: 0.6 });
   hardware.envMapIntensity = 1.15;
   hardware.name = 'hardware';
-  return { steel, aluminum, polymer, rubber, hardware };
+  const postIvory = new THREE.MeshStandardMaterial({ color: 0xd8d4c4, roughness: 0.55, metalness: 0.05, emissive: 0x55503f, emissiveIntensity: 0.35 });
+  postIvory.name = 'postIvory';
+  return { steel, aluminum, polymer, rubber, hardware, postIvory };
 }
 
 /** Shared helper: chamfered box at a pose. */
@@ -384,19 +388,25 @@ function triggerGroup(parent: THREE.Object3D, mats: GunMaterials, y: number, z: 
   blade.rotation.x = 0.18;
 }
 
-/** Front (post) and rear (notch/ring) iron sights. */
+/** Front (post) and rear (notch/ring) iron sights. The post carries a bright
+ * insert and the rear notch is a wide two-ear aperture: at ADS the sight
+ * picture must read as post-through-notch against the aim point. */
 function ironSights(parent: THREE.Object3D, mats: GunMaterials, yTop: number, zFront: number, zRear: number): void {
   const front = new THREE.Group();
   front.position.set(0, yTop, zFront);
   box(front, mats.aluminum, 0.012, 0.02, 0.008, 0, 0.008, 0, 0.002);
   box(front, mats.hardware, 0.003, 0.014, 0.003, 0, 0.022, 0, 0.0008);
+  // Bright post tip: the aiming reference the eye locks onto at ADS.
+  box(front, mats.postIvory, 0.0035, 0.004, 0.0035, 0, 0.03, 0, 0.0008);
   parent.add(front);
   const rear = new THREE.Group();
   rear.position.set(0, yTop, zRear);
-  // CYCLE 34 (review): pedestal reaching down to the receiver deck — the
-  // bare base used to hover ~20 mm above it, reading as a black tower.
-  box(rear, mats.aluminum, 0.024, 0.024, 0.012, 0, 0.0, 0, 0.002);
-  box(rear, mats.polymer, 0.008, 0.012, 0.006, 0, 0.021, 0, 0.001);
+  // Pedestal reaching down to the receiver deck, topped by a two-ear notch:
+  // ears wide of the post line so the aperture frames the front tip.
+  box(rear, mats.aluminum, 0.026, 0.022, 0.012, 0, -0.002, 0, 0.002);
+  for (const ear of [-1, 1]) {
+    box(rear, mats.polymer, 0.006, 0.014, 0.007, ear * 0.008, 0.02, 0, 0.001);
+  }
   parent.add(rear);
 }
 

@@ -17,7 +17,7 @@ function smooth(t: number): number {
 }
 
 const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.3);
-const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
+const SPRINT_POS = new THREE.Vector3(0.06, -0.24, -0.28);
 
 /**
  * Per-class ADS pose, computed from each weapon's sight line: the sight
@@ -29,7 +29,7 @@ const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
 const ADS_POSE: Record<WeaponId, { y: number; z: number }> = {
   pistol: { y: -0.044, z: -0.24 },
   smg: { y: -0.043, z: -0.24 },
-  ar: { y: -0.042, z: -0.33 },
+  ar: { y: -0.046, z: -0.33 },
   shotgun: { y: -0.026, z: -0.34 },
   sniper: { y: -0.049, z: -0.3 },
 };
@@ -960,9 +960,9 @@ export class ViewModel {
     const strafeRoll = this.sideLag * 1.6;
     const landPitch = this.landT > 0 ? Math.sin((1 - this.landT / 0.34) * Math.PI) * 0.12 : 0;
     this.pivot.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.32 * (1 - ads) + inspect.pitch * iw + landPitch + airFloat * 6,
-      this.swayX * 2.2 - this.sprintBlend * 0.42 * (1 - ads) + hipYaw + inspect.yaw * iw,
-      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.18 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw + strafeRoll,
+      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.44 * (1 - ads) + inspect.pitch * iw + landPitch + airFloat * 6,
+      this.swayX * 2.2 - this.sprintBlend * 0.58 * (1 - ads) + hipYaw + inspect.yaw * iw,
+      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.3 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw + strafeRoll,
     );
 
     // CYCLE 36 (user pass): connect the arms shoulder→elbow→wrist to the

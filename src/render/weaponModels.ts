@@ -52,8 +52,10 @@ export function createWeaponReloadSockets(model: WeaponModel, id: WeaponId): Wea
     seated.quaternion.copy(model.mag.quaternion);
   }
   const withdrawn = anchor('withdrawn', seated.position.x, seated.position.y - (id === 'pistol' ? 0.14 : 0.2), seated.position.z + (id === 'ar' ? 0.065 : 0), id === 'ar' ? -0.38 : 0);
-  const stow = anchor('stow', -0.19, -0.85, 0.02, -0.25, 0, -0.12);
-  const spare = anchor('spare', -0.19, -0.85, 0.02, -0.25, 0, -0.12);
+  // Stow/spare ride higher and closer than the hip: the magazine swap must
+  // stay inside the frame at gameplay FOV, not dive out of view.
+  const stow = anchor('stow', -0.13, -0.34, 0.07, -0.25, 0, -0.12);
+  const spare = anchor('spare', -0.13, -0.34, 0.07, -0.25, 0, -0.12);
   const approach = anchor('approach', -0.015, seated.position.y - (id === 'pistol' ? 0.13 : 0.18), seated.position.z + (id === 'ar' ? 0.065 : 0.01), id === 'ar' ? -0.38 : 0);
   if (id === 'pistol') {
     withdrawn.position.set(0, -0.14, 0).applyQuaternion(seated.quaternion).add(seated.position);
@@ -128,11 +130,11 @@ export class WeaponModelFactory {
    * Values stay mid-dark (nothing pure black) so form shadows still model
    * the shapes under the stage light rig. */
   private static readonly FINISHES: Record<WeaponId, { steel: number; aluminum: number; polymer: number; rubber?: number }> = {
-    pistol: { steel: 0x2e3238, aluminum: 0x3a3f46, polymer: 0x26292e },
-    smg: { steel: 0x3a4046, aluminum: 0x495057, polymer: 0x2b2f34 },
-    ar: { steel: 0x474d55, aluminum: 0x585f68, polymer: 0x353a41 },
-    shotgun: { steel: 0x363b41, aluminum: 0x42474e, polymer: 0x4a3b2c, rubber: 0x2e271f },
-    sniper: { steel: 0x3c4147, aluminum: 0x4d5348, polymer: 0x3f443c },
+    pistol: { steel: 0x2c3036, aluminum: 0x363b42, polymer: 0x232629 },
+    smg: { steel: 0x3a4046, aluminum: 0x454c53, polymer: 0x2b2f34 },
+    ar: { steel: 0x474d55, aluminum: 0x59616a, polymer: 0x353a41 },
+    shotgun: { steel: 0x35393f, aluminum: 0x40454c, polymer: 0x54422e, rubber: 0x2e271f },
+    sniper: { steel: 0x3c4147, aluminum: 0x57624e, polymer: 0x47523f },
   };
 
   private finishMats(id: WeaponId): GunMaterials {
@@ -152,6 +154,7 @@ export class WeaponModelFactory {
       polymer: clone(this.mats.polymer, finish.polymer),
       rubber: clone(this.mats.rubber, finish.rubber ?? this.mats.rubber.color.getHex()),
       hardware: this.mats.hardware,
+      postIvory: this.mats.postIvory,
     };
     this.classMats.set(id, set);
     return set;

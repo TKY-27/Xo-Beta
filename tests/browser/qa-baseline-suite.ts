@@ -178,7 +178,7 @@ const scenario = async (): Promise<void> => {
   await page.evaluate(() => {
     (window as unknown as { __xoQaInput: (o: unknown) => void }).__xoQaInput({ firePressed: true, fireHeld: true });
   });
-  await page.waitForTimeout(240);
+  await page.waitForTimeout(110);
   await shot('12-ar-fire');
   await page.evaluate(() => {
     (window as unknown as { __xoQaInput: (o: unknown) => void }).__xoQaInput(null);
@@ -192,7 +192,7 @@ const scenario = async (): Promise<void> => {
   }, undefined, { timeout: 5000 });
   await page.waitForFunction(() => {
     const s = (window as unknown as { __xoSuiteRead?: () => { reloadPhase: number | null } }).__xoSuiteRead?.();
-    return (s?.reloadPhase ?? 0) >= 0.42;
+    return (s?.reloadPhase ?? 0) >= 0.72;
   }, undefined, { timeout: 5000 }).catch(() => undefined);
   await shot('13-ar-reload-mid');
   await page.waitForFunction(() => {

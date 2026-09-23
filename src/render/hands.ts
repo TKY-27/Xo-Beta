@@ -466,7 +466,7 @@ function wrapSupport(glove: Glove, group: THREE.Group, contact: THREE.Vector3, s
     // Palm-up cup under the pump: fingers curl up around it, thumb clamps.
     orientHand(group, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
     placePalm(group, contact, 0.02);
-    poseSupportWrap(glove, 0.74, 1, 0.25);
+    poseSupportWrap(glove, 0.74, 1, 0.85);
     return;
   }
   const approach = new THREE.Vector3(-0.2, -0.22, 0.02).sub(contact);

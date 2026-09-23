@@ -2442,7 +2442,10 @@ function wirePresentation(
       );
     }
   });
-  match.events.on('tracer', (e) => vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color, e.weaponId));
+  match.events.on('tracer', (e) => {
+    const eye = rig.camera.position;
+    vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color, e.weaponId, eye);
+  });
   match.events.on('impact', (e) => vfx.impactSparks(e.x, e.y, e.z, e.nx, e.ny, e.nz, e.material === 'metal' ? 10 : 6));
   match.events.on('impact', (e) => decals.spawn(
     e.x, e.y, e.z, e.nx, e.ny, e.nz, e.material,
