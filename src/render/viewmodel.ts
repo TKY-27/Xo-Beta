@@ -27,11 +27,11 @@ const SPRINT_POS = new THREE.Vector3(0.1, -0.21, -0.26);
  * the crosshair. Z keeps the buttstock comfortably clear of the eye.
  */
 const ADS_POSE: Record<WeaponId, { y: number; z: number }> = {
-  pistol: { y: -0.044, z: -0.2 },
-  smg: { y: -0.043, z: -0.2 },
-  ar: { y: -0.044, z: -0.245 },
-  shotgun: { y: -0.027, z: -0.27 },
-  sniper: { y: -0.05, z: -0.245 },
+  pistol: { y: -0.044, z: -0.24 },
+  smg: { y: -0.043, z: -0.24 },
+  ar: { y: -0.042, z: -0.33 },
+  shotgun: { y: -0.026, z: -0.34 },
+  sniper: { y: -0.049, z: -0.3 },
 };
 
 type PresentationInput = Readonly<{
@@ -61,9 +61,9 @@ type ReloadTrack = Readonly<{
 
 const RELOAD_TRACKS: Record<WeaponId, ReloadTrack> = {
   pistol: { contact: 0.13, extracted: 0.24, stowed: 0.36, fetched: 0.44, aligned: 0.57, seated: 0.69, released: 0.75, action: 0.8, pitch: -0.12, roll: 0.42, drop: 0.014 },
-  smg: { contact: 0.12, extracted: 0.23, stowed: 0.35, fetched: 0.43, aligned: 0.58, seated: 0.72, released: 0.78, action: 0.82, pitch: 0.08, roll: 0.3, drop: 0.024 },
-  ar: { contact: 0.16, extracted: 0.29, stowed: 0.41, fetched: 0.49, aligned: 0.63, seated: 0.77, released: 0.82, action: 0.86, pitch: 0.11, roll: 0.36, drop: 0.018 },
-  sniper: { contact: 0.18, extracted: 0.31, stowed: 0.43, fetched: 0.51, aligned: 0.64, seated: 0.76, released: 0.8, action: 0.83, pitch: 0.06, roll: 0.27, drop: 0.018 },
+  smg: { contact: 0.12, extracted: 0.23, stowed: 0.35, fetched: 0.43, aligned: 0.58, seated: 0.72, released: 0.78, action: 0.82, pitch: 0.26, roll: -0.3, drop: 0.02 },
+  ar: { contact: 0.16, extracted: 0.29, stowed: 0.41, fetched: 0.49, aligned: 0.63, seated: 0.77, released: 0.82, action: 0.86, pitch: 0.3, roll: -0.35, drop: 0.014 },
+  sniper: { contact: 0.18, extracted: 0.31, stowed: 0.43, fetched: 0.51, aligned: 0.64, seated: 0.76, released: 0.8, action: 0.83, pitch: 0.22, roll: -0.3, drop: 0.016 },
   shotgun: { contact: 0.1, extracted: 0.2, stowed: 0.3, fetched: 0.4, aligned: 0.5, seated: 0.84, released: 0.89, action: 0.91, pitch: -0.06, roll: 0.65, drop: 0.008 },
 };
 
@@ -654,6 +654,23 @@ export class ViewModel {
     this.group.clear();
   }
 
+  /** QA debug snapshot of the live presentation pose (read-only). */
+  debugPose(): {
+    currentId: WeaponId | null; ads: number;
+    pivotPos: number[]; pivotRot: number[]; leftPos: number[] | null; rightPos: number[] | null;
+  } {
+    const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
+    this.pivot.updateMatrixWorld(true);
+    return {
+      currentId: this.currentId,
+      ads: this.adsSmooth,
+      pivotPos: this.pivot.position.toArray().map((n) => +n.toFixed(3)),
+      pivotRot: [this.pivot.rotation.x, this.pivot.rotation.y, this.pivot.rotation.z].map((n) => +n.toFixed(3)),
+      leftPos: rig ? rig.left.position.toArray().map((n) => +n.toFixed(3)) : null,
+      rightPos: rig ? rig.right.position.toArray().map((n) => +n.toFixed(3)) : null,
+    };
+  }
+
   /** Trigger a punch animation (alternating hands). */
   punch(): void {
     this.punchT = 0.3;
@@ -668,6 +685,20 @@ export class ViewModel {
     const m = this.currentModel;
     if (m) {
       m.group.localToWorld(this.muzzleFlashLight.position.copy(m.muzzle));
+      // Stage-drawn flash quad at the muzzle: carries the weapon transform,
+      // random roll per shot so bursts don't repeat a silhouette.
+      this.ensureFlash();
+      if (this.flashQuad) {
+        // Weapon-local → stage-space → pivot-local (the quad is pivot-child).
+        m.group.localToWorld(this.flashQuad.position.copy(m.muzzle));
+        this.pivot.worldToLocal(this.flashQuad.position);
+        this.flashQuad.quaternion.identity();
+        this.flashQuad.rotation.z = Math.random() * Math.PI * 2;
+        this.flashQuad.scale.setScalar(0.85 + strength * 0.35);
+        this.flashQuad.visible = true;
+        this.flashT = 0.055;
+        (this.flashQuad.material as THREE.MeshBasicMaterial).opacity = 1;
+      }
     }
   }
 
@@ -679,6 +710,70 @@ export class ViewModel {
     if (!m) return out.copy(this.muzzleFlashLight.position);
     this.pivot.updateMatrixWorld(true);
     return m.group.localToWorld(out.copy(m.muzzle));
+  }
+
+  /**
+   * First-person muzzle flash, drawn INSIDE the stage at the weapon muzzle:
+   * a bright additive star quad that carries the weapon transform, so the
+   * flash sits exactly at the on-screen barrel (a world-space sprite misses
+   * it — the stage camera's FOV differs from the world's). HDR color pushes
+   * the quad over the bloom threshold for a genuine flash read.
+   */
+  private flashQuad: THREE.Mesh | null = null;
+  private flashT = 0;
+  private static buildFlashTexture(): THREE.CanvasTexture {
+    const size = 96;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const grad = ctx.createRadialGradient(size / 2, size / 2, 2, size / 2, size / 2, size / 2);
+    grad.addColorStop(0, 'rgba(255,240,210,1)');
+    grad.addColorStop(0.25, 'rgba(255,190,110,0.85)');
+    grad.addColorStop(0.6, 'rgba(255,140,60,0.25)');
+    grad.addColorStop(1, 'rgba(255,120,40,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    // Four-petal star for a muzzle-burst silhouette.
+    ctx.translate(size / 2, size / 2);
+    ctx.fillStyle = 'rgba(255,225,170,0.9)';
+    for (let i = 0; i < 4; i++) {
+      ctx.rotate(Math.PI / 2);
+      ctx.beginPath();
+      ctx.moveTo(0, -3);
+      ctx.lineTo(size * 0.46, 0);
+      ctx.lineTo(0, 3);
+      ctx.closePath();
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  private ensureFlash(): void {
+    if (this.flashQuad || typeof document === 'undefined') return;
+    const material = new THREE.MeshBasicMaterial({
+      map: ViewModel.buildFlashTexture(),
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+      color: new THREE.Color(5.5, 4.4, 2.6),
+    });
+    this.flashQuad = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 0.15), material);
+    this.flashQuad.visible = false;
+    this.flashQuad.frustumCulled = false;
+    this.pivot.add(this.flashQuad);
+  }
+
+  private updateFlash(dt: number): void {
+    if (!this.flashQuad || this.flashT <= 0) return;
+    this.flashT = Math.max(0, this.flashT - dt);
+    const k = this.flashT / 0.055;
+    this.flashQuad.scale.setScalar(0.7 + (1 - k) * 0.9);
+    (this.flashQuad.material as THREE.MeshBasicMaterial).opacity = k;
+    if (this.flashT <= 0) this.flashQuad.visible = false;
   }
 
   /** Per-frame presentation update driven by actor state. */
@@ -709,6 +804,7 @@ export class ViewModel {
   private evaluate(input: PresentationInput | null, dt: number, lookDx: number, lookDy: number, movingSpeed: number): void {
     this.t += dt;
     this.muzzleFlashLight.intensity *= Math.exp(-dt * 30);
+    this.updateFlash(dt);
     if (!input || (!this.currentId && !this.fistRig.group.visible)) {
       this.group.visible = false;
       this.armSolver.setVisible(false);

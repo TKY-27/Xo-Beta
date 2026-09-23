@@ -71,11 +71,11 @@ export function getHandMaterialSet(): HandMats {
   // albedos to night maps too, so values stay far from pure black while
   // reading as gear, not skin or chalk.
   handMatsSingleton = {
-    glove: new THREE.MeshStandardMaterial({ color: 0x272b31, roughness: 0.88, metalness: 0.02, bumpMap, bumpScale: 0.00022 }),
-    shell: new THREE.MeshStandardMaterial({ color: 0x33383f, roughness: 0.82, metalness: 0.03, bumpMap, bumpScale: 0.00012 }),
-    skin: new THREE.MeshStandardMaterial({ color: 0x1c1f24, roughness: 0.94 }),
-    plate: new THREE.MeshStandardMaterial({ color: 0x3c434b, roughness: 0.5, metalness: 0.14 }),
-    palm: new THREE.MeshStandardMaterial({ color: 0x22262b, roughness: 0.97, bumpMap, bumpScale: 0.0003 }),
+    glove: new THREE.MeshStandardMaterial({ color: 0x343941, roughness: 0.88, metalness: 0.02, bumpMap, bumpScale: 0.00022 }),
+    shell: new THREE.MeshStandardMaterial({ color: 0x414751, roughness: 0.82, metalness: 0.03, bumpMap, bumpScale: 0.00012 }),
+    skin: new THREE.MeshStandardMaterial({ color: 0x262a30, roughness: 0.94 }),
+    plate: new THREE.MeshStandardMaterial({ color: 0x4a525c, roughness: 0.5, metalness: 0.14 }),
+    palm: new THREE.MeshStandardMaterial({ color: 0x2e333a, roughness: 0.97, bumpMap, bumpScale: 0.0003 }),
   };
   return handMatsSingleton;
 }

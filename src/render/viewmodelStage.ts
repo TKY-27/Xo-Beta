@@ -94,7 +94,10 @@ export class ViewModelStage {
     this.sun.position.copy(_viewSunDir).multiplyScalar(6);
     this.sunColorScratch.copy(world.sunColor);
     this.sun.color.copy(this.sunColorScratch);
-    this.sun.intensity = world.sunIntensity;
+    // The viewmodel reads hotter than the world: AAA presentations key the
+    // weapon slightly above the environment so it stays the subject in
+    // shade and at dusk without inventing light of its own.
+    this.sun.intensity = world.sunIntensity * 1.3;
 
     this.hemiSkyScratch.copy(world.hemiSkyColor);
     this.hemiGroundScratch.copy(world.hemiGroundColor);
@@ -104,7 +107,7 @@ export class ViewModelStage {
 
     this.ambientScratch.copy(world.ambientColor);
     this.ambient.color.copy(this.ambientScratch);
-    this.ambient.intensity = world.ambientIntensity;
+    this.ambient.intensity = world.ambientIntensity * 1.2;
 
     if (this.scene.environment !== world.environment) {
       this.scene.environment = world.environment;

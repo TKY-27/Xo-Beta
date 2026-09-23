@@ -2272,7 +2272,7 @@ function teardownMatch(disposeOnline = true): void {
     const qaWindow = window as unknown as Record<string, unknown>;
     for (const key of [
       '__xoRigs', '__xoAerial', '__xoState', '__xoTeleport', '__xoStress',
-      '__xoGive', '__xoQaInput', '__xoStorm', '__xoWaterQaView', '__xoReplicaState',
+      '__xoGive', '__xoQaInput', '__xoStorm', '__xoWaterQaView', '__xoReplicaState', '__xoViewmodel',
     ]) delete qaWindow[key];
     delete document.documentElement.dataset.xoQaTeleportRequest;
     delete document.documentElement.dataset.xoQaTeleportResult;
@@ -2413,7 +2413,10 @@ function wirePresentation(
       viewmodel.muzzleView(flashMuzzle).applyMatrix4(rig.camera.matrixWorld);
       flashFwd.set(0, 0, -1).applyQuaternion(rig.camera.quaternion);
       flashRight.set(1, 0, 0).applyQuaternion(rig.camera.quaternion);
-      vfx.muzzleFlash(flashMuzzle.x, flashMuzzle.y, flashMuzzle.z, flashFwd.x, flashFwd.y, flashFwd.z, 0.85, HEAVY_FLASH[e.weaponId] === true);
+      // The flash itself is drawn INSIDE the stage at the muzzle (muzzlePulse
+      // above) — a world-space sprite this close to the eye renders huge and
+      // off the vm barrel (world FOV differs from the stage's). Only the
+      // world-space smoke and shell keep the world position.
       vfx.muzzleSmoke(flashMuzzle.x, flashMuzzle.y, flashMuzzle.z, flashFwd.x, flashFwd.y, flashFwd.z);
       vfx.shellCasing(
         flashMuzzle.x - flashFwd.x * 0.28 + flashRight.x * 0.1,
@@ -3738,6 +3741,10 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
     };
     // QA helper: grant + equip a weapon by id ('pistol'|'smg'|'ar'|
     // 'shotgun'|'sniper', optional rarity). Dev/QA builds only.
+    (window as unknown as Record<string, unknown>).__xoViewmodel = () => {
+      const vm = live?.kind === 'match' ? live.viewmodel : null;
+      return vm ? vm.debugPose() : null;
+    };
     (window as unknown as Record<string, unknown>).__xoGive = (weaponId: string, rarity?: string) => {
       const p = m.localActor;
       if (!p || !p.alive) return false;

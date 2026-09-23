@@ -216,21 +216,29 @@ export function makeGunMaterials(): GunMaterials {
   // range, plus shared PBR detail maps (brush grain, grip stipple).
   const rough = getBrushedRoughness();
   const stipple = getStippleBump();
-  const steel = new THREE.MeshStandardMaterial({ color: 0x495057, roughness: 0.34, metalness: 0.9 });
+  // Metalness stays moderate: full-metal values turn the weapon into a black
+  // silhouette under the stage sun (metals have no diffuse term and the
+  // weapon-sized IBL contribution is weak). These still read as machined
+  // metal through the roughness grain and specular, with form shadows
+  // modelling the shapes.
+  const steel = new THREE.MeshStandardMaterial({ color: 0x575e66, roughness: 0.34, metalness: 0.55 });
   steel.roughnessMap = rough;
+  steel.envMapIntensity = 1.1;
   steel.name = 'steel';
-  const aluminum = new THREE.MeshStandardMaterial({ color: 0x575e66, roughness: 0.52, metalness: 0.78 });
+  const aluminum = new THREE.MeshStandardMaterial({ color: 0x626a73, roughness: 0.52, metalness: 0.45 });
   aluminum.roughnessMap = rough;
+  aluminum.envMapIntensity = 1.1;
   aluminum.name = 'aluminum';
-  const polymer = new THREE.MeshStandardMaterial({ color: 0x3d4147, roughness: 0.8, metalness: 0.06 });
+  const polymer = new THREE.MeshStandardMaterial({ color: 0x3f444b, roughness: 0.8, metalness: 0.06 });
   polymer.bumpMap = stipple;
   polymer.bumpScale = 0.00018;
   polymer.name = 'polymer';
-  const rubber = new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.94, metalness: 0.02 });
+  const rubber = new THREE.MeshStandardMaterial({ color: 0x2e3237, roughness: 0.94, metalness: 0.02 });
   rubber.bumpMap = stipple;
   rubber.bumpScale = 0.00025;
   rubber.name = 'rubber';
-  const hardware = new THREE.MeshStandardMaterial({ color: 0x666d75, roughness: 0.3, metalness: 0.92 });
+  const hardware = new THREE.MeshStandardMaterial({ color: 0x71787f, roughness: 0.3, metalness: 0.6 });
+  hardware.envMapIntensity = 1.15;
   hardware.name = 'hardware';
   return { steel, aluminum, polymer, rubber, hardware };
 }
