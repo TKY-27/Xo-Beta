@@ -79,8 +79,10 @@ export class ViewModelStage {
     this.scene.add(this.ambient);
 
     // Camera-relative fill from upper-left behind the weapon: keeps the
-    // camera-facing side of the receiver readable when the sun is behind it.
-    this.fill = new THREE.DirectionalLight(0xd8e4f2, 0.55);
+    // camera-facing side of the receiver readable when the sun is behind it,
+    // and lifts the gloves out of charcoal under overcast skies (OldFront)
+    // where the world's own fill is weakest.
+    this.fill = new THREE.DirectionalLight(0xdde8f4, 0.8);
     this.fill.position.set(-0.6, 0.5, 1.2);
     this.scene.add(this.fill);
   }
@@ -94,10 +96,10 @@ export class ViewModelStage {
     this.sun.position.copy(_viewSunDir).multiplyScalar(6);
     this.sunColorScratch.copy(world.sunColor);
     this.sun.color.copy(this.sunColorScratch);
-    // The viewmodel reads hotter than the world: AAA presentations key the
-    // weapon slightly above the environment so it stays the subject in
-    // shade and at dusk without inventing light of its own.
-    this.sun.intensity = world.sunIntensity * 1.3;
+    // Keep the key at world intensity: the weapon albedos are already tuned
+    // dark, and multiplying the sun washed the sleeves out to chalk under
+    // the day maps' high sun.
+    this.sun.intensity = world.sunIntensity;
 
     this.hemiSkyScratch.copy(world.hemiSkyColor);
     this.hemiGroundScratch.copy(world.hemiGroundColor);
@@ -107,7 +109,7 @@ export class ViewModelStage {
 
     this.ambientScratch.copy(world.ambientColor);
     this.ambient.color.copy(this.ambientScratch);
-    this.ambient.intensity = world.ambientIntensity * 1.2;
+    this.ambient.intensity = world.ambientIntensity;
 
     if (this.scene.environment !== world.environment) {
       this.scene.environment = world.environment;

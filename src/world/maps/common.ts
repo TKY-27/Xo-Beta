@@ -739,7 +739,12 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     // so the slot above the portal would otherwise read as open sky. Fixed
     // dark glazing fills the transom; it is noCollide like the rest of the
     // dressing, so sightline-blocking stays exactly as authored.
-    facePiece(side, along, baseY + doorHead + 0.2 + Math.max(0.1, fh - doorHead - 0.55) / 2, width + 0.04, Math.max(0.2, fh - doorHead - 0.55), 0.06, -0.01, 'windowDark');
+    // Transom glazing: heritage doors get a deterministic dim warm interior
+    // so the portal reads inhabited; other styles keep the dark pane.
+    const transomMat: MatKey = style === 'heritage' && facadeHash(side, along, 0, 7) % 3 === 0
+      ? 'windowWarmDim'
+      : 'windowDark';
+    facePiece(side, along, baseY + doorHead + 0.2 + Math.max(0.1, fh - doorHead - 0.55) / 2, width + 0.04, Math.max(0.2, fh - doorHead - 0.55), 0.06, -0.01, transomMat);
     const s = side === 0 || side === 1 ? 1 : -1;
     const face = (alongX ? hd : hw) + 0.2;
     for (let stepIdx = 0; stepIdx < 2; stepIdx++) {
