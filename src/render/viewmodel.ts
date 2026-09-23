@@ -479,38 +479,40 @@ export class ViewModel {
    * update()/updateView(); the pivot then positions the weapon relative to
    * the view, exactly as the HIP/ADS/SPRINT constants are authored.
    */
-  syncCamera(camera: THREE.Camera): void {
-    this.group.position.copy(camera.position);
-    this.group.quaternion.copy(camera.quaternion);
+  /**
+   * The viewmodel lives in the dedicated first-person stage whose camera sits
+   * at the origin looking down -Z, so the pose root is pinned to identity —
+   * pose space is view space by construction. The camera argument stays for
+   * call-site stability; the world camera's transform is irrelevant here
+   * (the stage's light rig picks up the camera rotation separately through
+   * ViewModelStage.syncLighting).
+   */
+  syncCamera(_camera: THREE.Camera): void {
+    this.group.position.set(0, 0, 0);
+    this.group.quaternion.identity();
   }
 
   /** View-space scale for the hand-held weapon. The factory builds to real
    * canonical length (~1 m AR) for world/loot presentation; at the hip offset
    * (~6 cm from the eye) that fills half the screen, so the viewmodel carries
    * its own presentation scale, like every shipped FPS does. */
-  /** Per-class presentation scale (round-6 weapon review): the flat 0.6
-   * left the pistol at ~5% of frame while long guns filled 20%. */
+  /** Per-class presentation scale. The stage camera runs a constant 55° FOV
+   * (vs the world's 80°), so scales are ~0.62x of the old shared-camera
+   * values to keep the same on-screen fraction. */
   private static readonly WEAPON_VIEW_SCALE: Record<WeaponId, number> = {
-    pistol: 0.95, smg: 0.78, ar: 0.82, shotgun: 0.85, sniper: 0.78,
+    pistol: 0.6, smg: 0.5, ar: 0.52, shotgun: 0.54, sniper: 0.5,
   };
 
-  /** Extra per-class ADS pose offsets (metres, applied through the ads
-   * blend). Y drops the sniper so the box magazine falls out of the aim
-   * point and the scope reads on the bore line. */
+  /** Per-class ADS pose offsets (metres, applied through the ads blend).
+   * Y drops the sniper so the box magazine falls out of the aim point. */
   private static readonly ADS_EXTRA_Y: Record<WeaponId, number> = {
-    // CYCLE 61 (review): the sniper's box mag sat dead-centre through the
-    // ADS blend — drop the weapon further so the mag leaves the aim point.
     pistol: 0, smg: 0, ar: 0, shotgun: -0.006, sniper: -0.028,
   };
 
-  /** Hands-review fix: extra forward pose offset at full ADS (metres, applied
-   * through the ads blend). The shared ADS_POS leaves a long gun's buttstock
-   * ~9 cm from the eye — inside the 8 cm near plane, so the stock renders as
-   * a giant clipped slab (and on the shotgun the hollow interior of the
-   * clipped butt fills the aim point). Long guns ride further forward; the
-   * pistol barely moves. */
+  /** The stage camera's 1 cm near plane makes the old forward nudges
+   * unnecessary — stocks stay outside the clip volume at true ADS. */
   private static readonly ADS_EXTRA_FORWARD: Record<WeaponId, number> = {
-    pistol: 0.02, smg: 0.1, ar: 0.12, shotgun: 0.14, sniper: 0.09,
+    pistol: 0, smg: 0, ar: 0, shotgun: 0, sniper: 0,
   };
 
   private modelFor(id: WeaponId, rarity: Rarity): WeaponModel | null {
@@ -522,12 +524,12 @@ export class ViewModel {
       m = built;
       const viewScale = ViewModel.WEAPON_VIEW_SCALE[id];
       m.group.scale.setScalar(viewScale);
-      // viewmodel render tuning: draw over world, no shadow casting
+      // The stage's sun casts real self-shadow onto the weapon: fingers on
+      // the grip, sights on the receiver. The stage shadow frustum (±0.85 m
+      // around the view origin) covers every held pose.
       m.group.traverse((o) => {
         const mesh = o as THREE.Mesh;
-        if (mesh.isMesh) { mesh.castShadow = false; mesh.receiveShadow = false; }
-        const mat = mesh.material as THREE.Material | undefined;
-        if (mat && 'depthTest' in mat) { /* keep depth test; weapon clips handled by proximity */ }
+        if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true; }
       });
       // CYCLE 35: gloved hands parented inside the weapon so every weapon
       // motion (sway/ADS/recoil/reload) carries them; counter-scaled to stay
@@ -537,7 +539,7 @@ export class ViewModel {
       for (const handGroup of [rig.right, rig.left]) {
         handGroup.traverse((o) => {
           const mesh = o as THREE.Mesh;
-          if (mesh.isMesh) { mesh.castShadow = false; mesh.receiveShadow = false; }
+          if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true; }
         });
         m.group.add(handGroup);
       }

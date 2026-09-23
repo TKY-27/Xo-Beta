@@ -56,6 +56,7 @@ import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import type { SkyConfig, WeatherProfile } from '../world/types';
 import { SkyAtmosphereSystem } from './skyAtmosphere';
+import { ViewModelStage, type WorldLightingSnapshot } from './viewmodelStage';
 import { getSettings } from '../core/settings';
 import { loadHdri, clampHdriPeaks } from '../assets/assets';
 
@@ -63,6 +64,7 @@ const _sunDirection = new Vector3();
 const _lightRight = new Vector3();
 const _lightUp = new Vector3();
 const _snappedTarget = new Vector3();
+const WHITE = new Color(0xffffff);
 
 /** Supported sniper scope magnification levels (angular-FOV based). */
 export const SCOPE_MAGNIFICATIONS = [1, 2, 4] as const;
@@ -108,6 +110,9 @@ export function isWebGPUBackend(renderer: unknown): boolean {
 export class GameRenderer {
   readonly renderer: WebGPURenderer;
   readonly scene = new Scene();
+  /** Dedicated first-person stage: the viewmodel renders here and is
+   * composited over the world pass (see buildComposer). */
+  readonly viewmodelStage = new ViewModelStage();
   /** Resolves once the GPU backend is initialized and the renderer is usable. */
   readonly ready: Promise<void>;
   private postProcessing: RenderPipeline | null = null;
@@ -216,8 +221,25 @@ export class GameRenderer {
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
     this.scopeU.aspect.value = w / Math.max(1, h);
+    this.viewmodelStage.resize(w, h);
     // Post-processing pass targets derive from the renderer's drawing buffer
     // every frame, so no per-pass resize is needed.
+  }
+
+  /** Live view of the world lighting rig for the viewmodel stage. */
+  lightingSnapshot(): WorldLightingSnapshot {
+    return {
+      sunColor: this.sun?.color ?? WHITE,
+      sunIntensity: this.sun?.intensity ?? 0,
+      sunDirection: this.sunOffset.clone().normalize(),
+      hemiSkyColor: this.hemi?.color ?? WHITE,
+      hemiGroundColor: this.hemi?.groundColor ?? WHITE,
+      hemiIntensity: this.hemi?.intensity ?? 0,
+      ambientColor: this.ambient?.color ?? WHITE,
+      ambientIntensity: this.ambient?.intensity ?? 0,
+      environment: this.scene.environment as Texture | null,
+      environmentIntensity: this.scene.environmentIntensity ?? 1,
+    };
   }
 
   private dynamicScale = 1;
@@ -573,6 +595,10 @@ export class GameRenderer {
     const settings = getSettings();
     const pp = new RenderPipeline(this.renderer);
     const scenePass = pass(this.scene, camera);
+    // The world pass must carry alpha 1 into the composite (its sky covers
+    // every pixel); the viewmodel pass clears to alpha 0 so its empty regions
+    // leave the world untouched.
+    this.renderer.setClearAlpha(0);
 
     const cinematic = settings.quality === 'cinematic';
     // NOTE on ambient occlusion: the r185 GTAONode returns ~0 occlusion on
@@ -581,6 +607,20 @@ export class GameRenderer {
     // is therefore not wired; contact grounding comes from the shadow map.
     // Revisit on a three.js upgrade.
     let color: Node<'vec4'> = scenePass.getTextureNode('output');
+
+    // Composite the first-person stage over the world before the optical
+    // scope, bloom and grading: the weapon gets the same display treatment as
+    // the primary view while rendering through its own camera and light rig.
+    const stage = this.viewmodelStage;
+    const vmPass = pass(stage.scene, stage.camera);
+    const vmColor = vmPass.getTextureNode('output');
+    // Composite by depth mask, not pass alpha: pass targets do not inherit
+    // the renderer's clear alpha, so the vm pass alpha is 1 everywhere. The
+    // stage's own depth buffer is exact: depth < 1 ⇔ stage geometry. The
+    // viewmodel is drawn over the world unconditionally (standard FPS
+    // presentation), so no world-depth test is needed.
+    const vmMask = vmPass.getTextureNode('depth').r.lessThan(1.0).select(1.0, 0.0);
+    color = mix(color, vmColor, vmMask);
 
     // Composite the linear optical scope image before bloom, AA and grading so
     // the lens receives the same display treatment as the primary view.
@@ -736,7 +776,13 @@ export class GameRenderer {
     if (this.postProcessing && usePost) {
       this.postProcessing.render();
     } else {
+      // Direct path (post disabled): draw the first-person stage over the
+      // world with a depth clear — the composited pipeline path is unavailable.
       this.renderer.render(this.scene, this.camera);
+      this.renderer.autoClear = false;
+      this.renderer.clearDepth();
+      this.renderer.render(this.viewmodelStage.scene, this.viewmodelStage.camera);
+      this.renderer.autoClear = true;
     }
   }
 }
