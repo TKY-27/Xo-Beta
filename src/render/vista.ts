@@ -2153,7 +2153,7 @@ function buildTerrain(
       ],
       topBySlope: [0.2, 0.48],
       topByHeight: { y: pal.rise * 0.92, fade: 6 },
-      midByNoise: { meters: 24, lo: 0.56, hi: 0.8, jitterMeters: 5, jitterAmount: 0.16 },
+      midByNoise: { meters: 34, lo: 0.6, hi: 0.72, jitterMeters: 9, jitterAmount: 0.3 },
       baseBrightness: 0.38,
       roughness: 1,
       grain: detailRough,
