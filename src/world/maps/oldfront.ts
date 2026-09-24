@@ -7,7 +7,7 @@
 import { planStairs, STAIR_MAX_RISE, WorldBuilder } from '../builder';
 import { ROCK_CLEARANCE_RADIUS, type MapDef, type MatKey } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { addBuilding, addGroundDecay, addMarketStall, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
@@ -174,6 +174,8 @@ export function buildOldFront(): MapDef {
   decorateOldFront(b, rng);
   hedgerowsAndWalls(b, rng);
   edgeHomesteads(b, rng);
+  townDensity(b, rng);
+  groundDecay(b);
 
   hardenExposedFlanks(b, { mat: 'sandbag', maxProps: 30 });
 
@@ -1130,4 +1132,253 @@ function decorateOldFront(b: WorldBuilder, rng: Rng): void {
     b.loot(x - 1.2, gy + 1.35, z);
   };
   stall(100, 24, 0.2); stall(112, 26, 0.2); stall(106, 42, Math.PI / 2 + 0.15);
+}
+
+/**
+ * W8 town density pass: property fences and a cemetery wall, dirt-worn
+ * patches at doorsteps and the well, market stalls on the cathedral square,
+ * timber carts, a washing line, corner downspouts on the houses and small
+ * woodpiles. Everything hugs plot edges; placements are gated by
+ * dressingSpotClear so lanes, doors, chests and crates stay usable.
+ */
+function townDensity(b: WorldBuilder, rng: Rng): void {
+  const clear = (x: number, z: number, hx: number, hz: number, yLow: number, yHigh: number): boolean =>
+    dressingSpotClear(b.def, x, z, hx, hz, yLow, yHigh, { crates: true, vehicles: true, margin: 0.3 });
+
+  // -- dirt-worn patches: doorsteps, cathedral doors, the well --------------
+  // Authored as three terrain-sampled thin dirt slabs per patch (surfacePath
+  // ribbons are reserved for the long inter-POI roads asserted by the
+  // world-contact contract). Per-column heights differ by a few millimetres
+  // so adjacent slabs never share a coplanar top.
+  const patch = (x: number, z: number, width: number): void => {
+    for (let col = 0; col < 3; col++) {
+      const px = x + (col - 1) * 0.58;
+      const gy = terrainH(px, z);
+      b.box(px, gy + 0.012 + col * 0.004, z, 0.56, 0.045, width - 0.3, 'dirt', 0, {
+        noCollide: true,
+        castShadow: false,
+      });
+    }
+  };
+  patch(18, -32.6, 3); patch(22, -32.6, 3);           // cathedral west portal
+  patch(18.5, -75.6, 2.6);                            // bell tower door
+  patch(106, 58, 3.6);                                // old town well apron
+  patch(-19.5, -19.4, 2.6); patch(56.5, -19.4, 2.6);  // square row-house doors
+  patch(-19.5, -3.2, 2.6);
+  patch(95.9, 9.5, 2.6); patch(114.1, 9.5, 2.6);      // old town doors
+  patch(95.9, 45.5, 2.6); patch(115.9, 47.5, 2.6);
+  patch(104, 40.4, 2.6); patch(111, 40.4, 2.6);       // shopfront doors
+  patch(168, 189.4, 2.6);                             // farmhouse door
+
+  // -- property fences: post-and-rail timber plot boundaries ----------------
+  let fenceIdx = 0;
+  const fenceLine = (x1: number, z1: number, x2: number, z2: number): void => {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    const segs = Math.max(2, Math.round(len / 2.2));
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const px = x1 + (x2 - x1) * t;
+      const pz = z1 + (z2 - z1) * t;
+      if (rng.bool(0.14)) continue; // gaps as passages
+      if (!clear(px, pz, 1.2, 0.35, 0, 1.4)) continue;
+      b.def.destructibles.push({
+        stableId: `oldfront:tfence:${(fenceIdx++).toString(36).padStart(4, '0')}`,
+        hp: 20,
+        type: 'fence',
+        geo: {
+          kind: 'box', x: px, y: terrainH(px, pz) + 0.6, z: pz,
+          sx: 2.2, sy: 1.15, sz: 0.16,
+          yaw: Math.atan2(z2 - z1, x2 - x1), mat: 'wood',
+        },
+      });
+    }
+  };
+  fenceLine(-30, -34, -30, -20);   // garden fence west of the square rows
+  fenceLine(52, -37, 64, -37);     // plot edge behind (58,-28)
+  fenceLine(-24, 2.6, -12, 2.6);   // plot edge behind (-18,12)
+  fenceLine(82, 21.6, 94, 21.6);   // back gardens, old town
+  fenceLine(116, 21.6, 128, 21.6);
+  fenceLine(98.6, 26, 98.6, 38);   // shopHouse west plot edge
+
+  // -- market stalls on the cathedral square --------------------------------
+  const squareY = terrainH(20, -10) + 0.14;
+  addMarketStall(b, { x: 2, z: -18, baseY: squareY, yaw: 0.25, rugMat: 'rust', awningMat: 'plasterOld', goods: true });
+  addMarketStall(b, { x: 38, z: -18, baseY: squareY, yaw: -0.2, rugMat: 'roofTile', awningMat: 'plasterOld', goods: true });
+  addMarketStall(b, { x: -6, z: 4, baseY: squareY, yaw: Math.PI / 2 + 0.15, rugMat: 'bricksOld', awningMat: 'plasterOld' });
+  b.crate(4.2, squareY + 0.1, -16.2, 0.8);
+  b.crate(36.4, squareY + 0.1, -16.6, 0.85);
+
+  // -- timber carts: one on the square, one in old town ---------------------
+  const cart = (x: number, z: number, yaw: number, baseY: number): void => {
+    const gy = baseY;
+    if (!clear(x, z, 1.1, 1.6, gy, gy + 1.2)) return;
+    const c = Math.cos(yaw);
+    const s = Math.sin(yaw);
+    const at = (lx: number, lz: number): [number, number] => [x + lx * c - lz * s, z + lx * s + lz * c];
+    const [bx, bz] = at(0, 0);
+    b.box(bx, gy + 0.72, bz, 1.4, 0.5, 2.7, 'wood', yaw);
+    b.box(bx, gy + 1.02, bz, 1.2, 0.14, 2.4, 'woodDark', yaw, { noCollide: true, castShadow: false });
+    for (const lz of [-0.85, 0.85]) {
+      const [wx, wz] = at(0.8, lz);
+      b.cyl(wx, gy + 0.52, wz, 0.52, 0.12, 'woodDark', { roll: Math.PI / 2, noCollide: true });
+    }
+    for (const lx of [-0.45, 0.45]) {
+      const [sx, sz2] = at(lx, 1.95);
+      b.box(sx, gy + 0.62, sz2, 0.09, 0.09, 1.6, 'woodDark', yaw, { noCollide: true, castShadow: false });
+    }
+  };
+  cart(46, 2, 0.9, squareY);
+  cart(99.5, 60.5, -0.4, terrainH(99.5, 60.5));
+
+  // -- washing line in the yard west of (-18,12) ----------------------------
+  {
+    const p1 = { x: -30.5, z: 13 };
+    const p2 = { x: -28, z: 19.5 };
+    const y1 = terrainH(p1.x, p1.z);
+    const y2 = terrainH(p2.x, p2.z);
+    if (clear(p1.x, p1.z, 0.4, 0.4, y1, y1 + 2.4) && clear(p2.x, p2.z, 0.4, 0.4, y2, y2 + 2.4)) {
+      b.box(p1.x, y1 + 1.15, p1.z, 0.12, 2.3, 0.12, 'woodDark');
+      b.box(p2.x, y2 + 1.15, p2.z, 0.12, 2.3, 0.12, 'woodDark');
+      const lineY = (y1 + y2) / 2 + 2.22;
+      const len = Math.hypot(p2.x - p1.x, p2.z - p1.z);
+      b.box((p1.x + p2.x) / 2, lineY, (p1.z + p2.z) / 2, len + 0.2, 0.045, 0.045, 'woodDark',
+        Math.atan2(p2.z - p1.z, p2.x - p1.x), { noCollide: true, castShadow: false });
+      const clothMats: MatKey[] = ['plaster', 'plasterOld', 'roofTile'];
+      for (const [t, ci] of [[0.32, 0], [0.52, 1], [0.74, 2]] as Array<[number, number]>) {
+        const cx2 = p1.x + (p2.x - p1.x) * t;
+        const cz2 = p1.z + (p2.z - p1.z) * t;
+        b.box(cx2, lineY - 0.46, cz2, 0.78, 0.88, 0.035, clothMats[ci]!,
+          Math.atan2(p2.z - p1.z, p2.x - p1.x), { noCollide: true, castShadow: false });
+      }
+    }
+  }
+
+  // -- cathedral cemetery: low wall + gravestones east of the nave ----------
+  for (let z = -73; z <= -41; z += 2.2) {
+    if (Math.abs(z + 57) < 1.6) continue; // gate gap
+    const px = 32.9;
+    if (!clear(px, z, 1.2, 0.35, 0, 1.2)) continue;
+    b.box(px, terrainH(px, z) + 0.42, z, 2.2, 0.8, 0.4, 'stoneBrick');
+  }
+  for (let col = 0; col < 2; col++) {
+    for (let row = 0; row < 8; row++) {
+      const gx = 35.2 + col * 5;
+      const gz = -70.5 + row * 3.7;
+      if (rng.bool(0.14)) continue;
+      if (!clear(gx, gz, 0.4, 0.25, 0, 1.2)) continue;
+      const gy = terrainH(gx, gz);
+      b.box(gx, gy + 0.42, gz, 0.6, 0.84, 0.14, 'stoneBrick', rng.range(-0.09, 0.09), { noCollide: true });
+      b.box(gx, gy + 0.88, gz, 0.72, 0.1, 0.18, 'marble', 0, { noCollide: true, castShadow: false });
+    }
+  }
+  for (const [mx, mz] of [[37.7, -66], [37.7, -51]] as Array<[number, number]>) {
+    if (!clear(mx, mz, 0.35, 0.25, 0, 1.6)) continue;
+    const gy = terrainH(mx, mz);
+    b.box(mx, gy + 0.6, mz, 0.16, 1.2, 0.14, 'stoneBrick', 0, { noCollide: true });
+    b.box(mx, gy + 0.92, mz, 0.52, 0.14, 0.13, 'stoneBrick', 0, { noCollide: true });
+  }
+
+  // -- corner downspouts on house walls --------------------------------------
+  let spouts = 0;
+  for (const g of [...b.def.geo]) {
+    if (spouts >= 22) break;
+    if (g.kind !== 'box') continue;
+    if (g.mat !== 'plaster' && g.mat !== 'plasterOld' && g.mat !== 'stoneBrick') continue;
+    if (g.sx <= g.sz) continue; // x-axis walls only
+    if (g.sz > 0.5 || g.sy < 3 || g.sy > 7.6) continue;
+    if (!rng.bool(0.6)) continue;
+    const sign = Math.abs(Math.round(g.x * 5 + g.z * 3)) % 2 === 0 ? 1 : -1;
+    // The pipe stands off the facade on brackets — far enough to clear the
+    // facade plinth course W7 adds (0.26 proud) along the wall base.
+    const px = g.x - g.sx / 2 + 0.55;
+    const pz = g.z + sign * (g.sz / 2 + 0.42);
+    const base = g.y - g.sy / 2;
+    // Clearance against everything except the host wall itself; shapes whose
+    // tops stay under a metre above the wall base are ground-level dressing
+    // (plinths, stoops, foundations) the elevated pipe legitimately passes
+    // beside, so they are skipped.
+    const pipeLo = base;
+    const pipeHi = base + g.sy;
+    let blocked = false;
+    for (const o of b.def.geo) {
+      if (o === g) continue;
+      const oTop = o.kind === 'box' ? o.y + o.sy / 2 : o.kind === 'cyl' ? o.y + o.h / 2 : o.y + o.r;
+      if (oTop < pipeLo + 1.0) continue;
+      if (o.kind === 'box') {
+        const c = Math.abs(Math.cos(o.yaw));
+        const s2 = Math.abs(Math.sin(o.yaw));
+        const ohx = (o.sx * c + o.sz * s2) / 2;
+        const ohz = (o.sx * s2 + o.sz * c) / 2;
+        if (Math.abs(px - o.x) < 0.27 + ohx && Math.abs(pz - o.z) < 0.27 + ohz
+          && pipeHi > o.y - o.sy / 2 && pipeLo < oTop) {
+          blocked = true;
+          break;
+        }
+      } else {
+        const r = o.r;
+        if (Math.hypot(px - o.x, pz - o.z) < 0.27 + r
+          && pipeHi > (o.kind === 'cyl' ? o.y - o.h / 2 : o.y - o.r)
+          && pipeLo < oTop) {
+          blocked = true;
+          break;
+        }
+      }
+    }
+    if (blocked) continue;
+    b.cyl(px, base + (g.sy - 0.1) / 2, pz, 0.07, g.sy - 0.1, 'metalDark', { segments: 8, noCollide: true });
+    b.box(px, base + g.sy - 0.18, pz, 0.22, 0.24, 0.22, 'metalDark', 0, { noCollide: true, castShadow: false });
+    b.box(px, base + 0.06, pz + sign * 0.12, 0.18, 0.14, 0.26, 'metalDark', 0, { noCollide: true, castShadow: false });
+    // Wall strap tying the stand-off pipe back to the facade.
+    b.box(px, base + g.sy * 0.45, pz - sign * 0.24, 0.05, 0.07, 0.42, 'metalDark', 0, {
+      noCollide: true,
+      castShadow: false,
+    });
+    spouts++;
+  }
+
+  // -- small woodpiles against walls (log length 1.6: distinct from the
+  //    lumber/firewood families pinned by world-structure tests) ------------
+  const woodpile = (x: number, z: number): void => {
+    const gy = terrainH(x, z);
+    if (!clear(x, z, 1.1, 0.7, gy, gy + 0.9)) return;
+    for (let i = 0; i < 3; i++) {
+      const lx = x + (i - 1) * 0.34;
+      const y = gy + 0.15;
+      b.cyl(lx, y, z, 0.15, 1.6, 'wood', { noCollide: true, yaw: 0.06, roll: Math.PI / 2 });
+      b.box(lx, y, z, 1.6, 0.3, 0.3, 'wood', 0.06, { noRender: true });
+    }
+    b.cyl(x, gy + 0.44, z, 0.15, 1.6, 'woodDark', { noCollide: true, yaw: -0.08, roll: Math.PI / 2 });
+    b.box(x, gy + 0.44, z, 1.6, 0.3, 0.3, 'woodDark', -0.08, { noRender: true });
+  };
+  woodpile(66.2, -26);
+  woodpile(119.5, 30.5);
+  woodpile(-28.5, 22.5);
+}
+
+/**
+ * Ground-decay micro-scatter along the worn travel corridors (connective
+ * tissue): mud stains, gravel, litter and rut pairs along the dirt roads that
+ * join the square, old town, keep, shrine, orchard, mill and farmstead, plus
+ * decay rings around existing ground props. Deterministic and
+ * dressingSpotClear-gated so lanes, doors, chests and crates stay usable.
+ */
+function groundDecay(b: WorldBuilder): void {
+  addGroundDecay(b, {
+    heightAt: terrainH,
+    corridors: [
+      { x1: 20, z1: -10, x2: 110, z2: 30, width: 7.4 },
+      { x1: 20, z1: -10, x2: -150, z2: -150, width: 7.4 },
+      { x1: -150, z1: -150, x2: -170, z2: 60, width: 7.4 },
+      { x1: 20, z1: -10, x2: 60, z2: -120, width: 7.4 },
+      { x1: 110, z1: 30, x2: 190, z2: 60, width: 7.4 },
+      { x1: 20, z1: -10, x2: -30, z2: 210, width: 7.4 },
+      { x1: 110, z1: 30, x2: 150, z2: 170, width: 7.4 },
+      // Open meadow spur west of the square (QA frame -30,40).
+      { x1: 20, z1: -10, x2: -30, z2: 60, width: 6.5 },
+    ],
+    stainMat: 'dirt',
+    trackMat: 'dirt',
+    spacing: 9,
+    maxPieces: 80,
+  });
 }

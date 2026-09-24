@@ -1279,6 +1279,13 @@ export class WorldView {
       if (treeBlobs) this.group.add(treeBlobs);
     }
 
+    // Contact darkening under authored ground props (connective-tissue pass):
+    // crates, kiosks, cabinets, dumpsters, drums and stall blocks used to sit
+    // on unmodulated ground with no AO pass, so they read as floating. Reuses
+    // the shared disc pool above; each disc drifts and stretches a little
+    // along the sun azimuth so the darkening reads directional, not painted on.
+    this.buildPropContactBlobs(def);
+
     // Lamps: authored street fixtures, instanced per part (draw-call budget).
     // Maps can finish with zero surviving lamps (eden/oldfront/neocity reject
     // every authored lamp in MapBuilder.finish). Creating the fixture pools
@@ -1441,9 +1448,16 @@ export class WorldView {
     return this.blobGeo;
   }
 
-  /** One instanced soft-disc pool for world-space contact shadows. The caller
-   * fills exactly `spots.length` instances; count 0 yields a hidden mesh. */
-  private buildContactBlobs(spots: Array<{ x: number; z: number; y?: number; span: number }>): THREE.InstancedMesh | null {
+  /**
+   * One instanced soft-disc pool for world-space contact shadows. The caller
+   * fills exactly `spots.length` instances; count 0 yields a hidden mesh.
+   * Spots carrying a `height` are sun-directional prop shadows: the disc
+   * drifts ~13% of the object height away from the sun azimuth and stretches
+   * along that direction so the darkening reads directional.
+   */
+  private buildContactBlobs(
+    spots: Array<{ x: number; z: number; y?: number; span: number; height?: number; yaw?: number }>,
+  ): THREE.InstancedMesh | null {
     if (spots.length === 0) return null;
     const blobs = new THREE.InstancedMesh(this.ensureBlobGeometry(), this.ensureBlobMaterial(), spots.length);
     const m = new THREE.Matrix4();
@@ -1451,11 +1465,27 @@ export class WorldView {
     const groundY = (s: { x: number; z: number; y?: number }): number =>
       s.y ?? (this.mapDef.terrainHeight ? this.mapDef.terrainHeight(s.x, s.z) : 0);
     spots.forEach((s, i) => {
-      m.compose(
-        new THREE.Vector3(s.x, groundY(s) + 0.05, s.z),
-        q.identity(),
-        new THREE.Vector3(s.span, 1, s.span),
-      );
+      if (s.height !== undefined && s.yaw !== undefined) {
+        const drift = Math.min(0.5, s.height * 0.13);
+        // rotY(-yaw) maps the disc's local +X onto (cos yaw, 0, sin yaw) — the
+        // azimuth the caller derived from the sun — so the stretched axis and
+        // the drift offset point the same way.
+        m.compose(
+          new THREE.Vector3(
+            s.x + Math.cos(s.yaw) * drift,
+            groundY(s) + 0.05,
+            s.z + Math.sin(s.yaw) * drift,
+          ),
+          q.setFromAxisAngle(_Y_AXIS, -s.yaw),
+          new THREE.Vector3(s.span * 1.3, 1, s.span * 0.94),
+        );
+      } else {
+        m.compose(
+          new THREE.Vector3(s.x, groundY(s) + 0.05, s.z),
+          q.identity(),
+          new THREE.Vector3(s.span, 1, s.span),
+        );
+      }
       blobs.setMatrixAt(i, m);
     });
     blobs.instanceMatrix.needsUpdate = true;
@@ -1464,6 +1494,65 @@ export class WorldView {
     blobs.frustumCulled = true;
     blobs.name = 'contact-blobs';
     return blobs;
+  }
+
+  /**
+   * Contact discs under authored ground props (crates, kiosks, cabinets,
+   * dumpsters, drums, barrels, stall blocks). A prop qualifies when its base
+   * sits at ground level (within ~0.65 m of the terrain sample, so roof and
+   * wall-mounted pieces are skipped) and its footprint is prop-scale — wall
+   * runs, posts, lamps and lying pipe runs stay out of the pool. One shared
+   * instanced mesh per view; discs stretch along the sun azimuth.
+   */
+  private buildPropContactBlobs(def: MapDef): void {
+    const sun = def.sky.sunDirection;
+    const horiz = Math.hypot(sun[0], sun[2]);
+    const azimuth = horiz > 1e-4 ? Math.atan2(sun[2], sun[0]) : null;
+    const terrainY = (x: number, z: number): number =>
+      def.terrainHeight ? def.terrainHeight(x, z) : 0;
+    const spots: Array<{ x: number; z: number; y: number; span: number; height: number }> = [];
+    const atGround = (base: number, x: number, z: number): boolean => {
+      const terr = terrainY(x, z);
+      return base >= terr - 0.35 && base <= terr + 0.65;
+    };
+    const push = (x: number, z: number, base: number, span: number, height: number): void => {
+      if (spots.length >= 1400) return;
+      spots.push({ x, z, y: base, span, height });
+    };
+    for (const g of def.geo) {
+      if (g.noRender) continue;
+      if (g.kind === 'box') {
+        const span = Math.max(g.sx, g.sz);
+        if (span < 0.4 || span > 6 || g.sy < 0.35 || g.sy > 4.6) continue;
+        const base = g.y - g.sy / 2;
+        if (!atGround(base, g.x, g.z)) continue;
+        push(g.x, g.z, base, Math.hypot(g.sx, g.sz) * 0.72 + 0.25, g.sy);
+      } else if (g.kind === 'cyl') {
+        if (g.pitch || g.roll) continue; // lying pipe/log runs
+        if (g.r < 0.18 || g.r > 1.5 || g.h < 0.35 || g.h > 3.4) continue;
+        const base = g.y - g.h / 2;
+        if (!atGround(base, g.x, g.z)) continue;
+        push(g.x, g.z, base, g.r * 2.6 + 0.2, g.h);
+      } else {
+        if (!atGround(g.y - g.r, g.x, g.z)) continue;
+        push(g.x, g.z, g.y - g.r, g.r * 2.7 + 0.15, g.r * 2);
+      }
+    }
+    for (const d of def.destructibles) {
+      const g = d.geo;
+      if (d.type !== 'crate' && d.type !== 'furniture') continue;
+      if (g.kind !== 'box') continue;
+      if (Math.max(g.sx, g.sz) > 4) continue;
+      const base = g.y - g.sy / 2;
+      if (!atGround(base, g.x, g.z)) continue;
+      push(g.x, g.z, base, Math.hypot(g.sx, g.sz) * 0.72 + 0.25, g.sy);
+    }
+    if (spots.length === 0) return;
+    const blobs = this.buildContactBlobs(spots.map((s) => ({ ...s, yaw: azimuth ?? undefined })));
+    if (blobs) {
+      blobs.name = 'prop-contact-blobs';
+      this.group.add(blobs);
+    }
   }
 
   private buildVehicles(def: MapDef, props: PropLibrary): void {

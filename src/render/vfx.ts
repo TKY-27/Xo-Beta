@@ -296,9 +296,25 @@ export class VfxSystem {
   spawnTracer(
     x1: number, y1: number, z1: number,
     x2: number, y2: number, z2: number,
-    color: number, weaponId: WeaponId = 'ar',
+    color: number, weaponId: WeaponId = 'ar', cameraPos?: THREE.Vector3,
   ): void {
     if (!finite(x1, y1, z1, x2, y2, z2, color)) return;
+    // A tracer spawned at the shooter's muzzle is a metre-long lathe a few
+    // metres from the eye on its first frames — for the player's own shots
+    // that reads as a grey blob parked mid-screen. Advance the visible start
+    // so the projectile materialises beyond point-blank range.
+    if (cameraPos) {
+      const dx = x2 - x1, dy = y2 - y1, dz = z2 - z1;
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const fromEye = Math.hypot(x1 - cameraPos.x, y1 - cameraPos.y, z1 - cameraPos.z);
+      const minStart = 8;
+      if (fromEye < minStart) {
+        const t = Math.min(0.5, (minStart - fromEye) / len);
+        x1 += dx * t;
+        y1 += dy * t;
+        z1 += dz * t;
+      }
+    }
     const pool = this.tracerPools.get(weaponId) ?? this.tracerPools.get('ar')!;
     const spec = pool.spec;
     const tracer = pool.tracers.find((t) => t.life <= 0)
@@ -429,11 +445,29 @@ export class VfxSystem {
     }
   }
 
+  /** Short muzzle smoke: a few small gray puffs racing down the bore and
+   * fading fast. Kept tiny and fast — a slow puff half a metre from the eye
+   * reads as a floating grey box. */
+  muzzleSmoke(x: number, y: number, z: number, dx: number, dy: number, dz: number): void {
+    for (let i = 0; i < 3; i++) {
+      this.spawnParticle(
+        x + dx * 0.22, y + dy * 0.22, z + dz * 0.22,
+        dx * (2.6 + Math.random() * 1.6) + (Math.random() - 0.5) * 0.4,
+        dy * 2.6 + 0.25 + Math.random() * 0.3,
+        dz * (2.6 + Math.random() * 1.6) + (Math.random() - 0.5) * 0.4,
+        0.22 + Math.random() * 0.12,
+        0.016 + Math.random() * 0.01,
+        0x9a9a92,
+        -0.4,
+      );
+    }
+  }
+
   shellCasing(x: number, y: number, z: number, dx: number, dz: number): void {
     this.spawnParticle(
       x, y, z,
       dx * 2 + (Math.random() - 0.5), 2.4 + Math.random() * 1.4, dz * 2 + (Math.random() - 0.5),
-      1.1, 0.05, 0xd8b45a, 24,
+      0.9, 0.026, 0xd8b45a, 24,
     );
   }
 

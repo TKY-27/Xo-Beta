@@ -1,59 +1,22 @@
-/**
- * CYCLE 38 — first-person hands/arms rig (v4, AAA readability pass).
- *
- * Two gloved hands parented INSIDE each weapon model group at its grip
- * anchors (see ProceduralWeapon.gripR/gripL), so every weapon motion — sway,
- * ADS, recoil kick, reload — carries the hands for free. The rig is built to
- * human scale and counter-scaled against the weapon's presentation scale.
- *
- * v4 changes (Apex-class hip-framing pass):
- * - fingers now spread along the hand's WIDTH axis (v3 stacked them down
- *   the palm normal, reading as dangling finger chains), two segments each
- *   with a gentle per-finger wrap curl + rotation variance — silhouette
- *   unified, separations visible, no comb;
- * - chirality fixed: buildHand(thumbSide) builds real right/left hands (v3's
- *   "right" build was anatomically mirrored, forcing Euler pose hacks);
- * - poses authored as palm/fingers DIRECTIONS through handBasisQuat() —
- *   no more hand-solved Euler triples — with contact offsets per class;
- * - materials: fabric glove + lighter hard-shell panels + dark rubber palm
- *   pads + glossy knuckle armour + warm leather finger pads (one family,
- *   shared with ArmSolver sleeves via `shell`);
- * - sleeves tapered thinner with a stronger elbow drop so arms leave the
- *   bottom corners with a visible bend, never straight pipes.
- */
-
 import * as THREE from 'three';
-import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 
 export type SupportStyle = 'under' | 'side' | 'pump' | 'over';
 
 export interface HandPoseInput {
-  /** 0..1 through the reload, or -1 when not reloading. */
   reloadPhase: number;
-  /** How the support hand holds this weapon class. */
   supportStyle: SupportStyle;
-  /** Magazine position in weapon-local space (null if none). */
   magLocal: THREE.Vector3 | null;
-  /** Weapon-local +z offset of the pump/bolt under cycle. */
   pumpOffset: number;
-  /** True when the LEFT hand operates the pump (shotgun). */
   pumpHand: boolean;
-  /** 0..1 aim blend — support hand tucks out of the sight line. */
   ads: number;
-  /** 0..1 through the bolt cycle (sniper), or -1. Right hand works it. */
   boltPhase: number;
-  /** Bolt handle position in weapon-local space (null if none). */
   boltLocal: THREE.Vector3 | null;
+  triggerAmount?: number;
 }
 
 export interface HandRig {
-  /** Right (trigger) hand group — parent into the weapon, at gripR. */
   right: THREE.Group;
-  /** Left (support) hand group — parent into the weapon, at gripL. */
   left: THREE.Group;
-  /** Wrist anchors riding each hand's cuff barrel — the ArmSolver attaches
-   * the sleeves HERE (not behind the palm), so the seam never gaps no matter
-   * how the grip pose rotates the hand's local axes. */
   wristR: THREE.Object3D;
   wristL: THREE.Object3D;
   configure(anchors: { gripR: THREE.Vector3; gripL: THREE.Vector3; scale: number }): void;
@@ -65,193 +28,464 @@ interface HandMats {
   shell: THREE.MeshStandardMaterial;
   skin: THREE.MeshStandardMaterial;
   plate: THREE.MeshStandardMaterial;
-  /** Dark rubberized palm/fingertip contact pads (grip surfaces read as gear). */
   palm: THREE.MeshStandardMaterial;
 }
 
 let fabricBump: THREE.CanvasTexture | null = null;
+let handMatsSingleton: HandMats | null = null;
 
-/** Woven-fabric bump for the gloves (tiny diagonal weave). */
 function getFabricBump(): THREE.CanvasTexture | null {
-  // Headless/QA environments have no DOM — the bump map is cosmetic.
-  if (typeof document === 'undefined') return null;
   if (fabricBump) return fabricBump;
-  const size = 64;
+  if (typeof document === 'undefined') return null;
   const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
+  canvas.width = canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
   ctx.fillStyle = '#808080';
-  ctx.fillRect(0, 0, size, size);
-  for (let i = -size; i < size * 2; i += 4) {
+  ctx.fillRect(0, 0, 64, 64);
+  for (let i = -64; i < 128; i += 4) {
     ctx.strokeStyle = 'rgba(255,255,255,0.35)';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(i, 0);
-    ctx.lineTo(i + size, size);
+    ctx.lineTo(i + 64, 64);
     ctx.stroke();
     ctx.strokeStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
     ctx.moveTo(i + 2, 0);
-    ctx.lineTo(i + size + 2, size);
+    ctx.lineTo(i + 66, 64);
     ctx.stroke();
   }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(6, 6);
-  tex.colorSpace = THREE.NoColorSpace;
-  fabricBump = tex;
-  return tex;
+  fabricBump = new THREE.CanvasTexture(canvas);
+  fabricBump.wrapS = fabricBump.wrapT = THREE.RepeatWrapping;
+  fabricBump.repeat.set(6, 6);
+  fabricBump.colorSpace = THREE.NoColorSpace;
+  return fabricBump;
 }
 
-
-let handMatsSingleton: HandMats | null = null;
-
-/** Shared hand materials — ONE instance used by the hands AND the arm
- * sleeves, so the chain reads as one person (round-2 review: three tones). */
 export function getHandMaterialSet(): HandMats {
   if (handMatsSingleton) return handMatsSingleton;
-  handMatsSingleton = makeHandMats();
+  const bumpMap = getFabricBump();
+  // Dark tactical gloves: charcoal shell with slightly lighter armour plates,
+  // rubberised palm/finger-tip surfaces. The stage light rig exposes these
+  // albedos to night maps too, so values stay far from pure black while
+  // reading as gear, not skin or chalk.
+  handMatsSingleton = {
+    glove: new THREE.MeshStandardMaterial({ color: 0x343941, roughness: 0.88, metalness: 0.02, bumpMap, bumpScale: 0.00022 }),
+    shell: new THREE.MeshStandardMaterial({ color: 0x414751, roughness: 0.82, metalness: 0.03, bumpMap, bumpScale: 0.00012 }),
+    skin: new THREE.MeshStandardMaterial({ color: 0x262a30, roughness: 0.94 }),
+    plate: new THREE.MeshStandardMaterial({ color: 0x4a525c, roughness: 0.5, metalness: 0.14 }),
+    palm: new THREE.MeshStandardMaterial({ color: 0x2e333a, roughness: 0.97, bumpMap, bumpScale: 0.0003 }),
+  };
   return handMatsSingleton;
 }
 
-function makeHandMats(): HandMats {
-  const bump = getFabricBump();
-  // One material FAMILY across hands + sleeves (ArmSolver shares `shell`):
-  // mid-grey fabric base, lighter hard-shell panels, dark rubber grip pads,
-  // near-black glossy knuckle armour that catches speculars, and warm
-  // leather finger pads. Panel contrast comes from GEOMETRY (proud shell
-  // plates over fabric), not just color swaps.
-  const glove = new THREE.MeshStandardMaterial({ color: 0x5a626b, roughness: 0.76, metalness: 0.05 });
-  if (bump) {
-    glove.normalMap = bump;
-    glove.normalScale.set(0.35, 0.35);
-  }
-  const shell = new THREE.MeshStandardMaterial({ color: 0x646d78, roughness: 0.68, metalness: 0.08 });
-  if (bump) {
-    shell.normalMap = bump;
-    shell.normalScale.set(0.4, 0.4);
-  }
-  // CYCLE 56 (review): distal segments were warm naked-skin tan (0x8f6b4f)
-  // — read as bare sausages against the glove, not leather. Dark rubber
-  // gripper pads keep the glove story and catch less glare.
-  const skin = new THREE.MeshStandardMaterial({ color: 0x2f343a, roughness: 0.85, metalness: 0.02 });
-  const plate = new THREE.MeshStandardMaterial({ color: 0x394049, roughness: 0.38, metalness: 0.55 });
-  const palm = new THREE.MeshStandardMaterial({ color: 0x474e56, roughness: 0.88, metalness: 0.02 });
-  return { glove, shell, skin, plate, palm };
+interface SurfaceVertex {
+  position: THREE.Vector3;
+  uv: THREE.Vector2;
+  weights: number[];
 }
 
-/** One gloved hand, built reaching palm-down with fingers curling -y and
- * extending -z. The four fingers spread along the hand's WIDTH axis (x) —
- * v3 stacked them down the palm normal, which read as dangling finger
- * chains. `thumbSide` picks the chirality: -1 = anatomical right hand
- * (thumb on -x), +1 = anatomical left hand. 20 meshes/hand (43 total with
- * the ArmSolver — inside the low-poly budget). */
-function buildHand(mats: HandMats, thumbSide: 1 | -1, curlBoost = 0): THREE.Group {
-  const hand = new THREE.Group();
-
-  // Palm: widened (real palms are ~as wide as long) with a proud rubber
-  // grip pad on the contact face (-y).
-  const palm = new THREE.Mesh(new RoundedBoxGeometry(0.052, 0.032, 0.094, 3, 0.012), mats.glove);
-  palm.position.set(0, 0, 0.012);
-  hand.add(palm);
-  const palmPad = new THREE.Mesh(new RoundedBoxGeometry(0.046, 0.011, 0.078, 2, 0.004), mats.palm);
-  palmPad.position.set(0, -0.0155, 0.008);
-  hand.add(palmPad);
-
-  // Hard-shell back panel + knuckle armour across the back of the hand.
-  // Hands-review pass: the single small plate only read on the deep-curled
-  // fists — on weapon grips the rolled dorsum showed mostly bare shell and
-  // read as smooth grey. The plate now covers most of the panel AND a second
-  // thin strip rides the proximal knuckle row (where the fingers meet the
-  // palm), with a sliver of shell showing between — segmented armour, not a
-  // gauntlet. Same `plate` material as the fists' knuckle armour.
-  const backPanel = new THREE.Mesh(new RoundedBoxGeometry(0.046, 0.012, 0.062, 2, 0.005), mats.shell);
-  backPanel.position.set(0, 0.017, 0.014);
-  hand.add(backPanel);
-  const plate = new THREE.Mesh(new RoundedBoxGeometry(0.052, 0.015, 0.046, 2, 0.005), mats.plate);
-  plate.position.set(0, 0.0245, 0.012);
-  hand.add(plate);
-  const knuckleStrip = new THREE.Mesh(new RoundedBoxGeometry(0.052, 0.011, 0.014, 2, 0.004), mats.plate);
-  knuckleStrip.position.set(0, 0.0195, -0.0245);
-  hand.add(knuckleStrip);
-
-  // Four fingers side by side along x (spacing slightly under the segment
-  // diameter so the silhouette unifies but separations still read), THREE
-  // segments each with a gentle wrap curl that grows toward the pinky, and
-  // a deterministic per-finger rotation variance so they never read as a
-  // comb. Hands-review pass: the old merged proximal capsule read as chunky
-  // 2-lobe sausages at ADS — the wrap now splits into proximal / mid (with
-  // a slight PIP kink that deepens with curl, plus a mild length stagger
-  // index→pinky) / dark distal pad, so three lobes sell the grip. The mid
-  // + distal placement keeps the distal pad EXACTLY on its proven contact
-  // orbit — only the bridging segment is new.
-  for (let i = 0; i < 4; i++) {
-    const wig = Math.sin(i * 12.9898 + 4.1) * 0.5; // -0.5..0.5 pseudo-random
-    const finger = new THREE.Group();
-    finger.position.set((i - 1.5) * 0.0142 + wig * 0.0012, -0.004 - Math.abs(wig) * 0.0012, -0.032 + (i === 1 ? -0.002 : i === 3 ? 0.004 : 0));
-    finger.rotation.y = thumbSide * ((i - 1.5) * 0.045 + wig * 0.05);
-    const curl = 0.72 + i * 0.09 + wig * 0.1;
-    const c2 = curl + curlBoost;
-    // Proximal segment: fabric glove, straight out of the palm.
-    const seg1 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0098, 0.015, 3, 10), mats.glove);
-    seg1.rotation.x = Math.PI / 2;
-    seg1.position.set(0, -0.01, -0.001);
-    finger.add(seg1);
-    // Mid segment: glove with a slight PIP kink (fists deepen it further so
-    // the guard wrap stays closed), tapering toward the pinky.
-    const kink = 0.16 + curl * 0.2 + curlBoost * 0.12;
-    const seg1b = new THREE.Mesh(new THREE.CapsuleGeometry(0.0095, 0.0135 - i * 0.0009, 3, 10), mats.glove);
-    seg1b.rotation.x = Math.PI / 2 - kink;
-    seg1b.position.set(0, -0.0105 - Math.sin(kink) * 0.0115, -0.0225 - (1 - Math.cos(kink)) * 0.0115);
-    finger.add(seg1b);
-    // Distal segment: leather pad, curled down-and-under the grip surface.
-    // curlBoost (CYCLE 52): unarmed fists wrap ~120° around their own palm
-    // instead of the weapon grip's half-curl, so they read as CLOSED hands.
-    const seg2 = new THREE.Mesh(new THREE.CapsuleGeometry(0.0092, 0.02, 3, 10), mats.skin);
-    seg2.rotation.x = Math.PI / 2 - c2;
-    seg2.position.set(0, -0.01 - Math.sin(c2) * 0.015, -0.034 - (1 - Math.cos(c2)) * 0.015);
-    finger.add(seg2);
-    hand.add(finger);
-  }
-
-  // Thumb wrapping across the near face: base on the thumb-side edge just
-  // under the tang line, angled forward-inward so the tip crosses in front
-  // of the fingers (a higher base stabbed the tip past the grip top).
-  // curlBoost (fist rig): the thumb clamps ACROSS the curled finger stack —
-  // deeper segment pitch and a tip pulled in over the knuckle row.
-  const thumb = new THREE.Group();
-  thumb.position.set(thumbSide * 0.026, -0.004, 0.012 + curlBoost * 0.006);
-  thumb.rotation.set(-0.05 - curlBoost * 0.22, thumbSide * 0.55, thumbSide * -0.1);
-  const thumbSeg = new THREE.Mesh(new THREE.CapsuleGeometry(0.011, 0.026, 3, 10), mats.glove);
-  thumbSeg.rotation.x = Math.PI / 2 - 0.28 - curlBoost * 0.32;
-  thumbSeg.position.set(0, -0.008, -0.015);
-  thumb.add(thumbSeg);
-  const thumbTip = new THREE.Mesh(new THREE.CapsuleGeometry(0.0098, 0.018, 3, 10), mats.skin);
-  thumbTip.rotation.x = Math.PI / 2 - 0.75 - curlBoost * 0.32;
-  thumbTip.position.set(0, -0.021 - curlBoost * 0.008, -0.029 + curlBoost * 0.01);
-  thumb.add(thumbTip);
-  hand.add(thumb);
-
-  // Wrist cuff: 16-segment barrel aligned to the wrist joint (+z axis),
-  // flaring toward the forearm where the ArmSolver sleeve meets it. Kept
-  // narrower than the palm — v4's 5.7 cm cuff read as a second palm.
-  // CYCLE 64: slimmed again — with the grip pose rolled camera-up the cuff
-  // sits end-on to the hip camera, and the old 4.7 cm barrel + the solver's
-  // wrist sphere/cuff ring rendered as a dome occluding the knuckle row.
-  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.0205, 0.018, 0.03, 16), mats.shell);
-  cuff.rotation.x = Math.PI / 2;
-  cuff.position.set(0, -0.002, 0.06);
-  hand.add(cuff);
-
-  return hand;
+interface SurfaceFace {
+  vertices: number[];
+  material: number;
 }
 
-// Pose-scratch vectors/quats (module-level: pose() runs once per frame).
+function mixVertices(vertices: SurfaceVertex[], factors?: number[]): SurfaceVertex {
+  const result: SurfaceVertex = {
+    position: new THREE.Vector3(), uv: new THREE.Vector2(), weights: new Array<number>(vertices[0]!.weights.length).fill(0),
+  };
+  vertices.forEach((vertex, i) => {
+    const factor = factors?.[i] ?? 1 / vertices.length;
+    result.position.addScaledVector(vertex.position, factor);
+    result.uv.addScaledVector(vertex.uv, factor);
+    vertex.weights.forEach((weight, bone) => { result.weights[bone]! += weight * factor; });
+  });
+  return result;
+}
+
+class SkinSurface {
+  vertices: SurfaceVertex[] = [];
+  faces: SurfaceFace[] = [];
+
+  constructor(private readonly boneCount: number) {}
+
+  vertex(x: number, y: number, z: number, bone = 0, parent = bone, blend = 1): number {
+    const weights = new Array<number>(this.boneCount).fill(0);
+    weights[parent] = 1 - blend;
+    weights[bone]! += blend;
+    this.vertices.push({ position: new THREE.Vector3(x, y, z), uv: new THREE.Vector2(x * 8 + y * 3 + 0.5, z * 7 + y * 2), weights });
+    return this.vertices.length - 1;
+  }
+
+  face(vertices: number[], material = 0): void {
+    this.faces.push({ vertices, material });
+  }
+
+  bridge(a: number[], b: number[], material = 0): void {
+    for (let j = 0; j < a.length; j++) {
+      const next = (j + 1) % a.length;
+      this.face([a[j]!, a[next]!, b[next]!, b[j]!], material);
+    }
+  }
+
+  cap(ring: number[], material = 0): void {
+    const center = this.vertices.length;
+    this.vertices.push(mixVertices(ring.map(index => this.vertices[index]!)));
+    for (let j = 0; j < ring.length; j += 2) {
+      this.face([ring[j]!, ring[(j + 1) % ring.length]!, ring[(j + 2) % ring.length]!, center], material);
+    }
+  }
+
+  subdivide(): void {
+    const facePoints = this.faces.map(face => mixVertices(face.vertices.map(index => this.vertices[index]!)));
+    const edges = new Map<string, { a: number; b: number; faces: number[]; index: number }>();
+    const vertexFaces = this.vertices.map(() => [] as number[]);
+    const neighbors = this.vertices.map(() => new Set<number>());
+    const key = (a: number, b: number): string => a < b ? `${a}:${b}` : `${b}:${a}`;
+    this.faces.forEach((face, f) => {
+      face.vertices.forEach((a, j) => {
+        const b = face.vertices[(j + 1) % face.vertices.length]!;
+        vertexFaces[a]!.push(f);
+        neighbors[a]!.add(b);
+        neighbors[b]!.add(a);
+        const id = key(a, b);
+        const edge = edges.get(id) ?? { a, b, faces: [], index: -1 };
+        edge.faces.push(f);
+        edges.set(id, edge);
+      });
+    });
+    const vertices = this.vertices.map((vertex, i) => {
+      const adjacent = [...neighbors[i]!];
+      const n = adjacent.length;
+      const faceAverage = mixVertices(vertexFaces[i]!.map(f => facePoints[f]!));
+      const edgeAverage = mixVertices(adjacent.map(j => mixVertices([vertex, this.vertices[j]!])));
+      const result = mixVertices([faceAverage, edgeAverage, vertex], [1 / n, 2 / n, (n - 3) / n]);
+      result.weights = mixVertices([vertex, faceAverage], [0.8, 0.2]).weights;
+      result.uv.copy(vertex.uv);
+      return result;
+    });
+    for (const edge of edges.values()) {
+      edge.index = vertices.length;
+      vertices.push(mixVertices([this.vertices[edge.a]!, this.vertices[edge.b]!, ...edge.faces.map(f => facePoints[f]!)]));
+    }
+    const faceOffset = vertices.length;
+    vertices.push(...facePoints);
+    const faces: SurfaceFace[] = [];
+    this.faces.forEach((face, f) => {
+      face.vertices.forEach((a, j) => {
+        const b = face.vertices[(j + 1) % face.vertices.length]!;
+        const previous = face.vertices[(j + face.vertices.length - 1) % face.vertices.length]!;
+        faces.push({ vertices: [a, edges.get(key(a, b))!.index, faceOffset + f, edges.get(key(previous, a))!.index], material: face.material });
+      });
+    });
+    this.vertices = vertices;
+    this.faces = faces;
+  }
+
+  geometry(mirrored = false): THREE.BufferGeometry {
+    const positions: number[] = [];
+    const uv: number[] = [];
+    const skinIndices: number[] = [];
+    const skinWeights: number[] = [];
+    for (const vertex of this.vertices) {
+      positions.push(vertex.position.x * (mirrored ? -1 : 1), vertex.position.y, vertex.position.z);
+      uv.push(vertex.uv.x, vertex.uv.y);
+      const weights = vertex.weights.map((weight, bone) => ({ bone, weight })).sort((a, b) => b.weight - a.weight).slice(0, 4);
+      const total = weights.reduce((sum, item) => sum + item.weight, 0);
+      for (let i = 0; i < 4; i++) {
+        skinIndices.push(weights[i]?.bone ?? 0);
+        skinWeights.push((weights[i]?.weight ?? 0) / total);
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    const indices: number[] = [];
+    for (let material = 0; material < 5; material++) {
+      const start = indices.length;
+      for (const face of this.faces) {
+        if (face.material !== material) continue;
+        for (let i = 1; i < face.vertices.length - 1; i++) {
+          const a = face.vertices[0]!;
+          const b = face.vertices[i]!;
+          const c = face.vertices[i + 1]!;
+          indices.push(a, mirrored ? c : b, mirrored ? b : c);
+        }
+      }
+      if (indices.length > start) geometry.addGroup(start, indices.length - start, material);
+    }
+    geometry.setIndex(indices);
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geometry.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndices, 4));
+    geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    return geometry;
+  }
+}
+
+interface FingerChain {
+  bones: THREE.Bone[];
+  index: number;
+}
+
+interface Glove {
+  group: THREE.Group;
+  mesh: THREE.SkinnedMesh;
+  metacarpals: THREE.Bone[];
+  fingers: FingerChain[];
+  thumb: THREE.Bone[];
+  side: 1 | -1;
+}
+
+function makeBone(name: string, x: number, y: number, z: number, parent?: THREE.Bone): THREE.Bone {
+  const bone = new THREE.Bone();
+  bone.name = name;
+  bone.position.set(x, y, z);
+  parent?.add(bone);
+  return bone;
+}
+
+function bindSurface(surface: SkinSurface, bones: THREE.Bone[], materials: THREE.MeshStandardMaterial[], mirrored = false): THREE.SkinnedMesh {
+  const mesh = new THREE.SkinnedMesh(surface.geometry(mirrored), materials);
+  mesh.add(bones[0]!);
+  mesh.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton(bones));
+  mesh.frustumCulled = false;
+  mesh.castShadow = mesh.receiveShadow = false;
+  return mesh;
+}
+
+function buildHand(mats: HandMats, side: 1 | -1, fist = false): Glove {
+  const surface = new SkinSurface(20);
+  const root = makeBone('wrist', 0, 0, 0);
+  const metacarpals = Array.from({ length: 4 }, (_, i) => makeBone(`metacarpal-${3 - i}`, (i - 1.5) * 0.012 * side, 0, 0.042, root));
+  const bones = [root, ...metacarpals];
+  const fingers: FingerChain[] = [];
+  const rows = [0.077, 0.072, 0.065, 0.057, 0.048, 0.027, 0.006, -0.015, -0.032];
+  const widths = [0.025, 0.025, 0.0225, 0.0235, 0.025, 0.031, 0.035, 0.037, 0.037];
+  const top: number[][] = [];
+  const bottom: number[][] = [];
+  for (let row = 0; row < rows.length; row++) {
+    top.push([]);
+    bottom.push([]);
+    for (let col = 0; col <= 12; col++) {
+      const across = col / 6 - 1;
+      const x = across * widths[row]!;
+      const arch = 1 - across * across;
+      const cuff = row < 4;
+      const fold = cuff ? Math.sin(row * 2.7 + across * 3) * 0.0008 : 0;
+      const knuckle = Math.sin(col / 3 * Math.PI) ** 2 * Math.exp(-(((rows[row]! + 0.024) / 0.019) ** 2));
+      const dorsal = cuff ? 0.009 + arch * 0.004 + fold : 0.006 + arch * 0.009 + knuckle * 0.004;
+      const thenar = Math.exp(-((across - 0.55) ** 2) * 6) * Math.exp(-(((rows[row]! - 0.022) / 0.035) ** 2));
+      const knuckleArc = row >= rows.length - 2 ? (1 - arch) * 0.009 + Math.max(0, -across) * 0.004 : 0;
+      const web = row === rows.length - 1 && col > 0 && col < 12 && col % 3 === 0 ? 0.014 : 0;
+      const indices = [surface.vertex(x, dorsal - 0.002, rows[row]! + knuckleArc + web), surface.vertex(x, -0.01 - arch * 0.003 - thenar * 0.005 - fold, rows[row]! + knuckleArc + web)];
+      const column = THREE.MathUtils.clamp(col / 3 - 0.5, 0, 3);
+      const low = Math.floor(column);
+      const high = Math.min(3, low + 1);
+      const influence = smooth((0.058 - rows[row]!) / 0.065);
+      for (const index of indices) {
+        const weights = surface.vertices[index]!.weights;
+        weights[0] = 1 - influence;
+        weights[low + 1]! += influence * (1 - (column - low));
+        weights[high + 1]! += influence * (column - low);
+      }
+      top[row]!.push(indices[0]!);
+      bottom[row]!.push(indices[1]!);
+    }
+  }
+  for (let row = 0; row < rows.length - 1; row++) {
+    for (let col = 0; col < 12; col++) {
+      const dorsalMaterial = row < 2 ? 2 : row < 4 ? 1 : row >= 5 && col >= 2 && col < 10 && col % 3 !== 0 ? 3 : 0;
+      surface.face([top[row]![col]!, top[row]![col + 1]!, top[row + 1]![col + 1]!, top[row + 1]![col]!], dorsalMaterial);
+      surface.face([bottom[row]![col + 1]!, bottom[row]![col]!, bottom[row + 1]![col]!, bottom[row + 1]![col + 1]!], row < 1 ? 1 : 4);
+    }
+    surface.face([top[row]![0]!, top[row + 1]![0]!, bottom[row + 1]![0]!, bottom[row]![0]!]);
+    if (row !== 4 && row !== 5) {
+      surface.face([top[row + 1]![12]!, top[row]![12]!, bottom[row]![12]!, bottom[row + 1]![12]!]);
+    }
+  }
+  surface.cap([...top[0]!].reverse().concat(bottom[0]!), 1);
+  const last = rows.length - 1;
+  for (let finger = 0; finger < 4; finger++) {
+    const anatomicalIndex = 3 - finger;
+    const length = [0.068, 0.078, 0.073, 0.057][anatomicalIndex]!;
+    const x = (finger - 1.5) * 0.0185;
+    const z = -0.032 + (x / 0.037) ** 2 * 0.009 + Math.max(0, -x / 0.037) * 0.004;
+    const base = bones.length;
+    const metacarpal = metacarpals[finger]!;
+    const chain = [makeBone(`finger-${anatomicalIndex}-mcp`, x * side - metacarpal.position.x, -0.003, z - metacarpal.position.z, metacarpal)];
+    chain.push(makeBone(`finger-${anatomicalIndex}-pip`, 0, 0, -length * 0.43, chain[0]));
+    chain.push(makeBone(`finger-${anatomicalIndex}-dip`, 0, 0, -length * 0.32, chain[1]));
+    bones.push(...chain);
+    fingers.push({ bones: chain, index: anatomicalIndex });
+    let ring = top[last]!.slice(finger * 3, finger * 3 + 4).concat(bottom[last]!.slice(finger * 3, finger * 3 + 4).reverse());
+    const angles = [Math.PI * 0.9, Math.PI * 0.63, Math.PI * 0.37, Math.PI * 0.1, -Math.PI * 0.1, -Math.PI * 0.37, -Math.PI * 0.63, -Math.PI * 0.9];
+    for (const t of [0.10, 0.25, 0.37, 0.43, 0.49, 0.64, 0.70, 0.75, 0.81, 0.92, 0.985, 1.015]) {
+      const joint = Math.exp(-(((t - 0.43) / 0.065) ** 2)) * 0.0008 + Math.exp(-(((t - 0.75) / 0.055) ** 2)) * 0.0005;
+      const radius = ([0.0085, 0.0088, 0.0083, 0.0073][anatomicalIndex]! * (1 - t * 0.2) + joint) * (t > 0.92 ? Math.sqrt(Math.max(0.04, 1 - ((t - 0.92) / 0.11) ** 2)) : 1);
+      let bone = base;
+      let parent = finger + 1;
+      let blend = smooth(t / 0.18);
+      if (t > 0.33) { bone = base + 1; parent = base; blend = smooth((t - 0.33) / 0.2); }
+      if (t > 0.65) { bone = base + 2; parent = base + 1; blend = smooth((t - 0.65) / 0.2); }
+      const next = angles.map(angle => surface.vertex(x + Math.cos(angle) * radius, -0.003 + Math.sin(angle) * radius * (Math.sin(angle) < 0 ? 1.04 : 0.88), z - length * t, bone, parent, blend));
+      for (let j = 0; j < ring.length; j++) {
+        surface.face([ring[j]!, ring[(j + 1) % ring.length]!, next[(j + 1) % ring.length]!, next[j]!], j >= 4 ? 4 : t > 0.81 ? 2 : 0);
+      }
+      ring = next;
+    }
+    surface.cap(ring, 2);
+  }
+  const thumbBase = bones.length;
+  const thumbDirection = new THREE.Vector3(0.78, -0.12, -0.61).normalize();
+  const thumbOrigin = new THREE.Vector3(0.029, -0.004, 0.027);
+  const thumb = [makeBone('thumb-cmc', thumbOrigin.x * side, thumbOrigin.y, thumbOrigin.z, root)];
+  thumb.push(makeBone('thumb-mcp', thumbDirection.x * 0.025 * side, thumbDirection.y * 0.025, thumbDirection.z * 0.025, thumb[0]));
+  thumb.push(makeBone('thumb-ip', thumbDirection.x * 0.043 * side - thumb[1]!.position.x, thumbDirection.y * 0.018, thumbDirection.z * 0.018, thumb[1]));
+  bones.push(...thumb);
+  const thumbU = new THREE.Vector3(0, 1, 0).cross(thumbDirection).normalize();
+  const thumbV = thumbDirection.clone().cross(thumbU).normalize();
+  let thumbRing = [top[6]![12]!, top[5]![12]!, top[4]![12]!, bottom[4]![12]!, bottom[5]![12]!, bottom[6]![12]!];
+  for (const t of [0.15, 0.3, 0.39, 0.45, 0.51, 0.65, 0.72, 0.78, 0.9, 0.98, 1.02]) {
+    const center = thumbOrigin.clone().addScaledVector(thumbDirection, 0.061 * t);
+    const radius = (0.016 * (1 - smooth(t / 0.5)) + 0.009 * smooth(t / 0.5)) * (t > 0.9 ? Math.sqrt(Math.max(0.03, 1 - ((t - 0.9) / 0.13) ** 2)) : 1);
+    let bone = thumbBase;
+    let parent = 0;
+    let blend = smooth(t / 0.35);
+    if (t > 0.31) { bone++; parent = thumbBase; blend = smooth((t - 0.31) / 0.2); }
+    if (t > 0.61) { bone = thumbBase + 2; parent = thumbBase + 1; blend = smooth((t - 0.61) / 0.2); }
+    const next = Array.from({ length: 6 }, (_, j) => {
+      const angle = Math.PI * (1 / 6 + j / 3);
+      const p = center.clone().addScaledVector(thumbU, Math.cos(angle) * radius).addScaledVector(thumbV, Math.sin(angle) * radius * 0.86);
+      return surface.vertex(p.x, p.y, p.z, bone, parent, blend);
+    });
+    surface.bridge(thumbRing, next, t > 0.8 ? 2 : 0);
+    thumbRing = next;
+  }
+  surface.cap(thumbRing, 2);
+  surface.subdivide();
+  const mesh = bindSurface(surface, bones, [mats.glove, mats.shell, mats.skin, mats.plate, mats.palm], side === -1);
+  mesh.name = 'continuous-glove';
+  const group = new THREE.Group();
+  group.add(mesh);
+  const glove = { group, mesh, metacarpals, fingers, thumb, side };
+  articulate(glove, fist ? 1 : 0.62, 0, fist);
+  return glove;
+}
+
+function articulate(glove: Glove, curl: number, spread: number, fist = false, trigger = false, triggerAmount = 0): void {
+  for (let i = 0; i < glove.metacarpals.length; i++) {
+    const ulnar = (3 - i) / 3;
+    glove.metacarpals[i]!.rotation.set(-curl * (0.12 + ulnar * 0.3), glove.side * (i - 1.5) * spread * 0.04, glove.side * (1.5 - i) * curl * 0.12);
+  }
+  for (const finger of glove.fingers) {
+    const c = THREE.MathUtils.clamp(curl + finger.index * 0.035 - (trigger && finger.index === 0 ? 0.14 : 0), 0, 1);
+    finger.bones[0]!.rotation.set(-c * 1.18, glove.side * (finger.index - 1.5) * spread * 0.14, 0);
+    finger.bones[1]!.rotation.x = -c * 1.52;
+    finger.bones[2]!.rotation.x = -c * 1.02;
+    if (trigger && finger.index === 0) {
+      const pull = THREE.MathUtils.clamp(triggerAmount, 0, 1);
+      finger.bones[0]!.rotation.x = -0.12 - pull * 0.12;
+      finger.bones[1]!.rotation.x = -0.72 - pull * 0.28;
+      finger.bones[2]!.rotation.x = -0.38 - pull * 0.16;
+    }
+  }
+  glove.thumb[0]!.rotation.set(-curl * 0.32, glove.side * (curl * 0.7 - spread * 0.12), -glove.side * curl * 0.52);
+  glove.thumb[1]!.rotation.set(-curl * 0.26, glove.side * curl * (fist ? 0.9 : 0.62), 0);
+  glove.thumb[2]!.rotation.set(-curl * 0.18, glove.side * curl * 0.48, 0);
+}
+
+/**
+ * Authored trigger-hand pose: the palm presses the grip's rear face, the
+ * middle/ring/pinky wrap the front strap with a per-finger curl gradient,
+ * the index lives at the trigger (pulling through `triggerAmount` when
+ * firing) and the thumb lays along the grip's support side. Replaces the
+ * former per-frame grip-fitting optimizer — these are fixed, art-directed
+ * curves, so the pose is deterministic and costs nothing to solve.
+ */
+function poseTriggerHand(glove: Glove, trigger: boolean, triggerAmount: number): void {
+  const curls = [0.34, 0.75, 0.85, 0.8];
+  for (const finger of glove.fingers) {
+    let c = curls[finger.index] ?? 0.75;
+    if (trigger && finger.index === 0) {
+      const pull = THREE.MathUtils.clamp(triggerAmount, 0, 1);
+      c = 0.34 - pull * 0.2;
+    }
+    finger.bones[0]!.rotation.x = -c * 1.08;
+    finger.bones[1]!.rotation.x = -c * 1.42;
+    finger.bones[2]!.rotation.x = -c * 0.92;
+  }
+  for (let i = 0; i < glove.metacarpals.length; i++) {
+    const ulnar = (3 - i) / 3;
+    glove.metacarpals[i]!.rotation.set(-0.2 - ulnar * 0.3, glove.side * (i - 1.5) * 0.02, glove.side * (1.5 - i) * 0.1);
+  }
+  // Thumb wraps the grip's near face and locks under the palm — never a
+  // raised prong floating beside the receiver.
+  glove.thumb[0]!.rotation.set(-0.4, glove.side * 0.2, -glove.side * 0.45);
+  glove.thumb[1]!.rotation.set(-0.3, glove.side * 0.45, 0);
+  glove.thumb[2]!.rotation.set(-0.15, glove.side * 0.25, 0);
+}
+
+/**
+ * Authored support-hand wrap for each grip style. `curl` shapes the finger
+ * hook, `thumbClamp` presses the thumb against the near side so the hand
+ * reads as clamping the forend rather than hovering under it.
+ */
+function poseSupportWrap(glove: Glove, curl: number, thumbClamp: number, thumbYaw = -0.3): void {
+  for (const finger of glove.fingers) {
+    const c = curl + finger.index * 0.04;
+    finger.bones[0]!.rotation.x = -c * 1.12;
+    finger.bones[1]!.rotation.x = -c * 1.38;
+    finger.bones[2]!.rotation.x = -c * 0.9;
+  }
+  for (let i = 0; i < glove.metacarpals.length; i++) {
+    const ulnar = (3 - i) / 3;
+    glove.metacarpals[i]!.rotation.set(-0.14 - ulnar * 0.26, glove.side * (i - 1.5) * 0.02, -glove.side * (1.5 - i) * 0.08);
+  }
+  // thumbYaw lays the thumb along the forend (C-clamp: forward, ~-1.15) or
+  // wraps it across the contact (pump: ~+0.25) — never a prong above the rail.
+  glove.thumb[0]!.rotation.set(-0.42, glove.side * thumbYaw, -glove.side * (0.28 + thumbClamp * 0.22));
+  glove.thumb[1]!.rotation.set(-0.4, glove.side * (0.3 - thumbClamp * 0.15), 0);
+  glove.thumb[2]!.rotation.set(-0.2, glove.side * 0.2, 0);
+}
+
+function wrapSupport(glove: Glove, group: THREE.Group, contact: THREE.Vector3, style: 'under' | 'side' | 'pump' | 'over'): void {
+  if (style === 'under') {
+    // C-clamp: palm pressed against the forend's left face, fingers wrapping
+    // around the bottom, thumb forward along the near face — the standard
+    // long-gun support grip. The palm-up cup variant dragged fingertips over
+    // the top rail.
+    orientHand(group, _palm.set(1, 0, 0), _fingers.set(0, -0.3, -0.95), true);
+    placePalm(group, contact, 0.019);
+    poseSupportWrap(glove, 0.52, 0.35, 1.35);
+    return;
+  }
+  if (style === 'pump') {
+    // Side-clamp on the pump: palm pressed against the pump's left face,
+    // fingers wrapping under and around it (the palm-up cup splayed the
+    // fingers over the barrel like tentacles).
+    orientHand(group, _palm.set(1, 0, 0), _fingers.set(0, -0.55, -0.84), true);
+    placePalm(group, contact, 0.02);
+    poseSupportWrap(glove, 0.7, 1, 1.3);
+    return;
+  }
+  const approach = new THREE.Vector3(-0.2, -0.22, 0.02).sub(contact);
+  approach.z = 0;
+  orientHand(group, _palm.copy(approach).negate(), _fingers.set(0, 0, -1), true);
+  placePalm(group, contact, 0.018);
+  const curl = style === 'side' ? 0.7 : 0.6;
+  poseSupportWrap(glove, curl, style === 'side' ? 1 : 0.5, style === 'side' ? 0.9 : 1.0);
+}
+
+function placePalm(group: THREE.Object3D, contact: THREE.Vector3, depth = 0.013): void {
+  group.position.copy(contact).addScaledVector(_palm.set(0, -1, 0).applyQuaternion(group.quaternion), -depth * group.scale.y);
+}
+
+const _contactOffset = new THREE.Vector3();
 const _palm = new THREE.Vector3();
 const _target = new THREE.Vector3();
-/** Frozen +Y basis vector for sleeve alignment (setFromUnitVectors reads only). */
 const _upY = new THREE.Vector3(0, 1, 0);
 const _fingers = new THREE.Vector3();
 const _bp = new THREE.Vector3();
@@ -263,33 +497,9 @@ const _basis = new THREE.Matrix4();
 const _quatA = new THREE.Quaternion();
 const _quatB = new THREE.Quaternion();
 
-/**
- * Build the hand orientation from two anatomical directions: `palm` (the
- * way the open palm faces) and `fingers` (the way the finger chain extends
- * at the knuckles). Replaces v3's hand-solved Euler triples — poses are now
- * authored as "palm here, fingers there", which is how a grip is described.
- * `_mirrored` remains in the signature for call-site documentation only —
- * since the CYCLE 56 chirality fix both hands share the same right-handed
- * basis (the mirror lives in the meshes via thumbSide and wrapper groups).
- */
-function handBasisQuat(
-  out: THREE.Quaternion,
-  palm: THREE.Vector3,
-  fingers: THREE.Vector3,
-  _mirrored: boolean,
-): THREE.Quaternion {
+function handBasisQuat(out: THREE.Quaternion, palm: THREE.Vector3, fingers: THREE.Vector3, _mirrored: boolean): THREE.Quaternion {
   _bp.copy(palm).normalize();
   _bf.copy(fingers).addScaledVector(_bp, -fingers.dot(_bp)).normalize();
-  // Hand-local axes: +x thumb side, +y back of hand, +z opposite the
-  // finger-extend direction. The basis MUST stay right-handed for BOTH
-  // chiralities (x = y × z = (-palm) × (-fingers) = palm × fingers): the
-  // v4 code crossed the right hand the other way, handing
-  // setFromRotationMatrix a REFLECTION matrix — silently degraded to a
-  // skewed rotation, so every authored right-hand pose rendered with the
-  // palm facing somewhere else entirely. That single defect is why the
-  // firing hand read as a buried mitt instead of a grip (hands-review #1).
-  // `mirrored` no longer changes the basis — chirality is baked into the
-  // meshes (buildHand's thumbSide); the parameter only documents intent.
   _axisX.copy(_bp).cross(_bf);
   _axisY.copy(_bp).negate();
   _axisZ.copy(_bf).negate();
@@ -306,85 +516,61 @@ function smooth(t: number): number {
   return c * c * (3 - 2 * c);
 }
 
+function reachEnvelope(phase: number, start: number, peak: number, end: number): number {
+  if (phase < start || phase > end) return 0;
+  return phase < peak ? smooth((phase - start) / (peak - start)) : 1 - smooth((phase - peak) / (end - peak));
+}
+
 export function createHandRig(): HandRig {
   const mats = getHandMaterialSet();
-
-  // Left hand: anatomically built (thumbSide +1) inside a WRAPPER group —
-  // the pose solver composes orientations around it, so no pose can undo
-  // the chirality (the v1 Euler clobber dangled the fingers frame one).
+  const gloveL = buildHand(mats, 1);
+  const gloveR = buildHand(mats, -1);
   const leftWrap = new THREE.Group();
-  leftWrap.add(buildHand(mats, 1));
+  leftWrap.add(gloveL.group);
   const left = leftWrap;
-
-  const right = buildHand(mats, -1);
-
-  // Cuff-ridge anchors for the sleeve solve (same offset the fist rig uses):
-  // one per hand, riding the hand's own cuff barrel at the wrist.
-      // CYCLE 61 (review): bias the right wrist anchor toward the grip's
-      // right-rear so the sleeve approaches from lower-right and leaves the
-      // rolled knuckle row unobstructed.
-      const wristR = new THREE.Object3D();
-      wristR.position.set(0.007, -0.002, 0.073);
-      right.add(wristR);
+  const right = gloveR.group;
+  const wristR = new THREE.Object3D();
+  wristR.name = 'hand-wrist-right';
+  wristR.position.set(0, 0, 0.073);
+  right.add(wristR);
   const wristL = new THREE.Object3D();
-  wristL.position.set(0, -0.002, 0.073);
+  wristL.name = 'hand-wrist-left';
+  wristL.position.set(0, 0, 0.073);
   left.add(wristL);
-
   const gripR = new THREE.Vector3();
   const gripL = new THREE.Vector3();
-
   return {
-    right,
-    left,
-    wristR,
-    wristL,
+    right, left, wristR, wristL,
     configure(anchors) {
       gripR.copy(anchors.gripR);
       gripL.copy(anchors.gripL);
-      // Hands-review fix: 1.1x human size against the presentation scale —
-      // at hip framing the 1.0 counter-scale read half-size next to the gun
-      // (1.18 tested oversized: the mitts dwarfed the receiver details).
       const s = 1.1 / anchors.scale;
       right.position.copy(gripR);
       right.scale.setScalar(s);
       left.position.copy(gripL);
       left.scale.setScalar(s);
     },
-    pose({ reloadPhase, supportStyle, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal }) {
-      // ---- Right (trigger) hand ---------------------------------------
-      // High power grip. CYCLE 64 (hands-review: "smooth grey dome"): the
-      // previous long-gun basis pointed the hand's wrist axis (local +z =
-      // -fingers) up-back almost straight INTO the camera, so at hip and
-      // aim-right framing the cuff barrel + wrist sphere + sleeve cuff ring
-      // stack rendered as an end-on grey dome that occluded the palm, the
-      // knuckle plate AND the whole finger chain (fingers pointed along the
-      // camera ray — zero foreshortened length). The fix rolls the basis so
-      // the BACK OF THE HAND faces up-right-toward the key light (knuckle
-      // plate reads proud above the wrist stack), the finger knuckle axis
-      // runs forward-right (mesh curl then wraps 2-3 segments around the
-      // grip's front-right corner, camera-side), and the cuff exits level
-      // back-right instead of skyward. The pistol keeps its proven basis —
-      // its steeper grip rake reads well with the deeper-down finger wrap.
+    pose({ reloadPhase, supportStyle, magLocal, pumpOffset, pumpHand, ads, boltPhase, boltLocal, triggerAmount = 0 }) {
+      right.userData.boundWrist = boltPhase < 0 && reloadPhase < 0;
+      left.userData.boundWrist = reloadPhase < 0;
+      const pumping = pumpHand || supportStyle === 'pump';
+      const leftReach = !pumping && magLocal && reloadPhase >= 0
+        ? Math.max(reachEnvelope(reloadPhase, 0, 0.13, 0.3), reachEnvelope(reloadPhase, 0.85, 0.92, 1)) : 0;
+      const rightReach = boltLocal && boltPhase >= 0
+        ? Math.max(reachEnvelope(boltPhase, 0, 0.14, 0.3), reachEnvelope(boltPhase, 0.7, 0.84, 1)) : 0;
+      const pumpSqueeze = pumping ? smooth(Math.abs(pumpOffset) / 0.085) * 0.1 : 0;
+      articulate(gloveL, (supportStyle === 'side' ? 0.68 : 0.58) * (1 - leftReach) + 0.08 * leftReach + pumpSqueeze, leftReach);
+      articulate(gloveR, 0.67 * (1 - rightReach) + 0.1 * rightReach, rightReach, false, boltPhase < 0, triggerAmount);
       const longGun = supportStyle !== 'over';
-      const gripPalm = longGun ? _palm.set(-0.7, -0.65, -0.3) : _palm.set(-0.75, -0.5, -0.4);
-      const gripFingers = longGun
-        ? _fingers.set(0.2, 0.15, -0.95)
-        : _fingers.set(-0.35, -0.6, -0.7);
-      if (ads > 0) {
-        gripPalm.z += ads * 0.08;
-        gripFingers.x -= ads * 0.06;
-      }
+      const gripPalm = _palm.set(-0.88, 0.08, -0.46);
+      const gripFingers = longGun ? _fingers.set(-0.35, -0.36, -0.86) : _fingers.set(-0.35, -0.46, -0.82);
       if (boltPhase >= 0 && boltLocal) {
-        // Sniper: the firing hand leaves the grip and works the bolt through
-        // the cycle, then re-seats. Grip → bolt → ride → return.
         const target = _target;
         if (boltPhase < 0.3) {
           target.lerpVectors(gripR, boltLocal, smooth(boltPhase / 0.3));
         } else if (boltPhase < 0.7) {
           target.copy(boltLocal);
-          const swing = boltPhase < 0.5
-            ? smooth((boltPhase - 0.3) / 0.2)
-            : smooth((0.7 - boltPhase) / 0.2);
+          const swing = boltPhase < 0.5 ? smooth((boltPhase - 0.3) / 0.2) : smooth((0.7 - boltPhase) / 0.2);
           target.z += 0.05 * swing;
         } else {
           target.lerpVectors(boltLocal, gripR, smooth((boltPhase - 0.7) / 0.3));
@@ -392,30 +578,19 @@ export function createHandRig(): HandRig {
         right.position.copy(target);
         orientHand(right, gripPalm, gripFingers, false);
       } else {
-        // CYCLE 61: the palm centre rides proud of the grip's right face —
-        // seated ON the surface (not half-embedded in the grip volume), so
-        // the wrapped fingers emerge around the front strap where the
-        // camera can read them.
-        right.position.set(gripR.x + 0.018, gripR.y - 0.006 + ads * 0.004, gripR.z + 0.004);
         orientHand(right, gripPalm, gripFingers, false);
+        placePalm(right, gripR);
+        poseTriggerHand(gloveR, boltPhase < 0, triggerAmount);
       }
-
-      // ---- Left (support) hand ----------------------------------------
-      if (pumpHand || supportStyle === 'pump') {
-        // Shotgun: palm cups UNDER the pump body, fingers wrapping up its
-        // front face only (a taller curl speared the tips past the pump
-        // top); the hand rides the pump travel. Anchor sits at the pump
-        // body's centre height, so the fixed -y drop seats the palm just
-        // under the pump's bottom face.
-        left.position.set(gripL.x, gripL.y - 0.056, gripL.z - 0.012 + pumpOffset);
-        orientHand(left, _palm.set(0, 1, -0.1), _fingers.set(0, -0.35, -0.94), true);
+      if (pumping) {
+        orientHand(left, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
+        _target.copy(gripL).y += 0.006;
+        placePalm(left, _target, 0.022);
+        wrapSupport(gloveL, left, _target, 'pump');
+        left.position.z += pumpOffset;
         return;
       }
       if (reloadPhase >= 0 && magLocal) {
-        // Reach to the mag (0-0.3), pull down with it (0.3-0.5), carry back
-        // up and seat (0.5-0.85), slap + re-grip (0.85-1). The palm rides ON
-        // the mag body; orientation blends from the support grip to a
-        // mag-carry cup and back.
         const p = reloadPhase;
         const target = _target;
         let blend: number;
@@ -432,56 +607,38 @@ export function createHandRig(): HandRig {
         }
         left.position.copy(target);
         const tuck = ads * 0.012;
-        // CYCLE 46 (review): quatA = the ACTIVE support-style grip (v4
-        // hardcoded the 'under' cup → 50-70° orientation snaps on pistol/SMG
-        // reload starts and ends).
         if (supportStyle === 'side') {
           handBasisQuat(_quatA, _palm.set(0.95, -0.25, 0.18), _fingers.set(0.05, -0.5, -0.86), true);
         } else if (supportStyle === 'over') {
           handBasisQuat(_quatA, _palm.set(0.45, 0.7, 0.55), _fingers.set(0.1, 0.6, -0.79), true);
         } else {
-          handBasisQuat(_quatA, _palm.set(0.3, 0.9 - ads * 0.1, -0.32), _fingers.set(0.04, -0.32, -0.95), true);
+          handBasisQuat(_quatA, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
         }
         handBasisQuat(_quatB, _palm.set(0.85, -0.35, 0.2), _fingers.set(0, -0.5, -0.86), true);
         leftWrap.quaternion.slerpQuaternions(_quatA, _quatB, blend);
         left.position.y -= tuck * (1 - blend);
+        // The support hand carries the magazine through the whole timeline:
+        // fingers hook around it, thumb clamps the side.
+        poseSupportWrap(gloveL, 0.66, 0.85);
         return;
       }
-      // Support poses per class (review: the shared pitch speared
-      // fingertips through the solid forends on every long gun).
       const tuck = ads * 0.012;
       if (supportStyle === 'side') {
-        // SMG: horizontal wrap around the vertical foregrip — the anchor sits
-        // ON the grip's left face, the palm centre sits just off it, fingers
-        // curl around the far side, thumb riding up the near edge. Palm kept
-        // near-vertical so the cuff anchor routes the sleeve rearward, not
-        // skyward (ADS sight-line crossing).
         left.position.set(gripL.x - 0.018, gripL.y + 0.012 - tuck, gripL.z);
         orientHand(left, _palm.set(0.98, -0.15, 0.1), _fingers.set(0.05, -0.2, -0.98), true);
+        poseSupportWrap(gloveL, 0.7, 1);
         return;
       }
       if (supportStyle === 'over') {
-        // Pistol: hand-over-hand — the left hand cups the firing hand from
-        // below-left-front, fingers wrapping up around it.
         left.position.set(gripL.x - 0.008, gripL.y - 0.025, gripL.z - 0.028);
         orientHand(left, _palm.set(0.45, 0.7, 0.55), _fingers.set(0.1, 0.6, -0.79), true);
+        poseSupportWrap(gloveL, 0.6, 0.5);
         return;
       }
-      // 'under' (AR/sniper): palm straight UP under the handguard, fingers
-      // running straight FORWARD — flat, because the hand's cuff/wrist anchor
-      // rides local +z: a tilted palm-up-forward pose rotated the wrist
-      // direction 30° skyward and the sleeve rose across the sight line at
-      // ADS (hands-review #2). The hand sits half outboard of the forend's
-      // bottom-left corner so the knuckles break the left silhouette at hip,
-      // and SLIDES BACK toward the magwell while aiming — a 30 cm forward
-      // under-hand foreshortens to nothing at ADS and forces the forearm
-      // across the frame.
-      left.position.set(
-        gripL.x - 0.024 - ads * 0.012,
-        gripL.y - 0.006 - tuck,
-        gripL.z + 0.006 + ads * 0.2,
-      );
-      orientHand(left, _palm.set(0.15, 0.98, -0.12), _fingers.set(0.05, 0.15, -0.99), true);
+      orientHand(left, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
+      _target.copy(gripL).y += 0.006;
+      placePalm(left, _target, 0.022);
+      wrapSupport(gloveL, left, _target, 'under');
     },
   };
 }
@@ -490,210 +647,182 @@ export interface FistRig {
   group: THREE.Group;
   right: THREE.Group;
   left: THREE.Group;
-  /** Sleeve meeting points, parented behind each cuff. */
   wristR: THREE.Object3D;
   wristL: THREE.Object3D;
-  /** Authored guard orientations — updateFists composes its dynamic
-   * sway/punch Eulers with these every frame (rotation.set would otherwise
-   * clobber the pose back to identity). */
   baseQuatR: THREE.Quaternion;
   baseQuatL: THREE.Quaternion;
 }
 
-/**
- * CYCLE 52 (B6) — unarmed guard hands. The legacy capsule fists rendered
- * void-black on WebGPU (plain MeshStandardMaterial, same fault family as the
- * instanced props) and floated forearm-less. These are the SAME gloved hands
- * the weapon rig uses, posed in a boxing guard (palms inward, knuckles up),
- * so the character reads as one person with or without a gun.
- */
 export function createFistRig(): FistRig {
   const mats = getHandMaterialSet();
   const group = new THREE.Group();
-
-  const right = buildHand(mats, -1, 1.0);
+  const right = buildHand(mats, -1, true).group;
   const left = new THREE.Group();
-  left.add(buildHand(mats, 1, 1.0));
+  left.add(buildHand(mats, 1, true).group);
   group.add(right, left);
-
-  // Guard pose, authored palm/fingers like every other hand pose. The BACK
-  // of the hand (knuckle plate) faces UP and TOWARD the camera — the classic
-  // FPS fist read: a plate-topped ball with the fingers folded under and
-  // away, thumb toward the centre line.
   orientHand(right, _palm.set(-0.2, -0.9, -0.38), _fingers.set(-0.12, 0.12, -0.99), false);
   orientHand(left, _palm.set(0.2, -0.9, -0.38), _fingers.set(0.12, 0.12, -0.99), true);
-  // Same counter-scale the weapon-rig hands get (they sit at the weapon's
-  // presentation scale); without it the fists read half-size next to sleeves.
-  right.position.set(0.16, -0.16, -0.34);
+  right.position.set(0.17, -0.125, -0.32);
   right.scale.setScalar(1.18);
-  left.position.set(-0.15, -0.19, -0.38);
+  left.position.set(-0.16, -0.15, -0.36);
   left.scale.setScalar(1.18);
-
   const wristR = new THREE.Object3D();
-  wristR.position.set(0, -0.002, 0.075);
+  wristR.name = 'hand-wrist-right';
+  wristR.position.set(0, 0, 0.073);
   right.add(wristR);
   const wristL = new THREE.Object3D();
-  wristL.position.set(0, -0.002, 0.075);
+  wristL.name = 'hand-wrist-left';
+  wristL.position.set(0, 0, 0.073);
   left.add(wristL);
-
   return { group, right, left, wristR, wristL, baseQuatR: right.quaternion.clone(), baseQuatL: left.quaternion.clone() };
 }
 
-/**
- * CYCLE 36 (user pass) — connected arm chain.
- *
- * The v2 hands floated: short sleeve stubs parented at the wrist read as
- * detached tubes. Real first-person arms are a continuous chain from an
- * off-screen shoulder through an elbow to the wrist — solved here with
- * analytic two-bone IK against the live hand positions, so the arms follow
- * every grip, reload carry and pump ride the way APEX-class shooters read.
- * Sleeves are tapered unit cylinders stretched between the joints.
- */
+interface Sleeve {
+  upper: THREE.Bone;
+  fore: THREE.Bone;
+  twist: THREE.Bone;
+  wrist: THREE.Bone;
+  mesh: THREE.SkinnedMesh;
+}
+
+function buildSleeve(upperLength: number, foreLength: number, side: number): Sleeve {
+  const upper = makeBone('upper-arm', 0, 0, 0);
+  const fore = makeBone('elbow', 0, upperLength, 0, upper);
+  const twist = makeBone('forearm-pronation', 0, foreLength * 0.5, 0, fore);
+  const wrist = makeBone('sleeve-wrist', 0, foreLength * 0.5, 0, twist);
+  const surface = new SkinSurface(4);
+  const length = upperLength + foreLength;
+  const samples = [0, 0.02, 0.15, 0.3, 0.48, 0.66, 0.78, 0.86, 0.92, 0.97, 1].map(t => t * upperLength)
+    .concat([0.04, 0.09, 0.16, 0.25, 0.36, 0.49, 0.62, 0.74, 0.8, 0.85, 0.9, 0.94, 0.98, 1].map(t => upperLength + t * foreLength));
+  let ring: number[] = [];
+  for (let row = 0; row < samples.length; row++) {
+    const y = samples[row]!;
+    const t = y / length;
+    const upperT = Math.min(1, y / upperLength);
+    const foreT = Math.max(0, (y - upperLength) / foreLength);
+    const belly = Math.sin(Math.PI * smooth(foreT)) * (1 - foreT);
+    const radius = y < upperLength
+      ? 0.042 - 0.011 * upperT + 0.006 * Math.sin(Math.PI * upperT)
+      : 0.032 - 0.012 * smooth(foreT) + 0.009 * belly;
+    const next = Array.from({ length: 16 }, (_, j) => {
+      const angle = -j / 16 * Math.PI * 2;
+      const elbowFold = Math.exp(-(((y - upperLength) / 0.052) ** 2)) * Math.cos((y - upperLength) * 230 + Math.sin(angle) * 2) * 0.004;
+      const wristFold = Math.exp(-(((foreT - 0.85) / 0.14) ** 2)) * Math.cos(foreT * 72 + angle * 2) * 0.0025;
+      const muscle = belly * (0.004 * Math.cos(angle - side * 0.7) + 0.002 * Math.cos(angle * 2));
+      const seam = j === 3 || j === 11 ? 0.0008 : 0;
+      const r = radius + muscle + elbowFold + wristFold + seam;
+      const center = side * 0.006 * belly;
+      const index = surface.vertex(center + Math.cos(angle) * r, y, Math.sin(angle) * r * (0.84 + 0.08 * foreT), 1, 0, smooth((y - upperLength + 0.04) / 0.08));
+      const twistWeight = smooth((foreT - 0.12) / 0.65);
+      const wristWeight = smooth((foreT - 0.94) / 0.06);
+      if (twistWeight > 0) {
+        surface.vertices[index]!.weights[1] = 1 - twistWeight;
+        surface.vertices[index]!.weights[2] = twistWeight * (1 - wristWeight);
+        surface.vertices[index]!.weights[3] = twistWeight * wristWeight;
+      }
+      surface.vertices[index]!.uv.set(j / 16, t * 3);
+      return index;
+    });
+    if (row === 0) surface.cap([...next].reverse(), 1);
+    else surface.bridge(ring, next, 1);
+    ring = next;
+  }
+  surface.cap(ring, 1);
+  surface.subdivide();
+  const mats = getHandMaterialSet();
+  const mesh = bindSurface(surface, [upper, fore, twist, wrist], [mats.glove, mats.shell, mats.skin, mats.plate, mats.palm]);
+  mesh.name = 'continuous-sleeve';
+  return { upper, fore, twist, wrist, mesh };
+}
+
 export class ArmSolver {
   readonly group = new THREE.Group();
-  /** Shoulder anchors in view (pivot) space — off the bottom corners. */
-  // CYCLE 37 (review): shoulders near the eye plane and a chain long enough
-  // for the worst-case reach (sniper support hand) — v2's left sleeve ended
-  // 20-40 cm short of the hand in EVERY long-gun frame by construction.
-  private readonly shoulders = [
-    new THREE.Vector3(0.27, -0.4, -0.12),
-    new THREE.Vector3(-0.27, -0.4, -0.12),
-  ];
-  private readonly upperLen = 0.42;
-  private readonly foreLen = 0.4;
-  // Bend hints: strong downward elbow drop with a slight rearward bias —
-  // v3's shallow hints projected nearly parallel to the reach and read as
-  // straight pipes, while wide ±x splays tented the forearms OVER the
-  // receiver at ADS (hands-review #2).
-  private readonly bends = [new THREE.Vector3(0.8, -1.8, -0.35), new THREE.Vector3(-0.8, -1.8, -0.35)];
-  private readonly sleeves: Array<{ upper: THREE.Mesh; fore: THREE.Mesh }> = [];
-  private readonly cuffs: THREE.Mesh[] = [];
-  private joints: THREE.Mesh[] = [];
-  private tmpA = new THREE.Vector3();
-  private tmpB = new THREE.Vector3();
-  private tmpElbow = new THREE.Vector3();
-  private tmpShoulder = new THREE.Vector3();
-  // Per-frame solve scratch (B5: no allocations in the hot path).
-  private tmpWristC = new THREE.Vector3();
-  private tmpAlong = new THREE.Vector3();
-  private tmpBend = new THREE.Vector3();
+  private readonly shoulders = [new THREE.Vector3(0.16, -0.16, 0.12), new THREE.Vector3(-0.2, -0.22, 0.02)];
+  private readonly upperLen = 0.3;
+  private readonly foreLen = 0.27;
+  readonly reachDeficit = [0, 0];
+  private readonly bends = [new THREE.Vector3(1, -2, -2), new THREE.Vector3(-1.2, -1.8, 0.1)];
+  private readonly sleeves: Sleeve[] = [];
+  private readonly shoulder = new THREE.Vector3();
+  private readonly wristTarget = new THREE.Vector3();
+  private readonly wristClamped = new THREE.Vector3();
+  private readonly elbow = new THREE.Vector3();
+  private readonly along = new THREE.Vector3();
+  private readonly bend = new THREE.Vector3();
+  private readonly direction = new THREE.Vector3();
+  private readonly foreQuaternion = new THREE.Quaternion();
+  private readonly wristQuaternion = new THREE.Quaternion();
+  private readonly pivotQuaternion = new THREE.Quaternion();
+  private readonly wristAxis = new THREE.Quaternion().setFromUnitVectors(_upY, new THREE.Vector3(0, 0, -1));
+  private readonly anchorPosition = new THREE.Vector3();
 
   constructor() {
-    const shell = getHandMaterialSet().shell;
-    // CYCLE 56 (review): the sleeve tubes reused the hand shell material at
-    // full normal-map strength — at viewmodel texel density the fabric weave
-    // aliased into a shimmering moiré ("dev-placeholder" read). Sleeves get
-    // their own clone with the weave calmed and roughness raised.
-    const sleeveMat = shell.clone();
-    sleeveMat.roughness = 0.8;
-    if (sleeveMat.normalMap) sleeveMat.normalScale.set(0.14, 0.14);
-    const make = (rTop: number, rBottom: number): THREE.Mesh => {
-      // Unit-height tapered cylinder, stretched between joints per frame.
-      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBottom, 1, 10, 1, true), sleeveMat);
-      mesh.matrixAutoUpdate = true;
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
-      this.group.add(mesh);
-      return mesh;
-    };
     for (let i = 0; i < 2; i++) {
-      // Taper: thicker at the shoulder, thinnest at the wrist (aim() maps
-      // +Y to the SECOND joint, so rTop is the far end — v2 had it inverted).
-      // Slimmed ~15% (hands-review): the 8-10 cm tubes crowded the ADS frame.
-      this.sleeves.push({ upper: make(0.034, 0.044), fore: make(0.022, 0.031) });
-      // Cuff ring bridging the forearm end into the hand's own cuff barrel.
-      // CYCLE 64: slimmed to match the narrower hand cuff — the old 6.2 cm
-      // ring end-on at the hip camera read as the "grey dome" itself.
-      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.028, 1, 12, 1, true), sleeveMat);
-      cuff.castShadow = false;
-      cuff.receiveShadow = false;
-      this.group.add(cuff);
-      this.cuffs.push(cuff);
-    }
-    // Elbow joint spheres close the open cylinder ends; wrist spheres cover
-    // the forearm-to-cuff seam (round-3: hollow tube rims showed on clamp).
-    // CYCLE 64: the wrist spheres slimmed to sit INSIDE the hand's cuff
-    // silhouette — at hip framing they used to bulge past it as a second dome.
-    this.joints = [
-      new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), sleeveMat),
-      new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 8), sleeveMat),
-      new THREE.Mesh(new THREE.SphereGeometry(0.0205, 10, 8), sleeveMat),
-      new THREE.Mesh(new THREE.SphereGeometry(0.0205, 10, 8), sleeveMat),
-    ];
-    for (const j of this.joints) {
-      j.castShadow = false;
-      j.receiveShadow = false;
-      this.group.add(j);
+      const sleeve = buildSleeve(this.upperLen, this.foreLen, i === 0 ? -1 : 1);
+      this.sleeves.push(sleeve);
+      this.group.add(sleeve.mesh);
     }
     this.group.visible = false;
   }
 
-  /** Stretch a sleeve mesh between two points. */
-  private aim(mesh: THREE.Mesh, a: THREE.Vector3, b: THREE.Vector3): void {
-    this.tmpA.copy(b).sub(a);
-    const len = this.tmpA.length();
-    if (len < 1e-4) {
-      mesh.visible = false;
-      return;
-    }
-    mesh.visible = true;
-    mesh.position.copy(a).addScaledVector(this.tmpA, 0.5);
-    mesh.quaternion.setFromUnitVectors(_upY, this.tmpA.multiplyScalar(1 / len));
-    mesh.scale.set(1, len, 1);
-  }
-
-  /**
-   * Solve both arms so the wrists land on the given hand positions.
-   * `pivot` is the view-space root (hands are converted from world space).
-   * `settle` (0..1, the ADS blend) drops the shoulders back and down — the
-   * aimed stance tucks the elbows below the bore so the sleeves stop
-   * tenting over the receiver (hands-review #2).
-   */
   solve(pivot: THREE.Object3D, wristWorld: THREE.Vector3[], settle = 0): void {
     this.group.visible = true;
     for (let i = 0; i < 2; i++) {
-      const shoulder = this.tmpShoulder.copy(this.shoulders[i]!);
-      shoulder.y -= 0.055 * settle;
-      shoulder.z += 0.075 * settle;
-      const wrist = pivot.worldToLocal(this.tmpB.copy(wristWorld[i]!));
-      const { upper, fore } = this.sleeves[i]!;
-
-      // Analytic two-bone IK: clamp the reach, then place the elbow off the
-      // law-of-cosines angle along the bend hint (down/outward). At the
-      // short viewmodel reaches the raw sinA folds the elbow ~30 cm off the
-      // line (v4 round 1: pipe-arms), so the offset is damped — the stretched
-      // forearm absorbs the residual, keeping a subtle visible bend.
-      const elbowDamp = 0.5;
-      const delta = this.tmpA.copy(wrist).sub(shoulder);
-      let d = delta.length();
-      const maxReach = this.upperLen + this.foreLen - 0.02;
-      const clamped = Math.min(d, maxReach);
-      delta.multiplyScalar(d > 1e-5 ? clamped / d : 0);
-      d = Math.max(clamped, Math.abs(this.upperLen - this.foreLen) + 0.02);
-      const wristC = this.tmpWristC.copy(shoulder).add(delta);
-
-      const cosA = (this.upperLen * this.upperLen + d * d - this.foreLen * this.foreLen) / (2 * this.upperLen * d);
-      const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA)) * elbowDamp;
-      const along = this.tmpAlong.copy(delta).normalize();
-      const bend = this.tmpBend.copy(this.bends[i]!).addScaledVector(along, -this.bends[i]!.dot(along));
-      if (bend.lengthSq() < 1e-6) bend.set(0, -1, 0);
-      bend.normalize();
-      this.tmpElbow.copy(shoulder)
-        .addScaledVector(along, this.upperLen * cosA)
-        .addScaledVector(bend, this.upperLen * sinA);
-
-      this.aim(upper, shoulder, this.tmpElbow);
-      // Clamp safety: when the chain cannot reach, aim the forearm at the
-      // TRUE wrist (never render a floating open tube end short of the hand).
-      const short = wrist.distanceTo(shoulder) > maxReach + 1e-3;
-      this.aim(fore, this.tmpElbow, short ? wrist : wristC);
-      // Cuff ring: a short wider barrel straddling the forearm-to-hand seam.
-      const wristFinal = short ? wrist : wristC;
-      this.tmpAlong.copy(this.tmpElbow).sub(wristFinal).normalize();
-      this.tmpBend.copy(wristFinal).addScaledVector(this.tmpAlong, 0.055);
-      this.aim(this.cuffs[i]!, wristFinal, this.tmpBend);
-      this.joints[i]!.position.copy(this.tmpElbow);
-      this.joints[this.joints.length - 2 + i]!.position.copy(wristFinal);
+      this.shoulder.copy(this.shoulders[i]!);
+      this.shoulder.y -= 0.012 * settle;
+      this.shoulder.z += 0.015 * settle;
+      pivot.worldToLocal(this.wristTarget.copy(wristWorld[i]!));
+      this.along.copy(this.wristTarget).sub(this.shoulder);
+      const reach = this.along.length();
+      if (reach < 1e-8) this.along.set(0, 0, -1);
+      else this.along.multiplyScalar(1 / reach);
+      const distance = THREE.MathUtils.clamp(reach, Math.abs(this.upperLen - this.foreLen) + 0.0001, this.upperLen + this.foreLen - 0.0001);
+      this.reachDeficit[i] = Math.abs(reach - distance);
+      this.wristClamped.copy(this.shoulder).addScaledVector(this.along, distance);
+      let anchor: THREE.Object3D | undefined;
+      let nearest = Infinity;
+      pivot.traverse(object => {
+        if (object.name !== (i === 0 ? 'hand-wrist-right' : 'hand-wrist-left')) return;
+        object.getWorldPosition(this.anchorPosition);
+        const distance = this.anchorPosition.distanceToSquared(wristWorld[i]!);
+        if (distance < nearest) { nearest = distance; anchor = object; }
+      });
+      const hand = anchor?.parent;
+      const bounded = hand?.userData.boundWrist === true;
+      if (anchor) {
+        anchor.getWorldQuaternion(this.wristQuaternion);
+        pivot.getWorldQuaternion(this.pivotQuaternion);
+        this.wristQuaternion.premultiply(this.pivotQuaternion.invert()).multiply(this.wristAxis);
+      }
+      this.bend.copy(this.bends[i]!);
+      this.bend.addScaledVector(this.along, -this.bend.dot(this.along));
+      if (this.bend.lengthSq() < 1e-8) {
+        this.bend.set(Math.abs(this.along.x) < 0.8 ? 1 : 0, Math.abs(this.along.x) < 0.8 ? 0 : 1, 0);
+        this.bend.addScaledVector(this.along, -this.bend.dot(this.along));
+      }
+      this.bend.normalize();
+      const alongLength = (this.upperLen ** 2 + distance ** 2 - this.foreLen ** 2) / (2 * distance);
+      const bendLength = Math.sqrt(Math.max(0, this.upperLen ** 2 - alongLength ** 2));
+      this.elbow.copy(this.shoulder).addScaledVector(this.along, alongLength).addScaledVector(this.bend, bendLength);
+      const sleeve = this.sleeves[i]!;
+      sleeve.upper.position.copy(this.shoulder);
+      this.direction.copy(this.elbow).sub(this.shoulder).normalize();
+      sleeve.upper.quaternion.setFromUnitVectors(_upY, this.direction);
+      this.direction.copy(this.wristClamped).sub(this.elbow).normalize();
+      this.foreQuaternion.setFromUnitVectors(_upY, this.direction);
+      const relative = this.foreQuaternion.clone().invert().multiply(anchor ? this.wristQuaternion : this.foreQuaternion);
+      const twist = new THREE.Quaternion(0, relative.y, 0, relative.w).normalize();
+      const swing = relative.clone().multiply(twist.clone().invert());
+      const swingAngle = 2 * Math.acos(Math.min(1, Math.abs(swing.w)));
+      if (bounded && swingAngle > 0.55) swing.slerp(new THREE.Quaternion(), 1 - 0.55 / swingAngle);
+      const twistAngle = 2 * Math.atan2(twist.y, twist.w);
+      const wrappedTwist = Math.atan2(Math.sin(twistAngle), Math.cos(twistAngle));
+      const pronation = bounded ? THREE.MathUtils.clamp(wrappedTwist, -1.4, 1.4) : wrappedTwist;
+      const halfTwist = new THREE.Quaternion().setFromAxisAngle(_upY, pronation * 0.5);
+      sleeve.fore.quaternion.copy(sleeve.upper.quaternion).invert().multiply(this.foreQuaternion).multiply(halfTwist);
+      sleeve.twist.quaternion.copy(halfTwist);
+      const fullTwist = halfTwist.clone().multiply(halfTwist);
+      sleeve.wrist.quaternion.copy(fullTwist).invert().multiply(swing).multiply(fullTwist);
     }
   }
 

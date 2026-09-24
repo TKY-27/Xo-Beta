@@ -7,7 +7,7 @@
 import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef } from '../types';
 import { Rng } from '../../core/rng';
-import { addBuilding, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { addBuilding, addDrumCluster, addGroundDecay, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
 
 const S = 500;
 
@@ -168,6 +168,10 @@ export function buildEdenFacility(): MapDef {
 
   decorateEden(b, rng);
 
+  facilityDensity(b, rng);
+
+  groundDecay(b);
+
   hardenExposedFlanks(b, { mat: 'concreteDark', maxProps: 36 });
 
   return b.finish(
@@ -178,7 +182,7 @@ export function buildEdenFacility(): MapDef {
         // soft cumulus, restrained aerial perspective.
         zenith: 0x2f6cb3, horizon: 0xa9c2d4,
         discSize: 0.036, discColor: 0xfff2d4, discGlow: 0.55,
-        cloudCover: 0.42, cloudTint: 0xf2f5f7, cloudShade: 0x9fb2c4,
+        cloudCover: 0.3, cloudTint: 0xf2f5f7, cloudShade: 0x9fb2c4,
         windSpeed: 0.01, starOpacity: 0.0,
         hazeColor: 0xb9cdd8, hazeStrength: 0.34,
       },
@@ -1052,4 +1056,190 @@ function decorateEden(b: WorldBuilder, rng: Rng): void {
       b.box(sx - 1.8 + i * 1.2, gy + 0.07, sz, 0.6, 0.03, 3.4, 'gold', 0, { noCollide: true });
     }
   }
+}
+
+/**
+ * W8 facility density pass: exterior pipe runs with valve stands, cable trays
+ * on stanchions along the dormitory spine, coolant tanks in bunded rings at
+ * the treatment plant, dock cargo gear, sampling posts and buoys in the
+ * shallows, service-yard drums, path light poles, an entrance signboard and
+ * a roofline wind sock. Presentation-heavy, collision-light: placements are
+ * gated by dressingSpotClear so doors, stairs, chests and vehicles stay clear.
+ */
+function facilityDensity(b: WorldBuilder, rng: Rng): void {
+  void rng;
+  const clear = (x: number, z: number, hx: number, hz: number, yLow: number, yHigh: number): boolean =>
+    dressingSpotClear(b.def, x, z, hx, hz, yLow, yHigh, { crates: true, vehicles: true, margin: 0.3 });
+
+  // -- pipe runs with valve stands on the lab's blind west wall -------------
+  {
+    const gy = structureBaseY(terrainH, -95, -30, 34, 24);
+    const wx = -111.55;
+    if (clear(wx, -31, 0.5, 9.5, gy, gy + 1.8)) {
+      b.box(wx, gy + 0.86, -31, 0.24, 0.26, 18, 'metal', 0, { noCollide: true });
+      b.box(wx, gy + 0.34, -31, 0.2, 0.2, 17.2, 'rust', 0, { noCollide: true });
+      for (const vz of [-38, -31, -24]) {
+        b.cyl(wx, gy + 0.6, vz, 0.1, 1.1, 'metal', { segments: 8, noCollide: true });
+      }
+      for (const vz of [-35.5, -26.5]) {
+        b.cyl(wx, gy + 1.1, vz, 0.05, 0.36, 'rust', { segments: 8, noCollide: true });
+        b.cyl(wx, gy + 1.3, vz, 0.09, 0.05, 'rust', { segments: 8, noCollide: true });
+        b.box(wx, gy + 1.3, vz, 0.46, 0.05, 0.05, 'metalDark', 0, { noCollide: true, castShadow: false });
+        b.box(wx, gy + 1.3, vz, 0.05, 0.05, 0.46, 'metalDark', 0, { noCollide: true, castShadow: false });
+      }
+    }
+    // Matching riser + isolation valve on the greenhouse-facing wing wall.
+    const wingY = structureBaseY(terrainH, -55, 12, 20, 15);
+    if (clear(-44.9, 12, 0.4, 6, wingY, wingY + 2.4)) {
+      b.box(-44.85, wingY + 1.1, 12, 0.2, 0.22, 10.5, 'metal', 0, { noCollide: true });
+      for (const vz of [7.5, 12, 16.5]) {
+        b.cyl(-44.85, wingY + 0.6, vz, 0.09, 1.3, 'metalDark', { segments: 8, noCollide: true });
+        b.cyl(-44.85, wingY + 1.32, vz, 0.26, 0.07, 'rust', { segments: 10, noCollide: true });
+      }
+    }
+  }
+
+  // -- cable trays on stanchions along the complex→dormitories spine --------
+  {
+    const traySpots: Array<[number, number]> = [
+      [-103, 8], [-105, 20], [-107, 32], [-109, 44], [-110, 56], [-111, 68], [-112, 80],
+    ];
+    for (const [tx, tz] of traySpots) {
+      const gy = terrainH(tx, tz);
+      if (!clear(tx, tz, 0.9, 1.4, gy, gy + 1.2)) continue;
+      for (const side of [-0.62, 0.62]) {
+        b.box(tx + side, gy + 0.47, tz, 0.09, 0.94, 0.09, 'metalDark', 0, { noCollide: true, castShadow: false });
+      }
+      b.box(tx, gy + 0.97, tz, 0.4, 0.07, 2.6, 'metalDark', 0, { noCollide: true, castShadow: false });
+      b.box(tx, gy + 1.02, tz, 0.18, 0.035, 2.4, 'rust', 0, { noCollide: true, castShadow: false });
+    }
+  }
+
+  // -- coolant tanks in bunded containment rings, water treatment yard ------
+  {
+    const gy = structureBaseY(terrainH, -170, -120, 24, 18);
+    for (const [tx, tz, mat] of [[-194, -103, 'metal'], [-191, -91, 'rust']] as Array<[number, number, 'metal' | 'rust']>) {
+      const base = terrainH(tx, tz);
+      if (!clear(tx, tz, 3.6, 3.6, base, base + 3.6)) continue;
+      b.cyl(tx, base + 1.45, tz, 2.05, 3.3, mat, { segments: 14 });
+      b.cyl(tx, base + 3.18, tz, 2.18, 0.16, 'metalDark', { segments: 14, noCollide: true });
+      b.cyl(tx, base + 0.12, tz, 2.5, 0.3, 'concreteDark', { segments: 14, noCollide: true });
+      // Bund ring: 10 low kerb segments around the tank.
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * Math.PI * 2 + 0.31;
+        const bx = tx + Math.cos(a) * 3.3;
+        const bz = tz + Math.sin(a) * 3.3;
+        b.box(bx, base + 0.27, bz, 2.15, 0.54, 0.32, 'concreteDark', a + Math.PI / 2, {
+          noCollide: true,
+          castShadow: false,
+        });
+      }
+      // Feed line back to the plant's south face, on short stanchions.
+      const runLen = tz + 111;
+      if (runLen > 2) {
+        b.box(tx, gy + 0.85, (-111 + tz) / 2, 0.2, 0.2, runLen, 'rust', 0, { noCollide: true });
+        for (const frac of [0.3, 0.6, 0.88]) {
+          const sz2 = -111 + runLen * frac;
+          const ground = terrainH(tx, sz2);
+          b.box(tx, (ground + gy + 0.85) / 2, sz2, 0.12, gy + 0.85 - ground, 0.12, 'metalDark', 0, {
+            noCollide: true,
+            castShadow: false,
+          });
+        }
+      }
+    }
+  }
+
+  // -- dock cargo: cable drum, cable coils, working crates ------------------
+  {
+    const gy = terrainH(86.5, 32);
+    if (clear(86.5, 32, 1.2, 1.2, gy, gy + 1.6)) {
+      for (const dx of [-0.36, 0.36]) {
+        b.cyl(86.5 + dx, gy + 0.75, 32, 0.78, 0.1, 'woodDark', { segments: 14, noCollide: true, roll: Math.PI / 2 });
+      }
+      b.cyl(86.5, gy + 0.75, 32, 0.3, 0.62, 'rust', { segments: 12, noCollide: true, roll: Math.PI / 2 });
+    }
+    const coilY = terrainH(84.4, 28.4);
+    if (clear(84.4, 28.4, 0.8, 0.8, coilY, coilY + 0.6)) {
+      b.cyl(84.4, coilY + 0.09, 28.4, 0.56, 0.18, 'metalDark', { segments: 12, noCollide: true });
+      b.cyl(84.4, coilY + 0.27, 28.4, 0.48, 0.16, 'metalDark', { segments: 12, noCollide: true });
+    }
+    b.crate(88, terrainH(88, 36) + 0.2, 36, 0.9);
+    b.crate(86.4, terrainH(86.4, 34.8) + 0.2, 34.8, 0.75);
+  }
+
+  // -- sampling posts + buoys along the shallow lake margin -----------------
+  for (const [px, pz] of [[100, 60], [105, 70], [110, 55]] as Array<[number, number]>) {
+    const bed = terrainH(px, pz);
+    if (bed > -3.4) continue;
+    const top = -3.55;
+    b.cyl(px, (bed - 0.5 + top) / 2, pz, 0.06, top - (bed - 0.5), 'woodDark', { segments: 8, noCollide: true });
+    b.box(px, top + 0.06, pz, 0.3, 0.12, 0.3, 'woodDark', 0, { noCollide: true, castShadow: false });
+  }
+  for (const [px, pz] of [[95, 62], [102, 50], [108, 66]] as Array<[number, number]>) {
+    b.sphere(px, -3.98, pz, 0.34, 'neonOrange', { noCollide: true });
+    b.cyl(px, -4.16, pz, 0.05, 0.5, 'metalDark', { segments: 6, noCollide: true });
+  }
+
+  // -- service yard: fuel drums by the helipad, second vehicle by the dorms --
+  addDrumCluster(b, -52, -62, { baseY: terrainH(-52, -62), count: 3, stack: true, uprightMat: 'rust' });
+  b.vehicle(-80, 98, terrainH(-80, 98) + 0.2, 1.4, 'sedan', 0x9aa2ab);
+
+  // -- path light poles along the greenhouse→dock walk ----------------------
+  for (const [px, pz] of [[0, 34], [40, 38], [80, 40]] as Array<[number, number]>) {
+    b.lampPost(px, pz, terrainH(px, pz), 5.2, 0xfff2d4, 1.7, 22);
+  }
+
+  // -- entrance signboard at the complex approach ---------------------------
+  {
+    const gy = terrainH(-73.5, -38);
+    if (clear(-73.5, -38, 2, 0.5, gy, gy + 3.2)) {
+      for (const dx of [-1.55, 1.55]) {
+        b.box(-73.5 + dx, gy + 1.35, -38, 0.14, 2.7, 0.14, 'metalDark');
+      }
+      b.box(-73.5, gy + 2.35, -38, 3.6, 1.4, 0.13, 'metalDark', 0, { noCollide: true });
+      b.box(-73.5, gy + 2.35, -38.09, 3.0, 0.9, 0.04, 'paint', 0, { noCollide: true, castShadow: false });
+      b.box(-73.5, gy + 1.95, -38.1, 2.4, 0.1, 0.05, 'signDimCyan', 0, { noCollide: true, castShadow: false });
+    }
+  }
+
+  // -- wind sock on the main lab roofline ------------------------------------
+  {
+    const gy = structureBaseY(terrainH, -95, -30, 34, 24);
+    const roofY = gy + 2 * 4.2 + 0.2;
+    const mx = -105;
+    const mz = -24;
+    b.cyl(mx, roofY + 1.4, mz, 0.06, 2.8, 'metalDark', { segments: 8, noCollide: true });
+    b.cyl(mx + 0.02, roofY + 2.82, mz, 0.09, 0.06, 'metalDark', { segments: 8, noCollide: true });
+    b.cyl(mx + 0.55, roofY + 2.72, mz, 0.14, 0.9, 'neonOrange', { segments: 8, noCollide: true, pitch: 0.3 });
+  }
+}
+
+/**
+ * Ground-decay micro-scatter along the campus service paths (connective
+ * tissue): mud stains, gravel wash, scattered litter and tyre-track pairs
+ * where vehicles crossed, plus decay rings around the ground props. Follows
+ * the authored path spines; deterministic and dressingSpotClear-gated.
+ */
+function groundDecay(b: WorldBuilder): void {
+  addGroundDecay(b, {
+    heightAt: terrainH,
+    corridors: [
+      { x1: -95, z1: -30, x2: -55, z2: 12, width: 5.6 },
+      { x1: -95, z1: -30, x2: -110, z2: 100, width: 5.6 },
+      { x1: -110, z1: 100, x2: 10, z2: 30, width: 5.6 },
+      { x1: 10, z1: 30, x2: 118, z2: 42, width: 5.6 },
+      { x1: -95, z1: -30, x2: -170, z2: -120, width: 5.6 },
+      { x1: -60, z1: -55, x2: 10, z2: -195, width: 5.2 },
+      { x1: 60, z1: 175, x2: 160, z2: 150, width: 5.2 },
+      // Forest approach spurs (open ground the QA frame at 40,120 crosses).
+      { x1: 10, z1: 30, x2: 40, z2: 120, width: 5.2 },
+      { x1: 40, z1: 120, x2: 60, z2: 175, width: 5.2 },
+    ],
+    stainMat: 'dirt',
+    trackMat: 'dirt',
+    spacing: 9,
+    maxPieces: 44,
+    stainBias: 0.7,
+  });
 }

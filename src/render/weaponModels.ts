@@ -22,6 +22,52 @@ export interface WeaponModel {
   /** CYCLE 35: first-person hand anchors (weapon-local metres). */
   gripR: THREE.Vector3;
   gripL: THREE.Vector3;
+  reloadSockets?: WeaponReloadSockets;
+}
+
+export interface WeaponReloadSockets {
+  seated: THREE.Object3D;
+  withdrawn: THREE.Object3D;
+  stow: THREE.Object3D;
+  spare: THREE.Object3D;
+  approach: THREE.Object3D;
+  magazineContact: THREE.Object3D;
+  actionContact: THREE.Object3D;
+  port: THREE.Object3D;
+  shellContact: THREE.Object3D;
+}
+
+export function createWeaponReloadSockets(model: WeaponModel, id: WeaponId): WeaponReloadSockets {
+  const anchor = (name: string, x: number, y: number, z: number, rx = 0, ry = 0, rz = 0): THREE.Object3D => {
+    const socket = new THREE.Object3D();
+    socket.name = `reload-${name}`;
+    socket.position.set(x, y, z);
+    socket.rotation.set(rx, ry, rz);
+    model.group.add(socket);
+    return socket;
+  };
+  const seated = anchor('seated', 0, 0, 0);
+  if (model.mag) {
+    seated.position.copy(model.mag.position);
+    seated.quaternion.copy(model.mag.quaternion);
+  }
+  const withdrawn = anchor('withdrawn', seated.position.x, seated.position.y - (id === 'pistol' ? 0.14 : 0.2), seated.position.z + (id === 'ar' ? 0.065 : 0), id === 'ar' ? -0.38 : 0);
+  // Stow/spare ride higher and closer than the hip: the magazine swap must
+  // stay inside the frame at gameplay FOV, not dive out of view.
+  const stow = anchor('stow', -0.13, -0.34, 0.07, -0.25, 0, -0.12);
+  const spare = anchor('spare', -0.13, -0.34, 0.07, -0.25, 0, -0.12);
+  const approach = anchor('approach', -0.015, seated.position.y - (id === 'pistol' ? 0.13 : 0.18), seated.position.z + (id === 'ar' ? 0.065 : 0.01), id === 'ar' ? -0.38 : 0);
+  if (id === 'pistol') {
+    withdrawn.position.set(0, -0.14, 0).applyQuaternion(seated.quaternion).add(seated.position);
+    withdrawn.quaternion.copy(seated.quaternion);
+    approach.position.copy(withdrawn.position);
+    approach.quaternion.copy(seated.quaternion);
+  }
+  const magazineContact = anchor('magazine-contact', -0.04, id === 'sniper' || id === 'pistol' ? -0.06 : -0.1, 0.016, 0.25, 0.2, Math.PI / 2);
+  const actionContact = anchor('action-contact', id === 'sniper' ? 0.044 : -0.025, 0.015, 0.024, 0.2, -0.15, -Math.PI / 2);
+  const port = anchor('port', 0, -0.022, -0.226, -0.15);
+  const shellContact = anchor('shell-contact', -0.025, -0.046, 0.028, Math.PI, 0, 0.2);
+  return { seated, withdrawn, stow, spare, approach, magazineContact, actionContact, port, shellContact };
 }
 
 const ALL_RARITIES = RARITIES;
@@ -63,6 +109,11 @@ export class WeaponModelFactory {
   /** Prebuilt archetype per `weaponId:rarity`. Clones share geometry+materials. */
   private templates = new Map<string, WeaponModel>();
   private readonly mats: GunMaterials;
+  /** Per-class finish sets: each weapon class gets its own material INSTANCE
+   * set (shared across its rarities) so the five classes read as different
+   * finishes — blued pistol, grey-phosphate AR, walnut shotgun, OD sniper —
+   * instead of five copies of one black plastic. */
+  private classMats = new Map<WeaponId, GunMaterials>();
   /** CYCLE 32: per-rarity skin material overrides for the large receiver /
    * handguard / stock panels. Shared across every weapon archetype. */
   private skinPanels = new Map<Rarity, Map<string, THREE.MeshStandardMaterial>>();
@@ -75,6 +126,40 @@ export class WeaponModelFactory {
     legendary: '#ffb545',
   };
 
+  /** Absolute finish colors per class: steel / aluminum / polymer / rubber.
+   * Values stay mid-dark (nothing pure black) so form shadows still model
+   * the shapes under the stage light rig. */
+  private static readonly FINISHES: Record<WeaponId, { steel: number; aluminum: number; polymer: number; rubber?: number }> = {
+    pistol: { steel: 0x2c3036, aluminum: 0x363b42, polymer: 0x232629 },
+    smg: { steel: 0x3a4046, aluminum: 0x454c53, polymer: 0x2b2f34 },
+    ar: { steel: 0x474d55, aluminum: 0x59616a, polymer: 0x353a41 },
+    shotgun: { steel: 0x35393f, aluminum: 0x40454c, polymer: 0x54422e, rubber: 0x2e271f },
+    sniper: { steel: 0x3c4147, aluminum: 0x57624e, polymer: 0x47523f },
+  };
+
+  private finishMats(id: WeaponId): GunMaterials {
+    let set = this.classMats.get(id);
+    if (set) return set;
+    const finish = WeaponModelFactory.FINISHES[id];
+    const clone = (base: THREE.MeshStandardMaterial, color: number, rough?: number): THREE.MeshStandardMaterial => {
+      const m = base.clone();
+      m.color = new THREE.Color(color);
+      if (rough !== undefined) m.roughness = rough;
+      m.name = base.name;
+      return m;
+    };
+    set = {
+      steel: clone(this.mats.steel, finish.steel),
+      aluminum: clone(this.mats.aluminum, finish.aluminum, id === 'sniper' ? 0.62 : undefined),
+      polymer: clone(this.mats.polymer, finish.polymer),
+      rubber: clone(this.mats.rubber, finish.rubber ?? this.mats.rubber.color.getHex()),
+      hardware: this.mats.hardware,
+      postIvory: this.mats.postIvory,
+    };
+    this.classMats.set(id, set);
+    return set;
+  }
+
   constructor(
     /** Unused since the procedural-geometry rework; retained for call-site stability. */
     _props: unknown,
@@ -84,7 +169,7 @@ export class WeaponModelFactory {
 
   /** Skin-panel material for one base material + rarity (cached). Common
    * keeps the bare-metal look; uncommon+ carry the pattern graphic. */
-  private skinPanel(baseName: string, rarity: Rarity): THREE.MeshStandardMaterial | null {
+  private skinPanel(baseName: string, rarity: Rarity, classSet: GunMaterials | null = null): THREE.MeshStandardMaterial | null {
     if (rarity === 'common') return null;
     let byBase = this.skinPanels.get(rarity);
     if (!byBase) {
@@ -93,7 +178,8 @@ export class WeaponModelFactory {
     }
     const cached = byBase.get(baseName);
     if (cached) return cached;
-    const base = (this.mats as unknown as Record<string, THREE.MeshStandardMaterial | undefined>)[baseName];
+    const source = classSet ?? this.mats;
+    const base = (source as unknown as Record<string, THREE.MeshStandardMaterial | undefined>)[baseName];
     if (!base) return null;
     const panel = base.clone();
     panel.map = makeSkinTexture(rarity, WeaponModelFactory.SKIN_TINTS[rarity]);
@@ -150,7 +236,8 @@ export class WeaponModelFactory {
 
   private buildUnique(weaponId: WeaponId, rarity: Rarity): WeaponModel | null {
     if (!(weaponId in LENGTHS)) return null;
-    const gun = buildProceduralWeapon(weaponId, this.mats);
+    const finish = this.finishMats(weaponId);
+    const gun = buildProceduralWeapon(weaponId, finish);
     const group = gun.group;
     const length = LENGTHS[weaponId];
     const rank = RARITY_RANK[rarity];
@@ -204,7 +291,7 @@ export class WeaponModelFactory {
         const mat = mesh.material as THREE.MeshStandardMaterial;
         if (Array.isArray(mat) || !mat?.name) return;
         if (mat.name !== 'aluminum' && mat.name !== 'polymer') return;
-        const panel = this.skinPanel(mat.name, rarity);
+        const panel = this.skinPanel(mat.name, rarity, finish);
         if (panel) mesh.material = panel;
       });
     }

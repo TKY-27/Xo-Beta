@@ -22,6 +22,8 @@ export interface GunMaterials {
   rubber: THREE.MeshStandardMaterial;
   /** Bright steel: pins, small hardware. */
   hardware: THREE.MeshStandardMaterial;
+  /** Ivory-white sight post insert: the ADS aiming reference. */
+  postIvory: THREE.MeshStandardMaterial;
 }
 
 /**
@@ -216,23 +218,33 @@ export function makeGunMaterials(): GunMaterials {
   // range, plus shared PBR detail maps (brush grain, grip stipple).
   const rough = getBrushedRoughness();
   const stipple = getStippleBump();
-  const steel = new THREE.MeshStandardMaterial({ color: 0x495057, roughness: 0.34, metalness: 0.9 });
+  // Metalness stays moderate: full-metal values turn the weapon into a black
+  // silhouette under the stage sun (metals have no diffuse term and the
+  // weapon-sized IBL contribution is weak). These still read as machined
+  // metal through the roughness grain and specular, with form shadows
+  // modelling the shapes.
+  const steel = new THREE.MeshStandardMaterial({ color: 0x575e66, roughness: 0.34, metalness: 0.55 });
   steel.roughnessMap = rough;
+  steel.envMapIntensity = 1.1;
   steel.name = 'steel';
-  const aluminum = new THREE.MeshStandardMaterial({ color: 0x575e66, roughness: 0.52, metalness: 0.78 });
+  const aluminum = new THREE.MeshStandardMaterial({ color: 0x626a73, roughness: 0.52, metalness: 0.45 });
   aluminum.roughnessMap = rough;
+  aluminum.envMapIntensity = 1.1;
   aluminum.name = 'aluminum';
-  const polymer = new THREE.MeshStandardMaterial({ color: 0x3d4147, roughness: 0.8, metalness: 0.06 });
-  polymer.normalMap = stipple;
-  polymer.normalScale.set(0.35, 0.35);
+  const polymer = new THREE.MeshStandardMaterial({ color: 0x3f444b, roughness: 0.8, metalness: 0.06 });
+  polymer.bumpMap = stipple;
+  polymer.bumpScale = 0.00018;
   polymer.name = 'polymer';
-  const rubber = new THREE.MeshStandardMaterial({ color: 0x2a2d31, roughness: 0.94, metalness: 0.02 });
-  rubber.normalMap = stipple;
-  rubber.normalScale.set(0.5, 0.5);
+  const rubber = new THREE.MeshStandardMaterial({ color: 0x2e3237, roughness: 0.94, metalness: 0.02 });
+  rubber.bumpMap = stipple;
+  rubber.bumpScale = 0.00025;
   rubber.name = 'rubber';
-  const hardware = new THREE.MeshStandardMaterial({ color: 0x666d75, roughness: 0.3, metalness: 0.92 });
+  const hardware = new THREE.MeshStandardMaterial({ color: 0x71787f, roughness: 0.3, metalness: 0.6 });
+  hardware.envMapIntensity = 1.15;
   hardware.name = 'hardware';
-  return { steel, aluminum, polymer, rubber, hardware };
+  const postIvory = new THREE.MeshStandardMaterial({ color: 0xd8d4c4, roughness: 0.55, metalness: 0.05, emissive: 0x55503f, emissiveIntensity: 0.35 });
+  postIvory.name = 'postIvory';
+  return { steel, aluminum, polymer, rubber, hardware, postIvory };
 }
 
 /** Shared helper: chamfered box at a pose. */
@@ -281,6 +293,20 @@ function ring(parent: THREE.Object3D, mat: THREE.Material, radius: number, tube:
   return mesh;
 }
 
+/** Muzzle bore: a recessed dark face + crown ring so the barrel end reads as
+ * a drilled hole instead of a capped cylinder disc (the capped disc reads as
+ * a black ball whenever a reload pitches the bore toward the camera). */
+function muzzleBore(parent: THREE.Object3D, mats: GunMaterials, y: number, z: number, radius: number): void {
+  const bore = new THREE.Mesh(
+    new THREE.CircleGeometry(radius * 0.72, 16),
+    new THREE.MeshStandardMaterial({ color: 0x0a0b0d, roughness: 0.96, metalness: 0.1 }),
+  );
+  bore.rotation.y = Math.PI;
+  bore.position.set(0, y, z - 0.001);
+  parent.add(bore);
+  ring(parent, mats.steel, radius, radius * 0.22, 0, y, z + 0.002);
+}
+
 /** Vent slots cut visually into a handguard (dark inset boxes, both sides). */
 function handguardVents(parent: THREE.Object3D, mat: THREE.Material, zFrom: number, zTo: number, y: number, halfWidth: number): void {
   const count = Math.max(3, Math.round((zFrom - zTo) / 0.028));
@@ -292,7 +318,38 @@ function handguardVents(parent: THREE.Object3D, mat: THREE.Material, zFrom: numb
   }
 }
 
-/** Picatinny rail ridge running along the top of a part. */
+function openHandguard(parent: THREE.Object3D, mat: THREE.Material): void {
+  const side = new THREE.Shape();
+  side.moveTo(-0.64, -0.02);
+  side.lineTo(-0.34, -0.02);
+  side.lineTo(-0.34, 0.022);
+  side.lineTo(-0.64, 0.022);
+  side.closePath();
+  for (let i = 0; i < 7; i++) {
+    const z = -0.622 + i * 0.038;
+    const hole = new THREE.Path();
+    hole.moveTo(z, -0.008);
+    hole.lineTo(z, 0.008);
+    hole.lineTo(z + 0.025, 0.008);
+    hole.lineTo(z + 0.025, -0.008);
+    hole.closePath();
+    side.holes.push(hole);
+  }
+  const wall = new THREE.ExtrudeGeometry(side, {
+    depth: 0.003, bevelEnabled: true, bevelSize: 0.0006,
+    bevelThickness: 0.0006, bevelSegments: 1, steps: 1,
+  });
+  wall.rotateY(-Math.PI / 2);
+  for (const x of [-0.021, 0.024]) {
+    const mesh = new THREE.Mesh(wall, mat);
+    mesh.name = 'open-handguard-wall';
+    mesh.position.set(x, 0.026, 0);
+    parent.add(mesh);
+  }
+  box(parent, mat, 0.044, 0.004, 0.3, 0, 0.05, -0.49, 0.001);
+  box(parent, mat, 0.044, 0.004, 0.3, 0, 0.002, -0.49, 0.001);
+}
+
 function topRail(parent: THREE.Object3D, mat: THREE.Material, zFrom: number, zTo: number, y: number): void {
   const length = zFrom - zTo;
   box(parent, mat, 0.018, 0.007, length, 0, y, (zFrom + zTo) / 2, 0.0015);
@@ -331,19 +388,26 @@ function triggerGroup(parent: THREE.Object3D, mats: GunMaterials, y: number, z: 
   blade.rotation.x = 0.18;
 }
 
-/** Front (post) and rear (notch/ring) iron sights. */
+/** Front (post) and rear (notch/ring) iron sights. The post carries a bright
+ * insert and the rear notch is a wide two-ear aperture: at ADS the sight
+ * picture must read as post-through-notch against the aim point. */
 function ironSights(parent: THREE.Object3D, mats: GunMaterials, yTop: number, zFront: number, zRear: number): void {
   const front = new THREE.Group();
   front.position.set(0, yTop, zFront);
-  box(front, mats.aluminum, 0.012, 0.02, 0.008, 0, 0.008, 0, 0.002);
-  box(front, mats.hardware, 0.003, 0.014, 0.003, 0, 0.022, 0, 0.0008);
+  box(front, mats.aluminum, 0.012, 0.024, 0.008, 0, 0.01, 0, 0.002);
+  box(front, mats.hardware, 0.003, 0.016, 0.003, 0, 0.026, 0, 0.0008);
+  // Bright post tip: the aiming reference the eye locks onto at ADS.
+  box(front, mats.postIvory, 0.0035, 0.005, 0.0035, 0, 0.036, 0, 0.0008);
   parent.add(front);
   const rear = new THREE.Group();
   rear.position.set(0, yTop, zRear);
-  // CYCLE 34 (review): pedestal reaching down to the receiver deck — the
-  // bare base used to hover ~20 mm above it, reading as a black tower.
-  box(rear, mats.aluminum, 0.024, 0.024, 0.012, 0, 0.0, 0, 0.002);
-  box(rear, mats.polymer, 0.008, 0.012, 0.006, 0, 0.021, 0, 0.001);
+  // Pedestal reaching down to the receiver deck, topped by a tall two-ear
+  // aperture: the ears rise well clear of the deck so the notch frames the
+  // front tip instead of the receiver mass.
+  box(rear, mats.aluminum, 0.026, 0.02, 0.012, 0, -0.004, 0, 0.002);
+  for (const ear of [-1, 1]) {
+    box(rear, mats.polymer, 0.007, 0.02, 0.007, ear * 0.0095, 0.024, 0, 0.001);
+  }
   parent.add(rear);
 }
 
@@ -357,26 +421,37 @@ function chargingDetail(parent: THREE.Object3D, mats: GunMaterials, x: number, y
   return handle;
 }
 
-/** Curved-look magazine: stacked slight-angle segments descending from a well. */
 function boxMagazine(parent: THREE.Object3D, mats: GunMaterials, x: number, yTop: number, z: number, w: number, frontAngle: number, length = 0.16): { group: THREE.Group; tip: number } {
   const mag = new THREE.Group();
   mag.position.set(x, yTop, z);
-  const segments = 3;
-  const segLen = length / segments;
-  let angle = 0;
-  for (let i = 0; i < segments; i++) {
-    angle += frontAngle / segments;
-    const seg = box(
-      mag,
-      i === 0 ? mats.aluminum : mats.polymer,
-      w, segLen + 0.004, 0.052,
-      0, -(segLen * (i + 0.5)), Math.sin(angle) * segLen * (i + 0.5) * -0.5,
-      0.006,
-    );
-    seg.rotation.x = angle * (i + 1) * 0.35;
+  const bend = Math.sin(frontAngle) * length * -0.35;
+  const profile = new THREE.Shape();
+  profile.moveTo(-0.024, 0);
+  profile.lineTo(0.024, 0);
+  profile.bezierCurveTo(0.025, -length * 0.35, 0.025 + bend * 0.4, -length * 0.7, 0.025 + bend, -length);
+  profile.lineTo(-0.025 + bend, -length);
+  profile.bezierCurveTo(-0.025 + bend * 0.4, -length * 0.7, -0.025, -length * 0.35, -0.024, 0);
+  const geometry = new THREE.ExtrudeGeometry(profile, {
+    depth: w - 0.004, bevelEnabled: true, bevelSegments: 2,
+    steps: 1, bevelSize: 0.002, bevelThickness: 0.002, curveSegments: 12,
+  });
+  geometry.translate(0, 0, -(w - 0.004) / 2);
+  geometry.rotateY(-Math.PI / 2);
+  const body = new THREE.Mesh(geometry, mats.polymer);
+  body.name = 'magazine-body';
+  mag.add(body);
+  box(mag, mats.rubber, w + 0.004, 0.008, 0.058, 0, -length - 0.003, bend, 0.003);
+  for (const side of [-1, 1]) {
+    for (const zOffset of [-0.012, 0.012]) {
+      const points: THREE.Vector3[] = [];
+      for (let i = 0; i <= 8; i++) {
+        const t = 0.15 + i / 8 * 0.72;
+        points.push(new THREE.Vector3(side * (w / 2 + 0.0005), -length * t, zOffset + bend * t * t));
+      }
+      const rib = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 10, 0.0011, 4, false), mats.aluminum);
+      mag.add(rib);
+    }
   }
-  // Baseplate
-  box(mag, mats.rubber, w + 0.004, 0.012, 0.058, 0, -length - 0.004, Math.sin(frontAngle) * length * -0.35, 0.004);
   parent.add(mag);
   return { group: mag, tip: yTop - length - 0.012 };
 }
@@ -421,17 +496,20 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
   }
   ring(g, mats.steel, 0.0165, 0.004, 0, 0.024, -0.655);
   // Handguard with vents + top rail
-  box(g, mats.aluminum, 0.048, 0.052, 0.3, 0, 0.026, -0.49, 0.008);
-  handguardVents(g, mats.polymer, -0.37, -0.62, 0.026, 0.025);
+  openHandguard(g, mats.aluminum);
   topRail(g, mats.aluminum, -0.34, -0.64, 0.055);
   topRail(g, mats.aluminum, -0.06, -0.35, 0.055);
   // Front sight block on the handguard
   box(g, mats.steel, 0.016, 0.036, 0.018, 0, 0.04, -0.63, 0.003);
-  // Stock: buffer tube + adjustable shoulder stock
+  // Stock: buffer tube into a commercial-profile shoulder stock — sloped
+  // comb, hollow cheek, angled butt with rubber pad (not a straight slab).
   cyl(g, mats.aluminum, 0.016, 0.016, 0.14, 0, 0.02, -0.008, 12);
-  box(g, mats.polymer, 0.036, 0.05, 0.11, 0, 0.016, 0.09, 0.009);
-  box(g, mats.rubber, 0.036, 0.06, 0.018, 0, 0.008, 0.15, 0.006);
-  box(g, mats.polymer, 0.02, 0.03, 0.06, 0, -0.024, 0.055, 0.005);
+  const stockBody = box(g, mats.polymer, 0.038, 0.056, 0.1, 0, 0.006, 0.085, 0.009);
+  stockBody.rotation.x = 0.1;
+  box(g, mats.polymer, 0.034, 0.02, 0.09, 0, 0.036, 0.075, 0.006);
+  box(g, mats.rubber, 0.04, 0.075, 0.02, 0, 0.002, 0.138, 0.007);
+  box(g, mats.polymer, 0.024, 0.026, 0.05, 0, -0.028, 0.05, 0.005);
+  muzzleBore(g, mats, 0.024, -0.71, 0.009);
   // Pistol grip + trigger
   pistolGrip(g, mats, 0, 0.004, -0.115);
   triggerGroup(g, mats, 0.008, -0.15);
@@ -455,7 +533,7 @@ function buildAr(mats: GunMaterials): ProceduralWeapon {
     // gripL just under the handguard bottom for the palm-up under carry.
     // AR grip: top (0, 0.004, -0.115) raked -0.32, centre ≈ (0, -0.045, -0.099).
     gripR: new THREE.Vector3(0.02, -0.052, -0.096),
-    gripL: new THREE.Vector3(0, -0.006, -0.44),
+    gripL: new THREE.Vector3(-0.024, 0.004, -0.44),
   };
 }
 
@@ -467,17 +545,22 @@ function buildPistol(mats: GunMaterials): ProceduralWeapon {
   pistolGrip(g, mats, 0, -0.01, -0.045);
   triggerGroup(g, mats, 0.0, -0.075);
   // Slide: steel with serrations + ejection port
-  const slide = box(g, mats.steel, 0.032, 0.03, 0.21, 0, 0.033, -0.13, 0.005);
+  const slide = new THREE.Group();
+  slide.position.set(0, 0.033, -0.13);
   slide.name = 'bolt';
+  g.add(slide);
+  box(slide, mats.steel, 0.032, 0.03, 0.21, 0, 0, 0, 0.005);
   for (let i = 0; i < 6; i++) {
-    box(g, mats.steel, 0.034, 0.026, 0.003, 0, 0.033, -0.045 - i * 0.009, 0.0008);
+    box(slide, mats.steel, 0.034, 0.026, 0.003, 0, 0, 0.085 - i * 0.009, 0.0008);
   }
-  box(g, mats.polymer, 0.034, 0.012, 0.045, 0, 0.033, -0.175, 0.002);
+  box(slide, mats.polymer, 0.034, 0.012, 0.045, 0, 0, -0.045, 0.002);
   // Barrel visible at the muzzle + guide rod
   cyl(g, mats.steel, 0.009, 0.009, 0.014, 0, 0.031, -0.238, 14);
   cyl(g, mats.hardware, 0.005, 0.005, 0.012, 0, 0.006, -0.166, 10);
+  muzzleBore(g, mats, 0.031, -0.246, 0.006);
   // Magazine inside the grip (baseplate visible)
-  const mag = boxMagazine(g, mats, 0, -0.075, -0.045, 0.028, 0.12, 0.09);
+  const mag = boxMagazine(g, mats, 0, -0.025, -0.041, 0.026, 0, 0.105);
+  mag.group.rotation.x = -0.32;
   mag.group.name = 'mag';
   // Sights
   ironSights(g, mats, 0.048, -0.225, -0.035);
@@ -516,8 +599,9 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
   }
   pistolGrip(g, mats, 0, 0.0, -0.1);
   triggerGroup(g, mats, 0.006, -0.13);
+  muzzleBore(g, mats, 0.026, -0.525, 0.012);
   // Long straight mag
-  const mag = boxMagazine(g, mats, 0, -0.026, -0.19, 0.032, 0.16, 0.15);
+  const mag = boxMagazine(g, mats, 0, -0.026, -0.19, 0.032, 0, 0.15);
   mag.group.name = 'mag';
   const bolt = chargingDetail(g, mats, 0.026, 0.04, -0.085);
   bolt.name = 'bolt';
@@ -534,7 +618,23 @@ function buildSmg(mats: GunMaterials): ProceduralWeapon {
 /** Shotgun anatomy (canonical 1.0 m): tube magazine, pump, bead sight. */
 function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   const g = new THREE.Group();
-  receiver(g, mats, 0.044, 0.056, -0.36, -0.1, 0.046);
+  box(g, mats.aluminum, 0.044, 0.032, 0.26, 0, 0.034, -0.23, 0.005);
+  for (const x of [-0.018, 0.018]) box(g, mats.aluminum, 0.008, 0.026, 0.26, x, 0.006, -0.23, 0.002);
+  box(g, mats.steel, 0.028, 0.006, 0.082, 0, -0.005, -0.31, 0.001);
+  box(g, mats.aluminum, 0.03, 0.02, 0.056, 0, 0.001, -0.128, 0.003);
+  const loadingPort = new THREE.Object3D();
+  loadingPort.name = 'loading-port';
+  loadingPort.position.set(0, -0.012, -0.226);
+  g.add(loadingPort);
+  const shell = new THREE.Group();
+  shell.name = 'reload-shell';
+  const hull = new THREE.MeshStandardMaterial({ color: 0x8f3028, roughness: 0.52, metalness: 0.08 });
+  const brass = new THREE.MeshStandardMaterial({ color: 0xb39048, roughness: 0.3, metalness: 0.82 });
+  cyl(shell, hull, 0.009, 0.009, 0.052, 0, 0, -0.006, 16);
+  cyl(shell, brass, 0.0095, 0.0095, 0.012, 0, 0, 0.026, 16);
+  ring(shell, brass, 0.0092, 0.001, 0, 0, 0.032);
+  shell.visible = false;
+  g.add(shell);
   // Barrel + underbarrel tube magazine
   cyl(g, mats.steel, 0.011, 0.012, 0.56, 0, 0.03, -0.64, 14);
   cyl(g, mats.aluminum, 0.013, 0.013, 0.46, 0, 0.002, -0.58, 12);
@@ -553,6 +653,7 @@ function buildShotgun(mats: GunMaterials): ProceduralWeapon {
   box(g, mats.steel, 0.014, 0.03, 0.02, 0, 0.016, -0.72, 0.003);
   // Bead sight
   box(g, mats.hardware, 0.004, 0.006, 0.004, 0, 0.043, -0.88, 0.001);
+  muzzleBore(g, mats, 0.03, -0.925, 0.011);
   // Stock with wrist + butt pad
   box(g, mats.polymer, 0.034, 0.05, 0.08, 0, 0.014, -0.06, 0.007);
   const stock = new THREE.Group();
@@ -629,7 +730,16 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
   lens.rotation.y = Math.PI;
   lens.position.set(0, 0, -0.206);
   scope.add(lens);
+  // Eyepiece glass facing the shooter: dark coating with a cool reflective
+  // sheen — the empty tube mouth otherwise reads as a toy.
+  const eyepiece = new THREE.Mesh(
+    new THREE.CircleGeometry(0.016, 16),
+    new THREE.MeshStandardMaterial({ color: 0x0c1622, emissive: 0x1d3d5e, emissiveIntensity: 0.35, roughness: 0.12, metalness: 0.5 }),
+  );
+  eyepiece.position.set(0, 0, 0.186);
+  scope.add(eyepiece);
   g.add(scope);
+  muzzleBore(g, mats, 0.026, -1.255, 0.014);
   // Box magazine
   const mag = boxMagazine(g, mats, 0, -0.022, -0.2, 0.036, 0.1, 0.1);
   mag.group.name = 'mag';
@@ -643,7 +753,7 @@ function buildSniper(mats: GunMaterials): ProceduralWeapon {
     // Grip top (0, 0.002, -0.085) raked -0.32; gripL under the chassis
     // fore-end (spans y -0.005..0.045, z -0.41..-0.75).
     gripR: new THREE.Vector3(0.02, -0.048, -0.058),
-    gripL: new THREE.Vector3(0, -0.008, -0.52),
+    gripL: new THREE.Vector3(-0.027, 0.004, -0.52),
   };
 }
 

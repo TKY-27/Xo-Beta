@@ -1127,13 +1127,15 @@ async function prepareOnlineGuestRuntime(
 
     const viewmodel = new ViewModel(weaponFactory);
     viewmodel.group.visible = rig.mode === 'fps';
-    renderer.scene.add(viewmodel.group);
-    // Scene-root resident so hiding the viewmodel never changes the light
-    // count (NUM_POINT_LIGHTS) — see ViewModel.muzzleFlashLight.
-    renderer.scene.add(viewmodel.muzzleFlashLight);
+    // The viewmodel renders in the dedicated first-person stage (own camera
+    // + light rig composed over the world pass), not the world scene.
+    renderer.viewmodelStage.scene.add(viewmodel.group);
+    // Stage-resident so hiding the viewmodel never changes that scene's
+    // light count — see ViewModel.muzzleFlashLight.
+    renderer.viewmodelStage.scene.add(viewmodel.muzzleFlashLight);
     registerStartCleanup(generation, () => {
-      renderer.scene.remove(viewmodel.group);
-      renderer.scene.remove(viewmodel.muzzleFlashLight);
+      renderer.viewmodelStage.scene.remove(viewmodel.group);
+      renderer.viewmodelStage.scene.remove(viewmodel.muzzleFlashLight);
       viewmodel.dispose();
     });
     viewmodel.setWeapon(null, 'common');
@@ -1288,6 +1290,10 @@ async function prepareOnlineGuestRuntime(
       for (const character of rigs.values()) character.group.visible = true;
       viewmodel.group.visible = true;
       await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+      // The stage scene has its own light count → its own program variants.
+      // Compile and render it here so the first live frame never stalls.
+      await renderer.renderer.compileAsync(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
+      renderer.renderer.render(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
       ensureCurrentStart(generation);
       renderer.renderer.render(renderer.scene, rig.camera);
       const aerial = await renderer.captureAerial(input.map.size / 2, 1024, [
@@ -1857,12 +1863,13 @@ async function startMatchImpl(
   // Viewmodel
   const viewmodel = new ViewModel(weaponFactory);
   viewmodel.group.visible = rig.mode === 'fps';
-  renderer.scene.add(viewmodel.group);
-  // Scene-root resident: hiding the group must not change NUM_POINT_LIGHTS.
-  renderer.scene.add(viewmodel.muzzleFlashLight);
+  // Dedicated first-person stage (own camera + light rig) — see ViewModelStage.
+  renderer.viewmodelStage.scene.add(viewmodel.group);
+  // Stage-resident: hiding the group must not change that scene's light count.
+  renderer.viewmodelStage.scene.add(viewmodel.muzzleFlashLight);
   registerStartCleanup(generation, () => {
-    renderer.scene.remove(viewmodel.group);
-    renderer.scene.remove(viewmodel.muzzleFlashLight);
+    renderer.viewmodelStage.scene.remove(viewmodel.group);
+    renderer.viewmodelStage.scene.remove(viewmodel.muzzleFlashLight);
     viewmodel.dispose();
   });
   {
@@ -2000,6 +2007,9 @@ async function startMatchImpl(
     // Restore and compile the normal opaque gameplay variants last.
     await renderer.renderer.compileAsync(renderer.scene, rig.camera);
     ensureCurrentStart(generation);
+    // Warm the viewmodel stage program variants alongside (own light count).
+    await renderer.renderer.compileAsync(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
+    renderer.renderer.render(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
     // Warm the shadow/depth program variants too — compileAsync only covers
     // the main pass, and the first shadow render of a skinned rig otherwise
     // stalls ~50 ms on the first FP→TPS flip.
@@ -2262,7 +2272,7 @@ function teardownMatch(disposeOnline = true): void {
     const qaWindow = window as unknown as Record<string, unknown>;
     for (const key of [
       '__xoRigs', '__xoAerial', '__xoState', '__xoTeleport', '__xoStress',
-      '__xoGive', '__xoQaInput', '__xoStorm', '__xoWaterQaView', '__xoReplicaState',
+      '__xoGive', '__xoQaInput', '__xoStorm', '__xoWaterQaView', '__xoReplicaState', '__xoViewmodel',
     ]) delete qaWindow[key];
     delete document.documentElement.dataset.xoQaTeleportRequest;
     delete document.documentElement.dataset.xoQaTeleportResult;
@@ -2389,11 +2399,32 @@ function wirePresentation(
   };
 
   const HEAVY_FLASH: Partial<Record<WeaponId, boolean>> = { shotgun: true, sniper: true };
+  const flashMuzzle = new THREE.Vector3();
+  const flashFwd = new THREE.Vector3();
+  const flashRight = new THREE.Vector3();
   match.events.on('muzzleFlash', (e) => {
     const isPlayer = e.actorId === match.localActor?.id;
     if (isPlayer && rig.mode === 'fps') {
       viewmodel.kick(weaponViewmodelKick(e.weaponId));
       viewmodel.muzzlePulse(isPlayer ? 0.8 : 1.15);
+      // First-person feedback at the viewmodel muzzle: flash sprite, smoke
+      // puffs and shell ejecta — the world-space effects the player actually
+      // sees (the character-rig muzzle sits behind the camera in FPS).
+      viewmodel.muzzleView(flashMuzzle).applyMatrix4(rig.camera.matrixWorld);
+      flashFwd.set(0, 0, -1).applyQuaternion(rig.camera.quaternion);
+      flashRight.set(1, 0, 0).applyQuaternion(rig.camera.quaternion);
+      // The flash itself is drawn INSIDE the stage at the muzzle (muzzlePulse
+      // above) — a world-space sprite this close to the eye renders huge and
+      // off the vm barrel (world FOV differs from the stage's). Only the
+      // world-space smoke and shell keep the world position.
+      vfx.muzzleSmoke(flashMuzzle.x, flashMuzzle.y, flashMuzzle.z, flashFwd.x, flashFwd.y, flashFwd.z);
+      vfx.shellCasing(
+        flashMuzzle.x - flashFwd.x * 0.28 + flashRight.x * 0.1,
+        flashMuzzle.y - 0.12,
+        flashMuzzle.z - flashFwd.z * 0.28 + flashRight.z * 0.1,
+        flashRight.x * 2.4 + 0.6,
+        flashRight.z * 2.4,
+      );
     } else {
       const renderedMuzzle = rigs.get(e.actorId)?.muzzleWorld?.(
         presentationMuzzle,
@@ -2411,7 +2442,10 @@ function wirePresentation(
       );
     }
   });
-  match.events.on('tracer', (e) => vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color, e.weaponId));
+  match.events.on('tracer', (e) => {
+    const eye = rig.camera.position;
+    vfx.spawnTracer(e.x1, e.y1, e.z1, e.x2, e.y2, e.z2, e.color, e.weaponId, eye);
+  });
   match.events.on('impact', (e) => vfx.impactSparks(e.x, e.y, e.z, e.nx, e.ny, e.nz, e.material === 'metal' ? 10 : 6));
   match.events.on('impact', (e) => decals.spawn(
     e.x, e.y, e.z, e.nx, e.ny, e.nz, e.material,
@@ -3083,6 +3117,25 @@ function present(dtReal: number): void {
   presentMatch(live, dtReal);
 }
 
+const _vmRight = new THREE.Vector3();
+const _vmFwd = new THREE.Vector3();
+/** World velocity → view-space components for the viewmodel's motion
+ * inertia (side = camera-right axis, fwd = camera-forward axis). */
+function viewmodelMotion(
+  velocity: { x: number; y: number; z: number },
+  grounded: boolean,
+  quaternion: THREE.Quaternion,
+): { sideVel: number; fwdVel: number; vertVel: number; grounded: boolean } {
+  _vmRight.set(1, 0, 0).applyQuaternion(quaternion);
+  _vmFwd.set(0, 0, -1).applyQuaternion(quaternion);
+  return {
+    sideVel: velocity.x * _vmRight.x + velocity.z * _vmRight.z,
+    fwdVel: velocity.x * _vmFwd.x + velocity.z * _vmFwd.z,
+    vertVel: velocity.y,
+    grounded,
+  };
+}
+
 function presentMatch(game: MatchLiveGame, dtReal: number): void {
   const { match: m, renderer, world, vfx, decals, rig, viewmodel, rigs, player, characterFill } = game;
 
@@ -3691,6 +3744,10 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
     };
     // QA helper: grant + equip a weapon by id ('pistol'|'smg'|'ar'|
     // 'shotgun'|'sniper', optional rarity). Dev/QA builds only.
+    (window as unknown as Record<string, unknown>).__xoViewmodel = () => {
+      const vm = live?.kind === 'match' ? live.viewmodel : null;
+      return vm ? vm.debugPose() : null;
+    };
     (window as unknown as Record<string, unknown>).__xoGive = (weaponId: string, rarity?: string) => {
       const p = m.localActor;
       if (!p || !p.alive) return false;
@@ -3888,9 +3945,12 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   // Viewmodel (hidden while riding the transport — the unified transport
   // camera frames the drop rig instead of a weapon; hidden at full sniper
   // scope where the scope overlay replaces the world view).
+  renderer.viewmodelStage.syncLighting(rig.camera.quaternion, renderer.lightingSnapshot());
   if (m.localActor?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(m.localActor.body.velocity.x, m.localActor.body.velocity.z);
     viewmodel.syncCamera(rig.camera);
+    viewmodel.setMotionState(viewmodelMotion(m.localActor.body.velocity, m.localActor.body.grounded, rig.camera.quaternion));
+    hud.setCrosshairFade(m.localActor.wpn.adsAmount);
     viewmodel.update(m.localActor, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
     viewmodel.group.visible = true;
   } else {
@@ -4103,9 +4163,12 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
     );
   } else if (local) vfx.hideGrappleRope(local.id);
 
+  renderer.viewmodelStage.syncLighting(rig.camera.quaternion, renderer.lightingSnapshot());
   if (local?.alive && rig.mode === 'fps' && !inTransport && !rig.scoped) {
     const speed = Math.hypot(local.velocity.x, local.velocity.z);
     viewmodel.syncCamera(rig.camera);
+    viewmodel.setMotionState(viewmodelMotion(local.velocity, local.grounded, rig.camera.quaternion));
+    hud.setCrosshairFade(view.localMovement?.actorId === local.id ? view.localMovement.adsAmount : 0);
     viewmodel.updateView(
       local,
       dtReal,

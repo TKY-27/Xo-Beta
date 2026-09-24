@@ -10,7 +10,7 @@
 import { Rng } from '../../core/rng';
 import { WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
-import { addBuilding, hardenExposedFlanks, scatterRocks, structureBaseY } from './common';
+import { addBuilding, addDrumCluster, addGroundDecay, addMarketStall, dressingSpotClear, hardenExposedFlanks, scatterRocks, structureBaseY } from './common';
 
 const S = 500;
 
@@ -82,6 +82,8 @@ export function buildAsharaReach(): MapDef {
 
   roadsideInfrastructure(b, rng);
   desertScatter(b, rng);
+  desertDensity(b, rng);
+  groundDecay(b);
 
   hardenExposedFlanks(b, { mat: 'concreteDark', maxProps: 20 });
 
@@ -424,6 +426,7 @@ function compoundWall(
   d: number,
   y: number,
   mat: MatKey,
+  opts?: { fullBreakup?: boolean },
 ): void {
   // The construction pad is levelled to the footprint's high point. Extend
   // the perimeter below that pad so rolling terrain cannot expose a metre-wide
@@ -445,10 +448,131 @@ function compoundWall(
   const foundationDepth = Math.max(1.35, y - lowestPerimeter + 0.35);
   const wallHeight = 3.2 + foundationDepth;
   const wallBase = y - foundationDepth;
-  b.wallWithGaps(cx - w / 2, cz - d / 2, w, wallHeight, 0.55, 'x', mat, [[w / 2 - 2, 4]], 0, wallBase);
+  const frontGaps: Array<[number, number]> = [[w / 2 - 2, 4]];
+  const eastGaps: Array<[number, number]> = [[d / 2 - 1.5, 3]];
+  b.wallWithGaps(cx - w / 2, cz - d / 2, w, wallHeight, 0.55, 'x', mat, frontGaps, 0, wallBase);
   b.wallWithGaps(cx - w / 2, cz + d / 2, w, wallHeight, 0.55, 'x', mat, [], 0, wallBase);
   b.wallWithGaps(cx - w / 2, cz - d / 2, d, wallHeight, 0.55, 'z', mat, [], 0, wallBase);
-  b.wallWithGaps(cx + w / 2, cz - d / 2, d, wallHeight, 0.55, 'z', mat, [[d / 2 - 1.5, 3]], 0, wallBase);
+  b.wallWithGaps(cx + w / 2, cz - d / 2, d, wallHeight, 0.55, 'z', mat, eastGaps, 0, wallBase);
+  compoundWallBreakup(b, cx, cz, w, d, y, wallHeight, frontGaps, eastGaps, opts?.fullBreakup === true);
+}
+
+/**
+ * Perimeter-wall breakup (connective-tissue pass): the compound runs used to
+ * be single unbroken mudbrick/brick slabs at combat range. Every wall now
+ * carries a proud stone coping, a mid-course joint line and a darker base
+ * course — split around the gate gaps so the openings stay visually and
+ * physically clear. Compounds flagged `fullBreakup` (the QA-flagged Kestrel
+ * Compound) additionally get large plaster-repair inset panels with proud
+ * stone reveals and thin dirt-rain streaks. All pieces are noCollide dressing
+ * that wraps the wall body, so the wall collider and sightlines are unchanged.
+ * Trim uses stoneBrick because the ashara daylight substitution re-tints
+ * concreteDark to light concrete at render time.
+ */
+function compoundWallBreakup(
+  b: WorldBuilder,
+  cx: number,
+  cz: number,
+  w: number,
+  d: number,
+  y: number,
+  wallHeight: number,
+  frontGaps: Array<[number, number]>,
+  eastGaps: Array<[number, number]>,
+  full: boolean,
+): void {
+  const trim: MatKey = 'stoneBrick';
+  const stain: MatKey = 'dirt';
+  const opts = { noCollide: true, castShadow: false } as const;
+  const wallTop = y + 3.2;
+  const segsAroundGaps = (len: number, gaps: Array<[number, number]>): Array<[number, number]> => {
+    const segs: Array<[number, number]> = [];
+    let cursor = 0;
+    for (const [off, wid] of [...gaps].sort((m, n) => m[0] - n[0])) {
+      const lo = Math.max(0, off - 0.3);
+      const hi = Math.min(len, off + wid + 0.3);
+      if (lo > cursor + 0.3) segs.push([cursor, lo]);
+      cursor = Math.max(cursor, hi);
+    }
+    if (len > cursor + 0.3) segs.push([cursor, len]);
+    return segs;
+  };
+  /** Proud course wrapping one wall run: `seg` spans along the wall axis. */
+  const course = (
+    alongX: boolean, fixed: number, seg: [number, number],
+    yCenter: number, sy: number, thickness: number, courseMat: MatKey,
+  ): void => {
+    const mid = (seg[0] + seg[1]) / 2;
+    const len = seg[1] - seg[0];
+    if (alongX) b.box(cx - w / 2 + mid, yCenter, fixed, len, sy, thickness, courseMat, 0, opts);
+    else b.box(fixed, yCenter, cz - d / 2 + mid, thickness, sy, len, courseMat, 0, opts);
+  };
+  const walls: Array<{ alongX: boolean; fixed: number; len: number; gaps: Array<[number, number]> }> = [
+    { alongX: true, fixed: cz - d / 2, len: w, gaps: frontGaps },
+    { alongX: true, fixed: cz + d / 2, len: w, gaps: [] },
+    { alongX: false, fixed: cx - w / 2, len: d, gaps: [] },
+    { alongX: false, fixed: cx + w / 2, len: d, gaps: eastGaps },
+  ];
+  // Coping wraps every run everywhere. The joint line, base course and the
+  // panel/streak kit dress the flagged (Kestrel) compound's long elevations —
+  // the approaches QA frames actually see — so the triangle budget concentrates
+  // the breakup where the slab reading was worst. Every call site has w >= d,
+  // so the along-X runs are the long faces.
+  for (const wall of walls) {
+    // Coping tops alternate by run direction so pieces meeting at a corner
+    // never share a top plane (z-fighting guard): along-Z runs sit 1 cm
+    // lower, reading as a stepped stone course.
+    const copingTop = wallTop + (wall.alongX ? 0.09 : 0.08);
+    for (const seg of segsAroundGaps(wall.len, wall.gaps)) {
+      course(wall.alongX, wall.fixed, seg, copingTop, 0.22, 0.67, trim);       // coping
+      if (!full || !wall.alongX) continue;
+      course(wall.alongX, wall.fixed, seg, wallTop - 1.62, 0.14, 0.63, trim);   // mid-course joint
+      course(wall.alongX, wall.fixed, seg, y + 0.1, 1.9, 0.65, trim);           // base course
+    }
+  }
+  if (!full) return;
+
+  // Kestrel-level kit: plaster-repair panels (dark inset, stone header, and
+  // reveal jambs on the largest) and dirt rain-streaks on the long elevations,
+  // clear of both gates.
+  const panel = (alongX: boolean, fixed: number, along: number, yCenter: number, pw: number, ph: number, jambs: boolean): void => {
+    if (alongX) {
+      b.box(cx - w / 2 + along, yCenter, fixed, pw, ph, 0.7, stain, 0, opts);
+      if (jambs) {
+        for (const jx of [-pw / 2 - 0.14, pw / 2 + 0.14]) {
+          b.box(cx - w / 2 + along + jx, yCenter, fixed, 0.28, ph + 0.24, 0.72, trim, 0, opts);
+        }
+      }
+      b.box(cx - w / 2 + along, yCenter + ph / 2 + 0.13, fixed, pw + 0.56, 0.26, 0.72, trim, 0, opts);
+    } else {
+      b.box(fixed, yCenter, cz - d / 2 + along, 0.7, ph, pw, stain, 0, opts);
+      if (jambs) {
+        for (const jz of [-pw / 2 - 0.14, pw / 2 + 0.14]) {
+          b.box(fixed, yCenter, cz - d / 2 + along + jz, 0.72, ph + 0.24, 0.28, trim, 0, opts);
+        }
+      }
+      b.box(fixed, yCenter + ph / 2 + 0.13, cz - d / 2 + along, 0.72, 0.26, pw + 0.56, trim, 0, opts);
+    }
+  };
+  panel(true, cz - d / 2, w / 2 - 11, y + 1.55, 5.4, 2.1, true);
+  panel(true, cz + d / 2, w / 2 + 8, y + 1.5, 4.8, 1.9, false);
+  panel(false, cx - w / 2, d / 2 - 5, y + 1.55, 5.2, 2.0, false);
+  const streakHash = (i: number): number => ((Math.imul(i + 1, 0x9e3779b1) >>> 8) % 1000) / 1000;
+  const streak = (alongX: boolean, fixed: number, along: number, seed: number): void => {
+    const h = 2.2 + streakHash(seed) * 1.6;
+    const sw = 0.5 + streakHash(seed + 31) * 0.45;
+    if (alongX) {
+      b.box(cx - w / 2 + along, wallTop - h / 2 - 0.1, fixed + (fixed < cz ? -0.03 : 0.03), sw, h, 0.05, stain, 0, opts);
+    } else {
+      b.box(fixed + (fixed < cx ? -0.03 : 0.03), wallTop - h / 2 - 0.1, cz - d / 2 + along, 0.05, h, sw, stain, 0, opts);
+    }
+  };
+  streak(true, cz - d / 2, w / 2 - 18, 1);
+  streak(true, cz - d / 2, w / 2 - 6, 2);
+  streak(true, cz + d / 2, w / 2 - 15, 3);
+  streak(true, cz + d / 2, w / 2 + 14, 4);
+  streak(false, cx - w / 2, d / 2 - 14, 5);
+  streak(false, cx + w / 2, d / 2 + 9, 6);
 }
 
 function kestrelCompound(b: WorldBuilder, cx: number, cz: number): void {
@@ -456,7 +580,7 @@ function kestrelCompound(b: WorldBuilder, cx: number, cz: number): void {
   // 52 m wide, not 46: the main building's outer fire-escape flight hangs on
   // the west facade at cx-23.2, and the former wall line ran straight through
   // the flight, leaving its top ridge as the only descent surface.
-  compoundWall(b, cx, cz, 52, 42, y, 'mudbrick');
+  compoundWall(b, cx, cz, 52, 42, y, 'mudbrick', { fullBreakup: true });
   addBuilding(b, {
     x: cx - 10, z: cz - 6, baseY: y, w: 18, d: 16, floors: 2,
     wallMat: 'mudbrick', trimMat: 'metalDark', doors: [[0, 8, 2.6]], roofAccess: true, stairMat: 'mudbrick',
@@ -723,6 +847,176 @@ function roadsideInfrastructure(b: WorldBuilder, rng: Rng): void {
   ] as Array<[number, number, number, 'sedan' | 'van' | 'truck' | 'wrecked']>) {
     b.vehicle(x, z, terrainH(x, z) + 0.2, yaw, variant, variant === 'wrecked' ? 0x3c342d : 0x756148);
   }
+}
+
+/**
+ * W8 density pass: fabric-awning market stalls, rugs and pot clusters in the
+ * Sunwall lanes, sack and crate stores at the caravanserai, salvage piles
+ * under tarps at Dustline Works, plank crossings + rebar in the dry canals,
+ * tyre/drum stacks at the fuel court and supply crates + guyed radio masts
+ * at the checkpoints. Everything edges the lanes; placements are gated by
+ * dressingSpotClear so chests, doors and vehicles stay clear.
+ */
+function desertDensity(b: WorldBuilder, rng: Rng): void {
+  const clear = (x: number, z: number, hx: number, hz: number, yLow: number, yHigh: number): boolean =>
+    dressingSpotClear(b.def, x, z, hx, hz, yLow, yHigh, { crates: true, vehicles: true, margin: 0.3 });
+
+  // -- Sunwall Market: stalls, rugs, pot clusters ---------------------------
+  const stalls: Array<[number, number, number, MatKey]> = [
+    [-50, -37, 0.1, 'rust'], [-41, -36.4, -0.15, 'roofTile'],
+    [-25, -36, 0.2, 'bricksOld'], [-46, -12, Math.PI / 2, 'roofTile'],
+  ];
+  for (const [sx, sz, yaw, rug] of stalls) {
+    const gy = terrainH(sx, sz);
+    if (!clear(sx, sz, 2.4, 1.8, gy, gy + 2.8)) continue;
+    addMarketStall(b, { x: sx, z: sz, baseY: gy, yaw, rugMat: rug, awningMat: 'plasterOld', goods: true });
+    b.crate(sx + rng.range(-1.4, 1.4), gy + 0.1, sz + rng.range(2.2, 2.8), rng.range(0.65, 0.85));
+  }
+  const rugs: Array<[number, number, number, MatKey]> = [
+    [-36, -38, 0.2, 'bricksOld'], [-20.5, -34, -0.12, 'rust'], [-32.5, -9, 0.32, 'roofTile'],
+  ];
+  for (const [rx, rz, yaw, mat] of rugs) {
+    const gy = terrainH(rx, rz);
+    if (!clear(rx, rz, 1.4, 0.9, gy, gy + 0.1)) continue;
+    b.box(rx, gy + 0.05, rz, 2.6, 0.02, 1.6, mat, yaw, { noCollide: true, castShadow: false });
+  }
+  const pot = (x: number, z: number, r: number, h: number, mat: MatKey): void => {
+    const gy = terrainH(x, z);
+    if (!clear(x, z, r + 0.2, r + 0.2, gy, gy + h)) return;
+    b.cyl(x, gy + h / 2, z, r, h, mat, { segments: 9 });
+    b.cyl(x, gy + h + 0.015, z, r * 0.7, 0.03, 'rock', { segments: 9, noCollide: true });
+  };
+  for (const [cx2, cz2] of [[-52.5, -38], [-20.5, -33], [-44.5, -22], [-29.5, -9]] as Array<[number, number]>) {
+    pot(cx2, cz2, 0.26, 0.55, 'mudbrick');
+    pot(cx2 + 0.85, cz2 + 0.2, 0.17, 0.3, 'rock');
+    pot(cx2 + 0.35, cz2 + 0.85, 0.22, 0.42, 'mudbrick');
+  }
+
+  // -- Old Caravanserai: sack piles + working crates ------------------------
+  const sack = (x: number, z: number, r: number): void => {
+    const gy = terrainH(x, z);
+    if (!clear(x, z, r + 0.15, r + 0.15, gy, gy + r * 2)) return;
+    b.sphere(x, gy + r * 0.8, z, r, 'sandbag', { noCollide: true });
+  };
+  // Sack offsets keep >1.1 m spacing so placed sacks never gate their twins;
+  // the piles sit clear of the central well (r 4.2) and building plinths.
+  sack(43.5, -202, 0.34); sack(44.65, -201.7, 0.3); sack(44.1, -203.15, 0.36);
+  sack(61.8, -197.5, 0.34); sack(62.95, -197.15, 0.3);
+  b.crate(52.6, terrainH(52.6, -203.4) + 0.2, -203.4, 0.85);
+  b.crate(64.5, terrainH(64.5, -194.6) + 0.2, -194.6, 0.8);
+
+  // -- Dustline Works: salvage piles under tarps ----------------------------
+  for (const [px, pz] of [[128, 22], [152, 46], [132, 42]] as Array<[number, number]>) {
+    const gy = terrainH(px, pz);
+    if (!clear(px, pz, 1.6, 1.4, gy, gy + 1.2)) continue;
+    for (let i = 0; i < 3; i++) {
+      const ox = rng.range(-0.8, 0.8);
+      const oz = rng.range(-0.6, 0.6);
+      // Per-index base heights keep all three tops distinct (coplanar guard).
+      const baseH = [0.28, 0.62, 0.42][i]!;
+      b.box(px + ox, gy + baseH, pz + oz, rng.range(1.1, 1.6), 0.5, rng.range(0.8, 1.2),
+        i % 2 ? 'rust' : 'metalDark', rng.range(-0.5, 0.5), {
+        noCollide: true,
+        pitch: rng.range(-0.08, 0.08),
+        castShadow: false,
+      });
+    }
+    b.box(px, gy + 0.86, pz, 2.5, 0.06, 2.0, 'plasterOld', rng.range(-0.4, 0.4), {
+      noCollide: true,
+      pitch: 0.1,
+      castShadow: false,
+    });
+  }
+
+  // -- Dry Canals: plank crossings + rebar stubs ----------------------------
+  for (const [px, pz] of [[-196, 170], [-183, 186], [-177, 162]] as Array<[number, number]>) {
+    // Top of the plank follows the higher bank so the ends never float where
+    // the channel slopes, with pier stones carrying each end down to grade.
+    const bankLo = terrainH(px, pz - 1.4);
+    const bankHi = terrainH(px, pz + 1.4);
+    const deckY = Math.max(bankLo, bankHi) + 0.1;
+    const gy = terrainH(px, pz);
+    if (!clear(px, pz, 0.5, 1.7, gy, gy + 0.5)) continue;
+    b.box(px, deckY - 0.05, pz, 0.6, 0.1, 3.0, 'wood', 0, { noCollide: true, castShadow: false });
+    for (const [ez, bank] of [[pz - 1.35, bankLo], [pz + 1.35, bankHi]] as Array<[number, number]>) {
+      const h = Math.max(0.25, deckY - 0.05 - bank);
+      b.box(px, bank + h / 2, ez, 0.44, h, 0.55, 'concreteDark', 0, { noCollide: true });
+    }
+    for (const side of [-1, 1]) {
+      b.cyl(px + side * 0.5, gy + 0.3, pz + side * 1.3, 0.035, 0.7, 'rust', {
+        segments: 6,
+        noCollide: true,
+        pitch: 0.28,
+      });
+    }
+  }
+
+  // -- Fuel Court: tyre stacks + drum clusters -------------------------------
+  const tyreStack = (x: number, z: number): void => {
+    const gy = terrainH(x, z);
+    if (!clear(x, z, 0.7, 0.7, gy, gy + 0.8)) return;
+    for (let i = 0; i < 3; i++) {
+      b.cyl(x + (i % 2) * 0.05, gy + 0.12 + i * 0.24, z + (i % 2) * -0.04, 0.52, 0.24, 'metalDark', {
+        segments: 12,
+        noCollide: i > 0,
+      });
+    }
+  };
+  tyreStack(182, 150.5);
+  tyreStack(187.5, 149.5);
+  addDrumCluster(b, 176, 136, { baseY: terrainH(176, 136), count: 3, stack: true, uprightMat: 'rust' });
+  addDrumCluster(b, 172, 158, { baseY: terrainH(172, 158), count: 2, uprightMat: 'rust' });
+
+  // -- South Checkpoint: guyed mast anchors + supply crates ------------------
+  {
+    const topY = terrainH(42, 202) + 8.8;
+    for (const [ax, az] of [[35, 199], [49, 200], [45, 213]] as Array<[number, number]>) {
+      const ground = terrainH(ax, az);
+      if (!clear((42 + ax) / 2, (206 + az) / 2, 0.3, 0.3, Math.min(ground, topY), Math.max(ground, topY))) continue;
+      const dx = ax - 42;
+      const dz = az - 206;
+      const run = Math.hypot(dx, dz);
+      const rise = topY - ground;
+      b.box((42 + ax) / 2, (topY + ground) / 2, (206 + az) / 2, 0.05, 0.05, Math.hypot(run, rise),
+        'metalDark', Math.atan2(dx, dz), {
+        noCollide: true,
+        pitch: -Math.atan2(-rise, run),
+        castShadow: false,
+      });
+      b.box(ax, ground + 0.2, az, 0.5, 0.4, 0.5, 'concreteDark');
+    }
+  }
+  b.crate(36, terrainH(36, 208) + 0.2, 208, 1);
+  b.crate(34.5, terrainH(34.5, 205) + 0.2, 205, 0.85);
+  b.crate(37.2, terrainH(37.2, 210.4) + 0.2, 210.4, 0.9);
+
+  // -- Ridge Bunkers: supply crates near the trench --------------------------
+  b.crate(-172, terrainH(-172, -140) + 0.2, -140, 0.9);
+  addDrumCluster(b, -168, -137, { baseY: terrainH(-168, -137), count: 2, uprightMat: 'rust' });
+}
+
+/**
+ * Ground-decay micro-scatter along the travel corridors (connective tissue):
+ * the logistics highway, the southern checkpoint feeder and the fuel-court
+ * approach pick up damp stains, gravel, litter and tyre-track pairs; marks
+ * also ring the existing ground props. Deterministic; dressingSpotClear-gated.
+ */
+function groundDecay(b: WorldBuilder): void {
+  addGroundDecay(b, {
+    heightAt: terrainH,
+    corridors: [
+      { x1: -240, z1: -5, x2: 240, z2: -5, width: 9 },
+      { x1: 42, z1: 72, x2: 42, z2: 238, width: 7 },
+      { x1: 184, z1: 104, x2: 184, z2: 131, width: 13 },
+      // Wadi-crossing to Kestrel approach: open desert the QA frames cross.
+      { x1: -150, z1: 62, x2: -10, z2: 46, width: 7 },
+    ],
+    stainMat: 'dirt',
+    trackMat: 'asphalt',
+    spacing: 9,
+    maxPieces: 34,
+    stainBias: 0.75,
+  });
 }
 
 function desertScatter(b: WorldBuilder, rng: Rng): void {
