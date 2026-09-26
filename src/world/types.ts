@@ -17,6 +17,8 @@ export type MatKey =
   | 'interiorCeiling'
   | 'paint'
   | 'paving'
+  | 'cardboard'
+  | 'rubber'
   | 'signDimCyan'
   | 'signDimMagenta'
   | 'signDimOrange';
@@ -66,6 +68,8 @@ export interface GeoCylinder {
   roll?: number;
   noCollide?: boolean;
   noRender?: boolean;
+  /** Skip the static shadow pass for presentation-only detail. */
+  castShadow?: boolean;
   materialHint?: 'stone' | 'metal' | 'wood' | 'glass' | 'dirt' | 'foliage';
 }
 

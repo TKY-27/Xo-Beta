@@ -507,13 +507,14 @@ export class WorldBuilder {
 
   cyl(
     x: number, y: number, z: number, r: number, h: number, mat: MatKey,
-    opts?: { segments?: number; noCollide?: boolean; noRender?: boolean; yaw?: number; pitch?: number; roll?: number },
+    opts?: { segments?: number; noCollide?: boolean; noRender?: boolean; castShadow?: boolean; yaw?: number; pitch?: number; roll?: number },
   ): void {
     this.def.geo.push({
       kind: 'cyl', x, y, z, r, h, mat,
       segments: opts?.segments,
       noCollide: opts?.noCollide,
       noRender: opts?.noRender,
+      castShadow: opts?.castShadow,
       yaw: opts?.yaw,
       pitch: opts?.pitch,
       roll: opts?.roll,

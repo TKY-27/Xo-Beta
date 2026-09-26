@@ -8,6 +8,7 @@ import { planStairs, STAIR_MAX_RISE, WorldBuilder } from '../builder';
 import { ROCK_CLEARANCE_RADIUS, type MapDef, type MatKey } from '../types';
 import { Rng } from '../../core/rng';
 import { addBuilding, addGroundDecay, addMarketStall, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { CLUTTER_BIOMES, scatterClutter } from './clutter';
 
 const S = 500;
 
@@ -1386,4 +1387,16 @@ function groundDecay(b: WorldBuilder): void {
     spacing: 9,
     maxPieces: 80,
   });
-}
+
+  // Authored clutter: market wares, firewood, woven screens and civic street
+  // furniture along the lanes, densest around the settlement POIs.
+  scatterClutter(b, {
+    kinds: CLUTTER_BIOMES.oldfront!,
+    heightAt: terrainH,
+    spacing: 11,
+    perCell: 1,
+    poiPerCell: 3,
+    perRoad: 6,
+    maxPieces: 460,
+    seed: 0x01d0f2,
+  });}

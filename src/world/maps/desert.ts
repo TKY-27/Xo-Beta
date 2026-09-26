@@ -11,6 +11,7 @@ import { Rng } from '../../core/rng';
 import { WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { addBuilding, addDrumCluster, addGroundDecay, dressingSpotClear, hardenExposedFlanks, scatterRocks, structureBaseY } from './common';
+import { CLUTTER_BIOMES, scatterClutter } from './clutter';
 
 const S = 500;
 
@@ -973,7 +974,20 @@ function groundDecay(b: WorldBuilder): void {
     maxPieces: 34,
     stainBias: 0.75,
   });
-}
+
+  // Authored settlement clutter: water vessels, clay jars, firewood and woven
+  // screens around the market and waystations. Deliberately sparser than the
+  // industrial maps so the desert keeps its negative space.
+  scatterClutter(b, {
+    kinds: CLUTTER_BIOMES.ashara!,
+    heightAt: terrainH,
+    spacing: 13,
+    perCell: 1,
+    poiPerCell: 2,
+    perRoad: 4,
+    maxPieces: 320,
+    seed: 0x5a5a12,
+  });}
 
 function desertScatter(b: WorldBuilder, rng: Rng): void {
   const exclusions = b.def.pois.map((poi) => ({

@@ -8,6 +8,7 @@ import { planStairs, WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
 import { Rng } from '../../core/rng';
 import { addBuilding as addBaseBuilding, addGround, addGroundDecay, dressingSpotClear, hardenExposedFlanks, slabWithHole, type BuildingOpts } from './common';
+import { CLUTTER_BIOMES, scatterClutter } from './clutter';
 
 const S = 500; // map size
 const TRANSIT_CUTOUT = { minX: 117.7, maxX: 121.3, minZ: -140, maxZ: -127, surfaceY: 0 };
@@ -995,6 +996,19 @@ function groundDecay(b: WorldBuilder): void {
     trackMat: 'asphalt',
     spacing: 9,
     maxPieces: 148,
+  });
+  // Authored street clutter. The night map's emptiest read was the bare metre
+  // flanking every carriageway, so the scatter runs a road-edge pass first and
+  // only then an open-terrain pass weighted up inside POI rings.
+  scatterClutter(b, {
+    kinds: CLUTTER_BIOMES.neocity!,
+    heightAt: () => 0,
+    spacing: 11,
+    perCell: 1,
+    poiPerCell: 3,
+    perRoad: 7,
+    maxPieces: 520,
+    seed: 0x4e43f0,
   });
 }
 

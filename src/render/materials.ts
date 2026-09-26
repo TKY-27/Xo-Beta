@@ -841,6 +841,11 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // stay readable at grazing angles).
   mats.set('paint', new MeshStandardNodeMaterial({ color: 0xd9dbd2, roughness: 0.82, metalness: 0 }));
   mats.set('sandbag', new MeshStandardNodeMaterial({ color: 0x9c8b62, roughness: 0.98 }));
+  // Clutter-library surfaces. Cardboard reads as a palletised load and rubber
+  // as a tyre; both need to sit apart from the metal/wood palette or every
+  // industrial cluster collapses into one brown-grey mass.
+  mats.set('cardboard', std('cardboard', 'wood', { roughness: 0.97, color: 0xa8845c, metersPerTile: 0.5 }));
+  mats.set('rubber', new MeshStandardNodeMaterial({ color: 0x24262a, roughness: 0.93, metalness: 0 }));
   mats.set('hay', new MeshStandardNodeMaterial({ color: 0xb89a55, roughness: 1, metalness: 0 }));
   mats.set('gold', new MeshStandardNodeMaterial({ color: 0xd8b45a, roughness: 0.32, metalness: 0.95 }));
   // NOTE: plain alpha-blend glass. MeshPhysicalMaterial.transmission forces

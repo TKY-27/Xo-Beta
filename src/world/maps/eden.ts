@@ -8,6 +8,7 @@ import { planStairs, WorldBuilder } from '../builder';
 import type { GeoBox, MapDef } from '../types';
 import { Rng } from '../../core/rng';
 import { addBuilding, addDrumCluster, addGroundDecay, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { CLUTTER_BIOMES, scatterClutter } from './clutter';
 import { EDEN_LAB_DOORS } from '../environmentPlans';
 
 const S = 500;
@@ -1285,4 +1286,17 @@ function groundDecay(b: WorldBuilder): void {
     maxPieces: 44,
     stainBias: 0.7,
   });
-}
+
+  // Authored industrial clutter: drum stacks, pipe runs, gas racks, cable
+  // spools and rooftop plant, so the facility reads as worked rather than
+  // surveyed.
+  scatterClutter(b, {
+    kinds: CLUTTER_BIOMES.eden!,
+    heightAt: terrainH,
+    spacing: 11,
+    perCell: 1,
+    poiPerCell: 3,
+    perRoad: 6,
+    maxPieces: 560,
+    seed: 0x3d3b17,
+  });}
