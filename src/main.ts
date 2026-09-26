@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { loadMap, MAP_LIST, ensureWorldReady } from './world';
 import { normalizeMapForMatch } from './world/builder';
+import { environmentPlanAssetPaths } from './world/environmentPlans';
 import type { MapDef } from './world/types';
 import { Match } from './sim/match';
 import type { ActorView, GameStateView } from './sim/gameStateView';
@@ -27,7 +28,7 @@ import {
 import { Rng } from './core/rng';
 import { onSettingsChanged, updateSettings, getSettings, flushSettingsPersist } from './core/settings';
 import { createMaterials, type MaterialLibrary } from './render/materials';
-import { preloadAll } from './assets/assets';
+import { preloadAll, preloadEnvironmentAssets } from './assets/assets';
 import { PropLibrary } from './render/props';
 import { LobbyScene } from './render/lobby';
 import { SKIN_SPECS } from './render/characters';
@@ -172,7 +173,7 @@ let audio: AudioEngine;
 let menus: Menus;
 const disposers: Array<() => void> = [];
 let matchGeneration = 0;
-let pendingStart: { generation: number; cleanup: Array<() => void> } | null = null;
+let pendingStart: { generation: number; cleanup: Array<() => void>; abortController: AbortController } | null = null;
 let pendingGuestRuntime: PreparedGuestRuntime | null = null;
 let activeOnlineCoordinator: OnlineMatchCoordinator<ClientMovementPredictionState> | null = null;
 const presentationMuzzle = new THREE.Vector3();
@@ -233,6 +234,16 @@ function buildQaSceneCensus(root: THREE.Object3D): string {
   return JSON.stringify({ total: count(root), groups: groups.slice(0, 12) });
 }
 
+function collectSceneLights(root: THREE.Object3D): Array<{ type: string; intensity: number; color: string }> {
+  const lights: Array<{ type: string; intensity: number; color: string }> = [];
+  root.traverse((object) => {
+    const light = object as THREE.Light;
+    if (!light.isLight) return;
+    lights.push({ type: light.type, intensity: light.intensity, color: light.color.getHexString() });
+  });
+  return lights;
+}
+
 function runCleanups(cleanups: Array<() => void>): void {
   for (let i = cleanups.length - 1; i >= 0; i--) {
     try { cleanups[i]!(); } catch (err) { console.warn('match cleanup failed', err); }
@@ -243,6 +254,7 @@ function runCleanups(cleanups: Array<() => void>): void {
 function cancelPendingStart(): void {
   matchGeneration++;
   if (!pendingStart) return;
+  pendingStart.abortController.abort();
   const cleanups = pendingStart.cleanup;
   pendingStart = null;
   runCleanups(cleanups);
@@ -292,6 +304,10 @@ function recordFrameMs(ms: number): void {
 }
 
 function resetPerfStats(): void {
+  perfStats.simMs = 0;
+  perfStats.presentMs = 0;
+  perfStats.lastSimMs = 0;
+  perfStats.lastPresentMs = 0;
   frameRing.fill(0);
   frameRingIdx = 0;
   framesTotal = 0;
@@ -299,6 +315,12 @@ function resetPerfStats(): void {
   spikes50 = 0;
   worstFrameMs = 0;
   recentSpikes.length = 0;
+  adaptiveFrameCount = 0;
+  adaptiveFrameTimeSum = 0;
+  adaptiveDownStreak = 0;
+  adaptiveUpStreak = 0;
+  adaptiveCooldown = 0;
+  adaptiveWarmupLeft = ADAPTIVE_WARMUP_FRAMES;
 }
 
 function framePercentile(p: number): number {
@@ -427,10 +449,10 @@ function installQaConsoleCapture(): string[] {
         // back to their source when Chrome kept the game loop alive.
         return arg.stack ?? `${arg.name}: ${arg.message}`;
       }
-      if (typeof arg === 'string') return arg;
+       if (typeof arg === 'string') return `${arg}\n${new Error().stack ?? ''}`;
       try { return JSON.stringify(arg); } catch { return String(arg); }
     }).join(' ');
-    issues.push(`${kind}: ${text}`.slice(0, 500));
+     issues.push(`${kind}: ${text}`.slice(0, 2000));
     if (issues.length > 40) issues.shift();
   };
   const originalWarn = console.warn.bind(console);
@@ -457,6 +479,29 @@ async function setLoad(pct: number, status: string): Promise<void> {
   $('loading-fill').style.width = `${Math.round(pct * 100)}%`;
   $('loading-status').textContent = status;
   await new Promise((r) => setTimeout(r, 20));
+}
+
+async function preloadMapEnvironment(
+  plan: MapDef['environmentPlan'],
+  generation: number,
+  startPct: number,
+  endPct: number,
+  signal: AbortSignal,
+): Promise<void> {
+  const paths = environmentPlanAssetPaths(plan);
+  if (paths.length === 0) return;
+  let progressUpdate = Promise.resolve();
+  await preloadEnvironmentAssets(paths, (pct, label) => {
+    const progress = startPct + (endPct - startPct) * pct;
+    progressUpdate = progressUpdate.then(() => {
+      if (signal.aborted) throw new DOMException('Environment preload aborted', 'AbortError');
+      ensureCurrentStart(generation);
+      return setLoad(progress, label);
+    });
+  }, signal);
+  await progressUpdate;
+  ensureCurrentStart(generation);
+  await setLoad(endPct, t('load.assets'));
 }
 
 async function boot(): Promise<void> {
@@ -487,12 +532,13 @@ async function boot(): Promise<void> {
   const characterFactory = new CharacterFactory();
   const weaponFactory = new WeaponModelFactory(sharedProps);
   {
-    const [male, female, ual] = await Promise.all([
+    const [male, female, ual, swat] = await Promise.all([
       loadGltf('characters/hero_male.gltf'),
       loadGltf('characters/hero_female.gltf'),
       loadGltf('characters/ual_standard.glb'),
+      loadGltf('characters/swat-modular.glb'),
     ]);
-    await characterFactory.init(male.scene, female.scene, ual.animations);
+    await characterFactory.init(male.scene, female.scene, ual.animations, swat.scene, swat.animations);
   }
 
   // 3D lobby behind the main menu
@@ -599,7 +645,8 @@ async function boot(): Promise<void> {
         const adsAmount = game.view?.localMovement?.actorId === game.localActorId
           ? game.view.localMovement.adsAmount
           : 0;
-        return game.player.sampleCommand(adsAmount, ONLINE_FIXED_DT);
+        const equippedWeapon = game.view?.actors.find((actor) => actor.id === game.localActorId)?.equippedWeapon ?? null;
+        return game.player.sampleCommand(adsAmount, ONLINE_FIXED_DT, equippedWeapon);
       },
       onLocalInputSubmitted: predictGuestFirePresentation,
       onStateChange: (state) => {
@@ -901,7 +948,7 @@ async function prepareOnlineHostSession(
 ): Promise<HostAuthoritativeMatchSession> {
   teardownMatch(false);
   const generation = ++matchGeneration;
-  pendingStart = { generation, cleanup: [] };
+  pendingStart = { generation, cleanup: [], abortController: new AbortController() };
   menus.setPlayEnabled(false);
   try {
     const match = await startMatchImpl(
@@ -1033,7 +1080,7 @@ async function prepareOnlineGuestRuntime(
 ): Promise<void> {
   teardownMatch(false);
   const generation = ++matchGeneration;
-  pendingStart = { generation, cleanup: [] };
+  pendingStart = { generation, cleanup: [], abortController: new AbortController() };
   menus.setPlayEnabled(false);
   lobby.stop();
   menus.hideAll();
@@ -1057,6 +1104,7 @@ async function prepareOnlineGuestRuntime(
     });
     registerStartCleanup(generation, () => predictionWorld.dispose());
     await setLoad(0.38, t('load.map', { name: t(`map.${input.payload.mapId}.name` as never) }));
+    await preloadMapEnvironment(input.map.environmentPlan, generation, 0.4, 0.58, pendingStart!.abortController.signal);
 
     const canvas = $canvas();
     const renderer = new GameRenderer(canvas, QA_MODE);
@@ -1084,6 +1132,9 @@ async function prepareOnlineGuestRuntime(
       throw error;
     }
     renderer.scene.add(world.group);
+    // Must run after the world group is attached: the scale walks the live
+    // scene graph, so calling it before the add is a silent no-op.
+    renderer.applyEnvMapScale(input.map.sky.envMapScale ?? 1);
     registerStartCleanup(generation, () => {
       renderer.scene.remove(world.group);
       world.dispose();
@@ -1289,10 +1340,14 @@ async function prepareOnlineGuestRuntime(
     try {
       for (const character of rigs.values()) character.group.visible = true;
       viewmodel.group.visible = true;
-      await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+      if (isWebGPUBackend(renderer)) {
+        await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+      }
       // The stage scene has its own light count → its own program variants.
       // Compile and render it here so the first live frame never stalls.
-      await renderer.renderer.compileAsync(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
+      if (isWebGPUBackend(renderer)) {
+        await renderer.renderer.compileAsync(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
+      }
       renderer.renderer.render(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
       ensureCurrentStart(generation);
       renderer.renderer.render(renderer.scene, rig.camera);
@@ -1414,7 +1469,7 @@ async function startMatch(
 ): Promise<void> {
   teardownMatch();
   const generation = ++matchGeneration;
-  pendingStart = { generation, cleanup: [] };
+  pendingStart = { generation, cleanup: [], abortController: new AbortController() };
   menus.setPlayEnabled(false);
   try {
     await startMatchImpl(
@@ -1434,6 +1489,10 @@ async function startMatch(
     audio.startAmbience('night', true);
     lobby.start($canvas(), charFactory, weaponFactory);
   }
+}
+
+function isWebGPUBackend(renderer: GameRenderer): boolean {
+  return (renderer.renderer.backend as { isWebGPUBackend?: boolean } | undefined)?.isWebGPUBackend === true;
 }
 
 interface WarmupStageInput {
@@ -1463,8 +1522,10 @@ function qaHidePredicate(kind: string): ((o: THREE.Object3D) => boolean) | null 
       return Boolean(m && (m as { isMeshLambertMaterial?: boolean }).isMeshLambertMaterial);
     };
     case 'skinned': return (o) => (o as THREE.SkinnedMesh).isSkinnedMesh === true;
-    case 'terrain': return (o) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
-    case 'points': return (o) => (o as THREE.Points).isPoints === true;
+     case 'terrain': return (o) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
+      case 'sky': return (o) => o.name === 'sky-atmosphere';
+      case 'storm': return (o) => o.name === 'storm-wall';
+      case 'points': return (o) => (o as THREE.Points).isPoints === true;
     case 'lines': return (o) => (o as THREE.Line).isLine === true;
     case 'transparent': return (o) => {
       const m = (o as THREE.Mesh).material as THREE.Material | undefined;
@@ -1522,7 +1583,9 @@ async function runShaderWarmupStage({ renderer, camera, world, weaponFactory }: 
       const hidePred = qaHidePredicate(qaHide);
       if (hidePred) renderer.scene.traverse((o) => { if (hidePred(o)) o.visible = false; });
     }
-    await renderer.renderer.compileAsync(renderer.scene, camera);
+    if (isWebGPUBackend(renderer)) {
+      await renderer.renderer.compileAsync(renderer.scene, camera);
+    }
     renderer.renderer.render(renderer.scene, camera);
   } catch {
     /* parallel compile unsupported — runtime compile still works */
@@ -1563,6 +1626,7 @@ async function startMatchImpl(
   ensureCurrentStart(generation);
 
   const loaded = onlineHost ? { def: onlineHost.input.map } : loadMap(sel.map);
+  await preloadMapEnvironment(loaded.def.environmentPlan, generation, 0.2, 0.42, pendingStart!.abortController.signal);
   qaGlassBreakTimes = [];
   qaGlassBreakFrames = [];
   const matchSeed = onlineHost?.input.payload.seed ?? qaRequestedSeed() ?? Date.now() % 1000000;
@@ -1614,6 +1678,9 @@ async function startMatchImpl(
     throw error;
   }
   renderer.scene.add(world.group);
+  // Must run after the world group is attached: the scale walks the live
+  // scene graph, so calling it before the add is a silent no-op.
+  renderer.applyEnvMapScale(loaded.def.sky.envMapScale ?? 1);
   registerStartCleanup(generation, () => {
     renderer.scene.remove(world.group);
     world.dispose();
@@ -1987,7 +2054,9 @@ async function startMatchImpl(
     try {
       // Compile pooled impact/shield/elimination renderables and the death
       // transparency variant while the loading screen owns the frame.
-      await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+      if (isWebGPUBackend(renderer)) {
+        await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+      }
       ensureCurrentStart(generation);
       renderer.renderer.render(renderer.scene, rig.camera);
     } finally {
@@ -2005,10 +2074,14 @@ async function startMatchImpl(
       }
     }
     // Restore and compile the normal opaque gameplay variants last.
-    await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+    if (isWebGPUBackend(renderer)) {
+      await renderer.renderer.compileAsync(renderer.scene, rig.camera);
+    }
     ensureCurrentStart(generation);
     // Warm the viewmodel stage program variants alongside (own light count).
-    await renderer.renderer.compileAsync(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
+    if (isWebGPUBackend(renderer)) {
+      await renderer.renderer.compileAsync(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
+    }
     renderer.renderer.render(renderer.viewmodelStage.scene, renderer.viewmodelStage.camera);
     // Warm the shadow/depth program variants too — compileAsync only covers
     // the main pass, and the first shadow render of a skinned rig otherwise
@@ -2516,14 +2589,7 @@ function wirePresentation(
     if (victim && match.isLocalActor(victim)) hud.banner(t('banner.eliminatedYou'), 4);
   });
   match.events.on('shotFired', (e) => {
-    if (e.actorId === match.localActor?.id && !e.dry && match.localActor) {
-      viewmodel.cancelInspect();
-      const a = match.localActor;
-      // Eject toward the camera-right side, slightly back
-      const rx = Math.cos(a.yaw);
-      const rz = -Math.sin(a.yaw);
-      vfx.shellCasing(a.body.position.x + rx * 0.32, a.eyeY - 0.28, a.body.position.z + rz * 0.32, rx * 2.1, rz * 2.1);
-    }
+    if (e.actorId === match.localActor?.id && !e.dry) viewmodel.cancelInspect();
   });
   match.events.on('poundImpact', (e) => {
     vfx.poundShockwave(e.x, e.y, e.z);
@@ -2695,6 +2761,7 @@ function presentOnlineAuthoritativeEvent(
     audio.gunshot(weaponId, x, y, z, dry, isLocal);
     if (dry) return;
     const actor = actorView(actorId);
+    if (isLocal) applyLocalCameraRecoil(game, weaponId, actor);
     if (isLocal && game.rig.mode === 'fps') {
       game.viewmodel.kick(weaponViewmodelKick(weaponId));
       game.viewmodel.muzzlePulse(0.8);
@@ -2881,6 +2948,19 @@ function presentOnlineAuthoritativeEvent(
   void view;
 }
 
+function applyLocalCameraRecoil(game: ReplicaLiveGame, weaponId: WeaponId, actor: ActorView | null): void {
+  const selected = actor?.inventory && actor.inventory.selected >= 0
+    ? actor.inventory.slots[actor.inventory.selected]
+    : null;
+  const rarity: Rarity = selected?.kind === 'weapon' && selected.weaponId === weaponId
+    ? selected.rarity
+    : 'common';
+  const adsAmount = game.view?.localMovement?.actorId === game.localActorId
+    ? game.view.localMovement.adsAmount
+    : 0;
+  game.rig.addLocalRecoil(weaponId, { adsAmount, crouched: actor?.crouched ?? false, rarity });
+}
+
 function predictGuestFirePresentation(inputSequence: number, command: Readonly<InputCommand>): boolean {
   void inputSequence;
   const game = live;
@@ -2898,6 +2978,7 @@ function predictGuestFirePresentation(inputSequence: number, command: Readonly<I
   const time = performance.now();
   if (time + 0.5 < game.nextPredictedShotAtMs) return false;
   game.nextPredictedShotAtMs = time + 60_000 / def.rpm;
+  applyLocalCameraRecoil(game, weaponId, actor);
   audio.gunshot(weaponId, actor.position.x, actor.position.y, actor.position.z, false, true);
   if (game.rig.mode === 'fps') {
     game.viewmodel.kick(weaponViewmodelKick(weaponId));
@@ -3216,14 +3297,9 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       gameScene: renderer.scene,
       sceneInfo: {
         children: renderer.scene.children.length,
-        lights: renderer.scene.children
-          .filter((c) => (c as THREE.Light).isLight)
-          .map((c) => ({
-            type: (c as THREE.Light).type,
-            intensity: (c as THREE.Light).intensity,
-            color: (c as THREE.Light).color.getHexString(),
-          })),
-        drawCalls: renderer.renderer.info.render.calls,
+        lights: collectSceneLights(renderer.scene),
+        drawCalls: renderer.renderer.info.render.drawCalls,
+        frameCalls: renderer.renderer.info.render.frameCalls,
         triangles: renderer.renderer.info.render.triangles,
       },
       playerSkin: getSettings().playerSkin,
@@ -3277,9 +3353,10 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
         ? {
             x: +m.localActor.body.position.x.toFixed(1),
             y: +m.localActor.body.position.y.toFixed(1),
-            z: +m.localActor.body.position.z.toFixed(1),
-            state: m.localActor.state,
-            grounded: m.localActor.body.grounded,
+             z: +m.localActor.body.position.z.toFixed(1),
+             state: m.localActor.state,
+             alive: m.localActor.alive,
+             grounded: m.localActor.body.grounded,
             inWater: m.localActor.inWater,
             submerged: m.localActor.submerged,
             waterSurfaceY: Number.isFinite(m.localActor.waterSurfaceY)
@@ -3363,7 +3440,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       data.xoQaRuntime = qaRuntimeIssues.length === 0
         ? 'count=0'
         : `count=${qaRuntimeIssues.length}|last=${qaRuntimeIssues.at(-1)}`;
-      data.xoQaRender = `${renderer.renderer.info.render.calls},${renderer.renderer.info.render.triangles}|sim=${perfStats.simMs.toFixed(2)}|present=${perfStats.presentMs.toFixed(2)}`;
+      data.xoQaRender = `${renderer.renderer.info.render.drawCalls},${renderer.renderer.info.render.frameCalls},${renderer.renderer.info.render.triangles}|sim=${perfStats.simMs.toFixed(2)}|present=${perfStats.presentMs.toFixed(2)}`;
     }
   }
 
@@ -3419,6 +3496,130 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       return true;
     };
     (window as unknown as Record<string, unknown>).__xoTeleport = performQaTeleport;
+    // QA: report live shadow-map state plus the cast/receive flags of meshes
+    // near a world point. Shadow grounding defects are invisible in a capture
+    // unless the map, frustum and per-mesh flags are known.
+    (window as unknown as Record<string, unknown>).__xoShadowQa = (
+      x = 0, z = 0, radius = 24,
+    ) => {
+      const sun = renderer.keyLight;
+      if (!sun) return { error: 'no key light' };
+      const cam = sun.shadow.camera;
+      const near: Array<Record<string, unknown>> = [];
+      const p = new THREE.Vector3();
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh & { isInstancedMesh?: boolean; boundingBox?: THREE.Box3 | null; computeBoundingBox?: () => void };
+        if (!mesh.isMesh || !mesh.visible) return;
+        // InstancedMesh geometry bounds sit at the origin; the instances live
+        // out in world space, so use the instance-aware bound instead.
+        let centre: THREE.Vector3 | null = null;
+        if (mesh.isInstancedMesh) {
+          if (!mesh.boundingBox) mesh.computeBoundingBox?.();
+          const box = mesh.boundingBox;
+          if (!box || box.isEmpty()) return;
+          centre = box.getCenter(new THREE.Vector3());
+        } else {
+          mesh.geometry.computeBoundingSphere?.();
+          const bs = mesh.geometry.boundingSphere;
+          if (!bs) return;
+          centre = bs.center.clone();
+        }
+        p.copy(centre).applyMatrix4(mesh.matrixWorld);
+        if (Math.hypot(p.x - x, p.z - z) > radius) return;
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        near.push({
+          name: mesh.name || '(unnamed)',
+          parent: mesh.parent?.name || '(none)',
+          instanced: mesh.isInstancedMesh === true,
+          cast: mesh.castShadow,
+          receive: mesh.receiveShadow,
+          verts: mesh.geometry.attributes.position?.count ?? null,
+          mat: mats.map((mm) => {
+            const std = mm as THREE.MeshStandardMaterial;
+            return {
+              name: std.name || std.type,
+              hasMap: std.map != null,
+              hasNormal: std.normalMap != null,
+              color: std.color ? `#${std.color.getHexString()}` : null,
+            };
+          }),
+        });
+      });
+      return {
+        shadowMapEnabled: renderer.renderer.shadowMap.enabled,
+        shadowMapType: renderer.renderer.shadowMap.type,
+        sunCastShadow: sun.castShadow,
+        sunPosition: sun.position.toArray().map((v) => Math.round(v * 100) / 100),
+        sunTarget: sun.target.position.toArray().map((v) => Math.round(v * 100) / 100),
+        sunIntensity: sun.intensity,
+        mapSize: sun.shadow.mapSize.toArray(),
+        hasShadowMap: sun.shadow.map != null,
+        frustum: [cam.left, cam.right, cam.top, cam.bottom, cam.near, cam.far],
+        meshes: near,
+      };
+    };
+    // QA: scale the environment-map contribution at runtime. A full-dome
+    // "pure sky" HDRI delivers diffuse irradiance from every direction; with
+    // the world materials at the default envMapIntensity 1 it out-weighs the
+    // key light and erases its cast shadows. `scene.environmentIntensity`
+    // alone does not move the node pipeline, so the per-material value is
+    // scaled here and both are reported. This makes the key/fill ratio
+    // measurable instead of guessed.
+    (window as unknown as Record<string, unknown>).__xoEnvQa = (scale: number, sceneScale?: number) => {
+      if (sceneScale !== undefined) renderer.scene.environmentIntensity = sceneScale;
+      let touched = 0;
+      renderer.scene.traverse((o) => {
+        const m = (o as THREE.Mesh).material as (THREE.Material & { envMapIntensity?: number }) | undefined;
+        if (!m || Array.isArray(m) || m.envMapIntensity === undefined) return;
+        m.envMapIntensity *= scale;
+        touched += 1;
+      });
+      return { touched, sceneEnvironmentIntensity: renderer.scene.environmentIntensity };
+    };
+    // QA: isolate which TSL slot on the terrain splat material is responsible
+    // for direct-light response. Cycle 57 recorded that the stock normalMap
+    // slot zeroes direct lighting under r185; this checks whether the TSL
+    // normalNode / roughnessNode / colorNode graph does the same, so terrain
+    // shading is diagnosed rather than tuned by eye.
+    (window as unknown as Record<string, unknown>).__xoTerrainQa = (opts: {
+      normal?: boolean; roughness?: boolean; color?: boolean;
+    } = {}) => {
+      const found: Array<Record<string, unknown>> = [];
+      renderer.scene.traverse((o) => {
+        const mesh = (o as THREE.Mesh).material as unknown as {
+          isMeshStandardNodeMaterial?: boolean; vertexColors?: boolean;
+          colorNode?: unknown; normalNode?: unknown; roughnessNode?: unknown;
+          needsUpdate?: boolean; name?: string;
+        } | undefined;
+        if (!mesh || Array.isArray(mesh) || !mesh.isMeshStandardNodeMaterial) return;
+        if (mesh.vertexColors !== true || !mesh.colorNode) return;
+        if (opts.normal === false) mesh.normalNode = null;
+        if (opts.roughness === false) mesh.roughnessNode = null;
+        if (opts.color === false) mesh.colorNode = null;
+        mesh.needsUpdate = true;
+        found.push({
+          name: mesh.name || '(terrain splat)',
+          hasColorNode: Boolean(mesh.colorNode),
+          hasNormalNode: Boolean(mesh.normalNode),
+          hasRoughnessNode: Boolean(mesh.roughnessNode),
+        });
+      });
+      return found;
+    };
+    (window as unknown as Record<string, unknown>).__xoQaRevive = () => {
+      const p = m.localActor;
+      if (!p) return false;
+      p.health = 100;
+      p.shield = 100;
+      p.alive = true;
+      p.eliminatedById = -1;
+      p.deathTime = -1;
+      p.state = 'ground';
+      p.body.velocity.x = 0;
+      p.body.velocity.y = 0;
+      p.body.velocity.z = 0;
+      return true;
+    };
 
     // QA: raycast from an NDC screen point (default: centre) and report what
     // was hit (object chain, material identity, light-relevant flags) so a
@@ -3443,6 +3644,11 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
           material: std ? std.name || std.type : Array.isArray(mesh.material) ? 'multi' : String(mat?.type),
           color: std ? `#${std.color.getHexString()}` : null,
           map: Boolean(std?.map),
+          normalMap: Boolean(std?.normalMap),
+          roughnessMap: Boolean(std?.roughnessMap),
+          aoMap: Boolean(std?.aoMap),
+          emissive: std ? `#${std.emissive?.getHexString() ?? '000000'}` : null,
+          emissiveIntensity: std?.emissiveIntensity ?? null,
           vertexColors: Boolean(std?.vertexColors),
           metalness: std?.metalness ?? null,
           roughness: std?.roughness ?? null,
@@ -3468,9 +3674,25 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
         const mat = mesh.material as THREE.MeshStandardMaterial | undefined;
         const matName = mat && !Array.isArray(mat) ? mat.name : '';
         const hex = mat && !Array.isArray(mat) ? mat.color.getHexString() : '';
-        if (o.uuid.startsWith(prefix) || (matName && matName === prefix) || hex === needle) {
+        if (o.uuid.startsWith(prefix) || o.name === prefix || (matName && matName === prefix) || hex === needle) {
           o.visible = !o.visible;
           found.push(`${o.type}:${o.uuid.slice(0, 8)}:${matName || hex || '?'}:${o.visible ? 'shown' : 'hidden'}`);
+        }
+      });
+      return found;
+    };
+    // QA: hide every mesh whose material name matches, for isolating which
+    // layer owns a screen region. `__xoTint` cannot do this job for world
+    // materials because `ProjectedStandardMaterial`/`TerrainSplatMaterial`
+    // drive colour through a TSL `colorNode`, which ignores `material.color`.
+    (window as unknown as Record<string, unknown>).__xoHideMat = (name: string, hide = true) => {
+      const found: string[] = [];
+      renderer.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+        if (mats.some((m) => m.name === name)) {
+          o.visible = !hide;
+          found.push(`${o.type}:${o.uuid.slice(0, 8)}:${name}:${hide ? 'hidden' : 'shown'}`);
         }
       });
       return found;
@@ -3562,8 +3784,9 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
             return Boolean(m && (m as { isMeshLambertMaterial?: boolean }).isMeshLambertMaterial);
           };
           case 'skinned': return (o: THREE.Object3D) => (o as THREE.SkinnedMesh).isSkinnedMesh === true;
-          case 'terrain': return (o: THREE.Object3D) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
-          case 'points': return (o: THREE.Object3D) => (o as THREE.Points).isPoints === true;
+           case 'terrain': return (o: THREE.Object3D) => Boolean(o.name && o.name.toLowerCase().includes('terrain'));
+           case 'sky': return (o: THREE.Object3D) => o.name === 'sky-atmosphere';
+           case 'points': return (o: THREE.Object3D) => (o as THREE.Points).isPoints === true;
           case 'lines': return (o: THREE.Object3D) => (o as THREE.Line).isLine === true;
           case 'transparent': return (o: THREE.Object3D) => {
             const m = (o as THREE.Mesh).material as THREE.Material | undefined;
@@ -3671,7 +3894,7 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
         const yaw = parsed.yaw === undefined ? 0 : Number(parsed.yaw);
         const refY = parsed.refY === undefined ? undefined : Number(parsed.refY);
         const pitch = parsed.pitch === undefined ? -0.12 : Number(parsed.pitch);
-        const mode = parsed.mode === 'swim' ? 'swim' : parsed.mode === undefined ? 'standing' : null;
+        const mode = parsed.mode === 'swim' ? 'swim' : parsed.mode === undefined || parsed.mode === 'standing' ? 'standing' : null;
         if (nonce && Number.isFinite(x) && Number.isFinite(z) && Number.isFinite(yaw)
           && Number.isFinite(pitch) && mode !== null
           && (refY === undefined || Number.isFinite(refY))) {
@@ -3771,12 +3994,17 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
     // (browser automation cannot engage pointer lock). Press and held remain
     // independent so automation cannot conceal a lost short-click edge.
     (window as unknown as Record<string, unknown>).__xoQaInput = (
-      o: { firePressed?: boolean; fireHeld?: boolean; adsHeld?: boolean } | null,
+      o: { firePressed?: boolean; fireHeld?: boolean; adsHeld?: boolean; reloadPressed?: boolean } | null,
     ) => {
       m.qaInput =
-        o && (o.firePressed || o.fireHeld || o.adsHeld)
+        o && (o.firePressed || o.fireHeld || o.adsHeld || o.reloadPressed)
           ? { ...o }
           : null;
+      if (o?.reloadPressed) {
+        window.setTimeout(() => {
+          if (m.qaInput?.reloadPressed) m.qaInput = null;
+        }, 50);
+      }
     };
     // QA helper: jump the storm to a mid-shrink state so the wall, outside
     // tint, map fill and route-to-safety line can be verified without
@@ -3813,6 +4041,10 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
   wasSpectating = spectating;
   const playerAboard = !!m.localActor && !m.localActor.deployed;
   const inTransport = m.phase === 'transport' && !spectating && playerAboard;
+  if (!spectating && !inTransport && m.localActor) {
+    const look = player.presentationLook(m.localActor.wpn.adsAmount);
+    rig.applyPresentationLook(look.yaw, look.pitch);
+  }
   // Drop-rig slots: combatants hang in a row beneath the hull, spread along
   // the flight axis. The player rides the front slot with the line of
   // combatants receding behind them.
@@ -3950,8 +4182,9 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
     const speed = Math.hypot(m.localActor.body.velocity.x, m.localActor.body.velocity.z);
     viewmodel.syncCamera(rig.camera);
     viewmodel.setMotionState(viewmodelMotion(m.localActor.body.velocity, m.localActor.body.grounded, rig.camera.quaternion));
-    hud.setCrosshairFade(m.localActor.wpn.adsAmount);
-    viewmodel.update(m.localActor, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
+     hud.setCrosshairFade(m.localActor.wpn.adsAmount);
+     viewmodel.setTriggerIntent(player.fireIntent);
+     viewmodel.update(m.localActor, dtReal, player.lookDxSmooth(), player.lookDySmooth(), speed);
     viewmodel.group.visible = true;
   } else {
     viewmodel.update(null, dtReal, 0, 0, 0);
@@ -4059,6 +4292,10 @@ function presentReplica(game: ReplicaLiveGame, dtReal: number): void {
 
   presentationTransportPos.set(view.transport.x, view.transport.y, view.transport.z);
   const inTransport = view.phase === 'transport' && !spectating && local?.deployed === false;
+  if (!spectating && !inTransport && local) {
+    const look = player.presentationLook(view.localMovement?.actorId === local.id ? view.localMovement.adsAmount : 0);
+    rig.applyPresentationLook(look.yaw, look.pitch);
+  }
   const route = game.mapDef.transportRoute;
   const routeX = route.to[0] - route.from[0];
   const routeZ = route.to[1] - route.from[1];

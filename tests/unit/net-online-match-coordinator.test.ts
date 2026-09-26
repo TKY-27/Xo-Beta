@@ -81,6 +81,7 @@ function harness(options: {
   readonly sampleLocalInput?: () => Readonly<InputCommand>;
   readonly onLocalInputSubmitted?: (inputSeq: number, command: Readonly<InputCommand>) => boolean;
   readonly hostEventSendFailures?: { value: number };
+  readonly guestInputSendFailures?: { value: number };
   readonly throwOnDisconnectPeerId?: string;
   readonly throwGuestEventObserver?: boolean;
   readonly hostInactivityGraceMs?: number;
@@ -88,6 +89,7 @@ function harness(options: {
   const queue: Delivery[] = [];
   const disconnected: string[] = [];
   const hostEventSendFailures = options.hostEventSendFailures ?? { value: 0 };
+  const guestInputSendFailures = options.guestInputSendFailures ?? { value: 0 };
   const ctx = contexts();
   const port = (side: 'host' | 'guest'): OnlineMatchRoomPort => ({
     sendGameMessage(peerId: string, channel: GameChannelLabel, data: GamePayload): boolean {
@@ -104,6 +106,10 @@ function harness(options: {
       return true;
     },
     sendGameInput(data: GamePayload): boolean {
+      if (side === 'guest' && guestInputSendFailures.value > 0) {
+        guestInputSendFailures.value -= 1;
+        return false;
+      }
       queue.push({ target: 'host', peerId: 'guest-peer', message: { channel: 'input', data } });
       return true;
     },
@@ -307,6 +313,28 @@ describe('OnlineMatchCoordinator', () => {
     expect(value.guestCoordinator.requestTacticalPing(4, -5)).toBe(true);
     await value.flush();
     expect(value.tacticalPings).toEqual([{ peerId: 'guest-peer', x: 4, z: -5 }]);
+  });
+
+  it('reports guest input send failures without dropping the active session', async () => {
+    const guestInputSendFailures = { value: 0 };
+    const value = harness({ guestInputSendFailures });
+    await startBoth(value);
+    guestInputSendFailures.value = 1;
+    const before = value.receivedInputs.length;
+
+    value.guestCoordinator.setLocalInput({ ...emptyCommand(), firePressed: true });
+    value.hostCoordinator.fixedUpdate();
+    value.guestCoordinator.fixedUpdate();
+
+    expect(value.protocolErrors).toEqual([{ role: 'guest', message: 'Guest input send failed' }]);
+    expect(value.receivedInputs).toHaveLength(before);
+    expect(value.guestCoordinator.state).toBe('active');
+    expect(value.disconnected).not.toContain('guest-peer');
+
+    value.guestCoordinator.fixedUpdate();
+    await value.flush();
+    expect(value.receivedInputs).toHaveLength(before + 1);
+    expect(value.protocolErrors).toHaveLength(1);
   });
 
   it('keeps guest input ticks monotonic when the host clock runs far ahead', async () => {

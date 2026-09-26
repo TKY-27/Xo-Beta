@@ -34,9 +34,13 @@ const server = await createServer({
           phase: livePhase(), alive: p?.alive ?? false, grounded: p?.body?.grounded ?? false,
           weapon: p?.inv.selectedWeapon?.weaponId ?? null,
           ads: w?.adsAmount ?? null,
-          reloadPhase: w && w.reloadTimer > 0 && w.reloadTotal > 0 ? 1 - w.reloadTimer / w.reloadTotal : null,
-          state: p?.state ?? null,
-        };
+           reloadPhase: w && w.reloadTimer > 0 && w.reloadTotal > 0 ? 1 - w.reloadTimer / w.reloadTotal : null,
+           reloadTimer: w?.reloadTimer ?? null,
+           reloadTotal: w?.reloadTotal ?? null,
+           ammo: w?.ammoInMag ?? null,
+            state: p?.state ?? null,
+            position: p ? { x: p.body.position.x, y: p.body.position.y, z: p.body.position.z } : null,
+         };
       };`;
     },
   }],
@@ -56,15 +60,24 @@ page.on('console', (msg) => {
 });
 page.on('pageerror', (err) => errors.push(String(err)));
 
-type Read = { phase: string; alive: boolean; grounded: boolean; weapon: string | null; ads: number | null; reloadPhase: number | null; state: string | null };
+type Read = { phase: string; alive: boolean; grounded: boolean; weapon: string | null; ads: number | null; reloadPhase: number | null; state: string | null; position: { x: number; y: number; z: number } | null };
 const read = (): Promise<Read> => page.evaluate(() => (window as unknown as { __xoSuiteRead: () => Read }).__xoSuiteRead());
 const shot = async (label: string): Promise<void> => {
-  const s = await read().catch(() => null);
+  let s = await read().catch(() => null);
+  if (s && !s.alive) {
+    await page.evaluate(() => (window as unknown as { __xoQaRevive?: () => boolean }).__xoQaRevive?.());
+    await page.waitForTimeout(300);
+    s = await read().catch(() => null);
+  }
   if (s && (!s.alive || s.phase !== 'live')) {
     throw new Error(`state broken before ${label}: ${JSON.stringify(s)}`);
   }
   await page.screenshot({ path: `${OUT}/${label}.png` });
-  console.log(`captured ${label} ${s ? JSON.stringify({ w: s.weapon, ads: s.ads, rl: s.reloadPhase, st: s.state }) : ''}`);
+  if (label === '30-sniper-hip') {
+    const pose = await page.evaluate(() => (window as unknown as { __xoViewmodel?: () => unknown }).__xoViewmodel?.());
+    console.log('vm-debug', JSON.stringify(pose));
+  }
+  console.log(`captured ${label} ${s ? JSON.stringify({ w: s.weapon, ads: s.ads, rl: s.reloadPhase, st: s.state, pos: s.position }) : ''}`);
 };
 const give = async (weapon: string): Promise<void> => {
   await page.evaluate(([id, rarity]) => {
@@ -73,17 +86,17 @@ const give = async (weapon: string): Promise<void> => {
   await page.waitForTimeout(900);
 };
 /** Teleport and face a target point. Yaw convention: forward = (-sin yaw, 0, -cos yaw). */
-const tp = async (x: number, z: number, faceX: number, faceZ: number, pitch = -0.08): Promise<void> => {
+const tp = async (x: number, z: number, faceX: number, faceZ: number, pitch = -0.08, refY?: number): Promise<void> => {
   const dx = faceX - x;
   const dz = faceZ - z;
   const yaw = Math.atan2(-dx, -dz);
   await page.evaluate((pos) => {
     const input = document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null;
     if (!input) return;
-    input.value = JSON.stringify({ nonce: `suite-${Date.now()}`, x: pos.x, z: pos.z, yaw: pos.yaw, pitch: pos.pitch });
+    input.value = JSON.stringify({ nonce: `suite-${Date.now()}`, x: pos.x, z: pos.z, yaw: pos.yaw, pitch: pos.pitch, ...(pos.refY === undefined ? {} : { refY: pos.refY }) });
     input.dispatchEvent(new Event('change', { bubbles: true }));
     input.dispatchEvent(new Event('input', { bubbles: true }));
-  }, { x, z, yaw, pitch });
+  }, { x, z, yaw, pitch, refY });
   await page.waitForTimeout(2200);
 };
 const waitLiveGrounded = async (): Promise<void> => {
@@ -94,24 +107,33 @@ const waitLiveGrounded = async (): Promise<void> => {
 };
 
 // Per-map scenario targets: [label, standX, standZ, faceX, faceZ, pitch]
-const targets: Record<string, Array<{ label: string; x: number; z: number; fx: number; fz: number; pitch?: number }>> = {
+const targets: Record<string, Array<{ label: string; x: number; z: number; fx: number; fz: number; pitch?: number; refY?: number }>> = {
   neocity: [
     { label: 'poi-kiosk-row', x: 185, z: 48, fx: 185, fz: 20 },
     { label: 'poi-intersection', x: 12, z: 62, fx: 0, fz: 30 },
+    { label: 'poi-authored-facade', x: -22, z: 62, fx: -22, fz: 42, pitch: -0.02 },
     { label: 'poi-parking-garage', x: 30, z: 138, fx: 30, fz: 165 },
   ],
   oldfront: [
     { label: 'poi-cathedral', x: 20, z: -22, fx: 20, fz: -55 },
     { label: 'poi-orchard-trees', x: 172, z: 60, fx: 190, fz: 60 },
     { label: 'poi-town', x: -30, z: 40, fx: 0, fz: 10 },
+    { label: 'poi-authored-fort', x: 190, z: 55, fx: 170, fz: 18, pitch: 0.02 },
   ],
   eden: [
-    { label: 'poi-lab-main', x: -72, z: -30, fx: -95, fz: -30 },
+    { label: 'poi-lab-main', x: -95, z: 6, fx: -95, fz: -30, pitch: 0.02 },
+    { label: 'poi-lab-east-approach', x: -60, z: -30, fx: -95, fz: -30, pitch: 0.01 },
+    { label: 'poi-lab-three-quarter', x: -64, z: -4, fx: -95, fz: -30, pitch: 0.01 },
+    { label: 'poi-lab-interior', x: -95, z: -22, fx: -95, fz: -39, pitch: 0.03, refY: 0.2 },
+    { label: 'poi-generator-yard', x: -210, z: 56, fx: -210, fz: 40, pitch: -0.02 },
     { label: 'poi-forest', x: 40, z: 120, fx: 70, fz: 140 },
     { label: 'poi-lakeside', x: 40, z: 150, fx: 75, fz: 185 },
   ],
   ashara: [
     { label: 'poi-sunwall-market', x: -34, z: 4, fx: -34, fz: -30 },
+    { label: 'poi-sunwall-market-close', x: -34, z: -16, fx: -34, fz: -30, pitch: -0.03 },
+    { label: 'poi-sunwall-market-east', x: -10, z: -30, fx: -34, fz: -30, pitch: -0.02 },
+    { label: 'poi-sunwall-market-south', x: -34, z: -52, fx: -34, fz: -30, pitch: -0.02 },
     { label: 'poi-dry-canals', x: -160, z: 150, fx: -188, fz: 178 },
     { label: 'poi-compound', x: -130, z: 60, fx: -158, fz: 86 },
   ],
@@ -185,11 +207,15 @@ const scenario = async (): Promise<void> => {
   });
   await page.waitForTimeout(500);
   // Mid-reload frame.
-  await page.keyboard.press('r');
+  await page.evaluate(() => {
+    (window as unknown as { __xoQaInput: (o: unknown) => void }).__xoQaInput({ reloadPressed: true });
+  });
+  await page.waitForTimeout(120);
+  console.log('reload trigger', JSON.stringify(await read()));
   await page.waitForFunction(() => {
     const s = (window as unknown as { __xoSuiteRead?: () => { reloadPhase: number | null } }).__xoSuiteRead?.();
     return s?.reloadPhase !== null && (s?.reloadPhase ?? 0) > 0.3;
-  }, undefined, { timeout: 5000 });
+  }, undefined, { timeout: 12000 });
   await page.waitForFunction(() => {
     const s = (window as unknown as { __xoSuiteRead?: () => { reloadPhase: number | null } }).__xoSuiteRead?.();
     return (s?.reloadPhase ?? 0) >= 0.72;
@@ -211,9 +237,43 @@ const scenario = async (): Promise<void> => {
 };
 await scenario();
 
+await give('pistol:common');
+await shot('40-pistol-hip');
+await page.evaluate(() => {
+  (window as unknown as { __xoQaInput: (o: unknown) => void }).__xoQaInput({ adsHeld: true });
+});
+await page.waitForTimeout(650);
+await shot('41-pistol-ads');
+await page.evaluate(() => {
+  (window as unknown as { __xoQaInput: (o: unknown) => void }).__xoQaInput({ firePressed: true, fireHeld: true });
+});
+await page.waitForTimeout(110);
+await shot('42-pistol-fire');
+await page.evaluate(() => {
+  (window as unknown as { __xoQaInput: (o: unknown) => void }).__xoQaInput(null);
+});
+await page.waitForTimeout(350);
+await page.keyboard.press('r');
+await page.waitForFunction(() => {
+  const s = (window as unknown as { __xoSuiteRead?: () => { reloadPhase: number | null } }).__xoSuiteRead?.();
+  return (s?.reloadPhase ?? 0) > 0.35;
+}, undefined, { timeout: 5000 });
+await shot('43-pistol-reload-mid');
+await page.waitForFunction(() => {
+  const s = (window as unknown as { __xoSuiteRead?: () => { reloadPhase: number | null } }).__xoSuiteRead?.();
+  return s?.reloadPhase === null;
+}, undefined, { timeout: 8000 }).catch(() => undefined);
+await page.keyboard.down('KeyW');
+await page.keyboard.down('ShiftLeft');
+await page.waitForTimeout(1200);
+await shot('44-pistol-sprint');
+await page.keyboard.up('ShiftLeft');
+await page.keyboard.up('KeyW');
+await page.waitForTimeout(500);
+
 // POI close-ups with the AR held.
 for (const t of targets[mapArg] ?? []) {
-  await tp(t.x, t.z, t.fx, t.fz, t.pitch ?? -0.06);
+  await tp(t.x, t.z, t.fx, t.fz, t.pitch ?? -0.06, t.refY);
   await shot(`20-${t.label}`);
 }
 

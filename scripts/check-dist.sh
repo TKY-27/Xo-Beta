@@ -31,6 +31,22 @@ if ! grep -E -q '(src|href)="/assets/' dist/index.html; then
   exit 1
 fi
 
+public_assets_list=$(mktemp)
+trap 'rm -f "$public_assets_list"' EXIT
+find public/assets -type f -print | sort > "$public_assets_list"
+while IFS= read -r source; do
+  relative=${source#public/assets/}
+  target="dist/assets/$relative"
+  if [ ! -f "$target" ]; then
+    echo "dist audit FAILED — production asset missing from dist: $relative"
+    exit 1
+  fi
+  if ! cmp -s "$source" "$target"; then
+    echo "dist audit FAILED — production asset differs in dist: $relative"
+    exit 1
+  fi
+done < "$public_assets_list"
+
 if find dist -type l -print | grep -q .; then
   echo "dist audit FAILED — symbolic links are not allowed"
   find dist -type l -print

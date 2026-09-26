@@ -11,7 +11,7 @@ import {
   type PreferredItemCategory,
   type PreferredItemSlots,
 } from '../core/preferredSlots';
-import { getSettings, onSettingsChanged, updateSettings, DEFAULT_BINDINGS, type KeyBindings } from '../core/settings';
+import { getSettings, onSettingsChanged, updateSettings, DEFAULT_BINDINGS, type ColorVisionMode, type KeyBindings } from '../core/settings';
 import { clearMatchRecords, loadMatchRecords, summarize } from '../core/statsStore';
 import { SKIN_IDS } from '../render/characters';
 import { SkinSelector, skinTextKey } from './skinSelector';
@@ -25,6 +25,61 @@ import type { MapDef } from '../world/types';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const settingCopy = (en: string, ja: string): string => getLang() === 'ja' ? ja : en;
+
+export type ColorVisionCueKind = 'health' | 'shield' | 'ammo' | 'storm' | 'elimination' | 'alert' | 'hit' | 'damage';
+export interface ColorVisionCue {
+  symbol: string;
+  label: string;
+}
+
+const COLOR_VISION_SYMBOLS: Record<ColorVisionMode, Record<ColorVisionCueKind, string>> = {
+  none: { health: '', shield: '', ammo: '', storm: '', elimination: '', alert: '', hit: '', damage: '' },
+  protanopia: { health: '+', shield: '◇', ammo: '▣', storm: '▲', elimination: '✕', alert: '!', hit: '+', damage: '!' },
+  deuteranopia: { health: '♥', shield: '⬟', ammo: '▤', storm: '△', elimination: '×', alert: '◆', hit: '•', damage: '→' },
+  tritanopia: { health: 'H', shield: 'S', ammo: 'A', storm: '~', elimination: 'X', alert: '!', hit: '·', damage: '→' },
+};
+
+const COLOR_VISION_LABELS: Record<ColorVisionCueKind, readonly [string, string]> = {
+  health: ['Health', '体力'],
+  shield: ['Shield', 'シールド'],
+  ammo: ['Ammo', '弾薬'],
+  storm: ['Storm', 'ストーム'],
+  elimination: ['Elimination', '撃破'],
+  alert: ['Alert', '警告'],
+  hit: ['Hit', 'ヒット'],
+  damage: ['Damage', 'ダメージ'],
+};
+
+export function colorVisionCue(mode: ColorVisionMode, kind: ColorVisionCueKind): ColorVisionCue {
+  if (mode === 'none') return { symbol: '', label: '' };
+  const [en, ja] = COLOR_VISION_LABELS[kind];
+  return { symbol: COLOR_VISION_SYMBOLS[mode][kind], label: settingCopy(en, ja) };
+}
+
+export type CombatAlertKind = 'elimination' | 'storm' | 'banner';
+export interface CombatAlertCandidate {
+  kind: CombatAlertKind;
+  remaining: number;
+}
+
+const COMBAT_ALERT_PRIORITY: Record<CombatAlertKind, number> = {
+  elimination: 3,
+  storm: 2,
+  banner: 1,
+};
+
+export function combatAlertPriority(kind: CombatAlertKind): number {
+  return COMBAT_ALERT_PRIORITY[kind];
+}
+
+export function orderCombatAlerts(candidates: readonly CombatAlertCandidate[]): CombatAlertCandidate[] {
+  return candidates
+    .filter((candidate) => Number.isFinite(candidate.remaining) && candidate.remaining > 0)
+    .slice()
+    .sort((a, b) => combatAlertPriority(b.kind) - combatAlertPriority(a.kind));
+}
+
+type AmmoStatus = 'normal' | 'low' | 'empty' | 'unarmed';
 
 export type DifficultyChoice = Difficulty;
 export interface PlaySelection {
@@ -1269,14 +1324,24 @@ export class Hud {
   private killfeedEntries: Array<{ el: HTMLElement; t: number }> = [];
   private bannerTimer = 0;
   private elimTimer = 0;
+  private stormWarningRemaining = 0;
   private hitmarkerTimer = 0;
   private minimapTimer = 1 / 12;
-  private stormWarningTimer: number | null = null;
   private dmgNumbers: DamageNumberEntry[] = [];
   private captionEls = new Map<TextKey | string, HTMLElement>();
   private projector: ((x: number, y: number, z: number) => { x: number; y: number; visible: boolean }) | null = null;
   private onlineNoticeTimer: number | null = null;
   private tacticalPingExpiresAt = 0;
+  private lastHealthValue = 100;
+  private lastShieldValue = 100;
+  private lastHealthBand = 'normal';
+  private lastShieldBand = 'normal';
+  private lastAmmoSummary = '—';
+  private lastAmmoState: AmmoStatus = 'unarmed';
+  private lastAmmoAnnouncedState = '';
+  private lastHitAnnouncementAt = -Infinity;
+  private lastDamageAnnouncementAt = -Infinity;
+  private lastDamageDirection = '';
   tacMarker: TacMarker | null = null;
   onInventoryMove: (from: number, to: number) => void = () => undefined;
   onInventoryDrop: (slot: number) => void = () => undefined;
@@ -1287,16 +1352,204 @@ export class Hud {
   private inventorySuppressClickUntil = 0;
 
   constructor() {
+    this.applyReducedMotion();
     this.applyCrosshair();
+    this.applyColorVision();
+    this.renderCombatAlertStack();
     this.buildInventoryOverlay();
+    onSettingsChanged(() => {
+      this.applyReducedMotion();
+      this.applyColorVision();
+      this.updateResourceAccessibility(this.lastHealthValue, this.lastShieldValue);
+      this.updateAmmoAccessibility(this.lastAmmoSummary, this.lastAmmoState);
+      this.renderCombatAlertStack();
+    });
     onLangChanged(() => {
       hydrateStatic();
+      this.applyReducedMotion();
       this.applyCrosshair();
+      this.applyColorVision();
+      this.updateResourceAccessibility(this.lastHealthValue, this.lastShieldValue);
+      this.updateAmmoAccessibility(this.lastAmmoSummary, this.lastAmmoState);
+      this.renderCombatAlertStack();
     });
   }
 
   show(visible: boolean): void {
     $('hud').classList.toggle('hidden', !visible);
+    if (!visible) $('hud-live-status').textContent = '';
+  }
+
+  private applyReducedMotion(): void {
+    document.documentElement.dataset.reducedMotion = String(getSettings().reducedMotion);
+  }
+
+  private applyColorVision(mode = getSettings().colorVision): void {
+    document.documentElement.dataset.colorVision = mode;
+    $('combat-alert-stack').setAttribute('aria-label', settingCopy('Combat alerts', '戦闘アラート'));
+    const cueElements: Array<[string, ColorVisionCueKind]> = [
+      ['health-bar', 'health'],
+      ['shield-bar', 'shield'],
+      ['ammo-display', 'ammo'],
+      ['storm-timer', 'storm'],
+      ['hitmarker', 'hit'],
+      ['damage-direction', 'damage'],
+    ];
+    for (const [id, kind] of cueElements) this.applyColorVisionCue($(id), kind, mode);
+    for (const kind of ['elimination', 'storm', 'banner'] as const) {
+      this.applyColorVisionCue(this.combatAlertElement(kind), kind === 'banner' ? 'alert' : kind, mode);
+    }
+  }
+
+  private applyColorVisionCue(element: HTMLElement, kind: ColorVisionCueKind, mode = getSettings().colorVision): void {
+    const cue = colorVisionCue(mode, kind);
+    element.classList.toggle('color-vision-cue', cue.symbol !== '');
+    if (element.dataset.cvCue !== cue.symbol) element.dataset.cvCue = cue.symbol;
+    if (element.dataset.cvLabel !== cue.label) element.dataset.cvLabel = cue.label;
+  }
+
+  private announce(message: string): void {
+    const live = $('hud-live-status');
+    if (live.textContent !== message) live.textContent = message;
+  }
+
+  private updateResourceAccessibility(healthValue: number, shieldValue: number): void {
+    const health = Number.isFinite(healthValue) ? Math.max(0, Math.min(100, healthValue)) : 0;
+    const shield = Number.isFinite(shieldValue) ? Math.max(0, Math.min(100, shieldValue)) : 0;
+    this.lastHealthValue = health;
+    this.lastShieldValue = shield;
+    const healthBand = health <= 30 ? 'critical' : health <= 60 ? 'low' : 'normal';
+    const shieldBand = shield <= 25 ? 'low' : 'normal';
+    const healthBar = $('health-bar');
+    const shieldBar = $('shield-bar');
+    const healthLabel = settingCopy('Health', '体力');
+    const shieldLabel = settingCopy('Shield', 'シールド');
+    const criticalLabel = settingCopy('critical', '危険');
+    const lowLabel = settingCopy('low', '低い');
+    const healthStateLabel = healthBand === 'critical' ? criticalLabel : healthBand === 'low' ? lowLabel : '';
+    const shieldStateLabel = shieldBand === 'low' ? lowLabel : '';
+    $('health-fill').style.width = `${health}%`;
+    $('shield-fill').style.width = `${shield}%`;
+    $('health-text').textContent = String(Math.ceil(health));
+    $('shield-text').textContent = String(Math.ceil(shield));
+    healthBar.dataset.state = healthBand;
+    healthBar.dataset.value = String(Math.ceil(health));
+    shieldBar.dataset.state = shieldBand;
+    shieldBar.dataset.value = String(Math.ceil(shield));
+    healthBar.classList.toggle('critical', healthBand === 'critical');
+    healthBar.setAttribute('aria-label', healthLabel);
+    healthBar.setAttribute('aria-valuenow', String(Math.round(health)));
+    healthBar.setAttribute('aria-valuetext', healthStateLabel
+      ? `${healthLabel} ${Math.ceil(health)}, ${healthStateLabel}`
+      : `${healthLabel} ${Math.ceil(health)}`);
+    shieldBar.setAttribute('aria-label', shieldLabel);
+    shieldBar.setAttribute('aria-valuenow', String(Math.round(shield)));
+    shieldBar.setAttribute('aria-valuetext', shieldStateLabel
+      ? `${shieldLabel} ${Math.ceil(shield)}, ${shieldStateLabel}`
+      : `${shieldLabel} ${Math.ceil(shield)}`);
+    this.applyColorVisionCue(healthBar, 'health');
+    this.applyColorVisionCue(shieldBar, 'shield');
+    if (healthBand !== this.lastHealthBand) {
+      if (healthBand === 'critical') this.announce(settingCopy('Health critical', '体力が危険です'));
+      else if (healthBand === 'low' && this.lastHealthBand === 'normal') this.announce(settingCopy('Health low', '体力が低下しています'));
+      this.lastHealthBand = healthBand;
+    }
+    if (shieldBand !== this.lastShieldBand) {
+      if (shieldBand === 'low') this.announce(settingCopy('Shield low', 'シールドが低下しています'));
+      this.lastShieldBand = shieldBand;
+    }
+  }
+
+  private updateAmmoAccessibility(summary: string, status: AmmoStatus): void {
+    this.lastAmmoSummary = summary;
+    this.lastAmmoState = status;
+    const element = $('ammo-display');
+    const ammoLabel = settingCopy('Ammunition', '弾薬');
+    const stateLabel = status === 'empty'
+      ? settingCopy('Empty', '空')
+      : status === 'low'
+        ? settingCopy('Low', '少ない')
+        : '';
+    element.classList.toggle('low', status === 'empty');
+    element.classList.toggle('warn', status === 'low');
+    element.dataset.state = status;
+    element.dataset.cvDetail = stateLabel;
+    element.setAttribute('aria-label', stateLabel ? `${ammoLabel}: ${summary}, ${stateLabel}` : `${ammoLabel}: ${summary}`);
+    this.applyColorVisionCue(element, 'ammo');
+    if ((status === 'low' || status === 'empty') && this.lastAmmoAnnouncedState !== status) {
+      this.announce(`${ammoLabel} ${stateLabel}`);
+    }
+    this.lastAmmoAnnouncedState = status === 'low' || status === 'empty' ? status : '';
+  }
+
+  private combatAlertElement(kind: CombatAlertKind): HTMLElement {
+    if (kind === 'elimination') return $('elim-banner');
+    if (kind === 'storm') return $('storm-warning');
+    return $('center-banner');
+  }
+
+  private setCombatAlert(kind: CombatAlertKind, text: string, duration: number, fallback: number): void {
+    const safeDuration = Number.isFinite(duration) ? Math.max(0, Math.min(12, duration)) : fallback;
+    if (kind === 'elimination') this.elimTimer = safeDuration;
+    else if (kind === 'storm') this.stormWarningRemaining = safeDuration;
+    else this.bannerTimer = safeDuration;
+    this.combatAlertElement(kind).textContent = text;
+    this.renderCombatAlertStack();
+  }
+
+  private renderCombatAlertStack(): void {
+    const stack = $('combat-alert-stack');
+    const candidates: CombatAlertCandidate[] = [
+      { kind: 'elimination', remaining: this.elimTimer },
+      { kind: 'storm', remaining: this.stormWarningRemaining },
+      { kind: 'banner', remaining: this.bannerTimer },
+    ];
+    const active = orderCombatAlerts(candidates);
+    const activeKinds = new Set(active.map((candidate) => candidate.kind));
+    const activeCount = String(active.length);
+    if (stack.dataset.activeCount !== activeCount) stack.dataset.activeCount = activeCount;
+    for (const kind of ['elimination', 'storm', 'banner'] as const) {
+      const element = this.combatAlertElement(kind);
+      const visible = activeKinds.has(kind);
+      element.classList.toggle('hidden', !visible);
+      const ariaHidden = String(!visible);
+      if (element.getAttribute('aria-hidden') !== ariaHidden) element.setAttribute('aria-hidden', ariaHidden);
+      if (!visible) {
+        element.style.order = '';
+        element.removeAttribute('data-priority');
+        if (element.hasAttribute('aria-label')) element.removeAttribute('aria-label');
+        continue;
+      }
+      const priority = combatAlertPriority(kind);
+      const order = String(4 - priority);
+      if (element.style.order !== order) element.style.order = order;
+      if (element.dataset.priority !== String(priority)) element.dataset.priority = String(priority);
+      const cueKind: ColorVisionCueKind = kind === 'banner' ? 'alert' : kind;
+      this.applyColorVisionCue(element, cueKind);
+      const cue = colorVisionCue(getSettings().colorVision, cueKind);
+      const label = cue.symbol ? `${cue.label}: ${element.textContent ?? ''}` : '';
+      if (label) {
+        if (element.getAttribute('aria-label') !== label) element.setAttribute('aria-label', label);
+      } else if (element.hasAttribute('aria-label')) {
+        element.removeAttribute('aria-label');
+      }
+    }
+  }
+
+  private updateCombatAlertTimers(uiDt: number): void {
+    this.bannerTimer = Math.max(0, this.bannerTimer - uiDt);
+    this.elimTimer = Math.max(0, this.elimTimer - uiDt);
+    this.stormWarningRemaining = Math.max(0, this.stormWarningRemaining - uiDt);
+    this.renderCombatAlertStack();
+  }
+
+  private updateHudTimers(dt: number): void {
+    const uiDt = Number.isFinite(dt) ? Math.min(0.1, Math.max(0, dt)) : 0;
+    this.hitmarkerTimer = Math.max(0, this.hitmarkerTimer - uiDt);
+    this.damageDirTimer = Math.max(0, this.damageDirTimer - uiDt);
+    if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
+    if (this.damageDirTimer <= 0) $('damage-direction').classList.remove('show');
+    this.updateCombatAlertTimers(uiDt);
   }
 
   /**
@@ -1618,7 +1871,7 @@ export class Hud {
   /** Fade the crosshair out as iron sights take over the aim point. */
   setCrosshairFade(adsAmount: number): void {
     const ch = $('crosshair');
-    ch.style.opacity = `${(1 - Math.min(1, Math.max(0, adsAmount)) * 0.85).toFixed(3)}`;
+    ch.style.opacity = `${(1 - Math.min(1, Math.max(0, adsAmount)) * 0.5).toFixed(3)}`;
   }
 
   /** Magnification readout inside the scope lens (1x / 2x / 4x). */
@@ -1655,10 +1908,7 @@ export class Hud {
       chEl.style.setProperty('--ring-d', `${Math.max(12, Math.round(radiusPx * 2))}px`);
     }
 
-    $('health-fill').style.width = `${p.health}%`;
-    $('shield-fill').style.width = `${p.shield}%`;
-    $('health-text').textContent = String(Math.ceil(p.health));
-    $('shield-text').textContent = String(Math.ceil(p.shield));
+    this.updateResourceAccessibility(p.health, p.shield);
 
     const w = p.inv.selectedWeapon;
     if (w) {
@@ -1666,13 +1916,13 @@ export class Hud {
       $('ammo-mag').textContent = String(w.ammoInMag);
       $('ammo-reserve').textContent = String(p.inv.ammo[def.ammoType]);
       $('weapon-name').textContent = t(`wpn.${w.weaponId}` as TextKey).toUpperCase();
-      const ammoEl = $('ammo-display');
-      ammoEl.classList.toggle('low', w.ammoInMag === 0);
-      ammoEl.classList.toggle('warn', w.ammoInMag > 0 && w.ammoInMag / def.magSize <= 0.25);
+      const status: AmmoStatus = w.ammoInMag === 0 ? 'empty' : w.ammoInMag / def.magSize <= 0.25 ? 'low' : 'normal';
+      this.updateAmmoAccessibility(`${w.ammoInMag} / ${p.inv.ammo[def.ammoType]}`, status);
     } else {
       $('ammo-mag').textContent = '—';
       $('ammo-reserve').textContent = '';
       $('weapon-name').textContent = t('hud.unarmed');
+      this.updateAmmoAccessibility('—', 'unarmed');
     }
 
     // Slots: [Fists] [1..5] — fists are a permanent pseudo-slot, leftmost.
@@ -1747,10 +1997,8 @@ export class Hud {
     else if (st.state === 'shrinking') stEl.textContent = `${t('hud.stormShrinking')} — ${formatTime(st.timer)}`;
     else stEl.textContent = t('hud.finalCircle');
     stEl.classList.toggle('urgent', st.state === 'shrinking');
-
-    // Critical health bar state
-    const hpBar = document.querySelector('.bar.health');
-    if (hpBar) hpBar.classList.toggle('critical', p.health <= 30 && p.health > 0);
+    stEl.dataset.state = st.state;
+    this.applyColorVisionCue(stEl, 'storm');
 
     // Vignettes
     const vig = $('vignette');
@@ -1758,15 +2006,7 @@ export class Hud {
     const stormVig = $('storm-vignette');
     stormVig.style.opacity = match.storm.isOutside(p.body.position.x, p.body.position.z) ? '0.8' : '0';
 
-    const uiDt = Math.min(0.1, Math.max(0, dt));
-    this.bannerTimer -= uiDt;
-    this.elimTimer -= uiDt;
-    this.hitmarkerTimer -= uiDt;
-    if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
-    this.damageDirTimer -= uiDt;
-    if (this.damageDirTimer <= 0) $('damage-direction').classList.remove('show');
-    if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
-    if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
+    this.updateHudTimers(dt);
 
     if (getSettings().showFps) $('fps-counter').classList.remove('hidden');
     else $('fps-counter').classList.add('hidden');
@@ -1781,14 +2021,9 @@ export class Hud {
     this.updateOnlineHud();
     const p = view.actors.find((actor) => actor.id === view.localActorId) ?? null;
     if (!p) return;
-    $('health-fill').style.width = `${p.health}%`;
-    $('shield-fill').style.width = `${p.shield}%`;
-    $('health-text').textContent = String(Math.ceil(p.health));
-    $('shield-text').textContent = String(Math.ceil(p.shield));
+    this.updateResourceAccessibility(p.health, p.shield);
     $('alive-count').textContent = String(view.actors.filter((actor) => actor.alive).length);
     $('kills-count').textContent = String(p.stats.kills);
-    const hpBar = document.querySelector('.bar.health');
-    if (hpBar) hpBar.classList.toggle('critical', p.health <= 30 && p.health > 0);
     const storm = view.storm;
     const stormEl = $('storm-timer');
     if (storm.state === 'idle') stormEl.textContent = '';
@@ -1796,21 +2031,15 @@ export class Hud {
     else if (storm.state === 'shrinking') stormEl.textContent = `${t('hud.stormShrinking')} — ${formatTime(storm.timer)}`;
     else stormEl.textContent = t('hud.finalCircle');
     stormEl.classList.toggle('urgent', storm.state === 'shrinking');
+    stormEl.dataset.state = storm.state;
+    this.applyColorVisionCue(stormEl, 'storm');
     $('vignette').style.opacity = String(Math.max(0, 1 - p.health / 65));
     const outside = storm.state !== 'idle'
       && Math.hypot(p.position.x - storm.centerX, p.position.z - storm.centerZ) > storm.radius;
     $('storm-vignette').style.opacity = outside ? '0.8' : '0';
     this.syncReplicaInventory(p.inventory);
     if (this.isInventoryOpen()) this.syncReplicaInventoryOverlay(p.inventory);
-    const uiDt = Math.min(0.1, Math.max(0, dt));
-    this.bannerTimer -= uiDt;
-    this.elimTimer -= uiDt;
-    this.hitmarkerTimer -= uiDt;
-    if (this.hitmarkerTimer <= 0) $('hitmarker').classList.remove('show');
-    this.damageDirTimer -= uiDt;
-    if (this.damageDirTimer <= 0) $('damage-direction').classList.remove('show');
-    if (this.elimTimer <= 0) $('elim-banner').classList.add('hidden');
-    if (this.bannerTimer <= 0) $('center-banner').classList.add('hidden');
+    this.updateHudTimers(dt);
     if (getSettings().showFps) $('fps-counter').classList.remove('hidden');
     else $('fps-counter').classList.add('hidden');
     this.updateDamageNumbers(dt);
@@ -1826,6 +2055,14 @@ export class Hud {
       $('weapon-name').textContent = t('hud.unarmed');
       $('ammo-mag').textContent = '—';
       $('ammo-reserve').textContent = '';
+    }
+    if (w?.kind === 'weapon') {
+      const def = WEAPONS[w.weaponId];
+      const reserve = inventory?.ammo[def.ammoType] ?? 0;
+      const status: AmmoStatus = w.ammoInMag === 0 ? 'empty' : w.ammoInMag / def.magSize <= 0.25 ? 'low' : 'normal';
+      this.updateAmmoAccessibility(`${w.ammoInMag} / ${reserve}`, status);
+    } else {
+      this.updateAmmoAccessibility('—', 'unarmed');
     }
     const slotsEl = $('inventory-slots');
     if (slotsEl.childElementCount !== 6) {
@@ -1970,6 +2207,14 @@ export class Hud {
   hitmarker(headshot: boolean): void {
     const hm = $('hitmarker');
     hm.classList.toggle('headshot', headshot);
+    this.applyColorVisionCue(hm, 'hit');
+    const hitLabel = headshot ? settingCopy('Headshot', 'ヘッドショット') : settingCopy('Hit', 'ヒット');
+    hm.setAttribute('aria-label', hitLabel);
+    const now = performance.now();
+    if (headshot || now - this.lastHitAnnouncementAt >= 500) {
+      this.announce(hitLabel);
+      this.lastHitAnnouncementAt = now;
+    }
     // Web Animations API restart — the old remove/`offsetWidth`/add pattern
     // forced a synchronous layout (reflow) on every hit, and bursts land
     // several hits per frame. fill:'forwards' parks the marker faded-out.
@@ -1990,36 +2235,42 @@ export class Hud {
    * Point the damage-direction arc at the attacker. `angleRad` is relative to
    * the camera forward: 0 = ahead, positive = clockwise (to the right).
    */
+  private damageDirectionLabel(angleRad: number): string {
+    const tau = Math.PI * 2;
+    const angle = ((angleRad % tau) + tau) % tau;
+    if (angle < Math.PI / 4 || angle >= tau - Math.PI / 4) return settingCopy('ahead', '前方');
+    if (angle < Math.PI * 0.75) return settingCopy('right', '右');
+    if (angle < Math.PI * 1.25) return settingCopy('behind', '後方');
+    return settingCopy('left', '左');
+  }
+
   showDamageDirection(angleRad: number): void {
+    if (!Number.isFinite(angleRad)) return;
     const el = $('damage-direction');
     el.style.transform = `rotate(${angleRad}rad)`;
     el.classList.add('show');
+    this.applyColorVisionCue(el, 'damage');
+    const direction = this.damageDirectionLabel(angleRad);
+    el.dataset.direction = direction;
+    const now = performance.now();
+    if (direction !== this.lastDamageDirection || now - this.lastDamageAnnouncementAt >= 700) {
+      this.announce(`${settingCopy('Damage from', 'ダメージ方向')} ${direction}`);
+      this.lastDamageDirection = direction;
+      this.lastDamageAnnouncementAt = now;
+    }
     this.damageDirTimer = 1.0;
   }
 
   banner(text: string, duration = 3): void {
-    const el = $('center-banner');
-    el.textContent = text;
-    el.classList.remove('hidden');
-    this.bannerTimer = duration;
+    this.setCombatAlert('banner', text, duration, 3);
   }
 
   elimination(text: string): void {
-    const el = $('elim-banner');
-    el.textContent = text;
-    el.classList.remove('hidden');
-    this.elimTimer = 2.2;
+    this.setCombatAlert('elimination', text, 2.2, 2.2);
   }
 
   stormWarning(text: string, duration = 4): void {
-    const el = $('storm-warning');
-    el.textContent = text;
-    el.classList.remove('hidden');
-    if (this.stormWarningTimer !== null) window.clearTimeout(this.stormWarningTimer);
-    this.stormWarningTimer = window.setTimeout(() => {
-      el.classList.add('hidden');
-      this.stormWarningTimer = null;
-    }, duration * 1000);
+    this.setCombatAlert('storm', text, duration, 4);
   }
 
   addKillfeed(killer: string | null, victim: string, weaponIcon: string | null, headshot: boolean, storm: boolean): void {

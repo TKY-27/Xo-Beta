@@ -1,9 +1,11 @@
 /** Shared world/map data types. Renderer-independent (usable headless). */
 
+import type { EnvironmentPlan } from './environmentKit';
+
 export type MatKey =
   | 'concrete' | 'concreteDark' | 'asphalt' | 'asphaltDesert' | 'sidewalk' | 'metal' | 'metalDark' | 'metalExterior'
   | 'rust' | 'wood' | 'woodDark' | 'stoneBrick' | 'plaster' | 'plasterOld' | 'mudbrick'
-  | 'glass' | 'grass' | 'dirt' | 'rock' | 'roofTile' | 'gold'
+  | 'glass' | 'grass' | 'dirt' | 'dirtDesert' | 'rock' | 'roofTile' | 'gold'
   | 'neonCyan' | 'neonMagenta' | 'neonOrange' | 'neonGreen' | 'neonBlue'
   | 'windowWarm' | 'windowCool' | 'windowDark'
   // CYCLE 42: emissive-intensity buckets for night window grids — per-window
@@ -223,8 +225,24 @@ export interface SkyConfig {
   hemisphereSky: number;
   hemisphereGround: number;
   hemisphereIntensity: number;
+  /**
+   * Sky-fill directional intensity from the anti-sun side. Defaults per
+   * preset in the renderer; hard-lit maps (desert noon) set this low so form
+   * reads from the key light instead of a wash of fill.
+   */
+  fillIntensity?: number;
   exposure?: number;
   envIntensity?: number;
+  /**
+   * Multiplier applied to every world material's `envMapIntensity` once the
+   * match world exists. `Scene.environmentIntensity` does not move the r185
+   * node pipeline, and a full-dome "pure sky" HDRI delivers diffuse
+   * irradiance from every direction: left at the default 1.0 it out-weighs a
+   * 3.6-intensity key light and erases the key's cast shadows entirely, so
+   * buildings read as flat cut-outs with no contact grounding. Hard-key maps
+   * set this well below 1; overcast maps leave it at 1 where IBL is the key.
+   */
+  envMapScale?: number;
   backgroundBlurriness?: number;
   backgroundIntensity?: number;
   grade?: SkyGrade;
@@ -328,6 +346,8 @@ export interface MapDef {
   stairs: StairFlight[];
   /** Suggested drop-route band across the map for the transport. */
   transportRoute: { from: [number, number]; to: [number, number] };
+  /** Authored visual environment instances and their prefab contract. */
+  environmentPlan?: EnvironmentPlan;
   /** Rain-slicked streets: ground materials get reflective wet treatment. */
   wetGround?: boolean;
   /** Per-match weather variants, picked by match seed (first entry = most

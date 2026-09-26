@@ -160,7 +160,7 @@ export function buildOldFront(): MapDef {
     [{ x: 90, z: 195, r: 30 }, { x: -30, z: 210, r: 25 }, { x: 150, z: 170, r: 45 }], terrainH);
   scatterTrees(b, rng, 40, { minX: -240, maxX: 240, minZ: -245, maxZ: -140 }, 'dead',
     [{ x: -150, z: -150, r: 50 }], terrainH);
-  scatterTrees(b, rng, 30, { minX: 150, maxX: 245, minZ: -140, maxZ: 40 }, 'oak', [], terrainH);
+  scatterTrees(b, rng, 30, { minX: 150, maxX: 245, minZ: -140, maxZ: 40 }, 'oak', [{ x: 170, z: 18, r: 30 }], terrainH);
   scatterRocks(b, rng, 25, { minX: -245, maxX: 245, minZ: -245, maxZ: 245 },
     [
       { x: 20, z: -30, r: 70 },
@@ -179,7 +179,7 @@ export function buildOldFront(): MapDef {
 
   hardenExposedFlanks(b, { mat: 'sandbag', maxProps: 30 });
 
-  return b.finish(
+  const def = b.finish(
     {
       preset: 'overcast',
       atmosphere: {
@@ -204,6 +204,10 @@ export function buildOldFront(): MapDef {
       hemisphereIntensity: 1.0,
       exposure: 0.95,
       envIntensity: 0.46,
+      // Measured IBL ratio (`qa/ibl-oldfront-*.png`): 0.4 keeps the overcast
+      // sky believable while letting the key model the settlement, so the
+      // grass reads as sunlit ground instead of a flat ambient wash.
+      envMapScale: 0.4,
       backgroundBlurriness: 0.12,
       backgroundIntensity: 0.34,
       grade: {
@@ -221,8 +225,9 @@ export function buildOldFront(): MapDef {
       { id: 'rainSquall', rain: 0.8, wetGround: true, thunder: true, windSpeed: 0.05, cloudCover: 0.95 },
       // Clearing skies: cloud breaks, distance opens up.
       { id: 'clearing', cloudCover: 0.62, fogDensityScale: 0.8, hazeStrength: 0.35, exposureScale: 1.04 },
-    ] },
+     ] },
   );
+  return def;
 }
 
 // ---------------------------------------------------------------------------

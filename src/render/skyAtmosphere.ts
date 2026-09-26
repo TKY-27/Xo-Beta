@@ -15,8 +15,8 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import type { Node, UniformNode } from 'three/webgpu';
 import {
-  abs, clamp, cos, dot, exp, float, max, mix, normalize, positionLocal, pow,
-  sin, smoothstep, step, texture, uniform, vec2, vec3,
+  abs, clamp, cos, dot, exp, float, max, mix, mx_fractal_noise_float, mx_noise_float, normalize, positionLocal, pow,
+  sin, smoothstep, step, texture, uniform, vec3,
 } from 'three/tsl';
 import type { SkyAtmosphereProfile } from '../world/types';
 
@@ -98,35 +98,22 @@ export class SkyAtmosphereSystem {
     const disc = smoothstep(cos(u.discSize), cos(u.discSize.mul(0.82)), cosAngle);
     const glow = pow(max(cosAngle, 0.0), 46.0).mul(u.discGlow);
 
-    // Clouds: project the view direction onto a virtual layer plane and
-    // scroll with the deterministic wind. Two layers, the higher one slower
-    // and fainter, produce parallax without any extra draw.
-    const density = (uv: Node<'vec2'>): Node<'float'> => {
-      const low = this.noise.sample(uv).r;
-      const high = this.noise.sample(uv.mul(3.7)).g;
-      // The fine octaves break up the bilinear cell boundaries of the low
-      // octave, which otherwise read as rectangular cloud patches drifting
-      // across the sky.
-      const fine = this.noise.sample(uv.mul(11.3)).g;
-      const fine2 = this.noise.sample(uv.mul(27.1)).r;
+    const density = (direction: Node<'vec3'>, scale: number): Node<'float'> => {
+      const point = direction.mul(scale);
+      const low = mx_fractal_noise_float(point, 3, 2.1, 0.55).mul(0.5).add(0.5);
+      const high = mx_noise_float(point.mul(3.7)).mul(0.5).add(0.5);
+      const fine = mx_noise_float(point.mul(11.3)).mul(0.5).add(0.5);
+      const fine2 = mx_noise_float(point.mul(27.1)).mul(0.5).add(0.5);
       const d = low.mul(0.42).add(high.mul(0.26)).add(fine.mul(0.2)).add(fine2.mul(0.12));
-      // Remap around the coverage control: 0 = clear, 1 = heavy overcast.
       return smoothstep(float(1.0).sub(u.cloudCover.mul(1.2)), float(1.0).sub(u.cloudCover.mul(0.3)), d);
     };
-    // CYCLE 56 (review): raise the projection floor and start the horizon
-    // fade higher — near the horizon the plane UVs explode and the 256px
-    // noise exposed hard-edged translucent rectangles; haze owns that band.
-    const plane = dir.xz.div(max(dir.y.add(0.22), 0.18));
     const wind = u.time.mul(u.windSpeed);
-    const c1 = density(plane.mul(0.055).add(vec2(wind.mul(0.9), wind.mul(0.32))));
-    const c2 = density(plane.mul(0.11).add(vec2(wind.mul(-0.55), wind.mul(0.7))).add(13.7));
+    const drift = vec3(wind.mul(0.9), wind.mul(0.05), wind.mul(0.32));
+    const c1 = density(dir.add(drift), 0.055);
+    const c2 = density(dir.add(vec3(wind.mul(-0.55), wind.mul(0.11), wind.mul(0.7))).add(vec3(13.7)), 0.11);
     const clouds = clamp(c1.mul(0.78).add(c2.mul(0.34)), 0.0, 1.0)
-      // Fade clouds toward the horizon line into the haze, and keep the
-      // overall layer subtle: solid cloud shapes read as floating cards at
-      // gameplay view angles.
       .mul(0.62)
       .mul(smoothstep(0.16, 0.42, height));
-    // Cloud shading: brighter toward the sun, cooler away.
     const cloudColor = mix(u.cloudShade, u.cloudTint, float(0.45).add(glow.mul(0.55)));
     color = mix(color, cloudColor, clouds);
 

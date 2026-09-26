@@ -10,8 +10,8 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import type { Node, UniformNode } from 'three/webgpu';
 import {
-  abs, clamp, dot, floor, fract, float, mix, normalView, positionLocal,
-  positionViewDirection, pow, sin, smoothstep, step, uniform, uv, vec2,
+  abs, clamp, dot, float, mix, normalView, positionLocal,
+  positionViewDirection, pow, sin, smoothstep, uniform, uv,
 } from 'three/tsl';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
@@ -26,6 +26,7 @@ import {
 import { RainSystem } from './rain';
 import type { MaterialLibrary } from './materials';
 import { PropLibrary, scatterMatrix } from './props';
+import { peekGltf } from '../assets/assets';
 import { WeaponModelFactory } from './weaponModels';
 import { buildVista, type VistaHandle } from './vista';
 import type { Match } from '../sim/match';
@@ -33,6 +34,8 @@ import type { ChestView, GameStateView, LootView } from '../sim/gameStateView';
 import { RARITY_COLORS, type AmmoType } from '../core/balance';
 import { buildTerrainRibbonIndices } from '../world/terrainMesh';
 import { getSettings } from '../core/settings';
+import { environmentTransformToMatrix, resolveEnvironmentPlan } from '../world/environmentKit';
+import { normalizeEnvironmentGlb } from './environmentKitGlb';
 import {
   WaterSurfaceSystem,
   type WaterQaStats,
@@ -65,6 +68,43 @@ export interface PresentationTransport {
 interface HullWeathering {
   map: THREE.CanvasTexture;
   roughnessMap: THREE.CanvasTexture;
+}
+
+function ensureGeometryUv(geometry: THREE.BufferGeometry): void {
+  if (geometry.getAttribute('uv')) return;
+  const position = geometry.getAttribute('position');
+  if (!position) return;
+  const normal = geometry.getAttribute('normal');
+  const values = new Float32Array(position.count * 2);
+  for (let index = 0; index < position.count; index += 1) {
+    const x = position.getX(index);
+    const y = position.getY(index);
+    const z = position.getZ(index);
+    const nx = Math.abs(normal?.getX(index) ?? 0);
+    const ny = Math.abs(normal?.getY(index) ?? 0);
+    const nz = Math.abs(normal?.getZ(index) ?? 0);
+    if (ny >= nx && ny >= nz) {
+      values[index * 2] = x * 0.25;
+      values[index * 2 + 1] = z * 0.25;
+    } else if (nx >= nz) {
+      values[index * 2] = z * 0.25;
+      values[index * 2 + 1] = y * 0.25;
+    } else {
+      values[index * 2] = x * 0.25;
+      values[index * 2 + 1] = y * 0.25;
+    }
+  }
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(values, 2));
+}
+
+export function environmentMeshCastsShadow(mesh: THREE.Mesh, prefabId: string): boolean {
+  if (prefabId === 'wickerBasket') return false;
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  if (materials.some((material) => material.transparent || material.opacity < 0.95)) return false;
+  if (prefabId === 'fireEscape' || prefabId === 'urbanFacade' || prefabId === 'factoryFacade') {
+    return !/(glass|window|frame|railing|trim|pipe|vent|lamp|light)/i.test(mesh.name);
+  }
+  return true;
 }
 
 let hullWeatheringCache: HullWeathering | null = null;
@@ -287,15 +327,12 @@ function buildStormMaterial(): { material: MeshBasicNodeMaterial; u: StormUnifor
   // scrolling energy bands (two directions)
   const band0 = sin(uvX.mul(90.0).sub(u.time.mul(2.2)).add(sin(uvY.mul(22.0)))).mul(0.5).add(0.5);
   const band = band0.mul(float(0.55).add(float(0.45).mul(sin(uvY.mul(34.0).sub(u.time.mul(1.4))))));
-  // crackle noise streaks
-  const cell = vec2(floor(uvX.mul(140.0)), floor(uvY.mul(26.0)));
-  const n = fract(sin(dot(cell.add(vec2(floor(u.time.mul(9.0)), 0.0)), vec2(127.1, 311.7))).mul(43758.5453));
-  const crackle = step(0.82, n).mul(float(0.6).add(float(0.4).mul(sin(u.time.mul(22.0)))));
-  const energy = band.mul(float(0.35).add(crackle));
+  const detail = sin(uvX.mul(48.0).sub(u.time.mul(1.6)).add(sin(uvY.mul(18.0).add(u.time.mul(0.7))).mul(1.7))).mul(0.5).add(0.5);
+  const energy = band.mul(float(0.28).add(detail.mul(0.16)));
   let col: Node<'vec3'> = mix(u.colorB, u.colorA, clamp(energy.mul(1.5), 0.0, 1.0));
   col = mix(col, u.colorB.mul(0.85), murk.mul(0.35));
   // readable translucent wall: solid purple body + energetic highlights
-  const alpha = vertFade.mul(float(0.27).add(murk.mul(0.08)).add(energy.mul(0.24))).mul(u.intensity);
+  const alpha = vertFade.mul(float(0.16).add(murk.mul(0.07)).add(energy.mul(0.16))).mul(u.intensity);
   const material = new MeshBasicNodeMaterial();
   material.transparent = true;
   material.side = THREE.DoubleSide;
@@ -541,6 +578,40 @@ export class GlassInstancePool {
 }
 
 const _Y_AXIS = new THREE.Vector3(0, 1, 0);
+const SCATTER_CELL_SIZE = 80;
+const STATIC_CELL_SIZE = 128;
+
+type EnvironmentSceneAsset = NonNullable<ReturnType<typeof peekGltf>>;
+type EnvironmentSceneOrigin = 'preserve' | 'bottom-center' | 'bounds-center';
+type EnvironmentSceneMaterialMode = 'preserve' | 'node-standard';
+
+const normalizedEnvironmentScenes = new Map<string, THREE.Group>();
+
+function cloneNormalizedEnvironmentScene(
+  asset: EnvironmentSceneAsset,
+  assetPath: string,
+  origin: EnvironmentSceneOrigin,
+  materialMode: EnvironmentSceneMaterialMode,
+): THREE.Group {
+  const key = `${assetPath}|${origin}|${materialMode}`;
+  const cached = normalizedEnvironmentScenes.get(key);
+  if (cached) return cached.clone(true);
+  const normalized = normalizeEnvironmentGlb(asset, { assetPath, origin, materialMode });
+  normalizedEnvironmentScenes.set(key, normalized.scene);
+  return normalized.scene.clone(true);
+}
+
+function enableInstancedCulling(mesh: THREE.InstancedMesh): void {
+  mesh.computeBoundingBox();
+  mesh.computeBoundingSphere();
+  mesh.frustumCulled = true;
+}
+
+function enableMeshCulling(mesh: THREE.Mesh): void {
+  mesh.geometry.computeBoundingBox();
+  mesh.geometry.computeBoundingSphere();
+  mesh.frustumCulled = true;
+}
 
 /**
  * Chests render this far sunk into their resolved support surface. The skirt
@@ -574,7 +645,7 @@ export class WorldView {
   private viewPos = new THREE.Vector3();
   private replicaInitialized = false;
   private readonly mapDef: MapDef;
-  /** Beyond-bounds landscape + boundary barrier (see vista.ts). */
+  /** Beyond-bounds landscape and atmospheric horizon detail (see vista.ts). */
   readonly vista: VistaHandle;
   /** Shared contact-shadow disc resources (vehicles, rocks, trees). Built
    * lazily; dispose() traverses the group, so one instance per view is
@@ -603,16 +674,17 @@ export class WorldView {
     this.mapDef = def;
     const quality = getSettings().quality;
     const lightCount = quality === 'cinematic' || quality === 'ultra'
-      ? 22
+      ? 8
       : quality === 'high'
-        ? 12
+        ? 8
         : quality === 'medium'
-          ? 8
+          ? 6
           : 4;
     this.lightPool = new StaticLightPool(lightCount);
     this.weaponFactory = new WeaponModelFactory(props);
     this.applyWetGround(def);
     this.buildStatic(def);
+    this.buildEnvironmentPlan(def);
     this.buildSurfacePaths(def);
     this.buildTerrainRoadStrips(def);
     this.vista = buildVista(def, mats);
@@ -662,10 +734,6 @@ export class WorldView {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Static geometry (instanced boxes/cylinders/spheres per material)
-  // -------------------------------------------------------------------------
-
   private buildStatic(def: MapDef): void {
     const batches = new Map<string, {
       kind: string;
@@ -696,7 +764,7 @@ export class WorldView {
       const key = g.kind;
       const renderMat = def.id === 'ashara' ? desertDaylightMat[g.mat] ?? g.mat : g.mat;
       const castShadow = g.kind !== 'box' || g.castShadow !== false;
-      const batchKey = `${key}:${renderMat}:${castShadow ? 'shadow' : 'unshadowed'}`;
+      const batchKey = `${key}:${renderMat}:${castShadow ? 'shadow' : 'unshadowed'}:${Math.floor(g.x / STATIC_CELL_SIZE)}:${Math.floor(g.z / STATIC_CELL_SIZE)}`;
       if (!batches.has(batchKey)) batches.set(batchKey, { kind: key, mat: renderMat, castShadow, matrices: [] });
       batches.get(batchKey)!.matrices.push(
         new THREE.Matrix4().compose(new THREE.Vector3(g.x, g.y, g.z), q, scale),
@@ -739,11 +807,319 @@ export class WorldView {
         if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
       }
       inst.instanceMatrix.needsUpdate = true;
-      inst.frustumCulled = false;
+      enableInstancedCulling(inst);
       inst.castShadow = castShadow;
       inst.receiveShadow = true;
       this.group.add(inst);
     }
+  }
+
+  private environmentMaterialKey(prefabId: string, mapId: string): MatKey {
+    if (prefabId.includes('marketStand')) return 'woodDark';
+    if (prefabId.includes('floor')) return mapId === 'oldfront' ? 'stoneBrick' : mapId === 'ashara' ? 'concrete' : 'facilityFloor';
+    if (prefabId.includes('ceiling')) return 'interiorCeiling';
+    if (prefabId.includes('roof') || prefabId.includes('parapet')) {
+      if (mapId === 'eden') return 'metal';
+      return mapId === 'oldfront' || mapId === 'ashara' ? 'roofTile' : 'metalDark';
+    }
+    if (prefabId.includes('crate')) return mapId === 'oldfront' ? 'woodDark' : 'wood';
+    if (prefabId.includes('barrel') || prefabId.includes('pipe')) return 'rust';
+    if (prefabId === 'wallDoorRound') return mapId === 'ashara' ? 'plasterOld' : mapId === 'oldfront' ? 'stoneBrick' : 'metal';
+    if (prefabId === 'wallArch') return mapId === 'ashara' ? 'plasterOld' : mapId === 'oldfront' ? 'stoneBrick' : 'concrete';
+    if (prefabId.includes('railing') || prefabId.includes('beam') || prefabId.includes('column') || prefabId.includes('vent') || prefabId.includes('door')) return 'metal';
+    if (prefabId.includes('wallDamaged') || prefabId.includes('wallReinforced')) return mapId === 'oldfront' ? 'stoneBrick' : 'concrete';
+    if (prefabId.includes('wallPlaster')) return mapId === 'ashara' ? 'plasterOld' : 'plaster';
+    if (prefabId.includes('wall')) {
+      if (mapId === 'oldfront') return 'plasterOld';
+      if (mapId === 'ashara') return 'mudbrick';
+      if (mapId === 'neocity') return 'facadeA';
+      return 'concrete';
+    }
+    if (prefabId.includes('rubble') || prefabId.includes('debris')) return mapId === 'ashara' ? 'rock' : 'concreteDark';
+    if (prefabId === 'homeA' || prefabId === 'homeB') return mapId === 'ashara' ? 'plasterOld' : 'concrete';
+    if (prefabId === 'towerA' || prefabId === 'tavern') return mapId === 'ashara' ? 'mudbrick' : 'stoneBrick';
+    return mapId === 'oldfront' ? 'stoneBrick' : 'concrete';
+  }
+
+  private buildEnvironmentPlan(def: MapDef): void {
+    const plan = def.environmentPlan;
+    if (!plan) return;
+    const group = new THREE.Group();
+    group.name = `${def.id}-authored-environment-plan`;
+    group.userData.environmentPlan = plan.kit.id;
+    group.userData.renderOnly = true;
+    const modules: string[] = [];
+    type EnvironmentBucket = {
+      geometry: THREE.BufferGeometry;
+      material: THREE.Material;
+      matrices: THREE.Matrix4[];
+      prefabId: string;
+      castShadow: boolean;
+      cellX: number;
+      cellZ: number;
+    };
+    const buckets = new Map<string, EnvironmentBucket>();
+    const environmentSpots: Array<{ x: number; z: number; y: number; span: number; height: number; yaw?: number }> = [];
+    const sun = def.sky.sunDirection;
+    const sunAzimuth = Math.hypot(sun[0], sun[2]) > 1e-4 ? Math.atan2(sun[2], sun[0]) : undefined;
+    const visible = (object: THREE.Object3D): boolean => {
+      for (let current: THREE.Object3D | null = object; current; current = current.parent) {
+        if (!current.visible) return false;
+      }
+      return true;
+    };
+    const configureMesh = (mesh: THREE.Mesh, resolvedInstance: string, prefabId: string, materialMode: 'node-standard' | 'preserve'): void => {
+      if (materialMode !== 'preserve') mesh.material = this.mats.get(this.environmentMaterialKey(prefabId, def.id));
+      if (prefabId === 'market' && materialMode === 'preserve' && !Array.isArray(mesh.material)) {
+        const material = mesh.material as THREE.MeshStandardMaterial;
+        if (!material.userData.xoDesertMarketTuned) {
+          material.color.multiply(new THREE.Color(0.78, 0.66, 0.54));
+          material.roughness = Math.max(material.roughness, 0.72);
+          material.metalness = Math.min(material.metalness, 0.12);
+          material.userData.xoDesertMarketTuned = true;
+        }
+      }
+      if ((prefabId === 'floor' || prefabId === 'ceiling') && !Array.isArray(mesh.material)) {
+        const material = mesh.material as THREE.Material;
+        material.side = THREE.DoubleSide;
+        material.needsUpdate = true;
+      }
+      mesh.geometry.userData.externalShared = true;
+      mesh.castShadow = environmentMeshCastsShadow(mesh, prefabId);
+      mesh.receiveShadow = true;
+      mesh.frustumCulled = true;
+      mesh.userData.externalShared = true;
+      mesh.userData.environmentInstance = resolvedInstance;
+      mesh.userData.environmentKit = plan.kit.id;
+    };
+    const addClonedRoot = (root: THREE.Group, resolved: ReturnType<typeof resolveEnvironmentPlan>[number]): void => {
+      root.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (mesh.isMesh) configureMesh(mesh, resolved.instanceId, resolved.prefabId, resolved.render.materialMode);
+      });
+      group.add(root);
+    };
+    for (const resolved of resolveEnvironmentPlan(plan)) {
+      if (!resolved.renderVisible) continue;
+      const [scaleX, scaleY, scaleZ] = resolved.transform.scale;
+      const isBuilding = resolved.prefabId === 'market' || resolved.prefabId === 'marketHall' || resolved.prefabId === 'shopRow';
+      const isCargo = resolved.prefabId === 'woodenTable'
+        || resolved.prefabId === 'woodenCrate'
+        || resolved.prefabId === 'plasticCrate'
+        || resolved.prefabId === 'wickerBasket';
+      if (isBuilding || isCargo) {
+        const footprint = isBuilding
+          ? (resolved.prefabId === 'marketHall' ? 4.7 : resolved.prefabId === 'shopRow' ? 4.3 : 2.75)
+          : 0.7;
+        environmentSpots.push({
+          x: resolved.transform.position[0],
+          y: resolved.transform.position[1],
+          z: resolved.transform.position[2],
+          span: footprint * Math.max(Math.abs(scaleX), Math.abs(scaleZ)),
+          height: (isBuilding
+            ? (resolved.prefabId === 'marketHall' ? 2.7 : resolved.prefabId === 'shopRow' ? 2.8 : 2.2)
+            : 0.45) * Math.abs(scaleY),
+          yaw: sunAzimuth,
+        });
+      }
+      const asset = peekGltf(resolved.render.assetPath);
+      if (!asset) throw new Error(`Required environment asset unavailable: ${resolved.render.assetPath}`);
+      const root = new THREE.Group();
+      root.name = `${resolved.prefabId}-${resolved.instanceId}`;
+      root.add(cloneNormalizedEnvironmentScene(
+        asset,
+        resolved.render.assetPath,
+        resolved.render.origin,
+        resolved.render.materialMode,
+      ));
+      const matrix = new THREE.Matrix4().fromArray(environmentTransformToMatrix(resolved.transform));
+      matrix.decompose(root.position, root.quaternion, root.scale);
+      root.userData.externalShared = true;
+      root.userData.environmentInstance = resolved.instanceId;
+      root.userData.environmentKit = plan.kit.id;
+      root.updateMatrixWorld(true);
+      const pending: Array<{ key: string; geometry: THREE.BufferGeometry; material: THREE.Material; matrix: THREE.Matrix4; castShadow: boolean }> = [];
+      let canInstance = true;
+      root.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh || !visible(mesh)) return;
+        if ((mesh as THREE.SkinnedMesh).isSkinnedMesh || Array.isArray(mesh.material)) {
+          canInstance = false;
+          return;
+        }
+        configureMesh(mesh, resolved.instanceId, resolved.prefabId, resolved.render.materialMode);
+        const material = mesh.material as THREE.Material;
+        const cellX = Math.floor(resolved.transform.position[0] / STATIC_CELL_SIZE);
+        const cellZ = Math.floor(resolved.transform.position[2] / STATIC_CELL_SIZE);
+        const castShadow = environmentMeshCastsShadow(mesh, resolved.prefabId);
+        const key = `${resolved.prefabId}:${mesh.geometry.uuid}:${material.uuid}:${castShadow}:${cellX}:${cellZ}`;
+        pending.push({ key, geometry: mesh.geometry, material, matrix: mesh.matrixWorld.clone(), castShadow });
+      });
+      if (!canInstance || pending.length === 0) {
+        addClonedRoot(root, resolved);
+      } else {
+        for (const entry of pending) {
+          const existing = buckets.get(entry.key);
+          if (existing) {
+            existing.matrices.push(entry.matrix);
+          } else {
+            buckets.set(entry.key, {
+              geometry: entry.geometry,
+              material: entry.material,
+              matrices: [entry.matrix],
+              prefabId: resolved.prefabId,
+              castShadow: entry.castShadow,
+              cellX: Math.floor(resolved.transform.position[0] / STATIC_CELL_SIZE),
+              cellZ: Math.floor(resolved.transform.position[2] / STATIC_CELL_SIZE),
+            });
+          }
+        }
+      }
+      modules.push(resolved.render.assetPath);
+    }
+    for (const bucket of buckets.values()) {
+      const material = bucket.material;
+      const inst = new THREE.InstancedMesh(bucket.geometry, material, bucket.matrices.length);
+      bucket.matrices.forEach((matrix, index) => inst.setMatrixAt(index, matrix));
+      inst.instanceMatrix.needsUpdate = true;
+      inst.name = `${bucket.prefabId}-${bucket.cellX}-${bucket.cellZ}`;
+      inst.userData.externalShared = true;
+      inst.userData.environmentPrefab = bucket.prefabId;
+      inst.userData.environmentKit = plan.kit.id;
+      inst.castShadow = bucket.castShadow;
+      inst.receiveShadow = true;
+      enableInstancedCulling(inst);
+      group.add(inst);
+    }
+    const environmentContact = this.buildContactBlobs(environmentSpots);
+    if (environmentContact) {
+      environmentContact.name = 'environment-contact-blobs';
+      this.group.add(environmentContact);
+    }
+    group.userData.modules = modules;
+    this.group.add(group);
+  }
+
+  private buildAuthoredEnvironmentKit(def: MapDef): void {
+    if (def.environmentPlan) {
+      this.buildEnvironmentPlan(def);
+      return;
+    }
+    if (def.id !== 'eden') return;
+
+    const group = new THREE.Group();
+    group.name = 'eden-authored-facility-district';
+    group.userData.environmentKit = 'modular-cc0-service-district';
+    group.userData.renderOnly = true;
+    const modules: string[] = [];
+    const addModule = (
+      path: string,
+      material: MatKey,
+      x: number,
+      y: number,
+      z: number,
+      yaw = 0,
+      pitch = 0,
+      roll = 0,
+      scale = 1,
+    ): void => {
+      const asset = peekGltf(path);
+      if (!asset) return;
+      const root = cloneNormalizedEnvironmentScene(asset, path, 'preserve', 'preserve');
+      root.name = path.split('/').at(-1) ?? path;
+      root.position.set(x, y, z);
+      root.rotation.set(pitch, yaw, roll, 'YXZ');
+      root.scale.setScalar(scale);
+      root.userData.externalShared = true;
+      root.userData.environmentKit = 'modular-cc0-service-district';
+      root.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        mesh.material = this.mats.get(material);
+        mesh.geometry.userData.externalShared = true;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.frustumCulled = true;
+        mesh.userData.externalShared = true;
+        mesh.userData.environmentKit = 'modular-cc0-service-district';
+      });
+      modules.push(path);
+      group.add(root);
+    };
+    const ground = (x: number, z: number): number => def.terrainHeight?.(x, z) ?? 0;
+    const addBay = (cx: number, cz: number, y: number, wallMat: MatKey, roofMat: MatKey, floorMat: MatKey, accent: MatKey): void => {
+      addModule('environment/eden/wall-window.glb', wallMat, cx - 2, y, cz - 2);
+      addModule('environment/eden/wall-doorway.glb', wallMat, cx + 2, y, cz - 2);
+      addModule('environment/eden/wall-reinforced.glb', wallMat, cx - 2, y, cz + 2);
+      addModule('environment/eden/wall-corner.glb', wallMat, cx - 4, y, cz + 2, Math.PI);
+      addModule('environment/eden/wall-reinforced.glb', wallMat, cx + 4, y, cz, Math.PI / 2);
+      addModule('environment/eden/wall-damaged.glb', 'concrete', cx - 4.05, y, cz - 1.4, Math.PI / 2, 0, 0, 0.75);
+      addModule('environment/eden/floor.glb', floorMat, cx, y + 0.04, cz);
+      addModule('environment/eden/floor-hatch.glb', accent, cx + 0.6, y + 0.12, cz - 0.4, 0, 0, 0.08, 0.82);
+      addModule('environment/eden/ceiling.glb', floorMat, cx, y + 2.76, cz);
+      addModule('environment/eden/roof-flat.glb', roofMat, cx, y + 2.78, cz);
+      addModule('environment/eden/roof-trim.glb', accent, cx, y + 2.96, cz);
+      addModule('environment/eden/beam.glb', accent, cx, y + 2.62, cz);
+      for (const x of [cx - 3.6, cx + 3.6]) {
+        for (const z of [cz - 3.6, cz + 3.6]) addModule('environment/eden/support-column.glb', 'concrete', x, y, z);
+      }
+      addModule('environment/eden/doorframe.glb', accent, cx + 2, y, cz - 2.3);
+      addModule('environment/eden/door-panel.glb', roofMat, cx + 2, y + 1.1, cz - 2.36, 0, 0, 0.08, 0.92);
+      addModule('environment/eden/vent-wall.glb', accent, cx - 3.9, y + 1.65, cz - 1.8, 0, 0, 0, 1.05);
+      addModule('environment/eden/pipe.glb', 'rust', cx - 1.2, y + 1.45, cz - 2.35, 0, 0, Math.PI / 2, 1.05);
+      addModule('environment/eden/railing.glb', accent, cx, y + 0.12, cz - 4.2);
+    };
+    const serviceY = ground(-18, 24);
+    addModule('environment/eden/wall-window.glb', 'facadeA', -20, serviceY, 24);
+    addModule('environment/eden/wall-doorway.glb', 'facadeA', -16, serviceY, 24);
+    addModule('environment/eden/wall-reinforced.glb', 'facadeA', -24, serviceY, 24, Math.PI / 2);
+    addModule('environment/eden/wall-corner.glb', 'facadeA', -12, serviceY, 24, Math.PI);
+    addModule('environment/eden/wall-damaged.glb', 'concrete', -24.1, serviceY, 28, Math.PI / 2);
+    addModule('environment/eden/floor.glb', 'facilityFloor', -18, serviceY + 0.04, 24);
+    addModule('environment/eden/floor-hatch.glb', 'metal', -18.4, serviceY + 0.12, 24.1, 0, 0, 0.08, 0.9);
+    addModule('environment/eden/ceiling.glb', 'facilityFloor', -18, serviceY + 3.02, 24);
+    addModule('environment/eden/roof-flat.glb', 'metalDark', -18, serviceY + 3.06, 24);
+    addModule('environment/eden/roof-trim.glb', 'metal', -18, serviceY + 3.22, 24);
+    addModule('environment/eden/parapet.glb', 'metalDark', -18, serviceY + 3.2, 28, 0, 0, 0, 1.1);
+    addModule('environment/eden/beam.glb', 'metal', -18, serviceY + 2.75, 24);
+    for (const x of [-21.7, -14.3]) addModule('environment/eden/support-column.glb', 'concrete', x, serviceY, 21.2);
+    addModule('environment/eden/doorframe.glb', 'metal', -16, serviceY, 23.7);
+    addModule('environment/eden/door-panel.glb', 'metalDark', -16, serviceY + 1.1, 23.66, 0, 0, 0.08, 0.92);
+    addModule('environment/eden/vent-wall.glb', 'metal', -21.9, serviceY + 1.65, 23.55, 0, 0, 0, 1.1);
+    addModule('environment/eden/stairs.glb', 'concrete', -11.2, serviceY, 23.5, Math.PI / 2);
+    addModule('environment/eden/railing.glb', 'metal', -11.2, serviceY + 0.12, 20.7, Math.PI / 2);
+    addModule('environment/eden/pipe.glb', 'rust', -18, serviceY + 1.45, 23.65, 0, 0, Math.PI / 2, 1.15);
+    addModule('environment/eden/crate-stack.glb', 'wood', -22.1, serviceY, 22.8, 0.18, 0, 0, 0.9);
+    addModule('environment/eden/crate-broken.glb', 'woodDark', -21.2, serviceY + 0.1, 26.4, -0.42, 0, 0.08, 0.8);
+    addModule('environment/eden/rubble-pile.glb', 'concreteDark', -14.2, serviceY, 27.2, 0.2);
+    addModule('environment/eden/debris-scatter.glb', 'concrete', -20.8, serviceY + 0.05, 27.4, -0.16, 0, 0, 1.15);
+    addModule('environment/eden/barrel-dented.glb', 'rust', -24, serviceY, 24.2, 0.12);
+
+    const dockY = ground(112, 38);
+    addBay(112, 38, dockY, 'concrete', 'metalDark', 'facilityFloor', 'metal');
+    addModule('environment/eden/crate-stack.glb', 'woodDark', 116, dockY, 34.5, -0.2);
+    addModule('environment/eden/barrel-dented.glb', 'rust', 117, dockY, 38.5, 0.4);
+    addModule('environment/eden/rubble-pile.glb', 'concreteDark', 106, dockY, 41, 0.2);
+
+    const greenhouseY = ground(4, 24);
+    addModule('environment/eden/wall-window.glb', 'facadeC', 0, greenhouseY, 24, Math.PI / 2);
+    addModule('environment/eden/wall-doorway.glb', 'facadeC', 4, greenhouseY, 24);
+    addModule('environment/eden/floor.glb', 'facilityFloor', 2, greenhouseY + 0.04, 24);
+    addModule('environment/eden/roof-flat.glb', 'metal', 2, greenhouseY + 3.1, 24);
+    addModule('environment/eden/support-column.glb', 'metal', -1.5, greenhouseY, 21.3);
+    addModule('environment/eden/support-column.glb', 'metal', 5.5, greenhouseY, 21.3);
+    addModule('environment/eden/railing.glb', 'metal', 2, greenhouseY + 0.12, 20.8);
+    addModule('environment/eden/crate.glb', 'wood', 6, greenhouseY, 22.8, 0.18);
+    addModule('environment/eden/debris-scatter.glb', 'concreteDark', 0.5, greenhouseY + 0.04, 27.2, 0.1);
+
+    const generatorY = ground(-210, 40);
+    addBay(-210, 40, generatorY, 'concrete', 'metalDark', 'facilityFloor', 'metal');
+    addModule('environment/eden/crate-stack.glb', 'woodDark', -214, generatorY, 35.2, 0.2);
+    addModule('environment/eden/barrel-dented.glb', 'rust', -205.2, generatorY, 41.2, -0.3);
+    addModule('environment/eden/pipe.glb', 'rust', -208.5, generatorY + 1.5, 35.5, 0, 0, Math.PI / 2, 1.25);
+
+    group.userData.modules = modules;
+    this.group.add(group);
   }
 
   /** Build smooth terrain-following ribbons for roads that do not need colliders. */
@@ -792,6 +1168,7 @@ export class WorldView {
       const mesh = new THREE.Mesh(geometry, mat);
       mesh.receiveShadow = true;
       mesh.castShadow = false;
+      enableMeshCulling(mesh);
       this.group.add(mesh);
     });
   }
@@ -857,6 +1234,7 @@ export class WorldView {
         const mesh = new THREE.Mesh(geometry, material);
         mesh.receiveShadow = true;
         mesh.castShadow = false;
+        enableMeshCulling(mesh);
         this.group.add(mesh);
       };
       // Segment-level shoulder boxes were flat at each centre height. Their
@@ -903,7 +1281,7 @@ export class WorldView {
       // scene traversal of the dominant triangle budget.
       const isTree = key.startsWith('tree/') || key === 'palm';
       const tint = def.id === 'oldfront' && isTree ? moorTint : undefined;
-      this.addInstancedByGrid(key, matrices, props, 4096, def.sky.preset !== 'overcast', tint);
+      this.addInstancedByGrid(key, matrices, props, SCATTER_CELL_SIZE, def.sky.preset !== 'overcast', tint);
     }
 
     // The bundled nature pack has no palm silhouette. Reusing a temperate
@@ -974,12 +1352,14 @@ export class WorldView {
       addFrondQuad([-0.035, tipY, tipZ - 0.38], [0.035, tipY, tipZ - 0.38], [0.015, tipY - 0.08, tipZ + 0.2], [-0.015, tipY - 0.08, tipZ + 0.2]);
       frondGeometry.setAttribute('position', new THREE.Float32BufferAttribute(frondVertices, 3));
       frondGeometry.setIndex(frondIndices);
-      frondGeometry.computeVertexNormals();
+       frondGeometry.computeVertexNormals();
+       ensureGeometryUv(frondGeometry);
+       // No emissive lift: fronds must respond to the raked key so shaded
+      // foliage reads as shaded foliage instead of a flat blue-grey mass
+      // under the old high blue ambient.
       const frondMaterial = new THREE.MeshStandardMaterial({
-        color: 0x647d40,
-        emissive: 0x18220f,
-        emissiveIntensity: 0.12,
-        roughness: 0.92,
+        color: 0x6d7a45,
+        roughness: 0.94,
         metalness: 0,
         side: THREE.DoubleSide,
       });
@@ -1015,6 +1395,9 @@ export class WorldView {
         }
       });
       trunks.instanceMatrix.needsUpdate = true;
+      enableInstancedCulling(trunks);
+      enableInstancedCulling(crowns);
+      enableInstancedCulling(fronds);
       trunks.castShadow = true;
       trunks.receiveShadow = true;
       crowns.instanceMatrix.needsUpdate = true;
@@ -1129,7 +1512,7 @@ export class WorldView {
       const softTint = def.id === 'oldfront'
         ? moorTintSoft
         : def.id === 'eden' ? wetlandTintSoft : groundTuftTint;
-      this.addInstancedByGrid(key, ms, props, 4096, false, softTint);
+      this.addInstancedByGrid(key, ms, props, SCATTER_CELL_SIZE, false, softTint);
     }
 
     // Rocks → Quaternius rock models. Each authored collider owns one primary
@@ -1203,7 +1586,7 @@ export class WorldView {
         key,
         matrices,
         props,
-        4096,
+        SCATTER_CELL_SIZE,
         true,
         tintRock,
       );
@@ -1247,8 +1630,7 @@ export class WorldView {
         }
       });
       scree.instanceMatrix.needsUpdate = true;
-      scree.computeBoundingBox();
-      scree.computeBoundingSphere();
+      enableInstancedCulling(scree);
       scree.castShadow = false;
       scree.receiveShadow = true;
       this.group.add(scree);
@@ -1353,9 +1735,33 @@ export class WorldView {
       if (lensInst.instanceColor) lensInst.instanceColor.needsUpdate = true;
       if (pools.instanceColor) pools.instanceColor.needsUpdate = true;
       pools.instanceMatrix.needsUpdate = true;
+      enableInstancedCulling(poles);
+      enableInstancedCulling(arms);
+      enableInstancedCulling(heads);
+      enableInstancedCulling(lensInst);
+      enableInstancedCulling(pools);
       poles.castShadow = true;
       poles.receiveShadow = true;
       this.group.add(poles, arms, heads, lensInst, pools);
+    }
+
+    // Lamp posts got a light pool but never a contact spot, so a 4-6 m pole
+    // stood on unmodulated ground and read as hovering. Anchor the base.
+    if (def.lamps.length > 0) {
+      const sun = def.sky.sunDirection;
+      const horizSun = Math.hypot(sun[0], sun[2]);
+      const lampAz = horizSun > 1e-4 ? Math.atan2(sun[2], sun[0]) : undefined;
+      const lampSpots: Array<{ x: number; z: number; y: number; span: number; height?: number; yaw?: number }> = [];
+      for (const l of def.lamps) {
+        lampSpots.push({
+          x: l.x, z: l.z, y: l.y, span: 0.62, height: Math.min(4, l.h * 0.5), yaw: lampAz,
+        });
+      }
+      const lampBlobs = this.buildContactBlobs(lampSpots);
+      if (lampBlobs) {
+        lampBlobs.name = 'lamp-contact-blobs';
+        this.group.add(lampBlobs);
+      }
     }
 
     for (const l of def.lights) {
@@ -1430,11 +1836,20 @@ export class WorldView {
   private ensureBlobMaterial(): THREE.MeshBasicMaterial {
     if (!this.blobMat) {
       this.blobMat = new THREE.MeshBasicMaterial({
-        map: makeGlowTexture('rgba(6,8,10,', 128),
+        map: makeGlowTexture('rgba(4,6,9,', 128),
         transparent: true,
-        opacity: 0.5,
+        opacity: 0.62,
         depthWrite: false,
         fog: true,
+        // The discs are flat and sit a few centimetres above an undulating
+        // heightfield, so without a depth bias they lose the depth test against
+        // the terrain over most of their radius and the contact darkening
+        // silently disappears — measured as "no contact shadows anywhere".
+        // A negative polygon offset wins the test without lifting the disc, so
+        // it never reads as a floating card.
+        polygonOffset: true,
+        polygonOffsetFactor: -3,
+        polygonOffsetUnits: -6,
       });
     }
     return this.blobMat;
@@ -1510,7 +1925,7 @@ export class WorldView {
     const azimuth = horiz > 1e-4 ? Math.atan2(sun[2], sun[0]) : null;
     const terrainY = (x: number, z: number): number =>
       def.terrainHeight ? def.terrainHeight(x, z) : 0;
-    const spots: Array<{ x: number; z: number; y: number; span: number; height: number }> = [];
+    const spots: Array<{ x: number; z: number; y: number; span: number; height: number; yaw?: number }> = [];
     const atGround = (base: number, x: number, z: number): boolean => {
       const terr = terrainY(x, z);
       return base >= terr - 0.35 && base <= terr + 0.65;
@@ -1528,7 +1943,33 @@ export class WorldView {
         if (!atGround(base, g.x, g.z)) continue;
         push(g.x, g.z, base, Math.hypot(g.sx, g.sz) * 0.72 + 0.25, g.sy);
       } else if (g.kind === 'cyl') {
-        if (g.pitch || g.roll) continue; // lying pipe/log runs
+        // Lying pipe and log runs used to be skipped outright, which is why
+        // fallen logs read as floating cutouts with daylight under them. A
+        // horizontal cylinder still meets the ground along its whole length, so
+        // the contact spot is elongated along the run instead of excluded.
+        if (g.pitch || g.roll) {
+          if (g.r < 0.1 || g.r > 0.9) continue;
+          // Rotate the cylinder's own +Y axis by (pitch about X, roll about Z) to
+          // get the world-space axis the run lies along; that is both the length
+          // direction of the contact spot and its long-axis yaw.
+          const axis = new THREE.Vector3(0, 1, 0)
+            .applyEuler(new THREE.Euler(g.pitch ?? 0, g.yaw ?? 0, g.roll ?? 0, 'YXZ'));
+          const horiz = Math.hypot(axis.x, axis.z);
+          if (horiz < 1e-3) continue;
+          const lyingYaw = Math.atan2(axis.z, axis.x);
+          const ground = terrainY(g.x, g.z);
+          // The cylinder's lowest point is its centre minus r along its axis.
+          const contact = g.y - Math.abs(axis.y) * g.r - (g.r - Math.abs(axis.y) * g.r);
+          if (contact < ground - 0.4 || contact > ground + 0.7) continue;
+          const run = g.h;
+          spots.push({
+            x: g.x, z: g.z, y: ground,
+            span: run * 0.62 + g.r * 1.5 + 0.18,
+            height: g.r * 2,
+            yaw: lyingYaw,
+          });
+          continue;
+        }
         if (g.r < 0.18 || g.r > 1.5 || g.h < 0.35 || g.h > 3.4) continue;
         const base = g.y - g.h / 2;
         if (!atGround(base, g.x, g.z)) continue;
@@ -1556,12 +1997,6 @@ export class WorldView {
   }
 
   private buildVehicles(def: MapDef, props: PropLibrary): void {
-    // CYCLE 29: one non-instanced clone per vehicle. The former InstancedMesh
-    // pools intermittently rendered as pure-black silhouettes on WebGPU —
-    // material values verified correct at runtime (round-5 P0.3), i.e. the
-    // r185 instanced-binding fault from QA_STATE's zero-size-uniform family.
-    // Maps author ≤9 vehicles, so individual draws are cheap and avoid the
-    // instanced path entirely.
     const blobMat = this.ensureBlobMaterial();
     const blobGeo = this.ensureBlobGeometry();
     for (const v of def.vehicles) {
@@ -1611,7 +2046,7 @@ export class WorldView {
         mesh.material = Array.isArray(mesh.material)
           ? mesh.material.map((mat) => fixMaterial(mat, mesh.name))
           : fixMaterial(mesh.material, mesh.name);
-        mesh.castShadow = true;
+        mesh.castShadow = false;
         mesh.receiveShadow = true;
       });
       this.group.add(car);
@@ -1629,7 +2064,7 @@ export class WorldView {
       );
       blobs.setMatrixAt(0, m4);
       blobs.instanceMatrix.needsUpdate = true;
-      blobs.frustumCulled = true;
+      enableInstancedCulling(blobs);
       blobs.name = `vehicle-blob:${key}`;
       this.group.add(blobs);
     }
@@ -1667,6 +2102,7 @@ export class WorldView {
     const glassEntries: GlassInstanceEntry[] = [];
     for (const d of match.combat.destructibleList()) {
       const g = d.geo;
+      if (g.noRender) continue;
       if (d.type === 'glass' && g.kind === 'box') {
         glassEntries.push({ id: d.id, stableId: d.stableId, geo: g });
         continue;
@@ -1702,6 +2138,7 @@ export class WorldView {
     const glassEntries: GlassInstanceEntry[] = [];
     this.mapDef.destructibles.forEach((d, id) => {
       const g = d.geo;
+      if (g.noRender) return;
       if (d.type === 'glass' && g.kind === 'box') {
         glassEntries.push({ id, stableId: d.stableId, geo: g });
         return;
@@ -2237,8 +2674,9 @@ export class WorldView {
     const storm = buildStormMaterial();
     this.stormU = storm.u;
     const mat = storm.material;
-    this.stormMesh = new THREE.Mesh(geo, mat);
-    this.stormMesh.position.y = 70;
+     this.stormMesh = new THREE.Mesh(geo, mat);
+     this.stormMesh.name = 'storm-wall';
+     this.stormMesh.position.y = 70;
     this.stormMesh.visible = false;
     this.stormMesh.renderOrder = 5;
     this.group.add(this.stormMesh);
@@ -2559,7 +2997,11 @@ export class WorldView {
     this.group.remove(this.waterSystem.group);
     this.waterSystem.dispose();
     this.weaponFactory.dispose();
-    this.rain = null;
+    if (this.rain) {
+      this.rain.dispose();
+      this.group.remove(this.rain.group);
+      this.rain = null;
+    }
 
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();

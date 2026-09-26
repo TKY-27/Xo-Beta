@@ -15,6 +15,7 @@ import type { ActorView } from '../sim/gameStateView';
 import type { SkinId } from '../core/settings';
 import { feetYFromBodyCenter } from '../physics/physics';
 import { ParachuteView } from './parachute';
+import { toNodeStandard } from './props';
 
 export type { SkinId } from '../core/settings';
 
@@ -87,11 +88,108 @@ export const CLIP_MAP: Array<[string, string]> = [
   ['punch_cross', 'Punch_Cross'],
 ];
 
+const AUTHORED_CLIP_MAP: Array<[string, string]> = [
+  ['idle', 'Idle'],
+  ['walk', 'Walk'],
+  ['jog', 'Run'],
+  ['sprint', 'Run'],
+  ['jump_start', 'Run'],
+  ['jump_loop', 'Run'],
+  ['jump_land', 'Roll'],
+  ['crouch_idle', 'Idle'],
+  ['crouch_walk', 'Walk'],
+  ['swim', 'Run'],
+  ['swim_idle', 'Idle'],
+  ['roll', 'Roll'],
+  ['aim_neutral', 'Idle_Gun_Pointing'],
+  ['aim_up', 'Idle_Gun_Pointing'],
+  ['aim_down', 'Idle_Gun_Pointing'],
+  ['armed_idle', 'Idle_Gun'],
+  ['reload', 'Idle_Gun_Shoot'],
+  ['hit_chest', 'HitRecieve'],
+  ['death', 'Death'],
+  ['interact', 'Interact'],
+  ['punch_jab', 'Punch_Left'],
+  ['punch_cross', 'Punch_Right'],
+];
+
 /** Clips that play once and hold their final pose until the state machine moves on. */
 const ONESHOT_CLIPS = new Set(['jump_start', 'jump_land', 'hit_chest', 'reload', 'interact', 'death', 'punch_jab', 'punch_cross']);
 const LOCOMOTION_CLIPS = new Set(['walk', 'jog', 'sprint', 'crouch_walk']);
 
 const TARGET_HEIGHT = 1.86;
+
+export type AuthoredMaterialRole = 'darkBrown' | 'grey' | 'black' | 'skin' | 'swat' | 'swatBlack' | 'visor';
+
+const AUTHORED_MATERIAL_ROLES: Record<string, AuthoredMaterialRole> = {
+  darkbrown: 'darkBrown',
+  grey: 'grey',
+  black: 'black',
+  skin: 'skin',
+  swat: 'swat',
+  swat_black: 'swatBlack',
+  swatblack: 'swatBlack',
+  visor: 'visor',
+};
+
+export function authoredMaterialRole(name: string | undefined): AuthoredMaterialRole | null {
+  if (!name) return null;
+  const normalized = name.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return AUTHORED_MATERIAL_ROLES[normalized] ?? AUTHORED_MATERIAL_ROLES[normalized.replace(/_/g, '')] ?? null;
+}
+
+export function styleAuthoredMaterial(
+  material: THREE.MeshStandardMaterial,
+  role: AuthoredMaterialRole | null,
+  suitColor: THREE.Color,
+): void {
+  if (!role) return;
+  material.emissiveMap = null;
+  material.emissive.setRGB(0, 0, 0);
+  material.emissiveIntensity = 1;
+  switch (role) {
+    case 'skin':
+      material.roughness = 0.76;
+      material.metalness = 0;
+      material.envMapIntensity = 0.65;
+      break;
+    case 'visor':
+      material.roughness = 0.2;
+      material.metalness = 0.55;
+      material.envMapIntensity = 1.15;
+      break;
+    case 'swat':
+      material.color.lerp(suitColor, 0.16);
+      material.roughness = 0.8;
+      material.metalness = 0.05;
+      material.envMapIntensity = 0.75;
+      material.emissive.copy(suitColor).multiplyScalar(0.025);
+      break;
+    case 'swatBlack':
+      material.roughness = 0.58;
+      material.metalness = 0.18;
+      material.envMapIntensity = 0.85;
+      material.emissive.copy(suitColor).multiplyScalar(0.015);
+      break;
+    case 'grey':
+      material.color.lerp(suitColor, 0.06);
+      material.roughness = 0.64;
+      material.metalness = 0.24;
+      material.envMapIntensity = 0.9;
+      break;
+    case 'black':
+      material.roughness = 0.48;
+      material.metalness = 0.35;
+      material.envMapIntensity = 0.95;
+      break;
+    case 'darkBrown':
+      material.color.lerp(suitColor, 0.04);
+      material.roughness = 0.72;
+      material.metalness = 0.08;
+      material.envMapIntensity = 0.8;
+      break;
+  }
+}
 
 /**
  * Nominal metres-per-second each locomotion clip was calibrated against, and
@@ -191,12 +289,21 @@ export class CharacterFactory {
   }
   private protoMale: THREE.Group | null = null;
   private protoFemale: THREE.Group | null = null;
+  private authoredProto: THREE.Group | null = null;
   private anims: AnimSet = {};
   private scaleM = 1;
   private scaleF = 1;
+  private scaleAuthored = 1;
+  private useAuthoredBody = false;
   ready = false;
 
-  async init(male: THREE.Group, female: THREE.Group, clips: THREE.AnimationClip[]): Promise<void> {
+  async init(
+    male: THREE.Group,
+    female: THREE.Group,
+    clips: THREE.AnimationClip[],
+    authored?: THREE.Group,
+    authoredClips: THREE.AnimationClip[] = [],
+  ): Promise<void> {
     this.protoFemale = preparePrototype(female);
     this.protoMale = preparePrototype(male);
     const box = new THREE.Box3().setFromObject(this.protoMale);
@@ -205,18 +312,26 @@ export class CharacterFactory {
     const boxF = new THREE.Box3().setFromObject(this.protoFemale);
     this.scaleF = TARGET_HEIGHT / Math.max(0.001, boxF.max.y);
 
-    for (const [key, srcName] of CLIP_MAP) {
-      const clip = clips.find((c) => c.name === srcName);
+    this.authoredProto = authored ? preparePrototype(authored) : null;
+    this.useAuthoredBody = !!this.authoredProto && authoredClips.length > 0;
+    if (this.authoredProto && this.useAuthoredBody) {
+      const authoredBox = new THREE.Box3().setFromObject(this.authoredProto);
+      this.scaleAuthored = TARGET_HEIGHT / Math.max(0.001, authoredBox.max.y);
+    }
+
+    const clipMap = this.useAuthoredBody ? AUTHORED_CLIP_MAP : CLIP_MAP;
+    const sourceClips = this.useAuthoredBody ? authoredClips : clips;
+    for (const [key, srcName] of clipMap) {
+      const clip = sourceClips.find((c) => c.name === srcName);
       if (clip) {
-        // Strip track node prefixes so tracks bind by bone name on any clone.
         const stripped = clip.clone();
-        stripped.tracks = stripped.tracks.map((t) => {
-          const parts = t.name.split('.');
-          return parts.length > 1 ? t.clone() : t;
-        });
+        stripped.tracks = stripped.tracks.map((t) => t.clone());
         stripped.name = key;
         this.anims[key] = stripped;
       }
+    }
+    if (this.authoredProto && (!this.useAuthoredBody || ['idle', 'walk', 'jog', 'sprint', 'jump_land', 'aim_neutral', 'reload', 'death'].some((key) => !this.anims[key]))) {
+      throw new Error('Authored character asset is missing required animation bindings');
     }
     this.ready = true;
   }
@@ -240,13 +355,14 @@ export class CharacterFactory {
       ? weaponModelOrSkin
       : explicitSkin ?? skinForName(name);
     const skin = SKIN_SPECS[skinId] ?? SKIN_SPECS.vanguard;
-    // The skin owns the body archetype; the legacy boolean only applies to
+    const useAuthoredBody = this.useAuthoredBody;
+    // The skin owns body archetype; the legacy boolean only applies to
     // callers that pass a real weapon model and no explicit skin.
     const useFemaleBody = typeof weaponModelOrSkin === 'string' || explicitSkin !== undefined
       ? skin.female
       : female;
-    const proto = useFemaleBody ? this.protoFemale : this.protoMale;
-    const s = useFemaleBody ? this.scaleF : this.scaleM;
+    const proto = this.useAuthoredBody ? this.authoredProto : (useFemaleBody ? this.protoFemale : this.protoMale);
+    const s = this.useAuthoredBody ? this.scaleAuthored : (useFemaleBody ? this.scaleF : this.scaleM);
 
     const group = new THREE.Group();
     group.userData.xoSkinId = skin.id;
@@ -258,6 +374,7 @@ export class CharacterFactory {
     }
 
     const body = SkeletonUtils.clone(proto) as THREE.Group;
+    if (useAuthoredBody) stripAuthoredWeaponAttachments(body);
     body.scale.setScalar(s);
     group.add(body);
     // SkeletonUtils intentionally shares immutable BufferGeometry with the
@@ -283,25 +400,31 @@ export class CharacterFactory {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       const next = mats.map((m) => {
         const std = m as THREE.MeshStandardMaterial;
-        const nm = std.clone();
-        nm.envMapIntensity = 0.9;
-        if (/suit|body|armor|MI_Superhero/i.test(nm.name ?? '')) {
-          nm.color = darkSuit.clone().lerp(suitColor, 0.35);
-          nm.metalness = Math.min(0.65, nm.metalness + 0.25);
-          nm.roughness = Math.max(0.42, nm.roughness * 0.85);
-          // The bundled suit texture is intentionally very dark. A restrained
-          // albedo-derived bounce term keeps seams and armour planes readable
-          // in NeoCity without turning the actor into an unlit/glowing model.
-          // This mirrors the soft character fill used by competitive TPS games
-          // while all highlights and shadows still come from the PBR material.
-          nm.emissive.copy(suitColor).multiplyScalar(0.34);
-          nm.emissiveMap = null;
-          nm.emissiveIntensity = 0.52;
-        }
-        // Every clone is actor-owned and must dissolve/dispose with the rig,
-        // including skin, hair and eye materials.
-        baseMats.push(nm);
-        return nm;
+        const nm = useAuthoredBody
+          ? (toNodeStandard(std) as unknown as THREE.MeshStandardMaterial)
+          : std.clone();
+         if (useAuthoredBody) {
+           styleAuthoredMaterial(nm, authoredMaterialRole(nm.name), suitColor);
+         } else {
+           nm.envMapIntensity = 0.9;
+           if (/suit|body|armor|MI_Superhero|swat|grey|black|darkbrown/i.test(nm.name ?? '')) {
+             nm.color = darkSuit.clone().lerp(suitColor, 0.35);
+             nm.metalness = Math.min(0.65, nm.metalness + 0.25);
+             nm.roughness = Math.max(0.42, nm.roughness * 0.85);
+             // The bundled suit texture is intentionally very dark. A restrained
+             // albedo-derived bounce term keeps seams and armour planes readable
+             // in NeoCity without turning the actor into an unlit/glowing model.
+             // This mirrors the soft character fill used by competitive TPS games
+             // while all highlights and shadows still come from the PBR material.
+             nm.emissive.copy(suitColor).multiplyScalar(0.34);
+             nm.emissiveMap = null;
+             nm.emissiveIntensity = 0.52;
+           }
+         }
+         // Every clone is actor-owned and must dissolve/dispose with the rig,
+         // including skin, hair and eye materials.
+         baseMats.push(nm);
+         return nm;
       });
       mesh.material = Array.isArray(mesh.material) ? next : next[0]!;
       mesh.castShadow = true;
@@ -322,6 +445,29 @@ export class CharacterFactory {
 
     // ---- Costume attachments -------------------------------------------
     const bones = collectBones(body);
+    if (useAuthoredBody) {
+      const aliases: Record<string, string> = {
+        hand_r: 'Wrist.R',
+        hand_l: 'Wrist.L',
+        upperarm_l: 'UpperArm.L',
+        upperarm_r: 'UpperArm.R',
+        lowerarm_l: 'LowerArm.L',
+        lowerarm_r: 'LowerArm.R',
+        thigh_l: 'UpperLeg.L',
+        thigh_r: 'UpperLeg.R',
+        calf_l: 'LowerLeg.L',
+        calf_r: 'LowerLeg.R',
+        spine_01: 'Hips',
+        spine_02: 'Abdomen',
+        spine_03: 'Chest',
+        clavicle_l: 'Shoulder.L',
+        clavicle_r: 'Shoulder.R',
+      };
+      for (const [alias, source] of Object.entries(aliases)) {
+        if (!bones[alias] && bones[source]) bones[alias] = bones[source]!;
+      }
+    }
+    if (!useAuthoredBody) {
     const costumeMat = new THREE.MeshStandardMaterial({
       color: skin.secondary,
       emissive: new THREE.Color(skin.secondary).multiplyScalar(0.3),
@@ -453,6 +599,7 @@ export class CharacterFactory {
       pack.add(cell);
       bones['spine_01'].add(pack);
       pack.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.frustumCulled = true; });
+    }
     }
 
     // ---- Weapon attachment ---------------------------------------------
@@ -887,6 +1034,14 @@ function preparePrototype(src: THREE.Group): THREE.Group {
   // Keep the loader-owned scene pristine; per-actor copies are made with
   // SkeletonUtils.clone which correctly rebuilds skin<->bone relationships.
   return src;
+}
+
+function stripAuthoredWeaponAttachments(root: THREE.Object3D): void {
+  const attachments: THREE.Object3D[] = [];
+  root.traverse((object) => {
+    if (object.name.trim().toLowerCase() === 'pistol') attachments.push(object);
+  });
+  for (const attachment of attachments) attachment.removeFromParent();
 }
 
 function collectBones(root: THREE.Object3D): Record<string, THREE.Object3D> {

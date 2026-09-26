@@ -16,6 +16,7 @@ import { buildNeoCity } from './maps/neocity';
 import { buildOldFront } from './maps/oldfront';
 import { buildEdenFacility } from './maps/eden';
 import { buildAsharaReach } from './maps/desert';
+import { createEnvironmentPlan, environmentCollisionGeo } from './environmentPlans';
 
 export type MapId = 'neocity' | 'oldfront' | 'eden' | 'ashara';
 
@@ -168,6 +169,9 @@ export function loadMap(id: MapId): LoadedMap {
         && Math.abs(geo.sy - lamp.h) < 0.01) geo.y += delta;
     }
   }
+
+  def.environmentPlan = createEnvironmentPlan(id, terrainHeight);
+  def.geo.push(...environmentCollisionGeo(def.environmentPlan));
 
   return {
     def,

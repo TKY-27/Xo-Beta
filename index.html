@@ -46,7 +46,7 @@
     </div>
     <div class="loading-foot">
       <div class="loading-bar"><div id="loading-fill"></div></div>
-      <div id="loading-status" data-i18n="notice.loading">Loading…</div>
+      <div id="loading-status" role="status" aria-live="polite" aria-atomic="true" data-i18n="notice.loading">Loading…</div>
       <button id="btn-online-start-cancel" class="loading-cancel hidden" type="button" data-i18n="online.cancelStart">CANCEL MATCH START</button>
     </div>
   </div>
@@ -315,7 +315,7 @@
 
   <!-- HUD -->
   <div id="hud" class="hidden">
-    <div id="crosshair"><span class="ch-t"></span><span class="ch-b"></span><span class="ch-l"></span><span class="ch-r"></span><span class="ch-dot"></span><span id="ch-ring"></span><span id="hitmarker"></span></div>
+    <div id="crosshair"><span class="ch-t"></span><span class="ch-b"></span><span class="ch-l"></span><span class="ch-r"></span><span class="ch-dot"></span><span id="ch-ring"></span><span id="hitmarker" role="img" aria-label="Hit marker"></span></div>
     <div id="damage-direction" aria-hidden="true"></div>
     <div id="scope-overlay" aria-hidden="true">
       <div class="scope-housing"></div>
@@ -336,10 +336,10 @@
     <div id="minimap-frame"><canvas id="minimap" width="188" height="188"></canvas></div>
     <div id="minimap-label" data-i18n="hud.tabFullMap">M — full map</div>
 
-    <div id="hud-bottom-left">
+    <div id="hud-bottom-left" role="group" aria-label="Player status">
       <div class="bars">
-        <div class="bar shield"><div id="shield-fill"></div><span id="shield-text">100</span></div>
-        <div class="bar health"><div id="health-fill"></div><span id="health-text">100</span></div>
+        <div id="shield-bar" class="bar shield" role="progressbar" aria-label="Shield" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" data-state="normal"><div id="shield-fill"></div><span id="shield-text">100</span></div>
+        <div id="health-bar" class="bar health" role="progressbar" aria-label="Health" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" data-state="normal"><div id="health-fill"></div><span id="health-text">100</span></div>
       </div>
       <div id="heal-channel" class="hidden" role="progressbar" aria-live="polite" aria-valuemin="0" aria-valuemax="100">
         <div class="heal-channel-head"><span id="heal-label">Healing…</span><span id="heal-time">0.0s</span></div>
@@ -347,16 +347,16 @@
       </div>
     </div>
 
-    <div id="hud-bottom-right">
-      <div id="ammo-display"><span id="ammo-mag">0</span><span class="ammo-sep">/</span><span id="ammo-reserve">0</span></div>
+    <div id="hud-bottom-right" role="group" aria-label="Weapon status">
+      <div id="ammo-display" aria-label="Ammunition" data-state="unarmed"><span id="ammo-mag">0</span><span class="ammo-sep">/</span><span id="ammo-reserve">0</span></div>
       <div id="weapon-name">UNARMED</div>
       <div id="inventory-slots"></div>
     </div>
 
-    <div id="hud-top-right">
+    <div id="hud-top-right" role="group" aria-label="Match status">
       <div id="alive-counter"><span id="alive-count">10</span><em data-i18n="hud.alive">ALIVE</em></div>
       <div id="kill-counter"><span id="kills-count">0</span><em data-i18n="hud.elims">ELIMS</em></div>
-      <div id="storm-timer"></div>
+      <div id="storm-timer" data-state="idle"></div>
     </div>
 
     <section id="online-hud-status" class="online-hud-status hidden" role="status" aria-live="polite" aria-atomic="true" aria-label="Online connection">
@@ -371,7 +371,7 @@
       <ul id="online-team-list" aria-live="polite"></ul>
     </section>
 
-    <div id="killfeed"></div>
+    <div id="killfeed" role="log" aria-live="polite" aria-relevant="additions" aria-label="Elimination feed"></div>
 
     <div id="interact-prompt" class="hidden"><kbd>E</kbd> <span id="interact-text"></span></div>
 
@@ -385,13 +385,16 @@
       <div class="lp-full hidden" id="lp-full" data-i18n="loot.inventoryFull">INVENTORY FULL — SWAP OR DROP</div>
     </div>
 
-    <div id="damage-numbers"></div>
-    <div id="captions"></div>
+    <div id="damage-numbers" aria-hidden="true"></div>
+    <div id="captions" role="status" aria-live="polite" aria-atomic="true"></div>
 
-    <div id="center-banner" class="hidden"></div>
+    <div id="combat-alert-stack" role="status" aria-live="polite" aria-atomic="true" aria-label="Combat alerts">
+      <div id="center-banner" class="hidden" data-alert-kind="banner"></div>
+      <div id="elim-banner" class="hidden" data-alert-kind="elimination"></div>
+      <div id="storm-warning" class="hidden" data-alert-kind="storm"></div>
+    </div>
+    <div id="hud-live-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
     <div id="online-presence-notice" class="online-presence-notice hidden" role="status" aria-live="polite" aria-atomic="true"></div>
-    <div id="elim-banner" class="hidden"></div>
-    <div id="storm-warning" class="hidden"></div>
 
     <div id="spectate-hud" class="hidden">
       <div><span data-i18n="hud.spectating">SPECTATING</span> <span id="spectate-name"></span></div>

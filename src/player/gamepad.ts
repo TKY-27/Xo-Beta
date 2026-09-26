@@ -70,6 +70,11 @@ export class GamepadInput {
     return out;
   }
 
+  get fireIntent(): boolean {
+    const pad = this.pad();
+    return !!pad && (pad.buttons[BUTTON.RT]?.value ?? 0) > 0.35;
+  }
+
   /** Return and clear one edge-triggered crouch toggle from the B button. */
   consumeCrouchToggle(): boolean {
     const pending = this.crouchTogglePending;

@@ -19,13 +19,14 @@ describe('persistent settings boundary', () => {
       quality: 'low',
       fov: 96,
       reducedMotion: true,
+      colorVision: 'deuteranopia',
       tpsCharacterSide: 'right',
       playerSkin: 'specter',
       preferredItemSlots: { enabled: true, slots: ['shotgun', 'smg', 'ar', 'sniper', 'healing'] },
       bindings: { forward: 'KeyI' },
     });
 
-    expect(getSettings()).toMatchObject({ quality: 'low', fov: 96, reducedMotion: true, tpsCharacterSide: 'right', playerSkin: 'specter' });
+    expect(getSettings()).toMatchObject({ quality: 'low', fov: 96, reducedMotion: true, colorVision: 'deuteranopia', tpsCharacterSide: 'right', playerSkin: 'specter' });
     expect(getSettings().preferredItemSlots).toEqual({ enabled: true, slots: ['shotgun', 'smg', 'ar', 'sniper', 'healing'] });
     expect(getSettings().bindings.forward).toBe('KeyI');
     expect(getSettings().bindings.back).toBe('KeyS');
@@ -34,6 +35,7 @@ describe('persistent settings boundary', () => {
   it('rejects invalid types and clamps finite numeric values', async () => {
     const { getSettings } = await loadWith({
       quality: '__invalid__',
+      colorVision: '__invalid__',
       fov: 1_000,
       masterVolume: -5,
       resolutionScale: Number.NaN,
@@ -44,6 +46,7 @@ describe('persistent settings boundary', () => {
     const settings = getSettings();
 
     expect(settings.quality).toBe('high');
+    expect(settings.colorVision).toBe('none');
     expect(settings.fov).toBe(110);
     expect(settings.masterVolume).toBe(0);
     expect(settings.resolutionScale).toBe(1);

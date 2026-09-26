@@ -1018,7 +1018,9 @@ export class OnlineMatchCoordinator<S extends PredictionState = PredictionState>
       shotTick: command.fireHeld || command.firePressed ? this.guestSimulationTick : null,
       recentFrames: this.recentInputs.slice(-3),
     });
-    this.room.sendGameInput(packet);
+    if (!this.room.sendGameInput(packet)) {
+      this.options.onProtocolError?.(this.context.hostPeerId, new Error('Guest input send failed'));
+    }
     this.recentInputs.push(Object.freeze({ inputSeq, clientTick: this.guestSimulationTick, command: submittedCommand }));
     if (this.recentInputs.length > 3) this.recentInputs.splice(0, this.recentInputs.length - 3);
     for (const predicted of this.predictedPresentationIds) if (predicted + 256 < inputSeq) this.predictedPresentationIds.delete(predicted);

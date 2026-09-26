@@ -30,6 +30,8 @@ export interface BuildingOpts {
   parapet?: boolean;
   /** Cosmetic pitched shell over the flat gameplay roof (silhouette only). */
   roofStyle?: 'flat' | 'gable';
+  /** Hide generated shell dressing while retaining its collision and platforms. */
+  authoredShell?: boolean;
   /** Decorative brick chimney on the gable ridge (deterministic per call). */
   chimney?: boolean;
   /** Material for the exterior fire-escape stair flights (default metal). */
@@ -302,6 +304,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   const stairMat = o.stairMat ?? 'metalExterior';
   const floorMat = o.floorMat ?? 'concreteDark';
   const roofMat = o.roofMat ?? trim;
+  const shellNoRender = o.authoredShell === true;
   const requestedStairSteps = Math.ceil(fh / 0.55);
   const interiorStair = planStairs(requestedStairSteps, fh / requestedStairSteps, 0.62, 1.7);
   const hasInteriorStair = floors > 1 && interiorStair.run < o.d - 2;
@@ -399,7 +402,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     depth: number,
     offset: number,
     mat: MatKey,
-    opts?: { noCollide?: boolean; pitch?: number; roll?: number },
+    opts?: { noCollide?: boolean; pitch?: number; roll?: number; noRender?: boolean },
   ): void => {
     const alongX = side === 0 || side === 2;
     const s = side === 0 || side === 1 ? 1 : -1;
@@ -412,12 +415,14 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     if (alongX) {
       b.box(x + mid, y, z + s * centre, hi - lo, sy, depth, mat, 0, {
         noCollide: opts?.noCollide ?? true,
+        noRender: opts?.noRender ?? shellNoRender,
         pitch: opts?.pitch,
         roll: opts?.roll,
       });
     } else {
       b.box(x + s * centre, y, z + mid, depth, sy, hi - lo, mat, 0, {
         noCollide: opts?.noCollide ?? true,
+        noRender: opts?.noRender ?? shellNoRender,
         pitch: opts?.pitch,
         roll: opts?.roll,
       });
@@ -510,7 +515,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     if (side === 0 || side === 2) {
       const paneX = x - hw + offset + width / 2;
       const paneZ = z + (side === 0 ? hd - inset : -hd + inset);
-      b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'x');
+      b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'x', shellNoRender);
       if (family === 'dual') {
         b.box(paneX, paneY, paneZ + (side === 0 ? 0.022 : -0.022), 0.055, paneH, 0.045, trim, 0, { noCollide: true });
       } else if (family === 'transom') {
@@ -519,7 +524,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     } else {
       const paneX = x + (side === 1 ? hw - inset : -hw + inset);
       const paneZ = z - hd + offset + width / 2;
-      b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'z');
+      b.glassPane(paneX, paneY, paneZ, Math.max(0.08, width - 0.08), paneH, 'z', shellNoRender);
       if (family === 'dual') {
         b.box(paneX + (side === 1 ? 0.022 : -0.022), paneY, paneZ, 0.045, paneH, 0.055, trim, 0, { noCollide: true });
       } else if (family === 'transom') {
@@ -590,10 +595,11 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat,
         o.windows === false ? frontDoors : [...frontDoors, ...groundWindowGapsFront],
         o.windows === false ? 0 : sillH, y0,
-        o.windows === false ? undefined : windowsWithoutDoorOverlap(groundWindowGapsFront, frontDoors));
-      b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat, backDoors, 0, y0);
-      b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat, rightDoors, 0, y0);
-      b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat, leftDoors, 0, y0);
+        o.windows === false ? undefined : windowsWithoutDoorOverlap(groundWindowGapsFront, frontDoors),
+        { noRender: shellNoRender });
+      b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat, backDoors, 0, y0, undefined, { noRender: shellNoRender });
+      b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat, rightDoors, 0, y0, undefined, { noRender: shellNoRender });
+      b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat, leftDoors, 0, y0, undefined, { noRender: shellNoRender });
       if (o.windows !== false) {
         // Ground-floor side and rear walls remain structurally solid to avoid
         // changing indoor collision/nav, but receive shallow, non-colliding
@@ -623,13 +629,13 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
     } else {
       // Upper floors: windows (sill gaps) all around
       b.wallWithGaps(x - hw, z + hd, o.w, fh, t, 'x', o.wallMat,
-        windowGapsFront, sillH, y0, windowGapsFront);
+        windowGapsFront, sillH, y0, windowGapsFront, { noRender: shellNoRender });
       b.wallWithGaps(x - hw, z - hd, o.w, fh, t, 'x', o.wallMat,
-        windowGapsBack, sillH, y0, windowGapsBack);
+        windowGapsBack, sillH, y0, windowGapsBack, { noRender: shellNoRender });
       b.wallWithGaps(x + hw, z - hd, o.d, fh, t, 'z', o.wallMat,
-        windowGapsRight, sillH, y0, windowGapsRight);
+        windowGapsRight, sillH, y0, windowGapsRight, { noRender: shellNoRender });
       b.wallWithGaps(x - hw, z - hd, o.d, fh, t, 'z', o.wallMat,
-        windowGapsLeft, sillH, y0, windowGapsLeft);
+        windowGapsLeft, sillH, y0, windowGapsLeft, { noRender: shellNoRender });
       if (o.windows !== false) {
         const upperPaneH = Math.max(0.8, fh - sillH - 0.5);
         const glassHi = y0 + sillH + upperPaneH;
@@ -775,7 +781,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
 
   // Roof
   const roofY = baseY + floors * fh + 0.2;
-  b.slab(x, roofY, z, o.w + 0.5, o.d + 0.5, 0.35, roofMat);
+  b.slab(x, roofY, z, o.w + 0.5, o.d + 0.5, 0.35, roofMat, { noRender: shellNoRender });
   // The exterior roof material used to remain visible on its underside,
   // giving occupied rooms a black repeated tile/grid instead of an interior
   // ceiling. Keep the physical roof untouched and add an inset finish with
@@ -787,33 +793,34 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
   const ceilingY = roofY - 0.38;
   b.box(x, ceilingY, z, Math.max(1, o.w - 0.5), 0.04, Math.max(1, o.d - 0.5), 'interiorCeiling', 0, {
     noCollide: true,
+    noRender: shellNoRender,
   });
   if (o.w >= 8 && o.d >= 8) {
     const beamY = roofY - 0.47;
     const beamCount = Math.max(2, Math.min(5, Math.round(o.d / 3.8)));
     for (let i = 1; i <= beamCount; i++) {
       const bz = z - hd + (o.d * i) / (beamCount + 1);
-      b.box(x, beamY, bz, o.w - 0.65, 0.12, 0.14, trim, 0, { noCollide: true });
+      b.box(x, beamY, bz, o.w - 0.65, 0.12, 0.14, trim, 0, { noCollide: true, noRender: shellNoRender });
     }
   }
   if (o.parapet !== false) {
     const ph = 0.8;
-    b.box(x, roofY + ph / 2, z + hd + 0.25, o.w + 0.5, ph, 0.25, trim);
-    b.box(x, roofY + ph / 2, z - hd - 0.25, o.w + 0.5, ph, 0.25, trim);
-    b.box(x + hw + 0.25, roofY + ph / 2, z, 0.25, ph, o.d + 0.5, trim);
+    b.box(x, roofY + ph / 2, z + hd + 0.25, o.w + 0.5, ph, 0.25, trim, 0, { noRender: shellNoRender });
+    b.box(x, roofY + ph / 2, z - hd - 0.25, o.w + 0.5, ph, 0.25, trim, 0, { noRender: shellNoRender });
+    b.box(x + hw + 0.25, roofY + ph / 2, z, 0.25, ph, o.d + 0.5, trim, 0, { noRender: shellNoRender });
     if (!o.roofAccess) {
       // Left parapet is handled by the exterior-stair block when present.
-      b.box(x - hw - 0.25, roofY + ph / 2, z, 0.25, ph, o.d + 0.5, trim);
+      b.box(x - hw - 0.25, roofY + ph / 2, z, 0.25, ph, o.d + 0.5, trim, 0, { noRender: shellNoRender });
     }
     b.platform(x - hw - 0.4, x + hw + 0.4, z - hd - 0.4, z + hd + 0.4, roofY);
     // Parapet caps: proud weathering strips topping every straight run
     // (the fire-escape side keeps its gated opening uncapped).
     const capY = roofY + 0.815;
-    b.box(x, capY, z + hd + 0.25, o.w + 0.5, 0.09, 0.35, darkTrim, 0, { noCollide: true });
-    b.box(x, capY, z - hd - 0.25, o.w + 0.5, 0.09, 0.35, darkTrim, 0, { noCollide: true });
-    b.box(x + hw + 0.25, capY, z, 0.35, 0.09, o.d + 0.5, darkTrim, 0, { noCollide: true });
+    b.box(x, capY, z + hd + 0.25, o.w + 0.5, 0.09, 0.35, darkTrim, 0, { noCollide: true, noRender: shellNoRender });
+    b.box(x, capY, z - hd - 0.25, o.w + 0.5, 0.09, 0.35, darkTrim, 0, { noCollide: true, noRender: shellNoRender });
+    b.box(x + hw + 0.25, capY, z, 0.35, 0.09, o.d + 0.5, darkTrim, 0, { noCollide: true, noRender: shellNoRender });
     if (!o.roofAccess) {
-      b.box(x - hw - 0.25, capY, z, 0.35, 0.09, o.d + 0.5, darkTrim, 0, { noCollide: true });
+      b.box(x - hw - 0.25, capY, z, 0.35, 0.09, o.d + 0.5, darkTrim, 0, { noCollide: true, noRender: shellNoRender });
     }
   }
 
@@ -907,21 +914,21 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       const kind = facadeHash(9, gx, gz, 6) % 3;
       if (kind === 0) {
         // HVAC pack with a roof-mounted fan and a supply duct beside it.
-        b.box(gx, roofY + 0.29, gz, 0.95, 0.65, 0.7, 'metalExterior', 0, { noCollide: true });
-        b.cyl(gx, roofY + 0.69, gz, 0.22, 0.14, 'metalDark', { segments: 10, noCollide: true });
-        b.box(gx + 0.78, roofY + 0.19, gz, 0.5, 0.38, 0.4, 'metalDark', 0, { noCollide: true });
+        b.box(gx, roofY + 0.29, gz, 0.95, 0.65, 0.7, 'metalExterior', 0, { noCollide: true, noRender: shellNoRender });
+        b.cyl(gx, roofY + 0.69, gz, 0.22, 0.14, 'metalDark', { segments: 10, noCollide: true, noRender: shellNoRender });
+        b.box(gx + 0.78, roofY + 0.19, gz, 0.5, 0.38, 0.4, 'metalDark', 0, { noCollide: true, noRender: shellNoRender });
       } else if (kind === 1) {
         // Staggered vent stack pair joined by a low crossover pipe.
-        b.cyl(gx, roofY + 0.245, gz, 0.2, 0.55, 'metalDark', { segments: 10, noCollide: true });
-        b.cyl(gx + 0.55, roofY + 0.395, gz, 0.15, 0.85, 'rust', { segments: 10, noCollide: true });
-        b.box(gx + 0.27, roofY + 0.36, gz, 0.55, 0.12, 0.12, 'metalDark', 0, { noCollide: true });
+        b.cyl(gx, roofY + 0.245, gz, 0.2, 0.55, 'metalDark', { segments: 10, noCollide: true, noRender: shellNoRender });
+        b.cyl(gx + 0.55, roofY + 0.395, gz, 0.15, 0.85, 'rust', { segments: 10, noCollide: true, noRender: shellNoRender });
+        b.box(gx + 0.27, roofY + 0.36, gz, 0.55, 0.12, 0.12, 'metalDark', 0, { noCollide: true, noRender: shellNoRender });
       } else {
         // Low pipe run on stanchions with one rising stack.
         for (const px of [gx - 1.1, gx, gx + 1.1]) {
-          b.box(px, roofY + 0.145, gz, 0.11, 0.35, 0.11, 'metalDark', 0, { noCollide: true });
+          b.box(px, roofY + 0.145, gz, 0.11, 0.35, 0.11, 'metalDark', 0, { noCollide: true, noRender: shellNoRender });
         }
-        b.box(gx, roofY + 0.375, gz, 2.4, 0.14, 0.14, 'metalExterior', 0, { noCollide: true });
-        b.cyl(gx + 1.2, roofY + 0.67, gz, 0.16, 0.5, 'rust', { segments: 10, noCollide: true });
+        b.box(gx, roofY + 0.375, gz, 2.4, 0.14, 0.14, 'metalExterior', 0, { noCollide: true, noRender: shellNoRender });
+        b.cyl(gx + 1.2, roofY + 0.67, gz, 0.16, 0.5, 'rust', { segments: 10, noCollide: true, noRender: shellNoRender });
       }
     }
     if (style === 'facility') {
@@ -1158,7 +1165,7 @@ export function addBuilding(b: WorldBuilder, o: BuildingOpts): void {
       const windowGap: [number, number] = [o.w * (0.28 + i * 0.44) - 0.75, 1.5];
       if (frontDoors.some((door) => gapsOverlap(windowGap, door))) continue;
       const wx = x - hw + o.w * (0.28 + i * 0.44);
-      b.glassPane(wx, gy, z + hd - t / 2 - 0.08, 1.5, fh - 1.6, 'x');
+      b.glassPane(wx, gy, z + hd - t / 2 - 0.08, 1.5, fh - 1.6, 'x', shellNoRender);
       dressWindow(0, o.w * (0.28 + i * 0.44) - hw, 0, 1.5, gy - (fh - 1.6) / 2, gy + (fh - 1.6) / 2);
     }
   }

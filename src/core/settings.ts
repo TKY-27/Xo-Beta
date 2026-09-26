@@ -11,6 +11,8 @@ export type QualityPreset = 'low' | 'medium' | 'high' | 'ultra' | 'cinematic';
 export type CameraMode = 'fps' | 'tps';
 export type TpsCharacterSide = 'left' | 'right';
 export type SkinId = 'vanguard' | 'pathfinder' | 'specter' | 'striker' | 'warden' | 'nova' | 'seraph' | 'corsair' | 'vesper' | 'dragoon' | 'tempest' | 'reaper';
+export const COLOR_VISION_MODES = ['none', 'protanopia', 'deuteranopia', 'tritanopia'] as const;
+export type ColorVisionMode = typeof COLOR_VISION_MODES[number];
 
 export interface KeyBindings {
   forward: string; back: string; left: string; right: string;
@@ -93,7 +95,7 @@ export interface Settings {
   /** First-run onboarding (language + default view) completed. */
   onboarded: boolean;
   damageNumbers: boolean;
-  colorVision: 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
+  colorVision: ColorVisionMode;
   reducedMotion: boolean;
   captions: boolean;
 
@@ -262,7 +264,7 @@ function mergeSettings(base: Settings, patch: unknown): Settings {
     lang: choice(patch.lang, base.lang, ['en', 'ja']),
     onboarded: bool(patch.onboarded, base.onboarded),
     damageNumbers: bool(patch.damageNumbers, base.damageNumbers),
-    colorVision: choice(patch.colorVision, base.colorVision, ['none', 'protanopia', 'deuteranopia', 'tritanopia']),
+    colorVision: choice(patch.colorVision, base.colorVision, COLOR_VISION_MODES),
     reducedMotion: bool(patch.reducedMotion, base.reducedMotion),
     captions: bool(patch.captions, base.captions),
 

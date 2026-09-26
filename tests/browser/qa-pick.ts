@@ -29,7 +29,9 @@ await page.addInitScript((settings) => {
   return base;
 })());
 
-await page.goto(`http://localhost:${PORT}/?qa=1&seed=42042`, { waitUntil: 'networkidle' });
+const query = new URLSearchParams({ qa: '1', seed: '42042' });
+if (process.env.QA_HIDE) query.set('qaHide', process.env.QA_HIDE);
+await page.goto(`http://localhost:${PORT}/?${query.toString()}`, { waitUntil: 'networkidle' });
 for (let i = 0; i < 60; i++) {
   const onboarding = await page.$('#onboarding-screen:not(.hidden)');
   if (onboarding) {
@@ -155,6 +157,6 @@ if (process.env.QA_SECOND_YAW) {
   await page.screenshot({ path: `qa/pick-${mapArg}-yaw2.png` });
 }
 
-await page.screenshot({ path: `qa/pick-${mapArg}.png` });
+await page.screenshot({ path: process.env.QA_OUT ?? `qa/pick-${mapArg}.png` });
 await browser.close();
 await server.close();

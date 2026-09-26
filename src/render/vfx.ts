@@ -240,10 +240,10 @@ export class VfxSystem {
       this.flashes.push({ sprite, light, life: 0, maxLife: 1, star: i % 3 === 2 });
     }
 
-    // Particle pool via instanced quads (billboard-ish boxes)
-    const pgeo = new THREE.BoxGeometry(1, 1, 1);
+    const pgeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+    const particleTexture = this.makeParticleTexture();
     for (let i = 0; i < 8; i++) {
-      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 });
+      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, map: particleTexture, transparent: true, opacity: 0.95, depthWrite: false });
       const inst = new THREE.InstancedMesh(pgeo, mat, MAX_PARTICLES / 8);
       inst.count = 0;
       inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -260,6 +260,19 @@ export class VfxSystem {
         life: 0, maxLife: 1, size: 0.05, color: new THREE.Color(), gravity: 20,
       });
     }
+  }
+
+  private makeParticleTexture(): THREE.Texture {
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const ctx = c.getContext('2d')!;
+    const grad = ctx.createRadialGradient(16, 16, 1, 16, 16, 15);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.45, 'rgba(255,255,255,0.85)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(c);
   }
 
   private makeFlashTexture(star: boolean): THREE.Texture {
@@ -660,10 +673,12 @@ export class VfxSystem {
       bucket++;
       inst.visible = true;
       if (inst.count >= (inst.instanceMatrix.count ?? MAX_PARTICLES / 8)) continue;
-      const fade = Math.min(1, k * 2.4);
-      _scl.setScalar(p.size * (0.6 + fade * 0.4));
-      _q.setFromAxisAngle(_axis, this.time * 3 + p.pos.x);
-      _m4.compose(p.pos, _q, _scl);
+       const fade = Math.min(1, k * 2.4);
+       _scl.setScalar(p.size * (0.6 + fade * 0.4));
+       _v1.subVectors(cameraPos, p.pos).normalize();
+       _v2.set(0, 0, 1);
+       _q.setFromUnitVectors(_v2, _v1);
+       _m4.compose(p.pos, _q, _scl);
       inst.setMatrixAt(inst.count, _m4);
       _col.copy(p.color).multiplyScalar(fade);
       inst.setColorAt(inst.count, _col);
@@ -675,7 +690,6 @@ export class VfxSystem {
         if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
       }
     }
-    void cameraPos;
 
     // Shockwaves expand + fade
     for (let i = this.shockwaves.length - 1; i >= 0; i--) {

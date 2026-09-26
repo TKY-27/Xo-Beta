@@ -16,8 +16,39 @@ function smooth(t: number): number {
   return c * c * (3 - 2 * c);
 }
 
+export type SightAdjustedPose = { x: number; y: number; z: number; yaw: number; pitch: number; roll: number };
+
+export function sightAdjustedPose(model: WeaponModel | null, weaponId: WeaponId, viewScale: number): SightAdjustedPose {
+  const fallback = DEFAULT_ADS_POSE[weaponId];
+  if (!model?.sight) return { x: 0, ...fallback, yaw: 0, pitch: 0, roll: 0 };
+  const group = model.group;
+  group.updateMatrix();
+  const contentMatrix = new THREE.Matrix4().copy(group.matrix);
+  contentMatrix.setPosition(0, 0, 0);
+  const rear = model.sight.rear.clone().applyMatrix4(contentMatrix);
+  const front = model.sight.front.clone().applyMatrix4(contentMatrix);
+  const direction = front.clone().sub(rear);
+  if (direction.lengthSq() < 1e-12) return { x: -rear.x, y: -rear.y, z: rear.z - ADS_EYE_RELIEF, yaw: 0, pitch: 0, roll: 0 };
+  const rotation = new THREE.Quaternion().setFromUnitVectors(direction.normalize(), new THREE.Vector3(0, 0, -1));
+  const euler = new THREE.Euler().setFromQuaternion(rotation, 'XYZ');
+  const authoredScale = Math.abs(group.scale.z);
+  const reliefScale = authoredScale > 1e-8 ? authoredScale : Math.abs(viewScale) || 1;
+  const rearTargetZ = -(ADS_EYE_RELIEF + model.sight.eyeRelief * reliefScale);
+  const orientedRear = rear.clone().applyQuaternion(rotation);
+  return {
+    x: -orientedRear.x,
+    y: -orientedRear.y,
+    z: rearTargetZ - orientedRear.z,
+    yaw: euler.y,
+    pitch: euler.x,
+    roll: euler.z,
+  };
+}
+
 const HIP_POS = new THREE.Vector3(0.15, -0.135, -0.285);
 const SPRINT_POS = new THREE.Vector3(0.06, -0.24, -0.28);
+const SNIPER_HIP_POS = new THREE.Vector3(0.15, -0.05, -0.6);
+const SNIPER_SPRINT_POS = new THREE.Vector3(0.06, -0.18, -0.58);
 
 /**
  * Per-class ADS pose, computed from each weapon's sight line: the sight
@@ -26,13 +57,14 @@ const SPRINT_POS = new THREE.Vector3(0.06, -0.24, -0.28);
  * ADS presents a true sight picture instead of parking the receiver over
  * the crosshair. Z keeps the buttstock comfortably clear of the eye.
  */
-const ADS_POSE: Record<WeaponId, { y: number; z: number }> = {
+const DEFAULT_ADS_POSE: Record<WeaponId, { y: number; z: number }> = {
   pistol: { y: -0.05, z: -0.24 },
   smg: { y: -0.05, z: -0.24 },
   ar: { y: -0.055, z: -0.33 },
   shotgun: { y: -0.03, z: -0.34 },
   sniper: { y: -0.055, z: -0.3 },
 };
+const ADS_EYE_RELIEF = 0.12;
 
 type PresentationInput = Readonly<{
   crouched: boolean;
@@ -348,12 +380,18 @@ export class ViewModel {
   private presentReloadEmpty = false;
   private presentBoltElapsed = -1;
   private presentBoltTotal = 0;
+  private presentationEligible = true;
+  private triggerAmount = 0;
+
+  setTriggerIntent(active: boolean): void {
+    this.triggerAmount = active ? 1 : 0;
+  }
 
   /** Seed the bolt/pump presentation timeline for the weapon just fired.
    * Called from the online fire handlers next to kick()/muzzlePulse(); no-op
    * for semi/auto weapons (their slide/recoil springs already run). */
   notifyShotFired(weaponId: WeaponId): void {
-    if (weaponId !== this.currentId || !this.group.visible) return;
+    if (!this.presentationEligible || weaponId !== this.currentId) return;
     const duration = boltDuration(weaponId);
     if (duration <= 0) return;
     this.presentBoltElapsed = 0;
@@ -364,7 +402,7 @@ export class ViewModel {
    * event. Duration mirrors the combat runtime's formula (WEAPONS def ×
    * rarity reload modifier) so the sweep lands with the authoritative refill. */
   notifyReloadStarted(weaponId: WeaponId, rarity: Rarity, empty: boolean): void {
-    if (weaponId !== this.currentId || !this.group.visible) return;
+    if (!this.presentationEligible || weaponId !== this.currentId) return;
     const def = WEAPONS[weaponId];
     if (!def) return;
     this.presentReloadElapsed = 0;
@@ -514,7 +552,7 @@ export class ViewModel {
    * (vs the world's 80°), so scales are ~0.62x of the old shared-camera
    * values to keep the same on-screen fraction. */
   private static readonly WEAPON_VIEW_SCALE: Record<WeaponId, number> = {
-    pistol: 0.66, smg: 0.56, ar: 0.58, shotgun: 0.6, sniper: 0.56,
+    pistol: 0.66, smg: 0.56, ar: 0.58, shotgun: 0.6, sniper: 0.62,
   };
 
   /** Per-class ADS pose offsets (metres, applied through the ads blend).
@@ -585,7 +623,7 @@ export class ViewModel {
       }
       this.rigs.set(key, rig);
       rig.pose({
-        reloadPhase: -1, supportStyle: id === 'pistol' ? 'over' : id === 'smg' ? 'side' : id === 'shotgun' ? 'pump' : 'under',
+         reloadPhase: -1, supportStyle: id === 'pistol' ? 'pistol' : id === 'smg' ? 'side' : id === 'shotgun' ? 'pump' : 'under',
         magLocal: m.mag?.position ?? null, pumpOffset: 0, pumpHand: id === 'shotgun',
         ads: 0, boltPhase: -1, boltLocal: null,
       });
@@ -641,11 +679,18 @@ export class ViewModel {
     // them before releasing the viewmodel's own arms/fists geometry.
     for (const model of this.models.values()) model.group.removeFromParent();
     const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
     this.group.traverse((object) => {
       const mesh = object as THREE.Mesh;
-      if (mesh.isMesh) geometries.add(mesh.geometry);
+      if (!mesh.isMesh) return;
+      if (!mesh.geometry.userData.externalShared) geometries.add(mesh.geometry);
+      if (mesh.userData.viewmodelOwned) {
+        const meshMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const material of meshMaterials) materials.add(material);
+      }
     });
     for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
     this.currentKey = null;
     this.currentModel = null;
     this.models.clear();
@@ -658,9 +703,24 @@ export class ViewModel {
   debugPose(): {
     currentId: WeaponId | null; ads: number;
     pivotPos: number[]; pivotRot: number[]; leftPos: number[] | null; rightPos: number[] | null;
+    modelChildren: Array<{ name: string; type: string; visible: boolean }>;
+    armChildren: Array<{ name: string; type: string; visible: boolean }>;
+    modelBounds: { min: number[]; max: number[] } | null;
+    handBounds: { min: number[]; max: number[] } | null;
   } {
     const rig = this.currentKey ? this.rigs.get(this.currentKey) : undefined;
     this.pivot.updateMatrixWorld(true);
+    const children = (root: THREE.Object3D | undefined) => root ? root.children.map((child) => ({ name: child.name, type: child.type, visible: child.visible })) : [];
+    const visibleBounds = (root: THREE.Object3D | undefined): { min: number[]; max: number[] } | null => {
+      if (!root) return null;
+      const box = new THREE.Box3();
+      root.updateWorldMatrix(true, true);
+      root.traverse((object) => {
+        if (!(object instanceof THREE.Mesh) || !object.visible) return;
+        box.expandByObject(object);
+      });
+      return box.isEmpty() ? null : { min: box.min.toArray().map((n) => +n.toFixed(3)), max: box.max.toArray().map((n) => +n.toFixed(3)) };
+    };
     return {
       currentId: this.currentId,
       ads: this.adsSmooth,
@@ -668,6 +728,10 @@ export class ViewModel {
       pivotRot: [this.pivot.rotation.x, this.pivot.rotation.y, this.pivot.rotation.z].map((n) => +n.toFixed(3)),
       leftPos: rig ? rig.left.position.toArray().map((n) => +n.toFixed(3)) : null,
       rightPos: rig ? rig.right.position.toArray().map((n) => +n.toFixed(3)) : null,
+      modelChildren: children(this.currentModel?.group),
+      armChildren: children(this.armSolver.group),
+      modelBounds: visibleBounds(this.currentModel?.group),
+      handBounds: visibleBounds(rig?.right),
     };
   }
 
@@ -778,7 +842,9 @@ export class ViewModel {
 
   /** Per-frame presentation update driven by actor state. */
   update(actor: Actor | null, dt: number, lookDx: number, lookDy: number, movingSpeed: number): void {
+    this.presentationEligible = !!actor?.alive;
     if (!actor || !actor.alive) {
+      this.setTriggerIntent(false);
       this.evaluate(null, dt, lookDx, lookDy, movingSpeed);
       return;
     }
@@ -849,9 +915,9 @@ export class ViewModel {
 
     const weaponId = this.currentId;
     const def = WEAPONS[weaponId];
-    const adsTarget = THREE.MathUtils.clamp(input.adsAmount, 0, 1);
-    this.adsSmooth += (adsTarget - this.adsSmooth) * Math.min(1, dt * 12);
-    const ads = this.adsSmooth;
+     const adsTarget = THREE.MathUtils.clamp(input.adsAmount, 0, 1);
+     this.adsSmooth = adsTarget;
+     const ads = adsTarget;
 
     // Sprint lowering when moving fast & not aiming
     const sprinting = movingSpeed > 8.6 && !adsTarget;
@@ -891,7 +957,7 @@ export class ViewModel {
     if (rig) {
       const boltMode = def.fireMode === 'bolt';
       const supportStyle: SupportStyle = weaponId === 'pistol'
-        ? 'over'
+        ? 'pistol'
         : def.fireMode === 'pump'
           ? 'pump'
           : weaponId === 'smg' ? 'side' : 'under';
@@ -901,10 +967,11 @@ export class ViewModel {
         magLocal: mag ? mag.position : null,
         pumpOffset,
         pumpHand: def.fireMode === 'pump',
-        ads,
-        boltPhase: boltMode ? boltPhase : -1,
-        boltLocal: boltMode && bolt ? bolt.position : null,
-      });
+         ads,
+         boltPhase: boltMode ? boltPhase : -1,
+         boltLocal: boltMode && bolt ? bolt.position : null,
+         triggerAmount: this.triggerAmount,
+       });
       reload?.pose(rig, reloadPhase, empty, reloadShells);
     }
 
@@ -913,7 +980,7 @@ export class ViewModel {
     const iw = inspect.weight;
     const adsFwd = ViewModel.ADS_EXTRA_FORWARD[weaponId] * ads;
     const adsDrop = ViewModel.ADS_EXTRA_Y[weaponId] * ads;
-    const adsPose = ADS_POSE[weaponId];
+    const adsPose = sightAdjustedPose(this.currentModel, weaponId, ViewModel.WEAPON_VIEW_SCALE[weaponId]);
 
     // Movement inertia: the weapon trails lateral/forward acceleration
     // (mass), settles back on a spring. Suppressed while aiming.
@@ -938,31 +1005,35 @@ export class ViewModel {
     // Idle breathing: a slow, shallow sway so the weapon never freezes.
     const breathe = Math.sin(this.t * 1.7) * 0.0021 + Math.sin(this.t * 0.9) * 0.0012;
 
+    const hipY = this.currentId === 'sniper' ? SNIPER_HIP_POS.y : HIP_POS.y;
+    const hipZ = this.currentId === 'sniper' ? SNIPER_HIP_POS.z : HIP_POS.z;
+    const sprintY = this.currentId === 'sniper' ? SNIPER_SPRINT_POS.y : SPRINT_POS.y;
+    const sprintZ = this.currentId === 'sniper' ? SNIPER_SPRINT_POS.z : SPRINT_POS.z;
     const px =
-      HIP_POS.x + (0 - HIP_POS.x) * ads +
+      HIP_POS.x + (adsPose.x - HIP_POS.x) * ads +
       (SPRINT_POS.x - HIP_POS.x) * this.sprintBlend * (1 - ads) +
       bobX + this.swayX + this.sideLag - 0.1 * inspect.lift * iw;
     const py =
-      HIP_POS.y + (adsPose.y - HIP_POS.y) * ads - adsDrop +
-      (SPRINT_POS.y - HIP_POS.y) * this.sprintBlend * (1 - ads) +
+      hipY + (adsPose.y - hipY) * ads - adsDrop +
+      (sprintY - hipY) * this.sprintBlend * (1 - ads) +
       bobY + this.swayY - reloadDrop - swapDip + 0.04 * inspect.lift * iw +
       breathe - landDip + jumpRise + airFloat - this.crouchBlend * 0.012;
     const pz =
-      HIP_POS.z + (adsPose.z - HIP_POS.z) * ads - adsFwd +
-      (SPRINT_POS.z - HIP_POS.z) * this.sprintBlend * (1 - ads) +
+      hipZ + (adsPose.z - hipZ) * ads - adsFwd +
+      (sprintZ - hipZ) * this.sprintBlend * (1 - ads) +
       this.recoilZ + 0.14 * inspect.lift * iw + this.fwdLag + this.crouchBlend * 0.012;
 
     this.pivot.position.set(px, py, pz);
     // Base hip stance angles the receiver inward across the lower-right
     // frame (muzzle toward center) like a real ready position; ADS removes it.
-    const hipYaw = 0.28 * (1 - ads);
-    const hipRoll = -0.1 * (1 - ads);
+    const hipYaw = (this.currentId === 'sniper' ? 0.12 : 0.28) * (1 - ads);
+    const hipRoll = (this.currentId === 'sniper' ? -0.04 : -0.1) * (1 - ads);
     const strafeRoll = this.sideLag * 1.6;
     const landPitch = this.landT > 0 ? Math.sin((1 - this.landT / 0.34) * Math.PI) * 0.12 : 0;
     this.pivot.rotation.set(
-      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.44 * (1 - ads) + inspect.pitch * iw + landPitch + airFloat * 6,
-      this.swayX * 2.2 - this.sprintBlend * 0.58 * (1 - ads) + hipYaw + inspect.yaw * iw,
-      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.3 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw + strafeRoll,
+      -this.swayY * 2.1 + this.recoilPitch + reloadPitch + this.sprintBlend * 0.44 * (1 - ads) + inspect.pitch * iw + landPitch + airFloat * 6 + adsPose.pitch * ads,
+      this.swayX * 2.2 - this.sprintBlend * 0.58 * (1 - ads) + hipYaw + inspect.yaw * iw + adsPose.yaw * ads,
+      reloadRoll + this.swayRoll + this.recoilRoll + this.sprintBlend * 0.3 * (1 - ads) - bobX * 1.4 + hipRoll + inspect.roll * iw + strafeRoll + adsPose.roll * ads,
     );
 
     // CYCLE 36 (user pass): connect the arms shoulder→elbow→wrist to the
@@ -991,6 +1062,7 @@ export class ViewModel {
     const pair = ViewModel._wristPair;
     pair[0].copy(wR);
     pair[1].copy(wL);
+    this.armSolver.setIntegratedArm(rig.integratedArm);
     this.armSolver.solve(this.pivot, pair, ads);
   }
 
@@ -1015,8 +1087,10 @@ export class ViewModel {
     movingSpeed: number,
     opts: { adsAmount?: number } = {},
   ): void {
-    if (!actor || !actor.alive) {
-      this.evaluate(null, dt, lookDx, lookDy, movingSpeed);
+     this.presentationEligible = !!actor?.alive;
+     if (!actor || !actor.alive) {
+       this.setTriggerIntent(false);
+       this.evaluate(null, dt, lookDx, lookDy, movingSpeed);
       return;
     }
 
@@ -1118,6 +1192,7 @@ export class ViewModel {
     const pair = ViewModel._wristPair;
     pair[0].copy(wR);
     pair[1].copy(wL);
+    this.armSolver.setIntegratedArm(this.fistRig.integratedArm);
     this.armSolver.solve(this.pivot, pair);
   }
 }

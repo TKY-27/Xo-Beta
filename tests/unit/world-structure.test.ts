@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as THREE from 'three';
 import { CAPSULE_CENTER_OFFSET, feetYFromBodyCenter } from '../../src/sim/movement';
 import {
   planStairs,
@@ -14,8 +15,9 @@ import {
   sampleTerrainGridMeshHeight,
 } from '../../src/world/terrainMesh';
 import { buildVista, sampleDesertHighwayHeight, sampleVistaGroundHeight } from '../../src/render/vista';
-import { buildWaterlineRibbonPositions, traceWaterline } from '../../src/render/worldView';
+import { buildWaterlineRibbonPositions, environmentMeshCastsShadow, traceWaterline } from '../../src/render/worldView';
 import { loadMap, type MapId } from '../../src/world';
+import { EDEN_LAB_DOORS, EDEN_LAB_LAYOUT } from '../../src/world/environmentPlans';
 import {
   VEHICLE_ASSET_BOUNDS,
   vehicleColliderBox,
@@ -24,6 +26,23 @@ import {
 } from '../../src/world/types';
 
 describe('world-space structure contracts', () => {
+  it('assigns shadow roles to authored facade details', () => {
+    const geometry = new THREE.BoxGeometry(1, 1, 1);
+    const opaque = new THREE.MeshStandardMaterial();
+    const glass = new THREE.MeshStandardMaterial({ transparent: true, opacity: 0.4 });
+    const shell = new THREE.Mesh(geometry, opaque);
+    shell.name = 'WallShell';
+    const pane = new THREE.Mesh(geometry, opaque);
+    pane.name = 'GlassPane';
+    const railing = new THREE.Mesh(geometry, opaque);
+    railing.name = 'FireEscapeRailing';
+    expect(environmentMeshCastsShadow(shell, 'urbanFacade')).toBe(true);
+    expect(environmentMeshCastsShadow(pane, 'urbanFacade')).toBe(false);
+    expect(environmentMeshCastsShadow(railing, 'fireEscape')).toBe(false);
+    expect(environmentMeshCastsShadow(new THREE.Mesh(geometry, glass), 'urbanFacade')).toBe(false);
+    expect(environmentMeshCastsShadow(shell, 'wickerBasket')).toBe(false);
+  });
+
   it('supports every horizontal Old Front lumber and firewood log at its local terrain', () => {
     const loaded = loadMap('oldfront');
     const logs = loaded.def.geo.filter((geo) => (
@@ -127,6 +146,40 @@ describe('world-space structure contracts', () => {
     } finally {
       vista.dispose();
       warnings.mockRestore();
+    }
+  });
+
+  it('bounds and distance-culls vista batches deterministically', () => {
+    for (const id of ['oldfront', 'eden', 'ashara'] satisfies MapId[]) {
+      const vista = buildVista(loadMap(id).def);
+      try {
+        vista.group.updateMatrixWorld(true);
+        const renderables: Array<THREE.Mesh | THREE.InstancedMesh | THREE.LineSegments> = [];
+        vista.group.traverse((object) => {
+          if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
+            renderables.push(object);
+          }
+        });
+        const invalidBounds = renderables.filter((object) => {
+          if (!object.frustumCulled) return false;
+          const sphere = object instanceof THREE.InstancedMesh
+            ? object.boundingSphere
+            : object.geometry.boundingSphere;
+          return !sphere || sphere.isEmpty();
+        });
+        expect(invalidBounds, id).toHaveLength(0);
+
+        const before = renderables.map((object) => object.visible);
+        const farView = new THREE.Vector3(10000, 0, 10000);
+        vista.update(farView, 0);
+        expect(renderables.filter((object, index) => before[index] && !object.visible).length, id)
+          .toBeGreaterThan(0);
+        const farVisibility = renderables.map((object) => object.visible);
+        vista.update(farView, 0);
+        expect(renderables.map((object) => object.visible), id).toEqual(farVisibility);
+      } finally {
+        vista.dispose();
+      }
     }
   });
 
@@ -650,6 +703,28 @@ describe('world-space structure contracts', () => {
     expect(labFloors.some((floor) => floor.kind === 'box' && floor.y > 3)).toBe(true);
   });
 
+  it('keeps the authored Eden lab door layout shared by visuals and navigation', async () => {
+    const { buildEdenFacility } = await import('../../src/world/maps/eden');
+    const def = buildEdenFacility();
+    for (const door of EDEN_LAB_DOORS) {
+      const worldX = door.side === 0 || door.side === 2
+        ? EDEN_LAB_LAYOUT.centerX - EDEN_LAB_LAYOUT.width / 2 + door.offset + door.width / 2
+        : door.side === 1 ? EDEN_LAB_LAYOUT.centerX + EDEN_LAB_LAYOUT.width / 2 : EDEN_LAB_LAYOUT.centerX - EDEN_LAB_LAYOUT.width / 2;
+      const worldZ = door.side === 0
+        ? EDEN_LAB_LAYOUT.centerZ + EDEN_LAB_LAYOUT.depth / 2
+        : door.side === 2
+          ? EDEN_LAB_LAYOUT.centerZ - EDEN_LAB_LAYOUT.depth / 2
+          : EDEN_LAB_LAYOUT.centerZ - EDEN_LAB_LAYOUT.depth / 2 + door.offset + door.width / 2;
+      expect(Math.abs(worldX - door.x)).toBeLessThan(1e-6);
+      expect(Math.abs(worldZ - door.z)).toBeLessThan(1e-6);
+      const navPlatforms = def.platforms.filter((platform) => (
+        Math.abs((platform.minX + platform.maxX) / 2 - door.x) < 0.2
+        && Math.abs((platform.minZ + platform.maxZ) / 2 - door.z) < 0.2
+      ));
+      expect(navPlatforms.length, `missing nav platform for side ${door.side}`).toBeGreaterThan(0);
+    }
+  });
+
   it('authors visible services and work surfaces inside the Eden research lab', async () => {
     const { buildEdenFacility } = await import('../../src/world/maps/eden');
     const def = buildEdenFacility();
@@ -829,10 +904,10 @@ describe('world-space structure contracts', () => {
     expect(handrailPosts).toHaveLength(10);
   });
 
-  it('marks Ashara Sunwall Market with a grounded service gateway', async () => {
+  it('removes the primitive Sunwall Market gateway and tank dressing', async () => {
     const { buildAsharaReach } = await import('../../src/world/maps/desert');
     const def = buildAsharaReach();
-    const sign = def.geo.find((g) => (
+    const marketSign = def.geo.find((g) => (
       g.kind === 'box'
       && g.mat === 'rust'
       && Math.abs(g.x + 47) < 0.1
@@ -846,16 +921,16 @@ describe('world-space structure contracts', () => {
       && g.z > -65 && g.z < 15
       && g.r > 0.8
     ));
-    const blockedGatewayCrates = def.destructibles.filter((item) => (
+    const marketCrates = def.destructibles.filter((item) => (
       item.type === 'crate'
       && Math.abs(item.geo.x + 47) < 3.2
       && item.geo.z > -59
       && item.geo.z < -35
     ));
-    expect(sign).toBeDefined();
-    expect(sign?.noCollide).toBe(true);
-    expect(marketTanks.length).toBeGreaterThanOrEqual(3);
-    expect(blockedGatewayCrates).toHaveLength(0);
+    expect(marketSign).toBeUndefined();
+    expect(marketTanks).toHaveLength(0);
+    expect(marketCrates).toHaveLength(0);
+    expect(def.pois.some((poi) => poi.name === 'Sunwall Market')).toBe(true);
   });
 
   it('seats and structurally articulates the Ashara relay mast', async () => {

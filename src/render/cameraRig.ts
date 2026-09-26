@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { Actor } from '../sim/actor';
 import type { ActorView } from '../sim/gameStateView';
 import { getSettings } from '../core/settings';
-import { MOVE, WEAPONS, type WeaponId } from '../core/balance';
+import { MOVE, RARITY_MODS, WEAPONS, type Rarity, type WeaponId } from '../core/balance';
 import { scopeFovForMagnification } from './renderer';
 import { feetYFromBodyCenter } from '../physics/physics';
 
@@ -63,6 +63,15 @@ export class CameraRig {
   onScopedChanged: ((scoped: boolean) => void) | null = null;
   /** Continuous sniper scope blend 0..1 (drives FOV and overlay weights). */
   private scopedBlend = 0;
+  private localRecoilYaw = 0;
+  private localRecoilPitch = 0;
+  private localRecoilClimb = 0;
+  private localRecoilWeaponId: WeaponId | null = null;
+  private localRecoilSinceShot = 99;
+  private localRecoilRecover = 6;
+  private localRecoilShotCount = 0;
+  private presentationYaw = 0;
+  private presentationPitch = 0;
   get scopeProgress(): number {
     return this.scopedBlend;
   }
@@ -112,9 +121,13 @@ export class CameraRig {
 
   /** Clear presentation-only aim state when entering a non-combat camera. */
   resetAimState(resetFov = true): void {
+    this.presentationYaw = 0;
+    this.presentationPitch = 0;
     this.currentAds = 0;
     this.sprintKick = 0;
     this.shakeAmount = 0;
+    this.scopedBlend = 0;
+    this.clearLocalRecoil();
     this.setScoped(false);
     if (resetFov) {
       this.camera.fov = this.baseFov;
@@ -122,9 +135,54 @@ export class CameraRig {
     }
   }
 
+  applyPresentationLook(yaw: number, pitch: number): void {
+    this.presentationYaw += Number.isFinite(yaw) ? yaw : 0;
+    this.presentationPitch += Number.isFinite(pitch) ? pitch : 0;
+  }
+
   addShake(amount: number): void {
     const s = getSettings().cameraShake;
     this.shakeAmount = Math.min(1.2, this.shakeAmount + amount * s);
+  }
+
+  addLocalRecoil(
+    weaponId: WeaponId,
+    opts: { adsAmount?: number; crouched?: boolean; rarity?: Rarity } = {},
+  ): void {
+    const profile = WEAPONS[weaponId].recoil;
+    const adsAmount = THREE.MathUtils.clamp(opts.adsAmount ?? 0, 0, 1);
+    const sustained = this.localRecoilWeaponId === weaponId && this.localRecoilSinceShot < 0.35;
+    this.localRecoilClimb = sustained
+      ? Math.min(profile.climbMax, this.localRecoilClimb + profile.climbPerShot)
+      : 0;
+    const stance = (1 - adsAmount * (1 - profile.ads)) * (opts.crouched ? profile.crouch : 1);
+    const recoilMultiplier = RARITY_MODS[opts.rarity ?? 'common'].recoilMult;
+    const yawSign = this.localRecoilShotCount % 2 === 0 ? -1 : 1;
+    this.localRecoilPitch += profile.vertical * (1 + this.localRecoilClimb) * recoilMultiplier * stance;
+    this.localRecoilYaw += yawSign * profile.horizontal * recoilMultiplier * stance;
+    this.localRecoilWeaponId = weaponId;
+    this.localRecoilSinceShot = 0;
+    this.localRecoilRecover = profile.recover;
+    this.localRecoilShotCount += 1;
+  }
+
+  private updateLocalRecoil(dt: number): void {
+    if (this.localRecoilSinceShot < 90) this.localRecoilSinceShot += dt;
+    const k = Math.exp(-this.localRecoilRecover * dt);
+    this.localRecoilPitch *= k;
+    this.localRecoilYaw *= k;
+    if (Math.abs(this.localRecoilPitch) < 1e-4) this.localRecoilPitch = 0;
+    if (Math.abs(this.localRecoilYaw) < 1e-4) this.localRecoilYaw = 0;
+  }
+
+  private clearLocalRecoil(): void {
+    this.localRecoilYaw = 0;
+    this.localRecoilPitch = 0;
+    this.localRecoilClimb = 0;
+    this.localRecoilWeaponId = null;
+    this.localRecoilSinceShot = 99;
+    this.localRecoilRecover = 6;
+    this.localRecoilShotCount = 0;
   }
 
   /**
@@ -140,8 +198,10 @@ export class CameraRig {
     const settings = getSettings();
     this.baseFov = settings.fov;
 
-    let yaw = actor.yaw;
-    let pitch = actor.pitch;
+    let yaw = actor.yaw + this.presentationYaw;
+    let pitch = actor.pitch + this.presentationPitch;
+    this.presentationYaw = 0;
+    this.presentationPitch = 0;
     if (!opts.spectating) {
       // Recoil punch applied visually on top of commanded aim. The visible
       // fraction comes from the weapon's shared recoil profile so camera,
@@ -154,32 +214,9 @@ export class CameraRig {
 
     // ADS FOV zoom + sprint FOV kick
     const adsZoom = actor.wpn.adsAmount;
-    this.currentAds += (adsZoom - this.currentAds) * Math.min(1, dt * 10);
     const hsNow = Math.hypot(actor.body.velocity.x, actor.body.velocity.z);
     const sprinting = actor.body.grounded && !actor.crouched && hsNow > MOVE.walkSpeed + 0.8;
-    this.sprintKick += ((sprinting ? 1 : 0) - this.sprintKick) * Math.min(1, dt * 6);
-    const sniperAds = actor.inv.selectedWeapon?.weaponId === 'sniper' && this.currentAds > 0.55;
-    // Single-pass optics: the primary camera itself carries the angular
-    // magnification, blended in continuously with ADS so the first visual
-    // response is immediate and there is no heavy path that switches on at
-    // full draw.
-    this.scopedBlend += ((sniperAds ? 1 : 0) - this.scopedBlend) * (1 - Math.exp(-9 * dt));
-    if (this.scopedBlend < 0.001) this.scopedBlend = 0;
-    const presentationFov = this.mode === 'tps'
-      ? THREE.MathUtils.clamp(this.baseFov * 0.55, 42, 60)
-      : this.baseFov;
-    const adsFov =
-      presentationFov - this.currentAds * (this.mode === 'tps' ? 6 : 14) +
-      this.sprintKick * presentationFov * 0.085;
-    const magnification = getSettings().scopeMagnification;
-    const scopedFov = scopeFovForMagnification(presentationFov, magnification);
-    const targetFov = THREE.MathUtils.lerp(adsFov, Math.max(3, scopedFov), this.scopedBlend);
-    const scopedNow = sniperAds && this.currentAds > 0.97;
-    this.setScoped(scopedNow);
-    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
-      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 12);
-      this.camera.updateProjectionMatrix();
-    }
+    this.updateAimOptics(dt, adsZoom, actor.inv.selectedWeapon?.weaponId ?? null, sprinting);
 
     // Shake decay
     this.shakeAmount *= Math.exp(-dt * 5.5);
@@ -247,6 +284,27 @@ export class CameraRig {
     }
   }
 
+  private updateAimOptics(dt: number, adsAmount: number, weaponId: WeaponId | null, sprinting: boolean): void {
+    this.currentAds += (adsAmount - this.currentAds) * Math.min(1, dt * 10);
+    this.sprintKick += ((sprinting ? 1 : 0) - this.sprintKick) * Math.min(1, dt * 6);
+    const sniperAds = weaponId === 'sniper' && this.currentAds > 0.55;
+    this.scopedBlend += ((sniperAds ? 1 : 0) - this.scopedBlend) * (1 - Math.exp(-9 * dt));
+    if (this.scopedBlend < 0.001) this.scopedBlend = 0;
+    const presentationFov = this.mode === 'tps'
+      ? THREE.MathUtils.clamp(this.baseFov * 0.55, 42, 60)
+      : this.baseFov;
+    const adsFov =
+      presentationFov - this.currentAds * (this.mode === 'tps' ? 6 : 14) +
+      this.sprintKick * presentationFov * 0.085;
+    const scopedFov = scopeFovForMagnification(presentationFov, getSettings().scopeMagnification);
+    const targetFov = THREE.MathUtils.lerp(adsFov, Math.max(3, scopedFov), this.scopedBlend);
+    this.setScoped(sniperAds && this.currentAds > 0.97);
+    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 12);
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
   /** Camera update for a replica actor. It intentionally consumes only the
    * read-only ActorView surface; recoil, ADS and movement prediction remain
    * local presentation concerns and are not reconstructed as authority. */
@@ -262,19 +320,11 @@ export class CameraRig {
     }
     const settings = getSettings();
     this.baseFov = settings.fov;
+    this.updateLocalRecoil(dt);
     const adsTarget = THREE.MathUtils.clamp(opts.adsAmount ?? 0, 0, 1);
-    this.currentAds += (adsTarget - this.currentAds) * Math.min(1, dt * 10);
     const horizontalSpeed = Math.hypot(actor.velocity.x, actor.velocity.z);
     const sprinting = actor.grounded && !actor.crouched && horizontalSpeed > MOVE.walkSpeed + 0.8;
-    this.sprintKick += ((sprinting ? 1 : 0) - this.sprintKick) * Math.min(1, dt * 6);
-    const presentationFov = this.mode === 'tps'
-      ? THREE.MathUtils.clamp(this.baseFov * 0.55, 42, 60)
-      : this.baseFov;
-    const targetFov = presentationFov - this.currentAds * (this.mode === 'tps' ? 6 : 14)
-      + this.sprintKick * presentationFov * 0.085;
-    this.setScoped(actor.equippedWeapon === 'sniper' && this.currentAds > 0.97);
-    this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 12);
-    this.camera.updateProjectionMatrix();
+    this.updateAimOptics(dt, adsTarget, actor.equippedWeapon, sprinting);
     this.shakeAmount *= Math.exp(-dt * 5.5);
     const shakeX = Math.sin(this.shakeSeed + this.t2() * 47.3) * 0.012 * this.shakeAmount;
     const shakeY = Math.sin(this.shakeSeed * 1.7 + this.t2() * 39.1) * 0.012 * this.shakeAmount;
@@ -285,8 +335,10 @@ export class CameraRig {
     const cameraFactor = actor.equippedWeapon
       ? WEAPONS[actor.equippedWeapon as WeaponId]?.recoil.camera ?? 0.6
       : 0.6;
-    const yaw = actor.yaw + (opts.recoilYaw ?? 0) * cameraFactor;
-    const pitch = actor.pitch + (opts.recoilPitch ?? 0) * cameraFactor;
+    const yaw = actor.yaw + this.presentationYaw + ((opts.recoilYaw ?? 0) + this.localRecoilYaw) * cameraFactor;
+    const pitch = actor.pitch + this.presentationPitch + ((opts.recoilPitch ?? 0) + this.localRecoilPitch) * cameraFactor;
+    this.presentationYaw = 0;
+    this.presentationPitch = 0;
     if (this.mode === 'fps') {
       this.camera.position.set(p.x + shakeX, feetY + this.smoothEye + shakeY, p.z);
       this.camera.quaternion.setFromEuler(new THREE.Euler(pitch + shakeY * 0.5, yaw + shakeX * 0.5, 0, 'YXZ'));
@@ -318,6 +370,8 @@ export class CameraRig {
 
   /** Stable spectator camera driven by interpolated replica state. */
   updateSpectateView(target: ActorView, dt: number, phys: PhysicsQuery): void {
+    this.scopedBlend = 0;
+    this.clearLocalRecoil();
     this.setScoped(false);
     this.baseFov = getSettings().fov;
     this.camera.fov += (this.baseFov - this.camera.fov) * Math.min(1, dt * 12);
@@ -382,6 +436,8 @@ export class CameraRig {
 
   /** Spectator orbit around an alive target actor. */
   updateSpectate(target: Actor, dt: number, phys: PhysicsQuery): void {
+    this.scopedBlend = 0;
+    this.clearLocalRecoil();
     this.setScoped(false);
     this.baseFov = getSettings().fov;
     this.camera.fov += (this.baseFov - this.camera.fov) * Math.min(1, dt * 12);

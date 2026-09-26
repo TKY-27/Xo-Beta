@@ -8,8 +8,6 @@
  *   player never sees an obvious map cutoff or void.
  * - Per-map distant silhouettes (city skyline / hedgerows and towers /
  *   forested ridge) sit near the horizon inside the fog.
- * - BoundaryBarrier reveals the invisible play-area wall as a subtle
- *   translucent red shimmer only when the viewer comes close to it.
  */
 
 import * as THREE from 'three';
@@ -22,6 +20,33 @@ import type { TerrainGridMesh } from '../world/types';
 import type { MaterialLibrary } from './materials';
 import { buildDetailGrainRoughness, createTerrainSplatMaterial, type TerrainSplatSpec } from './materials';
 import { peekTextureSet, type TextureSet } from '../assets/assets';
+
+function ensureGeometryUv(geometry: THREE.BufferGeometry): void {
+  if (geometry.getAttribute('uv')) return;
+  const position = geometry.getAttribute('position');
+  if (!position) return;
+  const normal = geometry.getAttribute('normal');
+  const values = new Float32Array(position.count * 2);
+  for (let index = 0; index < position.count; index += 1) {
+    const x = position.getX(index);
+    const y = position.getY(index);
+    const z = position.getZ(index);
+    const nx = Math.abs(normal?.getX(index) ?? 0);
+    const ny = Math.abs(normal?.getY(index) ?? 0);
+    const nz = Math.abs(normal?.getZ(index) ?? 0);
+    if (ny >= nx && ny >= nz) {
+      values[index * 2] = x * 0.25;
+      values[index * 2 + 1] = z * 0.25;
+    } else if (nx >= nz) {
+      values[index * 2] = z * 0.25;
+      values[index * 2 + 1] = y * 0.25;
+    } else {
+      values[index * 2] = x * 0.25;
+      values[index * 2 + 1] = y * 0.25;
+    }
+  }
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(values, 2));
+}
 
 const SEG = 150;
 
@@ -106,80 +131,81 @@ export interface VistaHandle {
   dispose: () => void;
 }
 
-class BoundaryBarrier {
-  readonly group = new THREE.Group();
-  private mats: THREE.LineBasicMaterial[] = [];
-  private meshes: THREE.LineSegments[] = [];
-  private half: number;
+interface VistaCullEntry {
+  readonly object: THREE.Object3D;
+  readonly center: THREE.Vector3;
+  readonly maxDistanceSq: number;
+  readonly baseVisible: boolean;
+}
 
-  constructor(size: number) {
-    this.half = size / 2;
-    // Low energy-fence height: must never tower over the map or cover the
-    // sky from inside (a full-height wall reads as a giant dark slab even
-    // at low opacity). 12 m reads as a boundary fence at character scale.
-    const wallY = 6;
-    const wallH = 12;
-    const linePositions: number[] = [];
-    for (let x = -size / 2; x <= size / 2 + 0.01; x += 10) {
-      linePositions.push(x, -wallH / 2, 0, x, wallH / 2, 0);
+function prepareVistaObject(object: THREE.Object3D, maxDistance: number): VistaCullEntry | null {
+  let localCenter: THREE.Vector3;
+  let localRadius: number;
+  if (object instanceof THREE.InstancedMesh) {
+    object.computeBoundingBox();
+    object.computeBoundingSphere();
+    const sphere = object.boundingSphere;
+    if (!sphere || sphere.isEmpty()) {
+      object.frustumCulled = false;
+      return null;
     }
-    for (let y = -wallH / 2; y <= wallH / 2 + 0.01; y += 4) {
-      linePositions.push(-size / 2, y, 0, size / 2, y, 0);
+    localCenter = sphere.center;
+    localRadius = sphere.radius;
+  } else if (object instanceof THREE.Mesh || object instanceof THREE.LineSegments) {
+    object.geometry.computeBoundingBox();
+    object.geometry.computeBoundingSphere();
+    const sphere = object.geometry.boundingSphere;
+    if (!sphere || sphere.isEmpty()) {
+      object.frustumCulled = false;
+      return null;
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
-    for (let i = 0; i < 4; i++) {
-      const mat = new THREE.LineBasicMaterial({
-        color: 0x37d8ff,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
+    localCenter = sphere.center;
+    localRadius = sphere.radius;
+  } else {
+    return null;
+  }
+
+  const center = localCenter.clone().applyMatrix4(object.matrixWorld);
+  const scale = object.getWorldScale(new THREE.Vector3());
+  const radius = localRadius * Math.max(Math.abs(scale.x), Math.abs(scale.y), Math.abs(scale.z));
+  const limit = maxDistance + radius;
+  object.frustumCulled = true;
+  return {
+    object,
+    center,
+    maxDistanceSq: limit * limit,
+    baseVisible: object.visible,
+  };
+}
+
+function prepareVistaCulling(root: THREE.Object3D): void {
+  root.updateMatrixWorld(true);
+  root.traverse((object) => {
+    prepareVistaObject(object, Number.POSITIVE_INFINITY);
+  });
+}
+
+class VistaDistanceCuller {
+  private readonly entries: VistaCullEntry[] = [];
+
+  constructor(roots: readonly THREE.Object3D[], maxDistance: number) {
+    for (const root of roots) {
+      root.updateMatrixWorld(true);
+      root.traverse((object) => {
+        const entry = prepareVistaObject(object, maxDistance);
+        if (entry) this.entries.push(entry);
       });
-      this.mats.push(mat);
-      const mesh = new THREE.LineSegments(geo, mat);
-      mesh.position.y = wallY;
-      mesh.renderOrder = 30;
-      mesh.visible = false;
-      if (i < 2) {
-        mesh.rotation.y = i === 0 ? Math.PI : 0;
-        mesh.position.z = i === 0 ? this.half - 3 : -(this.half - 3);
-      } else {
-        mesh.rotation.y = i === 2 ? -Math.PI / 2 : Math.PI / 2;
-        mesh.position.x = i === 2 ? this.half - 3 : -(this.half - 3);
-      }
-      mesh.frustumCulled = false;
-      this.meshes.push(mesh);
-      this.group.add(mesh);
     }
   }
 
-  /** Reveal each wall as the viewer approaches it; invisible otherwise. */
-  update(viewPos: THREE.Vector3, time: number): void {
-    const half = this.half;
-    const walls: Array<[number, number]> = [
-      [half - viewPos.z, 0],
-      [viewPos.z + half, 1],
-      [half - viewPos.x, 2],
-      [viewPos.x + half, 3],
-    ];
-    for (const [dist, idx] of walls) {
-      const mat = this.mats[idx]!;
-      // CYCLE 56 (review): the near-invisible alpha-red hairline read as a
-      // stray debug line. Electric-cyan at a slightly higher ceiling with a
-      // livelier pulse reads as an intentional containment fence.
-      const near = 22;
-      let target = dist < near ? Math.min(0.2, ((near - dist) / near) * 0.28) : 0;
-      target *= 0.86 + 0.14 * Math.sin(time * 3.4 + idx);
-      mat.opacity += (target - mat.opacity) * 0.18;
-      // Hard visibility gate: an invisible-but-rendered transparent plane
-      // still costs a draw call and can interact with post processing.
-      this.meshes[idx]!.visible = mat.opacity > 0.004;
+  update(viewPos: THREE.Vector3): void {
+    for (const entry of this.entries) {
+      const dx = viewPos.x - entry.center.x;
+      const dy = viewPos.y - entry.center.y;
+      const dz = viewPos.z - entry.center.z;
+      const visible = entry.baseVisible && dx * dx + dy * dy + dz * dz <= entry.maxDistanceSq;
+      if (entry.object.visible !== visible) entry.object.visible = visible;
     }
-  }
-
-  dispose(): void {
-    for (const m of this.mats) m.dispose();
-    this.meshes[0]?.geometry.dispose();
   }
 }
 
@@ -338,17 +364,17 @@ function buildSkyline(size: number): THREE.Group {
     tower.count = towerIndices[family]!;
     tower.instanceMatrix.needsUpdate = true;
     if (tower.instanceColor) tower.instanceColor.needsUpdate = true;
-    tower.frustumCulled = false;
+    tower.frustumCulled = true;
   });
   crowns.instanceMatrix.needsUpdate = true;
   antennas.count = antennaIndex;
   antennas.instanceMatrix.needsUpdate = true;
   tiers.instanceMatrix.needsUpdate = true;
   podiums.instanceMatrix.needsUpdate = true;
-  crowns.frustumCulled = false;
-  antennas.frustumCulled = false;
-  tiers.frustumCulled = false;
-  podiums.frustumCulled = false;
+  crowns.frustumCulled = true;
+  antennas.frustumCulled = true;
+  tiers.frustumCulled = true;
+  podiums.frustumCulled = true;
   group.add(...towers, crowns, antennas, tiers, podiums);
   group.userData.windowTextures = windowTextures;
   return group;
@@ -617,13 +643,13 @@ function buildCityContinuation(size: number): THREE.Group {
     mesh.count = familyIndices[family]!;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.frustumCulled = false;
+    mesh.frustumCulled = true;
   });
   setbacks.forEach((mesh, family) => {
     mesh.count = familyIndices[family]!;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.frustumCulled = false;
+    mesh.frustumCulled = true;
   });
   roofs.count = roofIndex;
   roofs.instanceMatrix.needsUpdate = true;
@@ -641,14 +667,14 @@ function buildCityContinuation(size: number): THREE.Group {
   entranceFrames.instanceMatrix.needsUpdate = true;
   entranceCanopies.instanceMatrix.needsUpdate = true;
   entrancePosts.instanceMatrix.needsUpdate = true;
-  roofs.frustumCulled = false;
-  wings.frustumCulled = false;
-  serviceCores.frustumCulled = false;
-  balconyBands.frustumCulled = false;
-  entrances.frustumCulled = false;
-  entranceFrames.frustumCulled = false;
-  entranceCanopies.frustumCulled = false;
-  entrancePosts.frustumCulled = false;
+  roofs.frustumCulled = true;
+  wings.frustumCulled = true;
+  serviceCores.frustumCulled = true;
+  balconyBands.frustumCulled = true;
+  entrances.frustumCulled = true;
+  entranceFrames.frustumCulled = true;
+  entranceCanopies.frustumCulled = true;
+  entrancePosts.frustumCulled = true;
 
   // Carry the four main street axes over the 0.6 m-deep vista ground. Before
   // this bed existed, the playable asphalt and lane paint ended at the legal
@@ -723,11 +749,11 @@ function buildCityContinuation(size: number): THREE.Group {
   marks.instanceMatrix.needsUpdate = true;
   ringRoads.instanceMatrix.needsUpdate = true;
   ringCurbs.instanceMatrix.needsUpdate = true;
-  roads.frustumCulled = false;
-  curbs.frustumCulled = false;
-  marks.frustumCulled = false;
-  ringRoads.frustumCulled = false;
-  ringCurbs.frustumCulled = false;
+  roads.frustumCulled = true;
+  curbs.frustumCulled = true;
+  marks.frustumCulled = true;
+  ringRoads.frustumCulled = true;
+  ringCurbs.frustumCulled = true;
 
   // Repeated poles and compact luminous heads carry human scale around the
   // service street without adding 24 point lights or gameplay collision.
@@ -758,8 +784,8 @@ function buildCityContinuation(size: number): THREE.Group {
   }
   poles.instanceMatrix.needsUpdate = true;
   heads.instanceMatrix.needsUpdate = true;
-  poles.frustumCulled = false;
-  heads.frustumCulled = false;
+  poles.frustumCulled = true;
+  heads.frustumCulled = true;
   group.add(
     ...blocks, ...setbacks, roofs, wings, serviceCores, balconyBands,
     entrances, entranceFrames, entranceCanopies, entrancePosts,
@@ -789,6 +815,7 @@ function buildGableRoofGeometry(): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.computeVertexNormals();
+  ensureGeometryUv(geometry);
   return geometry;
 }
 
@@ -824,6 +851,7 @@ function buildHedgeClusterGeometry(): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  ensureGeometryUv(geometry);
   return geometry;
 }
 
@@ -840,13 +868,13 @@ function buildRuralHorizon(def: MapDef): THREE.Group {
     buildRidgeBandGeometry(half + 390, 42, 8.1),
     new THREE.MeshBasicMaterial({ color: 0x59605b, fog: true }),
   );
-  farMoor.frustumCulled = false;
+  farMoor.frustumCulled = true;
   group.add(farMoor);
   const nearMoor = new THREE.Mesh(
     buildRidgeBandGeometry(half + 185, 24, 3.8),
     new THREE.MeshBasicMaterial({ color: 0x4d5842, fog: true }),
   );
-  nearMoor.frustumCulled = false;
+  nearMoor.frustumCulled = true;
   group.add(nearMoor);
   // A dense mid-distance treeline bridges the empty 50–150 m strip between
   // playable farmland and the distant moors. Every trunk starts on the same
@@ -871,7 +899,7 @@ function buildRuralHorizon(def: MapDef): THREE.Group {
     m.compose(p, q, s);
     inst.setMatrixAt(i, m);
   }
-  inst.frustumCulled = false;
+  inst.frustumCulled = true;
   group.add(inst);
 
   const box = new THREE.BoxGeometry(1, 1, 1);
@@ -911,7 +939,7 @@ function buildRuralHorizon(def: MapDef): THREE.Group {
   }
   hedges.instanceMatrix.needsUpdate = true;
   if (hedges.instanceColor) hedges.instanceColor.needsUpdate = true;
-  hedges.frustumCulled = false;
+  hedges.frustumCulled = true;
 
   const wallCount = 36;
   const walls = new THREE.InstancedMesh(
@@ -931,7 +959,7 @@ function buildRuralHorizon(def: MapDef): THREE.Group {
     walls.setMatrixAt(i, matrix);
   }
   walls.instanceMatrix.needsUpdate = true;
-  walls.frustumCulled = false;
+  walls.frustumCulled = true;
 
   // Short post-and-rail runs provide a second, human-scale field boundary.
   // Their open silhouette prevents the vista from becoming a ring of solid
@@ -969,8 +997,8 @@ function buildRuralHorizon(def: MapDef): THREE.Group {
   }
   fencePosts.instanceMatrix.needsUpdate = true;
   fenceRails.instanceMatrix.needsUpdate = true;
-  fencePosts.frustumCulled = false;
-  fenceRails.frustumCulled = false;
+  fencePosts.frustumCulled = true;
+  fenceRails.frustumCulled = true;
 
   // Replace seven isolated 50 m obelisks with a low, clustered village band.
   // Cottages establish believable scale; only three churches break the ridge.
@@ -1045,11 +1073,11 @@ function buildRuralHorizon(def: MapDef): THREE.Group {
   cottageWindows.instanceMatrix.needsUpdate = true;
   cottageDoors.instanceMatrix.needsUpdate = true;
   chimneys.instanceMatrix.needsUpdate = true;
-  cottages.frustumCulled = false;
-  roofs.frustumCulled = false;
-  cottageWindows.frustumCulled = false;
-  cottageDoors.frustumCulled = false;
-  chimneys.frustumCulled = false;
+  cottages.frustumCulled = true;
+  roofs.frustumCulled = true;
+  cottageWindows.frustumCulled = true;
+  cottageDoors.frustumCulled = true;
+  chimneys.frustumCulled = true;
 
   const churchCount = 3;
   const churches = new THREE.InstancedMesh(box, cottages.material, churchCount);
@@ -1075,8 +1103,8 @@ function buildRuralHorizon(def: MapDef): THREE.Group {
   }
   churches.instanceMatrix.needsUpdate = true;
   spires.instanceMatrix.needsUpdate = true;
-  churches.frustumCulled = false;
-  spires.frustumCulled = false;
+  churches.frustumCulled = true;
+  spires.frustumCulled = true;
   group.add(
     hedges, walls, fencePosts, fenceRails,
     cottages, roofs, cottageWindows, cottageDoors, chimneys,
@@ -1125,6 +1153,7 @@ function mergeTreeGeo(): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  ensureGeometryUv(geo);
   return geo;
 }
 
@@ -1163,6 +1192,7 @@ function buildRidgeBandGeometry(radius: number, baseHeight: number, seed: number
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
+  ensureGeometryUv(geometry);
   return geometry;
 }
 
@@ -1182,10 +1212,10 @@ function buildEdenRidge(def: MapDef, fogColor = 0xbfd6e4): THREE.Group {
     fog: true,
   });
   const far = new THREE.Mesh(buildRidgeBandGeometry(half + 480, 108, 6.4), farMat);
-  far.frustumCulled = false;
+  far.frustumCulled = true;
   group.add(far);
   const near = new THREE.Mesh(buildRidgeBandGeometry(half + 205, 44, 2.7), nearMat);
-  near.frustumCulled = false;
+  near.frustumCulled = true;
   group.add(near);
 
   // The previous ridge began behind a completely empty grass apron. Continue
@@ -1224,7 +1254,7 @@ function buildEdenRidge(def: MapDef, fogColor = 0xbfd6e4): THREE.Group {
   trees.count = treeIndex;
   trees.instanceMatrix.needsUpdate = true;
   if (trees.instanceColor) trees.instanceColor.needsUpdate = true;
-  trees.frustumCulled = false;
+  trees.frustumCulled = true;
 
   // Establish a forest floor instead of placing identical conifers on an
   // uninterrupted lawn. Low shrub colonies fill the woodland edge, while a
@@ -1260,7 +1290,7 @@ function buildEdenRidge(def: MapDef, fogColor = 0xbfd6e4): THREE.Group {
   shrubs.count = shrubIndex;
   shrubs.instanceMatrix.needsUpdate = true;
   if (shrubs.instanceColor) shrubs.instanceColor.needsUpdate = true;
-  shrubs.frustumCulled = false;
+  shrubs.frustumCulled = true;
 
   const logCount = 28;
   const logGeometry = new THREE.CylinderGeometry(0.5, 0.62, 1, 7);
@@ -1282,7 +1312,7 @@ function buildEdenRidge(def: MapDef, fogColor = 0xbfd6e4): THREE.Group {
     logs.setMatrixAt(i, matrix);
   }
   logs.instanceMatrix.needsUpdate = true;
-  logs.frustumCulled = false;
+  logs.frustumCulled = true;
 
   // A restrained maintenance line on the north side extends the facility's
   // utilities into the vista. Ten poles and low service sheds provide scale
@@ -1309,8 +1339,8 @@ function buildEdenRidge(def: MapDef, fogColor = 0xbfd6e4): THREE.Group {
   }
   poles.instanceMatrix.needsUpdate = true;
   arms.instanceMatrix.needsUpdate = true;
-  poles.frustumCulled = false;
-  arms.frustumCulled = false;
+  poles.frustumCulled = true;
+  arms.frustumCulled = true;
 
   const shedCount = 8;
   const sheds = new THREE.InstancedMesh(
@@ -1343,8 +1373,8 @@ function buildEdenRidge(def: MapDef, fogColor = 0xbfd6e4): THREE.Group {
   }
   sheds.instanceMatrix.needsUpdate = true;
   shedRoofs.instanceMatrix.needsUpdate = true;
-  sheds.frustumCulled = false;
-  shedRoofs.frustumCulled = false;
+  sheds.frustumCulled = true;
+  shedRoofs.frustumCulled = true;
   group.add(trees, shrubs, logs, poles, arms, sheds, shedRoofs);
   return group;
 }
@@ -1381,10 +1411,10 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
     fog: false,
   });
   const far = new THREE.Mesh(buildRidgeBandGeometry(half + 515, 118, 4.2), farMat);
-  far.frustumCulled = false;
+  far.frustumCulled = true;
   group.add(far);
   const near = new THREE.Mesh(buildRidgeBandGeometry(half + 190, 50, 1.4), nearMat);
-  near.frustumCulled = false;
+  near.frustumCulled = true;
   group.add(near);
 
   const box = new THREE.BoxGeometry(1, 1, 1);
@@ -1401,8 +1431,13 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   // playable-road edge, widths, vertical offsets and material family.
   const roadMaterial = mats?.get('asphaltDesert').clone()
     ?? new THREE.MeshStandardMaterial({ color: 0x4d4437, roughness: 0.96, metalness: 0 });
-  const shoulderMaterial = mats?.get('dirt').clone()
-    ?? new THREE.MeshStandardMaterial({ color: 0x8d7654, roughness: 1, metalness: 0 });
+  // Shoulder material: the shared ambientCG `dirt` set averages RGB(80,66,36)
+  // and a tint is a channel-wise multiply, so it can only be darkened. On the
+  // Ashara highway that produced a dark red-brown band cutting across the
+  // desert. Use the same low-chroma packed-earth set as the market lane, which
+  // is authored for compacted desert ground and reads as graded sand.
+  const shoulderMaterial = mats?.get('dirtDesert').clone()
+    ?? new THREE.MeshStandardMaterial({ color: 0xb6a684, roughness: 1, metalness: 0 });
   const addRibbon = (
     start: number,
     end: number,
@@ -1506,8 +1541,8 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   }
   poles.instanceMatrix.needsUpdate = true;
   crossbars.instanceMatrix.needsUpdate = true;
-  poles.frustumCulled = false;
-  crossbars.frustumCulled = false;
+  poles.frustumCulled = true;
+  crossbars.frustumCulled = true;
 
   // Low scrub, rocks and compact waystations form the missing desert midground
   // while leaving a broad clear band around the continued highway.
@@ -1535,7 +1570,7 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   }
   scrub.count = scrubIndex;
   scrub.instanceMatrix.needsUpdate = true;
-  scrub.frustumCulled = false;
+  scrub.frustumCulled = true;
 
   const rockCount = 72;
   const rocks = new THREE.InstancedMesh(
@@ -1559,7 +1594,7 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   }
   rocks.count = rockIndex;
   rocks.instanceMatrix.needsUpdate = true;
-  rocks.frustumCulled = false;
+  rocks.frustumCulled = true;
 
   const outpostCount = 8;
   const outposts = new THREE.InstancedMesh(
@@ -1593,8 +1628,8 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   }
   outposts.instanceMatrix.needsUpdate = true;
   outpostRoofs.instanceMatrix.needsUpdate = true;
-  outposts.frustumCulled = false;
-  outpostRoofs.frustumCulled = false;
+  outposts.frustumCulled = true;
+  outpostRoofs.frustumCulled = true;
 
   // A compact solar/service yard gives the broad northern approach a legible
   // middle distance. Random scatter alone became sub-pixel noise from the
@@ -1638,9 +1673,9 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   yardBodies.instanceMatrix.needsUpdate = true;
   yardCanopies.instanceMatrix.needsUpdate = true;
   yardPosts.instanceMatrix.needsUpdate = true;
-  yardBodies.frustumCulled = false;
-  yardCanopies.frustumCulled = false;
-  yardPosts.frustumCulled = false;
+  yardBodies.frustumCulled = true;
+  yardCanopies.frustumCulled = true;
+  yardPosts.frustumCulled = true;
 
   const panelCount = 18;
   const panels = new THREE.InstancedMesh(
@@ -1668,8 +1703,8 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   }
   panels.instanceMatrix.needsUpdate = true;
   panelStands.instanceMatrix.needsUpdate = true;
-  panels.frustumCulled = false;
-  panelStands.frustumCulled = false;
+  panels.frustumCulled = true;
+  panelStands.frustumCulled = true;
 
   group.add(
     ...shoulders, ...roads, dashes, poles, crossbars, scrub, rocks,
@@ -1678,79 +1713,6 @@ function buildDesertRidge(def: MapDef, fogColor: number, mats?: MaterialLibrary)
   return group;
 }
 
-function buildDesertDust(size: number): {
-  points: THREE.Points;
-  update: (viewer: THREE.Vector3, time: number) => void;
-  dispose: () => void;
-} {
-  const count = 150;
-  const radius = Math.min(115, size * 0.24);
-  const positions = new Float32Array(count * 3);
-  const seeds = new Float32Array(count * 4);
-  for (let i = 0; i < count; i++) {
-    const a = i * 2.399963229728653;
-    const r = radius * Math.sqrt((i + 0.5) / count);
-    seeds[i * 4] = Math.cos(a) * r;
-    const heightSeed = ((i * 37) % 97) / 97;
-    seeds[i * 4 + 1] = 0.18 + heightSeed * heightSeed * 2.5;
-    seeds[i * 4 + 2] = Math.sin(a) * r;
-    seeds[i * 4 + 3] = 0.6 + ((i * 53) % 89) / 89 * 1.4;
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const spriteSize = 32;
-  const spriteData = new Uint8Array(spriteSize * spriteSize * 4);
-  for (let y = 0; y < spriteSize; y++) {
-    for (let x = 0; x < spriteSize; x++) {
-      const nx = (x + 0.5) / spriteSize * 2 - 1;
-      const ny = (y + 0.5) / spriteSize * 2 - 1;
-      const radius2 = nx * nx + ny * ny;
-      const alpha = Math.max(0, 1 - radius2);
-      const offset = (y * spriteSize + x) * 4;
-      spriteData[offset] = 255;
-      spriteData[offset + 1] = 255;
-      spriteData[offset + 2] = 255;
-      spriteData[offset + 3] = Math.round(alpha * alpha * 255);
-    }
-  }
-  const sprite = new THREE.DataTexture(spriteData, spriteSize, spriteSize, THREE.RGBAFormat);
-  sprite.needsUpdate = true;
-  const material = new THREE.PointsMaterial({
-    color: 0xb69b70,
-    map: sprite,
-    alphaTest: 0.015,
-    size: 1.15,
-    sizeAttenuation: true,
-    transparent: true,
-    opacity: 0.065,
-    depthWrite: false,
-    fog: true,
-  });
-  const points = new THREE.Points(geometry, material);
-  points.frustumCulled = false;
-  const update = (viewer: THREE.Vector3, time: number) => {
-    points.position.set(viewer.x, 0, viewer.z);
-    for (let i = 0; i < count; i++) {
-      const baseX = seeds[i * 4]!;
-      const baseY = seeds[i * 4 + 1]!;
-      const baseZ = seeds[i * 4 + 2]!;
-      const speed = seeds[i * 4 + 3]!;
-      positions[i * 3] = ((baseX + time * speed * 2.3 + radius) % (radius * 2)) - radius;
-      positions[i * 3 + 1] = Math.max(0.08, baseY + Math.sin(time * 0.7 + i * 0.37) * 0.18);
-      positions[i * 3 + 2] = baseZ + Math.sin(time * 0.16 + i * 1.13) * 2.2;
-    }
-    (geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-  };
-  return {
-    points,
-    update,
-    dispose: () => {
-      geometry.dispose();
-      sprite.dispose();
-      material.dispose();
-    },
-  };
-}
 
 /**
  * Seamless deterministic sand grain and wind ripples for close terrain.
@@ -2088,6 +2050,8 @@ function buildTerrain(
   }
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   geo.computeVertexNormals();
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
 
   // W6 TERRAIN OVERHAUL: splat-blended TSL node material (see
   // createTerrainSplatMaterial in materials.ts). Layers blend by slope
@@ -2166,10 +2130,7 @@ function buildTerrain(
   mesh.receiveShadow = true;
   mesh.matrixAutoUpdate = false;
   mesh.updateMatrix();
-  // One mesh spans the whole playable area plus the skirt — it is always
-  // potentially visible, and a stale aggregate bound showed up as the entire
-  // terrain vanishing (black void) from some ground-level camera positions.
-  mesh.frustumCulled = false;
+  mesh.frustumCulled = true;
 
   return {
     mesh,
@@ -2257,6 +2218,7 @@ function smoothstep(t: number): number {
 export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
   const group = new THREE.Group();
   const disposables: Array<() => void> = [];
+  const vistaRoots: THREE.Object3D[] = [];
 
   // W6: the terrain splat graph consumes full grass/dirt/rock texture sets
   // (color + normal + rough) from the shared preload. Sets are null before
@@ -2272,12 +2234,14 @@ export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
   const terrain = buildTerrain(def, terrainSets);
   if (terrain) {
     group.add(terrain.mesh);
+    prepareVistaCulling(terrain.mesh);
     disposables.push(terrain.dispose);
   }
 
   if (def.id === 'neocity') {
     const continuation = buildCityContinuation(def.size);
     group.add(continuation);
+    vistaRoots.push(continuation);
     disposables.push(() => {
       (continuation.userData.facadeTextures as THREE.Texture[] | undefined)?.forEach((texture) => texture.dispose());
       continuation.traverse((o) => {
@@ -2290,6 +2254,7 @@ export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
     });
     const skyline = buildSkyline(def.size);
     group.add(skyline);
+    vistaRoots.push(skyline);
     disposables.push(() => {
       (skyline.userData.windowTextures as THREE.Texture[] | undefined)?.forEach((texture) => texture.dispose());
       skyline.traverse((o) => {
@@ -2303,6 +2268,7 @@ export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
   } else if (def.id === 'oldfront') {
     const rural = buildRuralHorizon(def);
     group.add(rural);
+    vistaRoots.push(rural);
     disposables.push(() => rural.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) {
@@ -2313,6 +2279,7 @@ export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
   } else if (def.id === 'ashara') {
     const ridge = buildDesertRidge(def, def.sky.fogColor, mats);
     group.add(ridge);
+    vistaRoots.push(ridge);
     disposables.push(() => ridge.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) {
@@ -2323,6 +2290,7 @@ export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
   } else {
     const ridge = buildEdenRidge(def, def.sky.fogColor);
     group.add(ridge);
+    vistaRoots.push(ridge);
     disposables.push(() => ridge.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) {
@@ -2332,21 +2300,16 @@ export function buildVista(def: MapDef, mats?: MaterialLibrary): VistaHandle {
     }));
   }
 
-  const barrier = new BoundaryBarrier(def.size);
-  group.add(barrier.group);
-  disposables.push(() => barrier.dispose());
-
-  const dust = def.id === 'ashara' ? buildDesertDust(def.size) : null;
-  if (dust) {
-    group.add(dust.points);
-    disposables.push(dust.dispose);
-  }
-
+  const detailDistance = Math.min(1400, Math.max(900, 1.5 / Math.max(def.sky.fogDensity, 0.0001)));
+  const vistaCuller = new VistaDistanceCuller(
+    vistaRoots,
+    def.id === 'neocity' ? Number.POSITIVE_INFINITY : detailDistance,
+  );
   return {
     group,
-    update: (viewPos, time) => {
-      barrier.update(viewPos, time);
-      dust?.update(viewPos, time);
+    update: (viewPos) => {
+      vistaCuller.update(viewPos);
+      return null;
     },
     dispose: () => {
       for (const d of disposables) d();

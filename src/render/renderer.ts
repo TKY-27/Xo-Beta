@@ -20,6 +20,7 @@ import {
   MathUtils,
   Mesh,
   MeshBasicNodeMaterial,
+  MeshStandardMaterial,
   OrthographicCamera,
   NeutralToneMapping,
   PCFShadowMap,
@@ -32,7 +33,7 @@ import {
   Vector3,
   WebGPURenderer,
 } from 'three/webgpu';
-import type { Camera, Node, Object3D, Texture } from 'three/webgpu';
+import type { Camera, Material, Node, Object3D, Texture } from 'three/webgpu';
 import {
   abs,
   clamp,
@@ -65,6 +66,20 @@ const _lightRight = new Vector3();
 const _lightUp = new Vector3();
 const _snappedTarget = new Vector3();
 const WHITE = new Color(0xffffff);
+
+type DisposableRttNode = {
+  isRTTNode?: boolean;
+  renderTarget?: { dispose: () => void };
+  _quadMesh?: { material?: { dispose: () => void } };
+};
+
+function disposeRttNode(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  const node = value as DisposableRttNode;
+  if (node.isRTTNode !== true) return;
+  node.renderTarget?.dispose();
+  node._quadMesh?.material?.dispose();
+}
 
 /** Supported sniper scope magnification levels (angular-FOV based). */
 export const SCOPE_MAGNIFICATIONS = [1, 2, 4] as const;
@@ -116,6 +131,10 @@ export class GameRenderer {
   /** Resolves once the GPU backend is initialized and the renderer is usable. */
   readonly ready: Promise<void>;
   private postProcessing: RenderPipeline | null = null;
+  private scenePass: ReturnType<typeof pass> | null = null;
+  private vmPass: ReturnType<typeof pass> | null = null;
+  private bloomNode: ReturnType<typeof bloom> | null = null;
+  private aaNode: ReturnType<typeof smaa> | ReturnType<typeof fxaa> | null = null;
   private camera: Camera | null = null;
   // TSL uniforms for the display chain (kept so they can be updated live).
   private gradingU = {
@@ -143,6 +162,9 @@ export class GameRenderer {
   private skyAtmosphere: SkyAtmosphereSystem | null = null;
   private baseFogDensity = 0;
   private baseExposure = 1.25;
+  private envMapScale = 1;
+  private envMapScaleBase = 1;
+  private envMapScaleTouched = 0;
   private sunOffset = new Vector3(120, 220, 90);
   private grading = { vignette: 0.3, saturation: 1.05, contrast: 1.03, lift: new Vector3(0, 0, 0.004) };
   private readonly gpuProfiling: boolean;
@@ -226,6 +248,50 @@ export class GameRenderer {
     // every frame, so no per-pass resize is needed.
   }
 
+  /**
+   * Scale every world material's `envMapIntensity` by `scale`.
+   *
+   * `Scene.environmentIntensity` is not honoured by the r185 node pipeline, and
+   * a full-dome "pure sky" HDRI delivers diffuse irradiance from every
+   * direction. At the default per-material 1.0 that irradiance out-weighs the
+   * key light: measured on Ashara, dropping it to ~0.12 of default is the
+   * difference between a market with no cast shadows at all and one where the
+   * raked key reads through.
+   *
+   * Must be called after the match world group has been added to the scene,
+   * because this walks the live scene graph. Idempotent: repeated calls with
+   * the same scale are a no-op, and a different scale re-bases from the
+   * authored value rather than compounding. Returns the number of materials
+   * it touched so QA can assert the pass actually reached the world.
+   */
+  applyEnvMapScale(scale: number): number {
+    if (scale === this.envMapScale) return this.envMapScaleTouched;
+    this.envMapScale = scale;
+    this.envMapScaleTouched = 0;
+    if (scale === 1) return 0;
+    this.scene.traverse((o) => {
+      const mesh = o as Mesh;
+      if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
+      const apply = (m: Material): void => {
+        const std = m as MeshStandardMaterial;
+        if (typeof std.envMapIntensity !== 'number') return;
+        std.envMapIntensity = (std.envMapIntensity / this.envMapScaleBase) * scale;
+        std.userData.envMapScaleBase = this.envMapScaleBase;
+        this.envMapScaleTouched++;
+      };
+      if (Array.isArray(mesh.material)) mesh.material.forEach(apply);
+      else if (mesh.material) apply(mesh.material);
+    });
+    return this.envMapScaleTouched;
+  }
+
+  /** Live view of the key light. Shadow map state is QA-observable through
+   * this so grounding defects can be attributed to the light rig rather than
+   * guessed at from a capture. */
+  get keyLight(): DirectionalLight | null {
+    return this.sun;
+  }
+
   /** Live view of the world lighting rig for the viewmodel stage. */
   lightingSnapshot(): WorldLightingSnapshot {
     return {
@@ -262,10 +328,28 @@ export class GameRenderer {
     return this.dynamicScale;
   }
 
-  dispose(): void {
-    window.removeEventListener('resize', this.onResize);
+  private disposeComposer(): void {
     this.postProcessing?.dispose();
     this.postProcessing = null;
+    const aaNode = this.aaNode as (ReturnType<typeof smaa> | ReturnType<typeof fxaa> | null) & {
+      textureNode?: unknown;
+    };
+    if (aaNode) {
+      disposeRttNode(aaNode.textureNode);
+      aaNode.dispose();
+    }
+    this.aaNode = null;
+    this.bloomNode?.dispose();
+    this.bloomNode = null;
+    this.vmPass?.dispose();
+    this.vmPass = null;
+    this.scenePass?.dispose();
+    this.scenePass = null;
+  }
+
+  dispose(): void {
+    window.removeEventListener('resize', this.onResize);
+    this.disposeComposer();
     this.disposeEnvironment();
     // The underlying renderer is a page-lifetime singleton shared with the
     // lobby — it must survive per-match teardown.
@@ -429,13 +513,17 @@ export class GameRenderer {
     this.scene.add(this.sun);
     this.scene.add(this.sun.target);
 
+
     this.hemi = new HemisphereLight(sky.hemisphereSky, sky.hemisphereGround, sky.hemisphereIntensity);
     this.scene.add(this.hemi);
     this.ambient = new AmbientLight(sky.ambientColor, sky.ambientIntensity);
     this.scene.add(this.ambient);
     // Sky-fill from the opposite side of the sun: keeps sun-facing contrast but
-    // lifts shaded facades so north walls don't read as near-black slabs.
-    const fillIntensity = sky.preset === 'bluehour' ? 0.92 : sky.preset === 'overcast' ? 0.22 : 0.72;
+    // lifts shaded facades so north walls don't read as near-black slabs. Maps
+    // with a hard key (desert noon) override this low via sky.fillIntensity so
+    // the form is read from the sun, not washed out by fill.
+    const fillIntensity = sky.fillIntensity
+      ?? (sky.preset === 'bluehour' ? 0.92 : sky.preset === 'overcast' ? 0.22 : 0.72);
     const fill = new DirectionalLight(sky.hemisphereSky, fillIntensity);
     fill.position.copy(sunPos).negate().setY(90);
     this.scene.add(fill);
@@ -589,23 +677,40 @@ export class GameRenderer {
   /** Wire the display chain for the given camera (rebuilt on quality changes). */
   buildComposer(camera: Camera): void {
     this.camera = camera;
-    this.postProcessing?.dispose();
-    this.postProcessing = null;
+    this.disposeComposer();
 
     const settings = getSettings();
     const pp = new RenderPipeline(this.renderer);
     const scenePass = pass(this.scene, camera);
+    this.scenePass = scenePass;
     // The world pass must carry alpha 1 into the composite (its sky covers
     // every pixel); the viewmodel pass clears to alpha 0 so its empty regions
     // leave the world untouched.
     this.renderer.setClearAlpha(0);
 
     const cinematic = settings.quality === 'cinematic';
-    // NOTE on ambient occlusion: the r185 GTAONode returns ~0 occlusion on
-    // the WebGPU backend with this scene (in-engine verified — the whole
-    // terrain multiplies to black; see docs/QA_STATE.md cycle 13). The pass
-    // is therefore not wired; contact grounding comes from the shadow map.
-    // Revisit on a three.js upgrade.
+    // NOTE on ambient occlusion: GTAO is deliberately not wired, and the reason
+    // is a measured r185 TSL defect rather than the older "returns ~0, terrain
+    // multiplies to black" note (that note mis-diagnosed two wiring bugs, both
+    // since fixed in tests/browser/qa-gtao-probe.ts: GTAONode is a *default*
+    // export, and its tunables are uniform nodes, so raw-number assignment throws
+    // `this.samples.lessThan is not a function`).
+    //
+    // With that wiring corrected the pass compiles and runs on WebGPU, but it
+    // does not produce usable occlusion. GTAONode's no-MRT fallback
+    // (GTAONode.js:340) calls
+    //   getNormalFromDepth(uv, this.depthNode.value, projInverse)
+    // where `depthNode` is a PassTextureNode, so `.value` is the depth *Texture*,
+    // not a per-fragment depth float. The reconstructed normals are therefore
+    // meaningless, and the probe measures the result: a flat, open floor is
+    // darkened across its entire mid-distance extent instead of only at
+    // contacts. Feeding a real view-space normal target does not fix it.
+    //
+    // Contact grounding therefore comes from two sources we can measure: the
+    // shadow map with a raked key light (see SkyConfig.fillIntensity and the
+    // desert sun direction), and baked AO authored into GLB materials by the
+    // recipes in docs/asset-recipes/. Revisit only on a three.js upgrade that
+    // ships a WebGPU GTAO example, which upstream currently does not.
     let color: Node<'vec4'> = scenePass.getTextureNode('output');
 
     // Composite the first-person stage over the world before the optical
@@ -613,6 +718,7 @@ export class GameRenderer {
     // the primary view while rendering through its own camera and light rig.
     const stage = this.viewmodelStage;
     const vmPass = pass(stage.scene, stage.camera);
+    this.vmPass = vmPass;
     const vmColor = vmPass.getTextureNode('output');
     // Composite by depth mask, not pass alpha: pass targets do not inherit
     // the renderer's clear alpha, so the vm pass alpha is 1 everywhere. The
@@ -628,22 +734,28 @@ export class GameRenderer {
 
     if (settings.bloom && settings.postProcessing) {
       // BloomNode emits only the bloom layer — add it on top of the scene.
-      color = color.add(bloom(
+      const bloomNode = bloom(
         color,
         cinematic ? 0.42 : 0.5,
         cinematic ? 0.75 : 0.62,
         // Threshold above 1.0 keeps daylight albedo (even white walls) out of
         // the bloom; only true emitters (neon, muzzle flashes, sun) bloom.
         cinematic ? 1.32 : 1.62,
-      ));
+      );
+      this.bloomNode = bloomNode;
+      color = color.add(bloomNode);
     }
 
     if (settings.aa === 'smaa') {
       // The SMAA/FXAA node types are declared vec3 in the type package but
       // sample and emit vec4 at runtime — normalize at the boundary.
-      color = smaa(color) as unknown as Node<'vec4'>;
+      const smaaNode = smaa(color);
+      this.aaNode = smaaNode;
+      color = smaaNode as unknown as Node<'vec4'>;
     } else if (settings.aa === 'fxaa') {
-      color = fxaa(color) as unknown as Node<'vec4'>;
+      const fxaaNode = fxaa(color);
+      this.aaNode = fxaaNode;
+      color = fxaaNode as unknown as Node<'vec4'>;
     }
 
     if (settings.postProcessing) {

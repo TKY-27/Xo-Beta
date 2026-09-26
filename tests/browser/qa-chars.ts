@@ -3,20 +3,23 @@ import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
 async function main(): Promise<void> {
-  const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
+  const port = Number(process.env.QA_PORT ?? 5199);
+  const server = await createServer({ server: { port, strictPort: true }, logLevel: 'silent' });
   await server.listen();
-  const browser = await chromium.launch({ args: ['--use-angle=metal', '--enable-gpu'] });
+  const browser = await chromium.launch({ channel: 'chrome', headless: process.env.HEADLESS === '1', args: process.env.HEADLESS === '1' ? ['--use-angle=metal'] : [] });
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message.slice(0, 200)));
   await page.addInitScript(() => {
     localStorage.setItem('xo-beta-settings-v1', JSON.stringify({
+      cameraMode: 'fps', playerSkin: 'vanguard', onboarded: true,
       quality: 'low', shadows: false, shadowQuality: 'low',
       postProcessing: false, bloom: false, aa: 'off', resolutionScale: 0.7,
     }));
   });
   const map = process.argv[2] ?? 'neocity';
-  await page.goto(`http://localhost:5199/?qa=1`, { waitUntil: 'domcontentloaded' });
+  const out = process.env.QA_OUT ?? 'qa';
+  await page.goto(`http://localhost:${port}/?qa=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#main-menu:not(.hidden)', { timeout: 90000 });
   await page.waitForTimeout(1000);
   await page.click('#btn-play');
@@ -50,7 +53,7 @@ async function main(): Promise<void> {
       if (tp) tp(t.x - 2.4, t.z - 1.6, t.yaw + Math.PI);
     }, target);
     await page.waitForTimeout(2200);
-    await page.screenshot({ path: `qa/char-${map}-${shot}.png`, timeout: 60000 });
+    await page.screenshot({ path: `${out}/char-${map}-${shot}.png`, timeout: 60000 });
     console.log('shot', shot, target.name);
   }
   console.log('errors:', errors.length);

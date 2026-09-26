@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventBus } from '../../src/core/events';
-import { MOVE } from '../../src/core/balance';
+import { MOVE, type WeaponId } from '../../src/core/balance';
+import { getSettings } from '../../src/core/settings';
 import {
   PlayerController,
   QA_TAP_HOLD_MS,
@@ -30,6 +31,15 @@ function keyEvent(type: 'keydown' | 'keyup', code: string, repeat = false): Even
 function mouseEvent(type: 'mousedown' | 'mouseup', button: number): Event {
   const event = new Event(type, { cancelable: true });
   Object.defineProperty(event, 'button', { value: button });
+  return event;
+}
+
+function mouseMoveEvent(movementX: number, movementY: number): Event {
+  const event = new Event('mousemove', { cancelable: true });
+  Object.defineProperties(event, {
+    movementX: { value: movementX },
+    movementY: { value: movementY },
+  });
   return event;
 }
 
@@ -69,6 +79,10 @@ describe('QA input timing', () => {
 
   const actor = { wpn: { adsAmount: 0 } } as never;
 
+  function actorWithWeapon(weaponId: WeaponId, adsAmount: number): never {
+    return { wpn: { adsAmount }, inv: { selectedWeapon: { weaponId } } } as never;
+  }
+
   it('reacts on the first production input sample and stops on the first sample after keyup', () => {
     vi.stubGlobal('location', { search: '' });
     const controller = makeController();
@@ -88,6 +102,148 @@ describe('QA input timing', () => {
     const command = controller.sampleCommand(0, 1 / 60);
     expect(command.moveZ).toBe(1);
     expect(command.yaw).toBe(controller.yaw);
+    controller.dispose();
+  });
+
+  it('samples replica input without constructing a mutable Actor', () => {
+    vi.stubGlobal('location', { search: '' });
+    const controller = makeController();
+    window.dispatchEvent(keyEvent('keydown', 'KeyW'));
+    const command = controller.sampleCommand(0, 1 / 60);
+    expect(command.moveZ).toBe(1);
+    expect(command.yaw).toBe(controller.yaw);
+    controller.dispose();
+  });
+
+  it('uses the replica weapon identity for scoped sampling', () => {
+    const settings = getSettings();
+    const previousSensitivity = settings.sensitivity;
+    const previousAdsSensitivity = settings.adsSensitivity;
+    let controller: PlayerController | undefined;
+    try {
+      settings.sensitivity = 1;
+      settings.adsSensitivity = 1;
+      controller = makeController();
+      controller.scopedZoom = 4;
+      window.dispatchEvent(mouseMoveEvent(100, 0));
+      const scoped = controller.sampleCommand(1, 1 / 60, 'sniper');
+      expect(scoped.yaw).toBeCloseTo(-100 * 0.0023 / 4, 9);
+      window.dispatchEvent(mouseMoveEvent(100, 0));
+      const unscoped = controller.sampleCommand(1, 1 / 60, 'ar');
+      expect(unscoped.yaw - scoped.yaw).toBeCloseTo(-100 * 0.0023, 9);
+    } finally {
+      settings.sensitivity = previousSensitivity;
+      settings.adsSensitivity = previousAdsSensitivity;
+      controller?.dispose();
+    }
+  });
+
+  it('applies the configured ADS sensitivity multiplier', () => {
+    const settings = getSettings();
+    const previousSensitivity = settings.sensitivity;
+    const previousAdsSensitivity = settings.adsSensitivity;
+    let controller: PlayerController | undefined;
+    try {
+      settings.sensitivity = 1;
+      settings.adsSensitivity = 0.25;
+      controller = makeController();
+      controller.scopedZoom = 1;
+      window.dispatchEvent(mouseMoveEvent(100, 0));
+      const hip = controller.sampleCommand(0, 1 / 60);
+      window.dispatchEvent(mouseMoveEvent(100, 0));
+      const ads = controller.sampleCommand(1, 1 / 60);
+      expect(ads.yaw - hip.yaw).toBeCloseTo(hip.yaw * settings.adsSensitivity, 9);
+    } finally {
+      settings.sensitivity = previousSensitivity;
+      settings.adsSensitivity = previousAdsSensitivity;
+      controller?.dispose();
+    }
+  });
+
+  it('keeps sniper scope sensitivity off non-sniper ADS weapons', () => {
+    const settings = getSettings();
+    const previousSensitivity = settings.sensitivity;
+    const previousAdsSensitivity = settings.adsSensitivity;
+    let controller: PlayerController | undefined;
+    try {
+      settings.sensitivity = 1;
+      settings.adsSensitivity = 1;
+      controller = makeController();
+      controller.scopedZoom = 4;
+      window.dispatchEvent(mouseMoveEvent(100, 0));
+      const command = controller.updateCommand(actorWithWeapon('ar', 1), 1 / 60);
+      expect(command.yaw).toBeCloseTo(-100 * 0.0023, 9);
+
+      controller.updateCommand(actorWithWeapon('sniper', 1), 1 / 60);
+      window.dispatchEvent(mouseMoveEvent(100, 0));
+      expect(controller.presentationLook(1).yaw).toBeCloseTo(-100 * 0.0023 / 4, 9);
+    } finally {
+      settings.sensitivity = previousSensitivity;
+      settings.adsSensitivity = previousAdsSensitivity;
+      controller?.dispose();
+    }
+  });
+
+  it('keeps gamepad look separate from mouse presentation residual', () => {
+    const buttons = Array.from({ length: 20 }, () => ({ pressed: false, value: 0 }));
+    const pad = { connected: true, axes: [0, 0, 0.75, 0], buttons } as unknown as Gamepad;
+    vi.stubGlobal('navigator', { getGamepads: () => [pad] });
+    const noop = () => undefined;
+    const callbacks: GamepadCallbacks = {
+      onJumpPress: noop, onReloadPress: noop, onInteractPress: noop,
+      onDashPress: noop, onGrapplePress: noop, onPoundPress: noop,
+      onMedkitPress: noop, onShieldPress: noop, onDropWeaponPress: noop,
+      onCameraToggle: noop, onMapToggle: noop, onPauseRequest: noop,
+      onSlotRequest: noop, onMeleePress: noop, onPingPress: noop,
+    };
+    const controller = makeController();
+    controller.gamepad = new GamepadInput(callbacks);
+
+    window.dispatchEvent(mouseMoveEvent(100, 0));
+    const mixed = controller.sampleCommand(0, 1 / 60);
+    expect(mixed.yaw).not.toBe(0);
+    expect(controller.presentationLook(0).yaw).toBeCloseTo(0, 9);
+
+    const yawBeforePadOnly = controller.yaw;
+    const padOnly = controller.sampleCommand(0, 1 / 60);
+    expect(padOnly.yaw).not.toBe(yawBeforePadOnly);
+    expect(controller.presentationLook(0).yaw).toBeCloseTo(0, 9);
+    controller.dispose();
+  });
+
+  it('clears pending look and viewmodel velocity on pointer-lock loss and reset', () => {
+    const controller = makeController();
+    window.dispatchEvent(mouseMoveEvent(100, 50));
+    expect(controller.lookVelX).not.toBe(0);
+    expect(controller.lookVelY).not.toBe(0);
+
+    const fakeDocument = document as unknown as FakeDocument;
+    fakeDocument.exitPointerLock();
+    fakeDocument.dispatchEvent(new Event('pointerlockchange'));
+    expect(controller.lookVelX).toBe(0);
+    expect(controller.lookVelY).toBe(0);
+    expect(controller.presentationLook(0).yaw).toBeCloseTo(0, 9);
+    expect(controller.presentationLook(0).pitch).toBeCloseTo(0, 9);
+
+    window.dispatchEvent(mouseMoveEvent(100, 0));
+    controller.resetLook(0.25, -0.1);
+    expect(controller.yaw).toBe(0.25);
+    expect(controller.pitch).toBe(-0.1);
+    expect(controller.lookVelX).toBe(0);
+    expect(controller.lookVelY).toBe(0);
+    expect(controller.sampleCommand(0, 1 / 60).yaw).toBe(0.25);
+    controller.dispose();
+  });
+
+  it('decays viewmodel look velocity using frame time', () => {
+    const controller = makeController();
+    window.dispatchEvent(mouseMoveEvent(100, 0));
+    const initialVelocity = controller.lookVelX;
+    controller.sampleCommand(0, 1 / 60);
+    expect(controller.lookVelX).toBeLessThan(initialVelocity);
+    expect(controller.lookVelX).toBeGreaterThan(0);
+    controller.sampleCommand(0, 1);
+    expect(controller.lookVelX).toBe(0);
     controller.dispose();
   });
 

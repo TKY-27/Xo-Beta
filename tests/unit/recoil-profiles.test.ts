@@ -98,8 +98,9 @@ describe('per-weapon recoil profiles', () => {
     combat.tryFire(shooter, 0, { x: 0, y: 0, z: -1 });
     expect(shooter.wpn.recoilClimb).toBeCloseTo(WEAPONS.smg.recoil.climbPerShot, 9);
     // A long pause re-arms the climb window.
+    shooter.wpn.lastShotTime = 0;
     combat.updateWeaponTimers(shooter, 1.5);
-    expect(shooter.wpn.lastShotTime).toBeGreaterThanOrEqual(1.5);
+    expect(shooter.wpn.lastShotTime).toBeCloseTo(1.5, 9);
     phys.dispose();
   });
 

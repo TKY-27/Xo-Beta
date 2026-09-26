@@ -498,18 +498,22 @@ export class WorldBuilder {
   }
 
   /** Floor slab: registers a walkable platform on its top surface. */
-  slab(x: number, yTop: number, z: number, sx: number, sz: number, thickness: number, mat: MatKey): void {
-    this.box(x, yTop - thickness / 2, z, sx, thickness, sz, mat, 0, { floor: true });
+  slab(
+    x: number, yTop: number, z: number, sx: number, sz: number, thickness: number, mat: MatKey,
+    opts?: { noRender?: boolean },
+  ): void {
+    this.box(x, yTop - thickness / 2, z, sx, thickness, sz, mat, 0, { floor: true, noRender: opts?.noRender });
   }
 
   cyl(
     x: number, y: number, z: number, r: number, h: number, mat: MatKey,
-    opts?: { segments?: number; noCollide?: boolean; yaw?: number; pitch?: number; roll?: number },
+    opts?: { segments?: number; noCollide?: boolean; noRender?: boolean; yaw?: number; pitch?: number; roll?: number },
   ): void {
     this.def.geo.push({
       kind: 'cyl', x, y, z, r, h, mat,
       segments: opts?.segments,
       noCollide: opts?.noCollide,
+      noRender: opts?.noRender,
       yaw: opts?.yaw,
       pitch: opts?.pitch,
       roll: opts?.roll,
@@ -586,6 +590,7 @@ export class WorldBuilder {
     gaps: Array<[number, number]> = [], sillHeight = 0,
     baseY = 0,
     sillGaps?: Array<[number, number]>,
+    opts?: { noRender?: boolean },
   ): void {
     const normalizeGaps = (source: Array<[number, number]>): Array<[number, number]> => source
       .map(([start, width]) => {
@@ -607,17 +612,17 @@ export class WorldBuilder {
     for (const [off, len] of segs) {
       if (len < 0.05) continue;
       if (axis === 'x') {
-        this.box(x0 + off + len / 2, baseY + height / 2, z0, len, height, thickness, mat);
+        this.box(x0 + off + len / 2, baseY + height / 2, z0, len, height, thickness, mat, 0, { noRender: opts?.noRender });
       } else {
-        this.box(x0, baseY + height / 2, z0 + off + len / 2, thickness, height, len, mat);
+        this.box(x0, baseY + height / 2, z0 + off + len / 2, thickness, height, len, mat, 0, { noRender: opts?.noRender });
       }
     }
     if (sillHeight > 0.05) {
       for (const [start, width] of normalizeGaps(sillGaps ?? gaps)) {
         if (axis === 'x') {
-          this.box(x0 + start + width / 2, baseY + sillHeight / 2, z0, width, sillHeight, thickness, mat);
+          this.box(x0 + start + width / 2, baseY + sillHeight / 2, z0, width, sillHeight, thickness, mat, 0, { noRender: opts?.noRender });
         } else {
-          this.box(x0, baseY + sillHeight / 2, z0 + start + width / 2, thickness, sillHeight, width, mat);
+          this.box(x0, baseY + sillHeight / 2, z0 + start + width / 2, thickness, sillHeight, width, mat, 0, { noRender: opts?.noRender });
         }
       }
     }
@@ -816,12 +821,14 @@ export class WorldBuilder {
     });
   }
 
-  glassPane(x: number, y: number, z: number, sx: number, sy: number, axis: 'x' | 'z'): void {
+  glassPane(
+    x: number, y: number, z: number, sx: number, sy: number, axis: 'x' | 'z', noRender = false,
+  ): void {
     this.def.destructibles.push({
       stableId: `${this.def.id}:glass:${this.def.destructibles.length.toString(36).padStart(4, '0')}`,
       hp: 5,
       type: 'glass',
-      geo: { kind: 'box', x, y, z, sx: axis === 'x' ? sx : 0.08, sy, sz: axis === 'z' ? sx : 0.08, yaw: 0, mat: 'glass', materialHint: 'glass' },
+      geo: { kind: 'box', x, y, z, sx: axis === 'x' ? sx : 0.08, sy, sz: axis === 'z' ? sx : 0.08, yaw: 0, mat: 'glass', materialHint: 'glass', noRender },
     });
   }
 

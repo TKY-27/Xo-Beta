@@ -120,9 +120,49 @@ five cycles.
 
 | 50 | final verification (eden FP capture + full gates) | CYCLE-45 REVIEW ITEMS CLOSED: hands top-5 all landed (quaternion wrist offset, under/over poses, wrist sphere/taper/cloth, reload quat continuity, online choreography via event timelines); bug analyst B1-B4 fixed (dispose-safety, headless guards, skin-texture leak); graphics top fix (neocity ground seams) landed; B5-B8 + grass/dropship octave watch-items remain as documented follow-ups. Final gates: tsc clean, eslint clean on hands/viewmodel/weaponGeometry, 547/547 unit tests, eden probe zero console errors. — CYCLE 50 REACHED: campaign paused per user instruction (resume with Phase H/I/J/K) | working tree committed and pushed |
 
+## Measured engine constraints (this campaign, direct measurement)
+
+These are not style opinions; each was isolated with a single-variable A/B capture
+and is reproducible with the QA hooks listed.
+
+- **The TSL `normalNode` slot zeroes direct lighting under r185**, exactly like the
+  stock `normalMap`/`bumpMap` slots recorded in cycle 57. Cycle 57's workaround of
+  routing terrain relief through `normalNode` therefore did not work, and the
+  terrain was receiving no key light on any map. Reproduce with
+  `__xoTerrainQa({ normal: false })` and compare against the baseline frame.
+  Terrain normals are removed in `src/render/materials.ts`; see
+  `docs/REBUILD_ROOT_CAUSE_MATRIX.md`.
+- **`Scene.environmentIntensity` is inert** under the r185 node pipeline. The live
+  lever is per-material `envMapIntensity`, applied through
+  `SkyConfig.envMapScale` / `renderer.applyEnvMapScale()`. A pure-sky HDRI at the
+  default intensity drowns the key light and makes every surface read shadowless.
+  `scene.environmentIntensity` sweeps are therefore worthless as evidence.
+
 ## Known open items
 
-- GTAO (ambient occlusion) disabled: upstream r185 GTAONode bug on WebGPU returns ~0 occlusion (cycle 13). Revisit when upgrading three.
+- GTAO (ambient occlusion) disabled — **cycle 13's diagnosis was wrong and has been
+  corrected by direct measurement** (`tests/browser/qa-gtao-probe.ts`). Cycle 13
+  concluded "the r185 GTAONode returns ~0 occlusion on WebGPU". What it actually
+  found were two *wiring* bugs, both now fixed and documented: `GTAONode` is a
+  **default** export (importing it as a named export yields `undefined` and
+  throws before any handler runs), and its tunables (`radius`, `thickness`,
+  `scale`, `samples`, …) are **uniform nodes**, so raw-number assignment replaces
+  the node with a JS number and throws
+  `THREE.TSL: TypeError: this.samples.lessThan is not a function`.
+  With both corrected the pass compiles and runs on WebGPU with zero TSL errors.
+  It still cannot be used: GTAONode's no-MRT fallback (`GTAONode.js:340`) calls
+  `getNormalFromDepth(uv, this.depthNode.value, projInverse)` where `depthNode`
+  is a `PassTextureNode`, so `.value` is the depth *Texture* rather than a
+  per-fragment depth float. The reconstructed normals are meaningless and the
+  measured result is physically wrong — a flat, open floor is darkened across its
+  whole mid-distance extent rather than only at contacts. Supplying a real
+  view-space normal target does not fix it, and upstream three.js ships **no**
+  WebGPU GTAO example (only the WebGL2 `GTAOPass`), so there is no known-good
+  wiring to copy.
+  Grounding instead comes from the shadow map with a raked key light
+  (`SkyConfig.fillIntensity`, desert `sunDirection`) plus baked AO authored into
+  GLB materials by `docs/asset-recipes/`. Revisit on a three.js upgrade that
+  ships a WebGPU GTAO example.
 - Engine-level WebGPU validation warnings (`Binding size … is zero`) from
   three r185 node-material instancing: non-fatal, renders correctly, tracked
   upstream; qa-perf filters them from the fatal-error gate.

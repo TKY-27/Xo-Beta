@@ -82,7 +82,7 @@ export class ViewModelStage {
     // camera-facing side of the receiver readable when the sun is behind it,
     // and lifts the gloves out of charcoal under overcast skies (OldFront)
     // where the world's own fill is weakest.
-    this.fill = new THREE.DirectionalLight(0xdde8f4, 0.8);
+    this.fill = new THREE.DirectionalLight(0xffd7bb, 0.95);
     this.fill.position.set(-0.6, 0.5, 1.2);
     this.scene.add(this.fill);
   }
@@ -105,11 +105,11 @@ export class ViewModelStage {
     this.hemiGroundScratch.copy(world.hemiGroundColor);
     this.hemi.color.copy(this.hemiSkyScratch);
     this.hemi.groundColor.copy(this.hemiGroundScratch);
-    this.hemi.intensity = world.hemiIntensity;
+    this.hemi.intensity = Math.max(0.45, world.hemiIntensity);
 
     this.ambientScratch.copy(world.ambientColor);
     this.ambient.color.copy(this.ambientScratch);
-    this.ambient.intensity = world.ambientIntensity;
+    this.ambient.intensity = Math.max(0.28, world.ambientIntensity);
 
     if (this.scene.environment !== world.environment) {
       this.scene.environment = world.environment;

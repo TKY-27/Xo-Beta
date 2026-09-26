@@ -1,6 +1,9 @@
 import * as THREE from 'three';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { peekGltf } from '../assets/assets';
+import { toNodeStandard } from './props';
 
-export type SupportStyle = 'under' | 'side' | 'pump' | 'over';
+export type SupportStyle = 'under' | 'side' | 'pump' | 'over' | 'pistol';
 
 export interface HandPoseInput {
   reloadPhase: number;
@@ -19,6 +22,7 @@ export interface HandRig {
   left: THREE.Group;
   wristR: THREE.Object3D;
   wristL: THREE.Object3D;
+  integratedArm: boolean;
   configure(anchors: { gripR: THREE.Vector3; gripL: THREE.Vector3; scale: number }): void;
   pose(input: HandPoseInput): void;
 }
@@ -63,6 +67,110 @@ function getFabricBump(): THREE.CanvasTexture | null {
   return fabricBump;
 }
 
+let gloveAlbedo: THREE.CanvasTexture | null = null;
+
+/**
+ * Tactical glove albedo for the authored hand rigs.
+ *
+ * The authored hand assets are bare-hand scans. Presenting their skin albedo
+ * makes the player's most-viewed object read as bare flesh, and flattening them
+ * to a single pale value (the previous `0x59656a` "skin" tint) made the fist
+ * read as an untextured white tube at gameplay FOV. This generates a dark
+ * technical-glove surface instead: charcoal weave base, darker palm-side
+ * panels, lighter knuckle padding and stitched seams, so the silhouette has
+ * internal value structure that survives close inspection.
+ */
+function getGloveAlbedo(): THREE.CanvasTexture | null {
+  if (gloveAlbedo) return gloveAlbedo;
+  if (typeof document === 'undefined') return null;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  // Base value sits in the range real tactical glove fabric photographs at
+  // (mid-dark charcoal, not black). A near-black albedo reads as a silhouette
+  // hole under the viewmodel light rig and loses all the panel detail below.
+  ctx.fillStyle = '#565c64';
+  ctx.fillRect(0, 0, size, size);
+
+  // Woven micro-pattern: two crossing thread families at different weights.
+  ctx.lineWidth = 1;
+  for (let i = -size; i < size * 2; i += 4) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+    ctx.beginPath();
+    ctx.moveTo(i, 0);
+    ctx.lineTo(i + size, size);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,0.075)';
+    ctx.beginPath();
+    ctx.moveTo(i + 2, 0);
+    ctx.lineTo(i + size + 2, size);
+    ctx.stroke();
+  }
+  for (let i = -size; i < size * 2; i += 5) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.05)';
+    ctx.beginPath();
+    ctx.moveTo(0, i);
+    ctx.lineTo(size, i + size);
+    ctx.stroke();
+  }
+
+  // Panel blocks: darker grip zones, lighter armour pads. These are the value
+  // breaks that let a closed fist read as a glove rather than a blob.
+  const panels: Array<[number, number, number, number, string]> = [
+    [0, 0, size, size * 0.34, 'rgba(26,29,33,0.55)'],
+    [0, size * 0.66, size, size * 0.34, 'rgba(26,29,33,0.55)'],
+    [0, size * 0.34, size * 0.28, size * 0.32, 'rgba(126,134,145,0.45)'],
+    [size * 0.72, size * 0.34, size * 0.28, size * 0.32, 'rgba(126,134,145,0.45)'],
+  ];
+  for (const [x, y, w, h, fill] of panels) {
+    ctx.fillStyle = fill;
+    ctx.fillRect(x, y, w, h);
+  }
+
+  // Stitched seams: dashed light thread with a dark seat so the stitch reads
+  // at close range instead of dissolving into the weave.
+  const seam = (x0: number, y0: number, x1: number, y1: number): void => {
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(150,158,168,0.5)';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  seam(0, size * 0.34, size, size * 0.34);
+  seam(0, size * 0.66, size, size * 0.66);
+  seam(size * 0.28, size * 0.34, size * 0.28, size * 0.66);
+  seam(size * 0.72, size * 0.34, size * 0.72, size * 0.66);
+
+  // Speckled wear so the surface is not perfectly uniform.
+  for (let i = 0; i < 1400; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const bright = Math.random() > 0.5;
+    ctx.fillStyle = bright ? 'rgba(190,198,208,0.10)' : 'rgba(0,0,0,0.14)';
+    ctx.fillRect(x, y, 1 + Math.random(), 1 + Math.random());
+  }
+
+  gloveAlbedo = new THREE.CanvasTexture(canvas);
+  gloveAlbedo.wrapS = gloveAlbedo.wrapT = THREE.RepeatWrapping;
+  gloveAlbedo.colorSpace = THREE.SRGBColorSpace;
+  gloveAlbedo.anisotropy = 8;
+  gloveAlbedo.needsUpdate = true;
+  return gloveAlbedo;
+}
+
+
 export function getHandMaterialSet(): HandMats {
   if (handMatsSingleton) return handMatsSingleton;
   const bumpMap = getFabricBump();
@@ -71,11 +179,11 @@ export function getHandMaterialSet(): HandMats {
   // albedos to night maps too, so values stay far from pure black while
   // reading as gear, not skin or chalk.
   handMatsSingleton = {
-    glove: new THREE.MeshStandardMaterial({ color: 0x343941, roughness: 0.88, metalness: 0.02, bumpMap, bumpScale: 0.00022 }),
-    shell: new THREE.MeshStandardMaterial({ color: 0x414751, roughness: 0.82, metalness: 0.03, bumpMap, bumpScale: 0.00012 }),
-    skin: new THREE.MeshStandardMaterial({ color: 0x262a30, roughness: 0.94 }),
-    plate: new THREE.MeshStandardMaterial({ color: 0x4a525c, roughness: 0.5, metalness: 0.14 }),
-    palm: new THREE.MeshStandardMaterial({ color: 0x2e333a, roughness: 0.97, bumpMap, bumpScale: 0.0003 }),
+    glove: new THREE.MeshStandardMaterial({ color: 0x24272b, roughness: 0.92, metalness: 0.01, bumpMap, bumpScale: 0.00022 }),
+    shell: new THREE.MeshStandardMaterial({ color: 0x25272a, roughness: 0.9, metalness: 0.01, bumpMap, bumpScale: 0.00012 }),
+    skin: new THREE.MeshStandardMaterial({ color: 0x1d2024, roughness: 0.96 }),
+    plate: new THREE.MeshStandardMaterial({ color: 0x3c4148, roughness: 0.56, metalness: 0.12 }),
+    palm: new THREE.MeshStandardMaterial({ color: 0x24272a, roughness: 0.97, bumpMap, bumpScale: 0.0003 }),
   };
   return handMatsSingleton;
 }
@@ -236,6 +344,9 @@ interface Glove {
   fingers: FingerChain[];
   thumb: THREE.Bone[];
   side: 1 | -1;
+  authored: boolean;
+  integratedArm: boolean;
+  rest?: Map<THREE.Bone, THREE.Quaternion>;
 }
 
 function makeBone(name: string, x: number, y: number, z: number, parent?: THREE.Bone): THREE.Bone {
@@ -370,31 +481,258 @@ function buildHand(mats: HandMats, side: 1 | -1, fist = false): Glove {
   mesh.name = 'continuous-glove';
   const group = new THREE.Group();
   group.add(mesh);
-  const glove = { group, mesh, metacarpals, fingers, thumb, side };
+  const glove = { group, mesh, metacarpals, fingers, thumb, side, authored: false, integratedArm: false };
   articulate(glove, fist ? 1 : 0.62, 0, fist);
   return glove;
+}
+
+const AUTHORED_HAND_PATH = 'hands/libhand-hand.glb';
+const AUTHORED_TACTICAL_HAND_PATH = 'hands/authored-tactical-hand.glb';
+
+function canonicalNodeName(name: string): string {
+  const normalized = name.toLowerCase().replaceAll(/[^a-z0-9]/g, '');
+  return normalized.replace(/^(authoredsleeve(?:upper|fore|cuff))\d+$/, '$1');
+}
+
+function findBone(root: THREE.Object3D, name: string): THREE.Bone | null {
+  const target = canonicalNodeName(name);
+  let result: THREE.Bone | null = null;
+  root.traverse((object) => {
+    if (!result && object instanceof THREE.Bone && canonicalNodeName(object.name) === target) result = object;
+  });
+  return result;
+}
+
+function findSkinnedMesh(root: THREE.Object3D): THREE.SkinnedMesh | null {
+  let result: THREE.SkinnedMesh | null = null;
+  root.traverse((object) => {
+    if (!result && object instanceof THREE.SkinnedMesh) result = object;
+  });
+  return result;
+}
+
+function libHandMaterial(source: THREE.Material, name: string): THREE.Material {
+  const standard = source as unknown as THREE.MeshStandardMaterial;
+  const material = toNodeStandard(standard);
+  const pbr = material as unknown as THREE.MeshStandardMaterial;
+  material.name = `libhand-${name}`;
+  pbr.vertexColors = false;
+  // The source is a bare-hand scan: its skin albedo must not ship, and a flat
+  // pale tint made the fist read as a white tube. Drive both slots from the
+  // generated tactical glove surface instead, separated by value so the
+  // knuckle/palm/glove break stays legible.
+  const albedo = getGloveAlbedo();
+  // NOTE: albedo only, never map + bumpMap together. three r185's node
+  // pipeline zeroes direct sun and sky-fill for any standard material that
+  // combines a normal/bump map with another map (see docs/QA_STATE.md cycle
+  // 57), which leaves the hand unlit. The generated albedo carries its own
+  // panel/stitch value structure, so no relief map is needed or safe here.
+  pbr.map = albedo ?? null;
+  pbr.roughness = name === 'skin' ? 0.84 : 0.92;
+  pbr.metalness = 0.02;
+  // White: the albedo map carries the colour. A grey colour factor here would
+  // multiply the already-dark glove texture a second time and crush the hand
+  // to black under the viewmodel light rig.
+  pbr.color.set(0xffffff);
+  material.userData.viewmodelOwned = true;
+  material.needsUpdate = true;
+  return material;
+}
+
+function tacticalHandMaterial(source: THREE.Material, name: string): THREE.Material {
+  const material = toNodeStandard(source as unknown as THREE.MeshStandardMaterial);
+  const pbr = material as unknown as THREE.MeshStandardMaterial;
+  const albedo = getGloveAlbedo();
+  material.name = `tactical-hand-${name}`;
+  pbr.vertexColors = false;
+  // Albedo only, no bump map: r185's node pipeline drops direct lighting for
+  // materials that combine a normal/bump map with another map (QA_STATE
+  // cycle 57), and the generated albedo already carries its value structure.
+  pbr.map = albedo ?? null;
+  // Glove: white so the albedo carries the colour. Fabric sleeve segments get a
+  // mild tint so arm and hand stay separable without crushing either to black.
+  pbr.color.setHex(name === 'sleeve' ? 0x9aa2aa : 0xffffff);
+  pbr.roughness = name === 'sleeve' ? 0.9 : 0.82;
+  pbr.metalness = 0.03;
+  material.userData.viewmodelOwned = true;
+  material.needsUpdate = true;
+  return material;
+}
+
+function buildTacticalHand(asset: NonNullable<ReturnType<typeof peekGltf>>, side: 1 | -1, fist: boolean): Glove | null {
+  const source = SkeletonUtils.clone(asset.scene) as THREE.Group;
+  const mesh = findSkinnedMesh(source);
+  const wrist = findBone(source, 'Wrist');
+  const metacarpals = ['Index Finger', 'Middle Finger', 'Ring Finger', 'Pinky'].map((name) => findBone(source, name));
+  const fingers = [
+    ['Lower.001', 'Middle.001', 'Top.001'],
+    ['Lower.002', 'Middle.002', 'Top.002'],
+    ['Lower.003', 'Middle.003', 'Top.003'],
+    ['Lower.004', 'Middle.004', 'Top.004'],
+  ].map((names) => names.map((name) => findBone(source, name)));
+  const thumb = ['Thumb', 'Lower', 'Middle'].map((name) => findBone(source, name));
+  if (!mesh || !wrist || metacarpals.some((bone) => !bone) || fingers.some((chain) => chain.some((bone) => !bone)) || thumb.some((bone) => !bone)) return null;
+  source.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    const converted = materials.map((material, index) => tacticalHandMaterial(material, material.name.toLowerCase().includes('arm') ? 'sleeve' : index === 0 ? 'glove' : 'sleeve'));
+    object.material = Array.isArray(object.material) ? converted : converted[0]!;
+  });
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.frustumCulled = false;
+  mesh.userData.viewmodelOwned = true;
+  mesh.geometry.userData.externalShared = true;
+  const gloveGroup = mesh.geometry.groups.find((group) => group.materialIndex === 0) ?? mesh.geometry.groups[0];
+  if (gloveGroup && mesh.geometry.groups.length > 1) {
+    mesh.geometry.clearGroups();
+    mesh.geometry.addGroup(gloveGroup.start, gloveGroup.count, 0);
+  }
+  const anchor = new THREE.Vector3();
+  wrist.getWorldPosition(anchor);
+  source.position.sub(anchor);
+  source.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(source);
+  const size = bounds.getSize(new THREE.Vector3());
+  const visual = new THREE.Group();
+  visual.name = `tactical-hand-${side === 1 ? 'left' : 'right'}`;
+  visual.add(source);
+  visual.scale.set(0.12 / Math.max(size.x, 0.001), 0.06 / Math.max(size.y, 0.001), 0.26 / Math.max(size.z, 0.001));
+  if (side === 1) visual.scale.x *= -1;
+  const group = new THREE.Group();
+  group.add(visual);
+  const rest = new Map<THREE.Bone, THREE.Quaternion>();
+  source.traverse((object) => {
+    if (object instanceof THREE.Bone) rest.set(object, object.quaternion.clone());
+  });
+  const glove: Glove = {
+    group,
+    mesh,
+    metacarpals: metacarpals as THREE.Bone[],
+    fingers: fingers.map((bones, index) => ({ bones: bones as THREE.Bone[], index })),
+    thumb: thumb as THREE.Bone[],
+    side,
+    authored: true,
+    integratedArm: false,
+    rest,
+  };
+  articulate(glove, fist ? 1 : 0.62, 0, fist);
+  return glove;
+}
+
+function buildLibHand(asset: NonNullable<ReturnType<typeof peekGltf>>, side: 1 | -1, fist: boolean): Glove | null {
+  const source = SkeletonUtils.clone(asset.scene) as THREE.Group;
+  const mesh = findSkinnedMesh(source);
+  const root = findBone(source, 'root');
+  const carpals = findBone(source, 'carpals');
+  const metacarpals = ['Bone', 'Bone.001', 'Bone.002', 'Bone.003'].map((name) => findBone(source, name));
+  if (!mesh || !root || !carpals || metacarpals.some((bone) => !bone)) return null;
+  source.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    const converted = materials.map((material, index) => {
+      const name = material.name.toLowerCase().includes('black') ? 'blackness' : index === 0 ? 'skin' : 'blackness';
+      return libHandMaterial(material, name);
+    });
+    object.material = Array.isArray(object.material) ? converted : converted[0]!;
+  });
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.frustumCulled = false;
+  mesh.userData.viewmodelOwned = true;
+  mesh.geometry.userData.externalShared = true;
+  const fingerNames = [
+    ['Bone', 'finger1joint1', 'finger1joint2', 'finger1joint3'],
+    ['Bone.001', 'finger2joint1', 'finger2joint2', 'finger2joint3'],
+    ['Bone.002', 'finger3joint1', 'finger3joint2', 'finger3joint3'],
+    ['Bone.003', 'finger4joint1', 'finger4joint2', 'finger4joint3'],
+  ];
+  const fingers: FingerChain[] = [];
+  for (let index = 0; index < fingerNames.length; index++) {
+    const bones = fingerNames[index]!.map((name) => findBone(source, name));
+    if (bones.some((bone) => !bone)) return null;
+    fingers.push({ bones: bones as THREE.Bone[], index: 3 - index });
+  }
+  const thumb = ['finger5joint1', 'finger5joint2', 'finger5joint3'].map((name) => findBone(source, name));
+  if (thumb.some((bone) => !bone)) return null;
+  const anchor = new THREE.Vector3();
+  carpals.getWorldPosition(anchor);
+  source.position.sub(anchor);
+  source.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(source);
+  const size = bounds.getSize(new THREE.Vector3());
+  const visual = new THREE.Group();
+  visual.name = `libhand-${side === 1 ? 'left' : 'right'}`;
+  visual.add(source);
+  visual.rotation.y = Math.PI / 2;
+  visual.scale.set(0.088 / Math.max(size.z, 0.001), 0.044 / Math.max(size.y, 0.001), 0.207 / Math.max(size.x, 0.001));
+  if (side === 1) visual.scale.x *= -1;
+  const group = new THREE.Group();
+  group.add(visual);
+  const rest = new Map<THREE.Bone, THREE.Quaternion>();
+  source.traverse((object) => {
+    if (object instanceof THREE.Bone) rest.set(object, object.quaternion.clone());
+  });
+  const glove: Glove = {
+    group,
+    mesh,
+    metacarpals: metacarpals as THREE.Bone[],
+    fingers,
+    thumb: thumb as THREE.Bone[],
+    side,
+    authored: true,
+    integratedArm: false,
+    rest,
+  };
+  articulate(glove, fist ? 1 : 0.62, 0, fist);
+  return glove;
+}
+
+function buildHands(side: 1 | -1, fist = false): Glove {
+  const asset = peekGltf(AUTHORED_HAND_PATH);
+  const authored = asset ? buildLibHand(asset, side, fist) : null;
+  if (authored) return authored;
+  const tactical = peekGltf(AUTHORED_TACTICAL_HAND_PATH);
+  const authoredTactical = tactical ? buildTacticalHand(tactical, side, fist) : null;
+  return authoredTactical ?? buildHand(getHandMaterialSet(), side, fist);
+}
+
+const _poseEuler = new THREE.Euler();
+const _poseQuat = new THREE.Quaternion();
+
+function setBoneRotation(glove: Glove, bone: THREE.Bone, x: number, y = 0, z = 0): void {
+  const rest = glove.rest?.get(bone);
+  if (!rest) {
+    bone.rotation.set(x, y, z);
+    return;
+  }
+  _poseEuler.set(x, y, z, 'XYZ');
+  _poseQuat.setFromEuler(_poseEuler);
+  bone.quaternion.copy(rest).multiply(_poseQuat);
 }
 
 function articulate(glove: Glove, curl: number, spread: number, fist = false, trigger = false, triggerAmount = 0): void {
   for (let i = 0; i < glove.metacarpals.length; i++) {
     const ulnar = (3 - i) / 3;
-    glove.metacarpals[i]!.rotation.set(-curl * (0.12 + ulnar * 0.3), glove.side * (i - 1.5) * spread * 0.04, glove.side * (1.5 - i) * curl * 0.12);
+    setBoneRotation(glove, glove.metacarpals[i]!, -curl * (0.12 + ulnar * 0.3), glove.side * (i - 1.5) * spread * 0.04, glove.side * (1.5 - i) * curl * 0.12);
   }
   for (const finger of glove.fingers) {
     const c = THREE.MathUtils.clamp(curl + finger.index * 0.035 - (trigger && finger.index === 0 ? 0.14 : 0), 0, 1);
-    finger.bones[0]!.rotation.set(-c * 1.18, glove.side * (finger.index - 1.5) * spread * 0.14, 0);
-    finger.bones[1]!.rotation.x = -c * 1.52;
-    finger.bones[2]!.rotation.x = -c * 1.02;
+    const factors = [1.18, 1.52, 1.02, 0.72];
+    for (let i = 0; i < finger.bones.length; i++) {
+      const y = i === 0 ? glove.side * (finger.index - 1.5) * spread * 0.14 : 0;
+      setBoneRotation(glove, finger.bones[i]!, -c * (factors[i] ?? 0.7), y, 0);
+    }
     if (trigger && finger.index === 0) {
       const pull = THREE.MathUtils.clamp(triggerAmount, 0, 1);
-      finger.bones[0]!.rotation.x = -0.12 - pull * 0.12;
-      finger.bones[1]!.rotation.x = -0.72 - pull * 0.28;
-      finger.bones[2]!.rotation.x = -0.38 - pull * 0.16;
+      setBoneRotation(glove, finger.bones[0]!, -0.12 - pull * 0.12);
+      setBoneRotation(glove, finger.bones[1]!, -0.72 - pull * 0.28);
+      setBoneRotation(glove, finger.bones[2]!, -0.38 - pull * 0.16);
     }
   }
-  glove.thumb[0]!.rotation.set(-curl * 0.32, glove.side * (curl * 0.7 - spread * 0.12), -glove.side * curl * 0.52);
-  glove.thumb[1]!.rotation.set(-curl * 0.26, glove.side * curl * (fist ? 0.9 : 0.62), 0);
-  glove.thumb[2]!.rotation.set(-curl * 0.18, glove.side * curl * 0.48, 0);
+  setBoneRotation(glove, glove.thumb[0]!, -curl * 0.32, glove.side * (curl * 0.7 - spread * 0.12), -glove.side * curl * 0.52);
+  setBoneRotation(glove, glove.thumb[1]!, -curl * 0.26, glove.side * curl * (fist ? 0.9 : 0.62), 0);
+  setBoneRotation(glove, glove.thumb[2]!, -curl * 0.18, glove.side * curl * 0.48, 0);
 }
 
 /**
@@ -406,26 +744,23 @@ function articulate(glove: Glove, curl: number, spread: number, fist = false, tr
  * curves, so the pose is deterministic and costs nothing to solve.
  */
 function poseTriggerHand(glove: Glove, trigger: boolean, triggerAmount: number): void {
-  const curls = [0.34, 0.75, 0.85, 0.8];
+  const curls = [0.48, 0.92, 1.0, 0.92];
+  const factors = [1.18, 1.5, 1.05, 0.75];
   for (const finger of glove.fingers) {
     let c = curls[finger.index] ?? 0.75;
     if (trigger && finger.index === 0) {
       const pull = THREE.MathUtils.clamp(triggerAmount, 0, 1);
       c = 0.34 - pull * 0.2;
     }
-    finger.bones[0]!.rotation.x = -c * 1.08;
-    finger.bones[1]!.rotation.x = -c * 1.42;
-    finger.bones[2]!.rotation.x = -c * 0.92;
+    for (let i = 0; i < finger.bones.length; i++) setBoneRotation(glove, finger.bones[i]!, -c * (factors[i] ?? 0.68));
   }
   for (let i = 0; i < glove.metacarpals.length; i++) {
     const ulnar = (3 - i) / 3;
-    glove.metacarpals[i]!.rotation.set(-0.2 - ulnar * 0.3, glove.side * (i - 1.5) * 0.02, glove.side * (1.5 - i) * 0.1);
+    setBoneRotation(glove, glove.metacarpals[i]!, -0.2 - ulnar * 0.3, glove.side * (i - 1.5) * 0.02, glove.side * (1.5 - i) * 0.1);
   }
-  // Thumb wraps the grip's near face and locks under the palm — never a
-  // raised prong floating beside the receiver.
-  glove.thumb[0]!.rotation.set(-0.4, glove.side * 0.2, -glove.side * 0.45);
-  glove.thumb[1]!.rotation.set(-0.3, glove.side * 0.45, 0);
-  glove.thumb[2]!.rotation.set(-0.15, glove.side * 0.25, 0);
+  setBoneRotation(glove, glove.thumb[0]!, -0.4, glove.side * 0.2, -glove.side * 0.45);
+  setBoneRotation(glove, glove.thumb[1]!, -0.3, glove.side * 0.45, 0);
+  setBoneRotation(glove, glove.thumb[2]!, -0.15, glove.side * 0.25, 0);
 }
 
 /**
@@ -434,24 +769,27 @@ function poseTriggerHand(glove: Glove, trigger: boolean, triggerAmount: number):
  * reads as clamping the forend rather than hovering under it.
  */
 function poseSupportWrap(glove: Glove, curl: number, thumbClamp: number, thumbYaw = -0.3): void {
+  const factors = [1.12, 1.38, 0.9, 0.66];
   for (const finger of glove.fingers) {
     const c = curl + finger.index * 0.04;
-    finger.bones[0]!.rotation.x = -c * 1.12;
-    finger.bones[1]!.rotation.x = -c * 1.38;
-    finger.bones[2]!.rotation.x = -c * 0.9;
+    for (let i = 0; i < finger.bones.length; i++) setBoneRotation(glove, finger.bones[i]!, -c * (factors[i] ?? 0.66));
   }
   for (let i = 0; i < glove.metacarpals.length; i++) {
     const ulnar = (3 - i) / 3;
-    glove.metacarpals[i]!.rotation.set(-0.14 - ulnar * 0.26, glove.side * (i - 1.5) * 0.02, -glove.side * (1.5 - i) * 0.08);
+    setBoneRotation(glove, glove.metacarpals[i]!, -0.14 - ulnar * 0.26, glove.side * (i - 1.5) * 0.02, -glove.side * (1.5 - i) * 0.08);
   }
-  // thumbYaw lays the thumb along the forend (C-clamp: forward, ~-1.15) or
-  // wraps it across the contact (pump: ~+0.25) — never a prong above the rail.
-  glove.thumb[0]!.rotation.set(-0.42, glove.side * thumbYaw, -glove.side * (0.28 + thumbClamp * 0.22));
-  glove.thumb[1]!.rotation.set(-0.4, glove.side * (0.3 - thumbClamp * 0.15), 0);
-  glove.thumb[2]!.rotation.set(-0.2, glove.side * 0.2, 0);
+  setBoneRotation(glove, glove.thumb[0]!, -0.42, glove.side * thumbYaw, -glove.side * (0.28 + thumbClamp * 0.22));
+  setBoneRotation(glove, glove.thumb[1]!, -0.4, glove.side * (0.3 - thumbClamp * 0.15), 0);
+  setBoneRotation(glove, glove.thumb[2]!, -0.2, glove.side * 0.2, 0);
 }
 
-function wrapSupport(glove: Glove, group: THREE.Group, contact: THREE.Vector3, style: 'under' | 'side' | 'pump' | 'over'): void {
+function wrapSupport(glove: Glove, group: THREE.Group, contact: THREE.Vector3, style: 'under' | 'side' | 'pump' | 'over' | 'pistol'): void {
+  if (style === 'pistol') {
+    orientHand(group, _palm.set(0.88, -0.12, -0.46), _fingers.set(0.12, -0.28, -0.95), true);
+    placePalm(group, contact, 0.021);
+    poseSupportWrap(glove, 0.82, 0.8, 1.05);
+    return;
+  }
   if (style === 'under') {
     // C-clamp: palm pressed against the forend's left face, fingers wrapping
     // around the bottom, thumb forward along the near face — the standard
@@ -522,29 +860,30 @@ function reachEnvelope(phase: number, start: number, peak: number, end: number):
 }
 
 export function createHandRig(): HandRig {
-  const mats = getHandMaterialSet();
-  const gloveL = buildHand(mats, 1);
-  const gloveR = buildHand(mats, -1);
+  const gloveL = buildHands(1);
+  const gloveR = buildHands(-1);
+  const authoredAvailable = gloveL.authored && gloveR.authored;
   const leftWrap = new THREE.Group();
   leftWrap.add(gloveL.group);
   const left = leftWrap;
   const right = gloveR.group;
   const wristR = new THREE.Object3D();
   wristR.name = 'hand-wrist-right';
-  wristR.position.set(0, 0, 0.073);
+  wristR.position.set(0, 0, authoredAvailable ? 0 : 0.073);
   right.add(wristR);
   const wristL = new THREE.Object3D();
   wristL.name = 'hand-wrist-left';
-  wristL.position.set(0, 0, 0.073);
+  wristL.position.set(0, 0, authoredAvailable ? 0 : 0.073);
   left.add(wristL);
   const gripR = new THREE.Vector3();
   const gripL = new THREE.Vector3();
   return {
     right, left, wristR, wristL,
+    integratedArm: gloveL.integratedArm && gloveR.integratedArm,
     configure(anchors) {
       gripR.copy(anchors.gripR);
       gripL.copy(anchors.gripL);
-      const s = 1.1 / anchors.scale;
+       const s = 0.56 / anchors.scale;
       right.position.copy(gripR);
       right.scale.setScalar(s);
       left.position.copy(gripL);
@@ -561,6 +900,17 @@ export function createHandRig(): HandRig {
       const pumpSqueeze = pumping ? smooth(Math.abs(pumpOffset) / 0.085) * 0.1 : 0;
       articulate(gloveL, (supportStyle === 'side' ? 0.68 : 0.58) * (1 - leftReach) + 0.08 * leftReach + pumpSqueeze, leftReach);
       articulate(gloveR, 0.67 * (1 - rightReach) + 0.1 * rightReach, rightReach, false, boltPhase < 0, triggerAmount);
+      if (supportStyle === 'pistol') {
+        right.position.copy(gripR);
+        orientHand(right, _palm.set(-0.88, 0.08, -0.46), _fingers.set(-0.35, -0.36, -0.86), false);
+        placePalm(right, gripR, gloveR.authored ? 0.04 : 0.016);
+        poseTriggerHand(gloveR, true, triggerAmount);
+        left.position.copy(gripL);
+        orientHand(left, _palm.set(0.88, -0.12, -0.46), _fingers.set(0.12, -0.28, -0.95), true);
+        placePalm(left, gripL, gloveL.authored ? 0.04 : 0.021);
+        poseSupportWrap(gloveL, 0.82, 0.8, 1.05);
+        return;
+      }
       const longGun = supportStyle !== 'over';
       const gripPalm = _palm.set(-0.88, 0.08, -0.46);
       const gripFingers = longGun ? _fingers.set(-0.35, -0.36, -0.86) : _fingers.set(-0.35, -0.46, -0.82);
@@ -579,13 +929,13 @@ export function createHandRig(): HandRig {
         orientHand(right, gripPalm, gripFingers, false);
       } else {
         orientHand(right, gripPalm, gripFingers, false);
-        placePalm(right, gripR);
+        placePalm(right, gripR, gloveR.authored ? 0.04 : 0.013);
         poseTriggerHand(gloveR, boltPhase < 0, triggerAmount);
       }
       if (pumping) {
         orientHand(left, _palm.set(0, 1, 0), _fingers.set(1, 0, 0), true);
         _target.copy(gripL).y += 0.006;
-        placePalm(left, _target, 0.022);
+        placePalm(left, _target, gloveL.authored ? 0.04 : 0.022);
         wrapSupport(gloveL, left, _target, 'pump');
         left.position.z += pumpOffset;
         return;
@@ -649,16 +999,19 @@ export interface FistRig {
   left: THREE.Group;
   wristR: THREE.Object3D;
   wristL: THREE.Object3D;
+  integratedArm: boolean;
   baseQuatR: THREE.Quaternion;
   baseQuatL: THREE.Quaternion;
 }
 
 export function createFistRig(): FistRig {
-  const mats = getHandMaterialSet();
   const group = new THREE.Group();
-  const right = buildHand(mats, -1, true).group;
+  const rightGlove = buildHands(-1, true);
+  const leftGlove = buildHands(1, true);
+  const authoredAvailable = rightGlove.authored && leftGlove.authored;
+  const right = rightGlove.group;
   const left = new THREE.Group();
-  left.add(buildHand(mats, 1, true).group);
+  left.add(leftGlove.group);
   group.add(right, left);
   orientHand(right, _palm.set(-0.2, -0.9, -0.38), _fingers.set(-0.12, 0.12, -0.99), false);
   orientHand(left, _palm.set(0.2, -0.9, -0.38), _fingers.set(0.12, 0.12, -0.99), true);
@@ -668,13 +1021,13 @@ export function createFistRig(): FistRig {
   left.scale.setScalar(1.18);
   const wristR = new THREE.Object3D();
   wristR.name = 'hand-wrist-right';
-  wristR.position.set(0, 0, 0.073);
+  wristR.position.set(0, 0, authoredAvailable ? 0 : 0.073);
   right.add(wristR);
   const wristL = new THREE.Object3D();
   wristL.name = 'hand-wrist-left';
-  wristL.position.set(0, 0, 0.073);
+  wristL.position.set(0, 0, authoredAvailable ? 0 : 0.073);
   left.add(wristL);
-  return { group, right, left, wristR, wristL, baseQuatR: right.quaternion.clone(), baseQuatL: left.quaternion.clone() };
+  return { group, right, left, wristR, wristL, integratedArm: rightGlove.integratedArm && leftGlove.integratedArm, baseQuatR: right.quaternion.clone(), baseQuatL: left.quaternion.clone() };
 }
 
 interface Sleeve {
@@ -683,6 +1036,86 @@ interface Sleeve {
   twist: THREE.Bone;
   wrist: THREE.Bone;
   mesh: THREE.SkinnedMesh;
+}
+
+const AUTHORED_SLEEVE_PATH = 'hands/authored-sleeve.glb';
+const AUTHORED_SLEEVE_UPPER_LENGTH = 0.3;
+const AUTHORED_SLEEVE_FORE_LENGTH = 0.219375;
+const AUTHORED_SLEEVE_CUFF_LENGTH = 0.075;
+
+interface AuthoredSleevePair {
+  readonly side: 'left' | 'right';
+  readonly upper: THREE.Mesh;
+  readonly fore: THREE.Mesh;
+  readonly cuff: THREE.Mesh;
+}
+
+function authoredSleeveMaterial(source: THREE.Material): THREE.Material {
+  const material = toNodeStandard(source as unknown as THREE.MeshStandardMaterial);
+  const standard = material as unknown as THREE.MeshStandardMaterial;
+  // The source sleeve carries a bright fabric weave albedo. Forcing white over
+  // it produced a pale tube that read as a debug primitive at the bottom of
+  // every frame. Drive the sleeve from the same generated technical surface,
+  // tinted well below the glove so arm and hand stay separable.
+  const albedo = getGloveAlbedo();
+  standard.map = albedo ?? null;
+  // Albedo only, no bump map — see the note in libHandMaterial (cycle 57).
+  // The shared glove texture is tinted down here so the sleeve reads as a
+  // separate garment under the viewmodel light rig rather than matching it.
+  standard.color.setHex(albedo ? 0x8b939b : 0x2b3238);
+  standard.roughness = 0.92;
+  standard.metalness = 0.02;
+  material.userData.viewmodelOwned = true;
+  return material;
+}
+
+function cloneAuthoredSleeveMesh(source: THREE.Object3D, name: string): THREE.Mesh | null {
+  let result: THREE.Mesh | null = null;
+  const target = canonicalNodeName(name);
+  source.traverse((object) => {
+    if (result || !(object instanceof THREE.Mesh) || canonicalNodeName(object.name) !== target) return;
+    const mesh = object.clone(true) as THREE.Mesh;
+    mesh.name = name;
+    mesh.geometry = object.geometry.clone();
+    mesh.geometry.rotateX(Math.PI / 2);
+    mesh.material = Array.isArray(object.material)
+      ? object.material.map(authoredSleeveMaterial)
+      : authoredSleeveMaterial(object.material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData.viewmodelOwned = true;
+    result = mesh;
+  });
+  return result;
+}
+
+function buildAuthoredSleeves(): AuthoredSleevePair[] | null {
+  const asset = peekGltf(AUTHORED_SLEEVE_PATH);
+  if (!asset) return null;
+  const upper = cloneAuthoredSleeveMesh(asset.scene, 'authored-sleeve-upper');
+  const fore = cloneAuthoredSleeveMesh(asset.scene, 'authored-sleeve-fore');
+  const cuff = cloneAuthoredSleeveMesh(asset.scene, 'authored-sleeve-cuff');
+  if (!upper || !fore || !cuff) return null;
+  return [
+    {
+      side: 'left' as const,
+      upper: upper.clone(true) as THREE.Mesh,
+      fore: fore.clone(true) as THREE.Mesh,
+      cuff: cuff.clone(true) as THREE.Mesh,
+    },
+    { side: 'right' as const, upper, fore, cuff },
+  ].map((pair) => {
+    for (const mesh of [pair.upper, pair.fore, pair.cuff]) {
+      mesh.geometry = mesh.geometry.clone();
+      mesh.material = Array.isArray(mesh.material)
+        ? mesh.material.map((material) => authoredSleeveMaterial(material))
+        : authoredSleeveMaterial(mesh.material);
+      mesh.userData.viewmodelOwned = true;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+    }
+    return pair;
+  });
 }
 
 function buildSleeve(upperLength: number, foreLength: number, side: number): Sleeve {
@@ -737,12 +1170,14 @@ function buildSleeve(upperLength: number, foreLength: number, side: number): Sle
 
 export class ArmSolver {
   readonly group = new THREE.Group();
-  private readonly shoulders = [new THREE.Vector3(0.16, -0.16, 0.12), new THREE.Vector3(-0.2, -0.22, 0.02)];
-  private readonly upperLen = 0.3;
-  private readonly foreLen = 0.27;
+  private readonly shoulders = [new THREE.Vector3(0.3, -0.3, -0.02), new THREE.Vector3(-0.32, -0.32, -0.08)];
+  private readonly upperLen = 0.52;
+  private readonly foreLen = 0.46;
   readonly reachDeficit = [0, 0];
   private readonly bends = [new THREE.Vector3(1, -2, -2), new THREE.Vector3(-1.2, -1.8, 0.1)];
   private readonly sleeves: Sleeve[] = [];
+  private readonly authoredSleeves: AuthoredSleevePair[] | null;
+  private integratedArm = false;
   private readonly shoulder = new THREE.Vector3();
   private readonly wristTarget = new THREE.Vector3();
   private readonly wristClamped = new THREE.Vector3();
@@ -751,32 +1186,48 @@ export class ArmSolver {
   private readonly bend = new THREE.Vector3();
   private readonly direction = new THREE.Vector3();
   private readonly foreQuaternion = new THREE.Quaternion();
+  private readonly authoredTwist = new THREE.Quaternion();
   private readonly wristQuaternion = new THREE.Quaternion();
   private readonly pivotQuaternion = new THREE.Quaternion();
   private readonly wristAxis = new THREE.Quaternion().setFromUnitVectors(_upY, new THREE.Vector3(0, 0, -1));
   private readonly anchorPosition = new THREE.Vector3();
 
   constructor() {
-    for (let i = 0; i < 2; i++) {
-      const sleeve = buildSleeve(this.upperLen, this.foreLen, i === 0 ? -1 : 1);
-      this.sleeves.push(sleeve);
-      this.group.add(sleeve.mesh);
+    this.authoredSleeves = buildAuthoredSleeves();
+    if (this.authoredSleeves) {
+      for (const pair of this.authoredSleeves) {
+        pair.upper.name = `authored-sleeve-${pair.side}-upper`;
+        pair.fore.name = `authored-sleeve-${pair.side}-fore`;
+        pair.cuff.name = `authored-sleeve-${pair.side}-cuff`;
+        pair.upper.visible = this.integratedArm;
+        pair.fore.visible = this.integratedArm;
+        pair.cuff.visible = this.integratedArm;
+        this.group.add(pair.upper, pair.fore, pair.cuff);
+      }
+    } else {
+      for (let i = 0; i < 2; i++) {
+        const sleeve = buildSleeve(this.upperLen, this.foreLen, i === 0 ? -1 : 1);
+        this.sleeves.push(sleeve);
+        this.group.add(sleeve.mesh);
+      }
     }
     this.group.visible = false;
   }
 
   solve(pivot: THREE.Object3D, wristWorld: THREE.Vector3[], settle = 0): void {
-    this.group.visible = true;
+    this.group.visible = this.integratedArm;
     for (let i = 0; i < 2; i++) {
       this.shoulder.copy(this.shoulders[i]!);
       this.shoulder.y -= 0.012 * settle;
       this.shoulder.z += 0.015 * settle;
+      const upperLen = this.upperLen;
+      const foreLen = this.foreLen;
       pivot.worldToLocal(this.wristTarget.copy(wristWorld[i]!));
       this.along.copy(this.wristTarget).sub(this.shoulder);
       const reach = this.along.length();
       if (reach < 1e-8) this.along.set(0, 0, -1);
       else this.along.multiplyScalar(1 / reach);
-      const distance = THREE.MathUtils.clamp(reach, Math.abs(this.upperLen - this.foreLen) + 0.0001, this.upperLen + this.foreLen - 0.0001);
+      const distance = THREE.MathUtils.clamp(reach, Math.abs(upperLen - foreLen) + 0.0001, upperLen + foreLen - 0.0001);
       this.reachDeficit[i] = Math.abs(reach - distance);
       this.wristClamped.copy(this.shoulder).addScaledVector(this.along, distance);
       let anchor: THREE.Object3D | undefined;
@@ -800,11 +1251,53 @@ export class ArmSolver {
         this.bend.set(Math.abs(this.along.x) < 0.8 ? 1 : 0, Math.abs(this.along.x) < 0.8 ? 0 : 1, 0);
         this.bend.addScaledVector(this.along, -this.bend.dot(this.along));
       }
-      this.bend.normalize();
-      const alongLength = (this.upperLen ** 2 + distance ** 2 - this.foreLen ** 2) / (2 * distance);
-      const bendLength = Math.sqrt(Math.max(0, this.upperLen ** 2 - alongLength ** 2));
-      this.elbow.copy(this.shoulder).addScaledVector(this.along, alongLength).addScaledVector(this.bend, bendLength);
-      const sleeve = this.sleeves[i]!;
+       this.bend.normalize();
+       const alongLength = (upperLen ** 2 + distance ** 2 - foreLen ** 2) / (2 * distance);
+       const bendLength = Math.sqrt(Math.max(0, upperLen ** 2 - alongLength ** 2));
+       this.elbow.copy(this.shoulder).addScaledVector(this.along, alongLength).addScaledVector(this.bend, bendLength);
+        const authored = this.authoredSleeves?.[i];
+        if (authored) {
+          const upperDistance = this.elbow.distanceTo(this.shoulder);
+          const foreDistance = this.wristClamped.distanceTo(this.elbow);
+          const upperSourceLength = AUTHORED_SLEEVE_UPPER_LENGTH;
+          const foreSourceLength = AUTHORED_SLEEVE_FORE_LENGTH;
+          const cuffSourceLength = AUTHORED_SLEEVE_CUFF_LENGTH;
+          const upperWidth = 0.48;
+          const foreWidth = 0.38;
+          const cuffWidth = 0.46;
+          this.direction.copy(this.elbow).sub(this.shoulder).normalize();
+          authored.upper.position.copy(this.shoulder);
+          authored.upper.quaternion.setFromUnitVectors(_upY, this.direction);
+          authored.upper.scale.set(
+            upperWidth,
+            upperDistance / upperSourceLength,
+            upperWidth,
+          );
+          this.direction.copy(this.wristClamped).sub(this.elbow).normalize();
+          authored.fore.position.copy(this.elbow);
+          authored.fore.quaternion.setFromUnitVectors(_upY, this.direction);
+          authored.fore.scale.set(
+            foreWidth,
+            foreDistance / foreSourceLength,
+            foreWidth,
+          );
+          if (anchor) {
+            const relative = this.foreQuaternion.setFromUnitVectors(_upY, this.direction).invert().multiply(this.wristQuaternion);
+            const twistAngle = 2 * Math.atan2(relative.z, relative.w);
+            authored.fore.quaternion.multiply(this.authoredTwist.setFromAxisAngle(_upY, twistAngle));
+          }
+          const cuffLength = Math.min(cuffSourceLength, Math.max(0.055, foreDistance * 0.42));
+          authored.cuff.position.copy(this.wristClamped);
+          authored.cuff.quaternion.setFromUnitVectors(_upY, this.direction);
+          authored.cuff.scale.set(cuffWidth, cuffLength / cuffSourceLength, cuffWidth);
+          if (anchor) {
+            const relative = this.foreQuaternion.setFromUnitVectors(_upY, this.direction).invert().multiply(this.wristQuaternion);
+            const twistAngle = 2 * Math.atan2(relative.z, relative.w);
+            authored.cuff.quaternion.multiply(this.authoredTwist.setFromAxisAngle(_upY, twistAngle));
+          }
+          continue;
+        }
+       const sleeve = this.sleeves[i]!;
       sleeve.upper.position.copy(this.shoulder);
       this.direction.copy(this.elbow).sub(this.shoulder).normalize();
       sleeve.upper.quaternion.setFromUnitVectors(_upY, this.direction);
@@ -824,6 +1317,17 @@ export class ArmSolver {
       const fullTwist = halfTwist.clone().multiply(halfTwist);
       sleeve.wrist.quaternion.copy(fullTwist).invert().multiply(swing).multiply(fullTwist);
     }
+  }
+
+  setIntegratedArm(integrated: boolean): void {
+    if (this.integratedArm === integrated) return;
+    this.integratedArm = integrated;
+    for (const pair of this.authoredSleeves ?? []) {
+      pair.upper.visible = integrated;
+      pair.fore.visible = integrated;
+      pair.cuff.visible = integrated;
+    }
+    this.group.visible = integrated;
   }
 
   setVisible(v: boolean): void {

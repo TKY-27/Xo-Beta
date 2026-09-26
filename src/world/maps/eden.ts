@@ -5,9 +5,10 @@
  */
 
 import { planStairs, WorldBuilder } from '../builder';
-import type { MapDef } from '../types';
+import type { GeoBox, MapDef } from '../types';
 import { Rng } from '../../core/rng';
 import { addBuilding, addDrumCluster, addGroundDecay, dressingSpotClear, hardenExposedFlanks, scatterRocks, scatterTrees, structureBaseY } from './common';
+import { EDEN_LAB_DOORS } from '../environmentPlans';
 
 const S = 500;
 
@@ -44,6 +45,41 @@ function terrainH(x: number, z: number): number {
     h -= (1 - pondD / 52) * 6.5;
   }
   return h;
+}
+
+type EdenAuthoredZone = { minX: number; maxX: number; minZ: number; maxZ: number; cx: number; cz: number; wallOffset?: number };
+
+const EDEN_AUTHORED_ZONES: EdenAuthoredZone[] = [
+  { minX: -27, maxX: -9, minZ: 19, maxZ: 30, cx: -18, cz: 24 },
+  { minX: 103, maxX: 121, minZ: 31, maxZ: 46, cx: 112, cz: 38, wallOffset: -4 },
+  { minX: -219, maxX: -201, minZ: 33, maxZ: 48, cx: -210, cz: 40 },
+];
+
+function applyAuthoredEdenPlan(b: WorldBuilder): void {
+  const inside = (g: GeoBox, zone: EdenAuthoredZone): boolean => (
+    g.x + g.sx * 0.5 >= zone.minX && g.x - g.sx * 0.5 <= zone.maxX
+    && g.z + g.sz * 0.5 >= zone.minZ && g.z - g.sz * 0.5 <= zone.maxZ
+  );
+  for (const g of b.def.geo) {
+    if (g.kind !== 'box' || g.sy <= 1.2) continue;
+    if (!EDEN_AUTHORED_ZONES.some((zone) => inside(g, zone))) continue;
+    g.noRender = true;
+    g.noCollide = true;
+  }
+  const addProxy = (x: number, z: number, sx: number, sz: number, y: number): void => {
+    b.def.geo.push({
+      kind: 'box', x, y: y + 1.5, z, sx, sy: 3, sz, yaw: 0,
+      mat: 'concrete', materialHint: 'stone', noRender: true, castShadow: false,
+    });
+  };
+  for (const zone of EDEN_AUTHORED_ZONES) {
+    const y = terrainH(zone.cx, zone.cz);
+    addProxy(zone.cx + (zone.wallOffset ?? -2), zone.cz - 2, 4, 0.24, y);
+    addProxy(zone.cx + 3.55, zone.cz - 2, 0.9, 0.24, y);
+    addProxy(zone.cx - 2, zone.cz + 2, 4, 0.24, y);
+    addProxy(zone.cx - 4, zone.cz, 0.24, 4, y);
+    addProxy(zone.cx + 4, zone.cz, 0.24, 4, y);
+  }
 }
 
 export function buildEdenFacility(): MapDef {
@@ -173,8 +209,9 @@ export function buildEdenFacility(): MapDef {
   groundDecay(b);
 
   hardenExposedFlanks(b, { mat: 'concreteDark', maxProps: 36 });
+  applyAuthoredEdenPlan(b);
 
-  return b.finish(
+  const def = b.finish(
     {
       preset: 'day',
       atmosphere: {
@@ -202,6 +239,10 @@ export function buildEdenFacility(): MapDef {
       hemisphereIntensity: 1.2,
       exposure: 0.98,
       envIntensity: 0.9,
+      // Measured IBL ratio (`qa/ibl-eden-*.png`): 0.4 gives the facility shell
+      // real value structure, readable window reveals and a visible cast
+      // shadow on the ground instead of a uniform haze.
+      envMapScale: 0.4,
       backgroundBlurriness: 0.045,
       backgroundIntensity: 0.52,
       grade: {
@@ -221,6 +262,7 @@ export function buildEdenFacility(): MapDef {
       { id: 'rainShower', rain: 0.65, wetGround: true, cloudCover: 0.75, windSpeed: 0.03 },
     ] },
   );
+  return def;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +351,8 @@ function labMain(b: WorldBuilder, cx: number, cz: number): void {
   addBuilding(b, {
     x: cx, z: cz, baseY: gy, w: 34, d: 24, floors: 2, floorHeight: 4.2, wallMat: 'facadeA', trimMat: 'metal',
     floorMat: 'facilityFloor',
-    doors: [[0, 10, 2.8], [0, 24, 2.8], [2, 17, 2.8], [1, 9, 2.8]], roofAccess: true,
+    doors: EDEN_LAB_DOORS.map(({ side, offset, width }) => [side, offset, width] as [0 | 1 | 2 | 3, number, number]), roofAccess: true,
+    authoredShell: true,
   });
   // addBuilding's deep metal foundation remains the exterior plinth. Give the
   // occupied ground floor its own inset physical surface so the interior does
@@ -322,16 +365,16 @@ function labMain(b: WorldBuilder, cx: number, cz: number): void {
   for (let floor = 0; floor < 2; floor++) {
     const levelY = gy + floor * 4.2;
     for (const z of [cz - 6.5, cz, cz + 6.5]) {
-      b.box(cx, levelY + 3.82, z, 7.2, 0.08, 0.22, 'signDimCyan', 0, { noCollide: true });
+      b.box(cx, levelY + 3.82, z, 7.2, 0.08, 0.22, 'signDimCyan', 0, { noCollide: true, noRender: true });
       b.light(cx, levelY + 3.55, z, 0xcfe8ff, 0.82, 10.5);
     }
     for (const wallZ of [cz - 11.65, cz + 11.65]) {
-      b.box(cx, levelY + 2.72, wallZ, 27, 0.16, 0.18, 'metalDark', 0, { noCollide: true });
-      b.box(cx, levelY + 0.18, wallZ, 32.2, 0.22, 0.16, 'metalDark', 0, { noCollide: true });
+      b.box(cx, levelY + 2.72, wallZ, 27, 0.16, 0.18, 'metalDark', 0, { noCollide: true, noRender: true });
+      b.box(cx, levelY + 0.18, wallZ, 32.2, 0.22, 0.16, 'metalDark', 0, { noCollide: true, noRender: true });
     }
     for (const x of [cx - 15.65, cx + 15.65]) {
-      b.cyl(x, levelY + 1.45, cz - 8.8, 0.13, 2.9, 'metal', { segments: 10, noCollide: true });
-      b.cyl(x, levelY + 1.45, cz + 8.8, 0.13, 2.9, 'metal', { segments: 10, noCollide: true });
+      b.cyl(x, levelY + 1.45, cz - 8.8, 0.13, 2.9, 'metal', { segments: 10, noCollide: true, noRender: true });
+      b.cyl(x, levelY + 1.45, cz + 8.8, 0.13, 2.9, 'metal', { segments: 10, noCollide: true, noRender: true });
     }
   }
   for (const benchX of [cx - 7, cx + 7]) {
@@ -374,7 +417,7 @@ function labMain(b: WorldBuilder, cx: number, cz: number): void {
     b.box(cx, gy + 0.135, z, 6.3, 0.015, 0.1, 'paint', 0, { noCollide: true });
   }
   // Rooftop units
-  b.box(cx + 8, gy + 9.4, cz - 4, 4, 1.6, 3, 'metalDark');
+  b.box(cx + 8, gy + 9.4, cz - 4, 4, 1.6, 3, 'metalDark', 0, { noCollide: true, noRender: true });
   b.loot(cx - 8, gy + 0.4, cz + 4);
   b.loot(cx + 6, gy + 0.4, cz - 6);
 }

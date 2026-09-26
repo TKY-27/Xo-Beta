@@ -58,21 +58,15 @@ async function measure(page: import('playwright').Page, stress: boolean): Promis
       throw new Error(`Stress placement incomplete: ${JSON.stringify(placement)}`);
     }
   }
-  // real draw stats: accumulate across the frame (composer resets per pass)
   await page.evaluate(`(async () => {
-    const r = window.__xoState.threeRenderer.info;
-    r.autoReset = false;
-    r.reset();
-    window.__frames = 0;
-    const t0 = performance.now();
-    await new Promise((res) => {
-      const tick = () => { window.__frames++; if (performance.now() - t0 > 500) res(null); else requestAnimationFrame(tick); };
-      requestAnimationFrame(tick);
-    });
+    window.__drawSamples = [];
+    for (let i = 0; i < 30; i++) {
+      await new Promise((res) => requestAnimationFrame(() => res(null)));
+      const info = window.__xoState.sceneInfo;
+      window.__drawSamples.push({ drawCalls: info.drawCalls, frameCalls: info.frameCalls, triangles: info.triangles });
+    }
   })()`);
-  const info = await evalSoft<string>('JSON.stringify(window.__xoState.threeRenderer.info.render)');
-  const frames = await evalSoft<number>('window.__frames');
-  await page.evaluate('window.__xoState.threeRenderer.info.autoReset = true');
+  const drawSamples = await evalSoft<Array<{ drawCalls: number; frameCalls: number; triangles: number }>>('window.__drawSamples');
   const perf = await evalSoft<string>('JSON.stringify(window.__xoState.perf)');
   // One chronological capture, split after collection. This prevents shader
   // warm-up frames and steady-state interaction frames from sharing metrics.
@@ -88,15 +82,15 @@ async function measure(page: import('playwright').Page, stress: boolean): Promis
     return d;
   })()`);
   const profile = summarizeFrameProfile(deltas as number[], 4000, 6000);
-  const i2 = info ? JSON.parse(info) : {};
   const p2 = perf ? JSON.parse(perf) : {};
   void evalSoft;
-  if (frames === null || frames <= 0) throw new Error(`Invalid draw-stat frame count: ${frames}`);
+  const samples = drawSamples ?? [];
+  if (samples.length < 20) throw new Error(`Invalid draw-stat sample count: ${samples.length}`);
+  const sample = samples[Math.floor(samples.length / 2)]!;
   const numeric = [...Object.values(profile.warmup), ...Object.values(profile.steady)];
   if (profile.warmup.n < 30 || profile.steady.n < 60 || numeric.some((value) => !Number.isFinite(value))) {
     throw new Error(`Invalid frame profile: ${JSON.stringify(profile)}`);
   }
-  const f = frames;
   const result = {
     warmupAvgFps: profile.warmup.avgFps,
     warmupP95Ms: profile.warmup.p95Ms,
@@ -112,8 +106,9 @@ async function measure(page: import('playwright').Page, stress: boolean): Promis
     steadyOver50: profile.steady.over50,
     simMs: p2.simMs ?? -1,
     presentMs: p2.presentMs ?? -1,
-    drawsPerFrame: Math.round((i2.calls ?? 0) / f),
-    mtrisPerFrame: +((i2.triangles ?? 0) / f / 1e6).toFixed(2),
+    drawsPerFrame: sample.drawCalls,
+    frameCallsPerFrame: sample.frameCalls,
+    mtrisPerFrame: +(sample.triangles / 1e6).toFixed(2),
   };
   if (Object.values(result).some((value) => !Number.isFinite(value))) {
     throw new Error(`Non-finite perf attribution: ${JSON.stringify(result)}`);
@@ -134,7 +129,13 @@ async function main(): Promise<void> {
   const scopeMag = args.find((a) => a.startsWith('--mag='))?.slice(6) ?? '2';
   if (!['practice', 'bot10', 'scope'].includes(scenario)) throw new Error(`Unknown scenario: ${scenario}`);
   const only = args.find((a) => a.startsWith('--only='))?.slice(7);
-  const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
+  const port = Number(process.env.QA_PORT ?? 5199);
+  const width = Number(process.env.QA_WIDTH ?? 1920);
+  const height = Number(process.env.QA_HEIGHT ?? 1080);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 320 || height < 240) {
+    throw new Error(`Invalid QA viewport: ${width}x${height}`);
+  }
+  const server = await createServer({ server: { port }, logLevel: 'silent' });
   await server.listen();
   // NOTE: do NOT pass --use-angle=metal/--enable-gpu — that flag path falls
   // back to a severely constrained software/ANGLE backend.
@@ -143,7 +144,7 @@ async function main(): Promise<void> {
   const headless = process.env.HEADLESS === '1';
   if (headless) console.warn('HEADLESS=1 is diagnostic only; it is not release QA evidence.');
   const browser = await chromium.launch({ channel: 'chrome', headless });
-  const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+  const page = await browser.newPage({ viewport: { width, height } });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message.slice(0, 160)));
   page.on('console', (message) => {
@@ -159,7 +160,7 @@ async function main(): Promise<void> {
         localStorage.setItem('xo-beta-settings-v1', JSON.stringify(c));
       }, cfg);
       const rosterQs = scenario === 'bot10' ? '&roster=4v6' : '';
-      await page.goto(`http://localhost:5199/?qa=1${rosterQs}`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`http://localhost:${port}/?qa=1${rosterQs}`, { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#main-menu:not(.hidden)', { timeout: 90000 });
       await page.waitForTimeout(400);
       await page.click('#btn-play');

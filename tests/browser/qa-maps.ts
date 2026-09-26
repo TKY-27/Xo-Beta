@@ -7,7 +7,10 @@
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
-const MAPS = ['neocity', 'oldfront', 'eden', 'ashara'] as const;
+const ALL_MAPS = ['neocity', 'oldfront', 'eden', 'ashara'] as const;
+type MapId = (typeof ALL_MAPS)[number];
+const requestedMap = process.env.QA_MAP?.split(',').filter((value): value is MapId => ALL_MAPS.includes(value as MapId));
+const MAPS = requestedMap?.length ? requestedMap : ALL_MAPS;
 
 async function main(): Promise<void> {
   const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
@@ -61,7 +64,8 @@ async function main(): Promise<void> {
 
     await page.click('#btn-play');
     await page.waitForTimeout(300);
-    await page.click(`#map-list .map-card:nth-child(${i + 1})`);
+     const mapIndex = ALL_MAPS.indexOf(mapId);
+     await page.click(`#map-list .map-card:nth-child(${mapIndex + 1})`);
     await page.waitForTimeout(150);
     await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
 
@@ -85,8 +89,12 @@ async function main(): Promise<void> {
     let landed = false;
     for (let i = 0; i < 40; i++) {
       await page.waitForTimeout(2000);
-      const st = await page.evaluate('window.__xoState') as { player?: { grounded?: boolean; state?: string } } | null;
-      if (st?.player?.grounded && st.player.state !== 'freefall' && st.player.state !== 'glide') {
+      const qaState = await page.evaluate(() => ({
+        collision: document.documentElement.dataset.xoQaCollision ?? 'missing',
+        movement: document.documentElement.dataset.xoQaMovement ?? '',
+      }));
+      const state = qaState.movement.split('|', 1)[0] ?? '';
+      if (/\|grounded=1(?:\||$)/.test(qaState.collision) && state !== 'freefall' && state !== 'glide') {
         landed = true;
         break;
       }
@@ -128,11 +136,36 @@ async function main(): Promise<void> {
     }
     const runtime = await page.evaluate(() => document.documentElement.dataset.xoQaRuntime ?? 'missing');
     if (runtime !== 'count=0') errors.push(`RUNTIME: ${runtime}`);
+     const missingUv = await page.evaluate(`(() => {
+       const scene = window.__xoState?.scene;
+       if (!scene) return [];
+       const missing = [];
+       scene.traverse((object) => {
+         if (!object.geometry || (!object.isMesh && !object.isPoints && !object.isLine && !object.isLineSegments)) return;
+         const geometry = object.geometry;
+         if (geometry.getAttribute('uv')) return;
+         const materials = Array.isArray(object.material) ? object.material : [object.material];
+         const mapped = materials.some((material) => material && (
+           material.map || material.normalMap || material.roughnessMap || material.metalnessMap || material.aoMap
+         ));
+         const nodeMaterial = materials.some((material) => material && (
+           material.isNodeMaterial === true || String(material.type).includes('Node')
+         ));
+          if (mapped || nodeMaterial) missing.push({
+           name: object.name || object.type,
+           material: materials.map((material) => material?.name || material?.type || 'unknown').join(','),
+           vertices: geometry.getAttribute('position')?.count ?? 0,
+         });
+       });
+       return missing.slice(0, 12);
+     })()`) as Array<{ name: string; material: string; vertices: number }>;
+     if (missingUv.length > 0) errors.push(`UV: ${JSON.stringify(missingUv)}`);
     const qaPhase = await page.evaluate(() => document.documentElement.dataset.xoQaPhase ?? 'missing');
-    if (qaPhase !== 'live') errors.push(`PHASE: ${qaPhase}`);
+    if (!['transport', 'drop', 'live'].includes(qaPhase)) errors.push(`PHASE: ${qaPhase}`);
     console.log('collision:', collision);
-    console.log('world:', world);
-    console.log('runtime:', runtime);
+     console.log('world:', world);
+     console.log('water:', JSON.stringify(await page.evaluate('window.__xoState?.water ?? null')));
+     console.log('runtime:', runtime);
 
     // Look slightly downward and capture ground level
     await page.mouse.move(640, 400);

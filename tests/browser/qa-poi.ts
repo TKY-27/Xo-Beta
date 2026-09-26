@@ -2,7 +2,7 @@
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
-const POIS: Record<string, Array<{ name: string; x: number; z: number; yaw: number; mode?: 'standing' | 'swim' }>> = {
+const POIS: Record<string, Array<{ name: string; x: number; z: number; yaw: number; pitch?: number; mode?: 'standing' | 'swim' }>> = {
   neocity: [
     { name: 'spire', x: 0, z: 30, yaw: Math.PI },
     { name: 'market', x: 120, z: 80, yaw: Math.PI },
@@ -28,10 +28,19 @@ const POIS: Record<string, Array<{ name: string; x: number; z: number; yaw: numb
     { name: 'greenhouse', x: 12, z: 46, yaw: Math.PI },
     { name: 'treatment', x: -164, z: -102, yaw: Math.PI / 4 },
     { name: 'meadow', x: 224, z: 110, yaw: 0 },
-    { name: 'lake-swim', x: 70, z: 60, yaw: -Math.PI / 3, mode: 'swim' },
+    // Lake/shore transition, captured from the dock deck at lake level. A
+    // `mode:'swim'` POI is not used here: `findClearSwimmingPlacement` rejects
+    // every sampled lake point because the smoothed basin bed sits above
+    // `surfaceY - swimSurfaceCenterDepth - capsuleOffset` near the shore, so a
+    // swim teleport cannot be staged. That is a real lake-traversal QA gap
+    // (tracked separately), not something to hide by loosening the invariant.
+    { name: 'lake-level', x: 116, z: 70, yaw: 0, pitch: -0.05 },
   ],
   ashara: [
-    { name: 'market', x: -34, z: -70, yaw: Math.PI },
+    { name: 'market', x: -34, z: 4, yaw: 0 },
+    { name: 'market-close', x: -34, z: -16, yaw: 0 },
+    { name: 'market-east', x: -12, z: -30, yaw: Math.PI / 2 },
+    { name: 'market-south', x: -34, z: -44, yaw: Math.PI },
     { name: 'relay', x: 205, z: -110, yaw: Math.PI / 4 },
     { name: 'works', x: 108, z: 32, yaw: -Math.PI / 2 },
     { name: 'wadi', x: 0, z: 44, yaw: Math.PI },
@@ -50,6 +59,7 @@ async function main(): Promise<void> {
   const server = await createServer({ server: { port: 5199 }, logLevel: 'silent' });
   await server.listen();
   const headless = process.env.HEADLESS === '1';
+  const captureOnly = process.env.QA_CAPTURE_ONLY === '1';
   if (headless) console.warn('HEADLESS=1 is diagnostic only; it is not POI visual acceptance evidence.');
   const browser = await chromium.launch({
     channel: 'chrome',
@@ -74,41 +84,77 @@ async function main(): Promise<void> {
           resolutionScale: diagnosticHeadless ? 0.7 : 1,
         }));
       }, headless);
-      await page.goto('http://localhost:5199/?qa=1', { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(9000);
-      await page.click('#btn-play');
+       const rosterQuery = '&roster=2v2';
+       await page.goto(`http://localhost:5199/?qa=1${rosterQuery}`, { waitUntil: 'domcontentloaded' });
+       for (let i = 0; i < 30; i++) {
+         const onboarding = await page.$('#onboarding-screen:not(.hidden)');
+         if (onboarding) {
+           await page.click('#btn-onb-en');
+           await page.waitForTimeout(200);
+           await page.click('#btn-onb-fp');
+           await page.waitForTimeout(300);
+           break;
+         }
+         const menu = await page.$('#main-menu:not(.hidden)');
+         if (menu) break;
+         await page.waitForTimeout(500);
+       }
+       await page.waitForSelector('#main-menu:not(.hidden)', { timeout: 90000 });
+       await page.click('#btn-play');
       await page.waitForTimeout(300);
       const mapIndex = Object.keys(POIS).indexOf(map) + 1;
       await page.click(`#map-list .map-card:nth-child(${mapIndex})`);
       await page.evaluate(() => (document.getElementById('btn-play-start') as HTMLButtonElement).click());
       await page.waitForSelector('#hud:not(.hidden)', { timeout: 60000 });
 
-      let landed = false;
-      for (let i = 0; i < 90; i++) {
-        await page.waitForTimeout(1200);
-        const st = await Promise.race([
-          page.evaluate('window.__xoState ? { grounded: window.__xoState.player && window.__xoState.player.grounded, phase: window.__xoState.phase } : null') as Promise<null | { grounded?: boolean; phase?: string }>,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
-        ]);
-        if (st?.phase === 'live' && st.grounded) {
-          landed = true;
-          break;
-        }
-        await page.evaluate('window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space" })); window.dispatchEvent(new KeyboardEvent("keyup", { code: "Space" }))');
-      }
-      if (!landed) throw new Error(`POI QA never reached live grounded state: ${map}`);
-      await page.waitForTimeout(2500);
+       let landed = false;
+       await page.waitForTimeout(6000);
+       await page.keyboard.press('Space');
+       for (let i = 0; i < 60; i++) {
+         await page.waitForTimeout(1000);
+         const st = await page.evaluate(() => ({
+           phase: document.documentElement.dataset.xoQaPhase ?? '',
+           collision: document.documentElement.dataset.xoQaCollision ?? '',
+         }));
+         if (st.phase === 'live' && /\|grounded=1(?:\||$)/.test(st.collision)) {
+           landed = true;
+           break;
+         }
+       }
+       if (!landed) throw new Error(`POI QA never reached live grounded state: ${map}`);
+        await page.waitForTimeout(2500);
 
       for (const poi of POIS[map]!) {
-        const teleported = await page.evaluate((p) => {
-          const tp = (window as unknown as {
-            __xoTeleport?: (
-              x: number, z: number, yaw: number, refY?: number, pitch?: number,
-              mode?: 'standing' | 'swim',
-            ) => boolean;
-          }).__xoTeleport;
-          return tp?.(p.x, p.z, p.yaw, undefined, -0.12, p.mode ?? 'standing') ?? false;
-        }, poi);
+        const nonce = `poi-${map}-${poi.name}-${Date.now()}`;
+        await page.evaluate(() => {
+          const revive = (window as unknown as { __xoQaRevive?: () => boolean }).__xoQaRevive;
+          if (revive && !revive()) throw new Error('QA revive unavailable');
+        });
+        await page.evaluate((request) => {
+          const input = document.getElementById('xo-qa-teleport-command') as HTMLInputElement | null;
+          if (!input) return;
+          input.value = JSON.stringify(request);
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }, { nonce, x: poi.x, z: poi.z, yaw: poi.yaw, pitch: -0.12, mode: poi.mode ?? 'standing' });
+        let teleported = false;
+        for (let i = 0; i < 30; i++) {
+          await page.waitForTimeout(100);
+          const result = await page.evaluate((expectedNonce) => {
+            const raw = document.documentElement.dataset.xoQaTeleportResult;
+            if (!raw) return null;
+            try {
+              const parsed = JSON.parse(raw) as { nonce?: string; ok?: boolean };
+              return parsed.nonce === expectedNonce ? parsed : null;
+            } catch {
+              return null;
+            }
+          }, nonce);
+          if (result?.ok === true) {
+            teleported = true;
+            break;
+          }
+        }
         if (!teleported) throw new Error(`QA teleport rejected for ${map}/${poi.name}`);
         await page.waitForTimeout(700);
         const resolvedPosition = await page.evaluate(
@@ -121,15 +167,23 @@ async function main(): Promise<void> {
             `QA teleport resolved too far from ${map}/${poi.name}: requested=${poi.x},${poi.z} resolved=${resolvedPosition}`,
           );
         }
-        await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' })));
-        await page.waitForTimeout(520);
-        await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' })));
-        await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyD' })));
-        await page.waitForTimeout(180);
-        await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyD' })));
-        await page.waitForTimeout(1200);
+        if (!captureOnly) {
+          await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' })));
+          await page.waitForTimeout(520);
+          await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' })));
+          await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyD' })));
+          await page.waitForTimeout(180);
+          await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyD' })));
+          await page.waitForTimeout(1200);
+        }
+        await page.evaluate(() => {
+          const revive = (window as unknown as { __xoQaRevive?: () => boolean }).__xoQaRevive;
+          if (revive && !revive()) throw new Error('QA revive unavailable before capture');
+        });
+        await page.waitForTimeout(captureOnly ? 220 : 180);
         const state = await page.evaluate(() => ({
           map: document.documentElement.dataset.xoQaMap ?? 'missing',
+          alive: (window as unknown as { __xoState?: { player?: { alive?: boolean } } }).__xoState?.player?.alive === true,
           collision: document.documentElement.dataset.xoQaCollision ?? 'missing',
           world: document.documentElement.dataset.xoQaWorld ?? 'missing',
           movement: document.documentElement.dataset.xoQaMovement ?? 'missing',
@@ -137,6 +191,7 @@ async function main(): Promise<void> {
           water: document.documentElement.dataset.xoQaWater ?? 'missing',
           runtime: document.documentElement.dataset.xoQaRuntime ?? 'missing',
         }));
+        if (!state.alive) throw new Error(`POI capture reached a dead/spectating state: ${map}/${poi.name}`);
         if (state.map !== map) throw new Error(`Wrong QA map for ${map}/${poi.name}: ${state.map}`);
         if (!state.collision.startsWith('count=0|depth=0.0000|')) {
           throw new Error(`Unsafe POI placement ${map}/${poi.name}: ${state.collision}`);

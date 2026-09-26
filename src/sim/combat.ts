@@ -410,9 +410,6 @@ export class CombatSystem {
       rt.currentSpread = 0;
     }
 
-    // Time since the previous real shot drives the sustained-fire climb.
-    rt.lastShotTime += dt;
-
     // Recoil recovery (view returns toward original aim). The rate is the
     // weapon profile's, so heavy weapons visibly recover slower; exponential
     // decay keeps it frame-rate independent.

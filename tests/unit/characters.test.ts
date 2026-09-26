@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { describe, expect, it, vi } from 'vitest';
-import { CharacterFactory, SKIN_IDS, SKIN_SPECS, skinForName } from '../../src/render/characters';
+import { CharacterFactory, SKIN_IDS, SKIN_SPECS, authoredMaterialRole, skinForName, styleAuthoredMaterial } from '../../src/render/characters';
 
 describe('character skins', () => {
   it('exposes twelve distinct deterministic procedural skin specs', () => {
@@ -24,6 +24,50 @@ describe('character skins', () => {
     expect(bounds.max.y).toBeGreaterThan(1.8);
     expect(bounds.max.y).toBeLessThan(1.9);
     rig.dispose();
+  });
+});
+
+describe('authored SWAT materials', () => {
+  it('maps source names to stable semantic roles', () => {
+    expect(authoredMaterialRole('DarkBrown')).toBe('darkBrown');
+    expect(authoredMaterialRole('Swat_Black')).toBe('swatBlack');
+    expect(authoredMaterialRole('Visor')).toBe('visor');
+    expect(authoredMaterialRole('unknown')).toBeNull();
+  });
+
+  it('keeps skin and visor source color while separating their response', () => {
+    const suit = new THREE.Color(0x2d6cdf);
+    const skin = new THREE.MeshStandardMaterial({ name: 'Skin', color: 0xc58b6a, emissive: 0x111111, roughness: 0.5, metalness: 0.1 });
+    const visor = new THREE.MeshStandardMaterial({ name: 'Visor', color: 0x101820, emissive: 0x111111, roughness: 0.5, metalness: 0 });
+    styleAuthoredMaterial(skin, authoredMaterialRole(skin.name), suit);
+    styleAuthoredMaterial(visor, authoredMaterialRole(visor.name), suit);
+    expect(skin.color.getHex()).toBe(0xc58b6a);
+    expect(skin.emissive.getHex()).toBe(0);
+    expect(skin.roughness).toBe(0.76);
+    expect(skin.metalness).toBe(0);
+    expect(visor.color.getHex()).toBe(0x101820);
+    expect(visor.emissive.getHex()).toBe(0);
+    expect(visor.roughness).toBe(0.2);
+    expect(visor.metalness).toBe(0.55);
+  });
+
+  it('gives tactical roles distinct PBR values and leaves unknown roles source-faithful', () => {
+    const suit = new THREE.Color(0x2d6cdf);
+    const swat = new THREE.MeshStandardMaterial({ name: 'Swat', color: 0x334455, roughness: 0.5, metalness: 0 });
+    const black = new THREE.MeshStandardMaterial({ name: 'Black', color: 0x111111, roughness: 0.5, metalness: 0 });
+    const unknown = new THREE.MeshStandardMaterial({ name: 'SourceOnly', color: 0xabcdef, emissive: 0x123456, roughness: 0.37, metalness: 0.12, envMapIntensity: 0.42 });
+    styleAuthoredMaterial(swat, authoredMaterialRole(swat.name), suit);
+    styleAuthoredMaterial(black, authoredMaterialRole(black.name), suit);
+    styleAuthoredMaterial(unknown, authoredMaterialRole(unknown.name), suit);
+    expect(swat.roughness).toBe(0.8);
+    expect(swat.metalness).toBe(0.05);
+    expect(black.roughness).toBe(0.48);
+    expect(black.metalness).toBe(0.35);
+    expect(unknown.color.getHex()).toBe(0xabcdef);
+    expect(unknown.emissive.getHex()).toBe(0x123456);
+    expect(unknown.roughness).toBe(0.37);
+    expect(unknown.metalness).toBe(0.12);
+    expect(unknown.envMapIntensity).toBe(0.42);
   });
 });
 

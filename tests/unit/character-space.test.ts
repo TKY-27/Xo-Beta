@@ -12,6 +12,7 @@ import {
 import { CameraRig, SPECTATOR_CAMERA, TRANSPORT_CAMERA } from '../../src/render/cameraRig';
 import { getSettings } from '../../src/core/settings';
 import { Actor } from '../../src/sim/actor';
+import type { ActorView } from '../../src/sim/gameStateView';
 import { CombatSystem } from '../../src/sim/combat';
 import { emptyCommand } from '../../src/sim/input';
 import { groundSurfaceForActor, waterVolumeContains } from '../../src/sim/match';
@@ -237,6 +238,46 @@ describe('authoritative character-space coordinates', () => {
     rig.resetAimState();
     expect(rig.scoped).toBe(false);
     expect(rig.camera.fov).toBe(getSettings().fov);
+  });
+
+  it('matches replica scope optics and applies local presentation recoil', () => {
+    const actor = actorAtFeet('SCOPE_PAIR', 0, 0, 0);
+    actor.inv.slots[0] = { kind: 'weapon', weaponId: 'sniper', rarity: 'common', ammoInMag: 1 };
+    actor.inv.selected = 0;
+    actor.wpn.adsAmount = 1;
+    const view = {
+      id: actor.id,
+      position: { ...actor.body.position },
+      velocity: { x: 0, y: 0, z: 0 },
+      yaw: actor.yaw,
+      pitch: actor.pitch,
+      grounded: true,
+      crouched: false,
+      equippedWeapon: 'sniper',
+    } as unknown as ActorView;
+    const noCollision = { cameraCast: () => null };
+    const offline = new CameraRig(16 / 9);
+    const online = new CameraRig(16 / 9);
+
+    offline.update(actor, 1, noCollision);
+    online.updateView(view, 1, noCollision, { adsAmount: 1 });
+
+    expect(online.scoped).toBe(offline.scoped);
+    expect(online.scopeProgress).toBeCloseTo(offline.scopeProgress, 8);
+    expect(online.camera.fov).toBeCloseTo(offline.camera.fov, 8);
+
+    online.resetAimState();
+    expect(online.scoped).toBe(false);
+    expect(online.scopeProgress).toBe(0);
+
+    const rifleView = { ...view, equippedWeapon: 'ar', inventory: null } as unknown as ActorView;
+    online.addLocalRecoil('ar');
+    online.updateView(rifleView, 1 / 60, noCollision);
+    const kickedPitch = new THREE.Euler().setFromQuaternion(online.camera.quaternion, 'YXZ').x;
+    expect(kickedPitch).toBeGreaterThan(rifleView.pitch);
+    online.updateView(rifleView, 1, noCollision);
+    const recoveredPitch = new THREE.Euler().setFromQuaternion(online.camera.quaternion, 'YXZ').x;
+    expect(recoveredPitch).toBeLessThan(kickedPitch);
   });
 
   it('keeps the TPS transport camera at a stable overhead height with continuous free look', () => {

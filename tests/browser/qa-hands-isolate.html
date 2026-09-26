@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>hands isolate</title>
+<link rel="icon" href="/favicon.svg">
 <style>body{margin:0;background:#888}canvas{display:block}</style>
 </head>
 <body>
@@ -25,25 +26,49 @@ renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 await renderer.init();
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x8fa3b5);
-const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 900);
-camera.position.set(0, 0, 0);
-camera.lookAt(0, 0, -1);
+const { loadGltf } = await import('/src/assets/assets.ts');
+await Promise.all([
+  'weapons/authored-pistol.glb',
+  'weapons/authored-ar-ak47.glb',
+  'weapons/authored-smg-suomi.glb',
+   'weapons/authored-shotgun-pump.glb',
+   'weapons/authored-sniper-m700.glb',
+   'hands/authored-tactical-hand.glb',
+  'hands/libhand-hand.glb',
+     'hands/authored-sleeve.glb',
 
-const key = new THREE.DirectionalLight(0xffffff, 2.4);
-key.position.set(0.6, 1.2, 0.5);
-scene.add(key);
-const fill = new THREE.DirectionalLight(0xbfd4e8, 1.1);
-fill.position.set(-1.2, 0.3, 0.7);
-scene.add(fill);
-scene.add(new THREE.AmbientLight(0x9fb4c8, 0.55));
-
+].map((path) => loadGltf(path)));
+window.__xoQaAuthoredAssetsLoaded = true;
 const { ViewModel } = await import('/src/render/viewmodel.ts');
+const { ViewModelStage } = await import('/src/render/viewmodelStage.ts');
 const { WeaponModelFactory } = await import('/src/render/weaponModels.ts');
+
+const stage = new ViewModelStage();
+stage.scene.background = new THREE.Color(0x8fa3b5);
+stage.resize(innerWidth, innerHeight);
+stage.syncLighting(new THREE.Quaternion(), {
+  sunColor: new THREE.Color(0xfff1d8),
+  sunIntensity: 2.2,
+  sunDirection: new THREE.Vector3(0.4, 0.8, 0.6),
+  hemiSkyColor: new THREE.Color(0xc5d8ea),
+  hemiGroundColor: new THREE.Color(0x4a5148),
+  hemiIntensity: 0.8,
+  ambientColor: new THREE.Color(0xbecddd),
+  ambientIntensity: 0.4,
+  environment: null,
+  environmentIntensity: 0.4,
+});
+const scene = stage.scene;
+const camera = stage.camera;
 
 const factory = new WeaponModelFactory(null);
 const viewmodel = new ViewModel(factory);
+if (params.get('hideSleeves') === '1') viewmodel.armSolver.group.visible = false;
+if (params.get('hideHands') === '1') for (const rig of viewmodel.rigs.values()) { rig.right.visible = false; rig.left.visible = false; }
+if (params.get('hideViewmodel') === '1') viewmodel.group.visible = false;
+const hideViewmodel = params.get('hideViewmodel') === '1';
+const hideWeapon = params.get('hideWeapon') === '1';
+const onlyMesh = params.get('onlyMesh');
 scene.add(viewmodel.group);
 viewmodel.syncCamera(camera);
 
@@ -70,6 +95,10 @@ const actor = {
 // Warm the presentation springs to steady state, then hold the hip pose.
 for (let i = 0; i < 120; i++) viewmodel.updateView(actor, 1 / 60, 0, 0, 0, { adsAmount });
 viewmodel.updateView(actor, 1 / 60, 0, 0, 0, { adsAmount });
+const action = params.get('action');
+const frozenPhase = params.has('phase') ? Number(params.get('phase')) : null;
+if (action === 'pump' && weapon === 'shotgun') viewmodel.notifyShotFired('shotgun');
+if (action === 'reload' && weapon !== 'none') viewmodel.notifyReloadStarted(weapon, rarity, params.get('empty') === '1');
 
 if (zoom > 0) {
   // Punch in on the grip area for contact inspection (does not move the rig):
@@ -88,6 +117,8 @@ if (zoom > 0) {
 }
 window.__ready = true;
 window.__vm = viewmodel;
+window.__stage = stage;
+window.__camera = camera;
 
 // QA_GIZMO=1: overlay the grip pose basis on the RIGHT hand (red = palm
 // normal (local -y), green = finger-extend (local -z), blue = hand-local
@@ -116,7 +147,19 @@ const errors = [];
 window.addEventListener('error', (e) => errors.push(String(e.error ?? e.message)));
 
 const loop = () => {
+  if (frozenPhase !== null && Number.isFinite(frozenPhase)) {
+    if (action === 'pump' && viewmodel.presentBoltTotal > 0) viewmodel.presentBoltElapsed = viewmodel.presentBoltTotal * frozenPhase;
+    if (action === 'reload' && viewmodel.presentReloadTotal > 0) viewmodel.presentReloadElapsed = viewmodel.presentReloadTotal * frozenPhase;
+  }
   viewmodel.updateView(actor, 1 / 60, 0, 0, 0, { adsAmount });
+  if (params.get('hideSleeves') === '1') viewmodel.armSolver.group.visible = false;
+  if (hideViewmodel) viewmodel.group.visible = false;
+  if (hideWeapon && viewmodel.currentModel) viewmodel.currentModel.group.visible = false;
+  if (onlyMesh && viewmodel.currentModel) viewmodel.currentModel.group.traverse((object) => {
+    if (object.isMesh) object.visible = object.name === onlyMesh;
+  });
+  if (params.get('hideUpperSleeve') === '1') viewmodel.armSolver.group.traverse((object) => { if (object.name.includes('sleeve-upper')) object.visible = false; });
+  if (params.get('hideHands') === '1') for (const rig of viewmodel.rigs.values()) { rig.right.visible = false; rig.left.visible = false; }
   renderer.renderAsync(scene, camera).catch((e) => errors.push(String(e)));
   requestAnimationFrame(loop);
 };

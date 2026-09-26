@@ -7,6 +7,7 @@
 import { emptyCommand, type InputCommand } from '../sim/input';
 import type { ActorController } from '../sim/match';
 import type { Actor } from '../sim/actor';
+import type { WeaponId } from '../core/balance';
 import { getSettings } from '../core/settings';
 import type { GamepadInput } from './gamepad';
 import type { EventBus } from '../core/events';
@@ -33,10 +34,20 @@ export class PlayerController implements ActorController {
   private readonly qaKeyDownAt = new Map<string, number>();
   private lookDx = 0;
   private lookDy = 0;
+  private presentationLookDx = 0;
+  private presentationLookDy = 0;
+  private activeWeaponId: WeaponId | null = null;
   yaw = 0;
   pitch = 0;
   private inputEnabled = false;
+  private mouseButton(binding: string, fallback: number): number {
+    const match = /^Mouse([0-9]+)$/.exec(binding);
+    return match ? Number(match[1]) : fallback;
+  }
   get enabled(): boolean { return this.inputEnabled; }
+  get fireIntent(): boolean {
+    return this.mouseButtons.has(this.mouseButton(getSettings().bindings.fire, 0)) || !!this.gamepad?.fireIntent;
+  }
   set enabled(value: boolean) {
     if (!value) this.clearGameplayInput();
     this.inputEnabled = value;
@@ -192,8 +203,8 @@ export class PlayerController implements ActorController {
       if (!this.enabled || (!this.locked && !this.qaUnlockedInput)) return;
       this.mouseButtons.add(e.button);
       const b = getSettings().bindings;
-      if (e.button === 0 && b.fire === 'Mouse0') this.pendingFirePress = true;
-      if (e.button === 2 && b.ads === 'Mouse2') { /* ads is held */ }
+      if (e.button === this.mouseButton(b.fire, 0)) this.pendingFirePress = true;
+      if (e.button === this.mouseButton(b.ads, 2)) { /* ads is held */ }
     }, { signal: this.listenerAbort.signal });
     window.addEventListener('mouseup', (e) => {
       this.mouseButtons.delete(e.button);
@@ -207,6 +218,8 @@ export class PlayerController implements ActorController {
       if (!this.enabled || (!this.locked && !this.qaUnlockedInput)) return;
       this.lookDx += e.movementX;
       this.lookDy += e.movementY;
+      this.presentationLookDx += e.movementX;
+      this.presentationLookDy += e.movementY;
       // Smoothed look velocity for viewmodel sway (decays each frame)
       this.lookVelX = this.lookVelX * 0.7 + e.movementX * 0.3;
       this.lookVelY = this.lookVelY * 0.7 + e.movementY * 0.3;
@@ -214,6 +227,7 @@ export class PlayerController implements ActorController {
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === this.canvas;
       if (!this.locked) {
+        this.clearLookInput();
         this.keys.clear();
         this.mouseButtons.clear();
         this.pendingFirePress = false;
@@ -233,6 +247,7 @@ export class PlayerController implements ActorController {
 
   releaseLock(): void {
     if (document.pointerLockElement) document.exitPointerLock();
+    this.clearLookInput();
   }
 
   dispose(): void {
@@ -246,15 +261,30 @@ export class PlayerController implements ActorController {
     this.qaKeyDownAt.clear();
   }
 
+  private clearLookInput(): void {
+    this.lookDx = 0;
+    this.lookDy = 0;
+    this.presentationLookDx = 0;
+    this.presentationLookDy = 0;
+    this.lookVelX = 0;
+    this.lookVelY = 0;
+  }
+
+  private decayLookVelocity(dt: number): void {
+    const safeDt = Number.isFinite(dt) ? Math.max(0, dt) : 0;
+    const decay = Math.pow(0.7, safeDt * 60);
+    this.lookVelX *= decay;
+    this.lookVelY *= decay;
+    if (Math.abs(this.lookVelX) < 1e-6) this.lookVelX = 0;
+    if (Math.abs(this.lookVelY) < 1e-6) this.lookVelY = 0;
+  }
+
   private clearGameplayInput(): void {
     this.keys.clear();
     this.mouseButtons.clear();
     this.qaKeyDeadlines.clear();
     this.qaKeyDownAt.clear();
-    this.lookDx = 0;
-    this.lookDy = 0;
-    this.lookVelX = 0;
-    this.lookVelY = 0;
+    this.clearLookInput();
     this.pendingJump = false;
     this.pendingFirePress = false;
     this.pendingReload = false;
@@ -275,6 +305,19 @@ export class PlayerController implements ActorController {
   resetLook(yaw: number, pitch: number): void {
     this.yaw = yaw;
     this.pitch = pitch;
+    this.clearLookInput();
+  }
+
+  presentationLook(adsAmount: number): { yaw: number; pitch: number } {
+    const s = getSettings();
+    const amount = Number.isFinite(adsAmount) ? Math.max(0, Math.min(1, adsAmount)) : 0;
+    const adsScale = amount > 0.01 ? s.adsSensitivity : 1;
+    let sensitivity = s.sensitivity * adsScale * 0.0023;
+    if (this.scopedZoom > 1 && amount > 0.5 && this.activeWeaponId === 'sniper') sensitivity /= this.scopedZoom;
+    return {
+      yaw: -this.presentationLookDx * sensitivity,
+      pitch: -this.presentationLookDy * sensitivity * (s.invertY ? -1 : 1),
+    };
   }
 
   /** Queue an owner-permitted inventory selection for the next sampled tick. */
@@ -297,6 +340,7 @@ export class PlayerController implements ActorController {
   }
 
   updateCommand(actor: Actor, dt: number): InputCommand {
+    this.activeWeaponId = actor.inv?.selectedWeapon?.weaponId ?? null;
     return this.sampleCommand(actor.wpn.adsAmount, dt);
   }
 
@@ -305,12 +349,14 @@ export class PlayerController implements ActorController {
    * Online guests pass the owner-scoped authoritative ADS amount from their
    * read-only replica; only the host ever supplies this command to Match.
    */
-  sampleCommand(adsAmount: number, dt: number): InputCommand {
+  sampleCommand(adsAmount: number, dt: number, weaponId: WeaponId | null = this.activeWeaponId): InputCommand {
+    this.activeWeaponId = weaponId;
     const cmd = emptyCommand();
     if (!this.enabled) {
       this.clearGameplayInput();
       return cmd;
     }
+    this.decayLookVelocity(dt);
     if (this.qaUnlockedInput && !this.locked) {
       const now = performance.now();
       for (const [code, deadline] of this.qaKeyDeadlines) {
@@ -345,12 +391,12 @@ export class PlayerController implements ActorController {
     cmd.jumpHeld = this.keys.has(b.jump);
     this.pendingJump = false;
 
-    const firing = this.mouseButtons.has(0);
+    const firing = this.mouseButtons.has(this.mouseButton(b.fire, 0));
     cmd.fireHeld = firing;
     cmd.firePressed = this.pendingFirePress;
     this.pendingFirePress = false;
 
-    cmd.adsHeld = this.mouseButtons.has(2);
+    cmd.adsHeld = this.mouseButtons.has(this.mouseButton(b.ads, 2));
     cmd.reloadPressed = this.pendingReload;
     this.pendingReload = false;
     cmd.interactPressed = this.pendingInteract;
@@ -387,23 +433,30 @@ export class PlayerController implements ActorController {
 
     // Look — gamepad is polled above, then consumed in the same simulation
     // tick so right-stick aiming cannot lag one frame behind movement.
-    let lookDx = this.lookDx;
-    let lookDy = this.lookDy;
+    const mouseLookDx = this.lookDx;
+    const mouseLookDy = this.lookDy;
+    let lookDx = mouseLookDx;
+    let lookDy = mouseLookDy;
     if (this.gamepad) {
       const padLook = this.gamepad.consumeLook();
-      const padScale = s.padLookSens * 11.5 * dt * 60 * 0.016 * (safeAdsAmount > 0.5 ? 0.55 : 1);
+      const padScale = s.padLookSens * 11.5 * dt * 60 * 0.016;
       lookDx += padLook.dx * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
       lookDy += padLook.dy * padScale / Math.max(0.0001, s.sensitivity * 0.0023);
     }
-    let sens = s.sensitivity * 0.0023 * (safeAdsAmount > 0.5 ? s.adsSensitivity : 1);
+    const adsScale = safeAdsAmount > 0.01 ? s.adsSensitivity : 1;
+    let sens = s.sensitivity * adsScale * 0.0023;
     // Angular scaling while scoped: turning rate shrinks with the scope's
     // tangent ratio, so 4x feels controllable and 1x feels unchanged.
-    if (this.scopedZoom > 1 && safeAdsAmount > 0.5) sens /= this.scopedZoom;
+    if (this.scopedZoom > 1 && safeAdsAmount > 0.5 && this.activeWeaponId === 'sniper') sens /= this.scopedZoom;
     this.yaw -= lookDx * sens;
     this.pitch -= lookDy * sens * (s.invertY ? -1 : 1);
     const lim = Math.PI / 2 - 0.02;
     this.pitch = Math.max(-lim, Math.min(lim, this.pitch));
     this.yaw = ((this.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    this.presentationLookDx -= mouseLookDx;
+    this.presentationLookDy -= mouseLookDy;
+    if (Math.abs(this.presentationLookDx) < 1e-6) this.presentationLookDx = 0;
+    if (Math.abs(this.presentationLookDy) < 1e-6) this.presentationLookDy = 0;
     this.lookDx = 0;
     this.lookDy = 0;
 

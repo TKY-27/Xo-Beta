@@ -34,6 +34,7 @@ interface LoadState {
   textureSets: Map<string, TextureSet>;
   hdrs: Map<string, THREE.Texture>;
   gltfs: Map<string, GltfAsset>;
+  gltfPromises: Map<string, Promise<GltfAsset>>;
   audio: Map<string, ArrayBuffer>;
 }
 
@@ -42,6 +43,7 @@ const state: LoadState = {
   textureSets: new Map(),
   hdrs: new Map(),
   gltfs: new Map(),
+  gltfPromises: new Map(),
   audio: new Map(),
 };
 
@@ -162,16 +164,28 @@ export function clampHdriPeaks(tex: THREE.Texture, max = 5): THREE.Texture {
 export async function loadGltf(rel: string): Promise<GltfAsset> {
   const cached = state.gltfs.get(rel);
   if (cached) return cached;
+  const pending = state.gltfPromises.get(rel);
+  if (pending) return pending;
   const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/') + 1) : '';
   const l = loader();
   l.setPath(modelUrl(dir));
   const file = rel.slice(dir.length);
-  const gltf = await new Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>(
+  const request = new Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>(
     (resolve, reject) => l.load(file, resolve as never, undefined, reject),
-  );
-  const asset: GltfAsset = { scene: gltf.scene, animations: gltf.animations };
-  state.gltfs.set(rel, asset);
-  return asset;
+  ).then((gltf) => {
+    const asset: GltfAsset = { scene: gltf.scene, animations: gltf.animations };
+    state.gltfs.set(rel, asset);
+    return asset;
+  }).finally(() => {
+    state.gltfPromises.delete(rel);
+  });
+  state.gltfPromises.set(rel, request);
+  return request;
+}
+
+/** Sync access to an already-preloaded GLB for synchronous presentation factories. */
+export function peekGltf(rel: string): GltfAsset | null {
+  return state.gltfs.get(rel) ?? null;
 }
 
 /** Fetch raw audio bytes (decode happens in the AudioEngine). */
@@ -201,7 +215,8 @@ export async function preloadAll(onProgress: ProgressFn): Promise<void> {
   const TEX_DIRS = [
     'concrete', 'concreteDark', 'asphalt', 'sidewalk', 'metal', 'metalDark',
     'rust', 'corrugated', 'wood', 'woodDark', 'stoneBrick', 'bricksOld',
-    'plaster', 'plasterOld', 'grass', 'dirt', 'rock', 'roofTile', 'marble',
+    'plaster', 'plasterOld', 'grass', 'dirt', 'packedEarth', 'rock', 'roofTile', 'marble',
+    'desertRoad',
     'facadeA', 'facilityFloor',
   ];
   for (const d of TEX_DIRS) {
@@ -224,9 +239,44 @@ export async function preloadAll(onProgress: ProgressFn): Promise<void> {
       ]);
     },
   });
-
+  tasks.push({
+    label: 'Authored SWAT character',
+    run: () => loadGltf('characters/swat-modular.glb').then(() => undefined),
+  });
+  tasks.push({
+    label: 'Authored pistol',
+    run: () => loadGltf('weapons/authored-pistol.glb').then(() => undefined),
+  });
+  tasks.push({
+    label: 'Authored AR',
+    run: () => loadGltf('weapons/authored-ar-ak47.glb').then(() => undefined),
+  });
+  tasks.push({
+    label: 'Authored SMG',
+    run: () => loadGltf('weapons/authored-smg-suomi.glb').then(() => undefined),
+  });
+  tasks.push({
+    label: 'Authored sniper',
+    run: () => loadGltf('weapons/authored-sniper-m700.glb').then(() => undefined),
+  });
+  tasks.push({
+    label: 'Authored shotgun',
+    run: () => loadGltf('weapons/authored-shotgun-pump.glb').then(() => undefined),
+  });
+  tasks.push({
+    label: 'Authored hands',
+    run: () => Promise.all([
+      loadGltf('hands/authored-tactical-hand.glb'),
+      loadGltf('hands/libhand-hand.glb'),
+    ]).then(() => undefined),
+  });
+  tasks.push({
+    label: 'Authored sleeves',
+    run: () => loadGltf('hands/authored-sleeve.glb').then(() => undefined),
+  });
   let done = 0;
   const total = tasks.length;
+  const failures: string[] = [];
   let lastLabel = '';
   const tick = () => {
     done++;
@@ -238,6 +288,49 @@ export async function preloadAll(onProgress: ProgressFn): Promise<void> {
     const batch = tasks.slice(i, i + BATCH);
     lastLabel = batch[0]!.label;
     onProgress(done / total, lastLabel);
-    await Promise.all(batch.map((t) => t.run().then(tick).catch(tick)));
+    await Promise.all(batch.map((t) => t.run().then(tick).catch((error: unknown) => {
+      failures.push(`${t.label}: ${error instanceof Error ? error.message : String(error)}`);
+      tick();
+    })));
   }
+  if (failures.length > 0) throw new Error(`Required asset preload failed:\n${failures.join('\n')}`);
+}
+
+export async function preloadEnvironmentAssets(
+  paths: readonly string[],
+  onProgress?: ProgressFn,
+  signal?: AbortSignal,
+): Promise<void> {
+  const uniquePaths = [...new Set(paths)].sort();
+  const throwIfAborted = (): void => {
+    if (signal?.aborted) throw new DOMException('Environment preload aborted', 'AbortError');
+  };
+  throwIfAborted();
+  if (uniquePaths.length === 0) {
+    onProgress?.(1, 'Environment · none');
+    return;
+  }
+  let done = 0;
+  const failures: string[] = [];
+  const batchSize = 6;
+  const tick = (path: string): void => {
+    throwIfAborted();
+    done += 1;
+    onProgress?.(done / uniquePaths.length, `Environment · ${path.split('/').at(-1) ?? path}`);
+  };
+  for (let index = 0; index < uniquePaths.length; index += batchSize) {
+    throwIfAborted();
+    const batch = uniquePaths.slice(index, index + batchSize);
+    await Promise.all(batch.map(async (path) => {
+      try {
+        await loadGltf(path);
+        tick(path);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        failures.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+        tick(path);
+      }
+    }));
+  }
+  if (failures.length > 0) throw new Error(`Environment asset preload failed:\n${failures.join('\n')}`);
 }

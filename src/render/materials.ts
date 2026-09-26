@@ -91,7 +91,8 @@ const TILE_DENSITY: Record<string, number> = {
   concrete: 3.6, concreteDark: 3.2, asphalt: 2.4, sidewalk: 3.2, grass: 4,
   metal: 2.6, metalDark: 2.6, rust: 2.8, corrugated: 2.2,
   wood: 2.4, woodDark: 2.4, stoneBrick: 3, bricksOld: 3,
-  plaster: 4, plasterOld: 4, dirt: 3.2, rock: 3,
+  plaster: 4, plasterOld: 4, dirt: 3.2, dirtDesert: 3.2, packedEarth: 3.2, rock: 3,
+  desertRoad: 6,
   roofTile: 2.6, marble: 4, facadeA: 6,
 };
 
@@ -112,6 +113,7 @@ const TINTS: Partial<Record<MatKey, number>> = {
   // The dirt shoulder under the path ribbons had no tint (white multiplier)
   // and blew out at distance against the sunlit grass.
   dirt: 0x9a8468,
+  dirtDesert: 0xd8b98b,
   // CYCLE 62 (review): eden's road ribbon clipped to snow under the restored
   // sun + bloom — the asphalt set had no tint entry (white multiplier).
   asphalt: 0x84878b,
@@ -506,7 +508,6 @@ class TerrainSplatMaterial extends MeshStandardNodeMaterial {
     // ---- Per-layer samples, weighted and summed ------------------------
     const colorParts: Array<Node<'vec4'>> = [];
     const roughParts: Array<Node<'float'>> = [];
-    const normalParts: Array<Node<'vec3'>> = [];
     layers.forEach((layer, i) => {
       const set = layer.set ?? {};
       // Single-layer graphs (city bed, texture-less fallback) are fully
@@ -550,32 +551,8 @@ class TerrainSplatMaterial extends MeshStandardNodeMaterial {
         rough = float(1);
       }
 
-      let nrm: Node<'vec3'> = wNrm;
-      if (set.normal) {
-        const normalNode = texture(finalizeTerrainTex(set.normal.clone()));
-        this.ownedTextures.push(normalNode.value as THREE.Texture);
-        let nT: Node<'vec3'> = normalNode.sample(uvBase).xyz.mul(2).sub(1);
-        if (layer.detailMeters) {
-          nT = mix(
-            nT,
-            normalNode.sample(pXZ.mul(1 / Math.max(0.001, layer.detailMeters))).xyz.mul(2).sub(1),
-            float(layer.detailAmount ?? 0.22),
-          );
-        }
-        // Face-tangent frame from the world normal (terrain is mostly
-        // up-pointing; the flat branch keeps slopes well-formed).
-        const ns = layer.normalScale ?? 1;
-        const nxy = nT.xy.mul(float(ns));
-        const T0 = normalize(cross(vec3(0.0, 1.0, 0.0), wNrm));
-        const flat = abs(wNrm.y).greaterThan(0.99);
-        const T = flat.select(vec3(1.0, 0.0, 0.0), T0);
-        const B = flat.select(vec3(0.0, 0.0, 1.0), cross(wNrm, T0));
-        nrm = normalize(T.mul(nxy.x).add(B.mul(nxy.y)).add(wNrm.mul(nT.z)));
-      }
-
       colorParts.push(col.mul(weight));
       roughParts.push(rough.mul(weight));
-      normalParts.push(nrm.mul(weight));
     });
 
     this.colorNode = colorParts.reduce((a, b) => a.add(b));
@@ -586,11 +563,22 @@ class TerrainSplatMaterial extends MeshStandardNodeMaterial {
       ).g);
     }
     this.roughnessNode = roughNode.clamp(0, 1);
-    // All micro-normal work rides the TSL normalNode — NEVER the stock
-    // normalMap slot, which zeroes direct lighting under r185 (cycle 57).
-    this.normalNode = transformNormalToView(
-      normalize(normalParts.reduce((a, b) => a.add(b))),
-    );
+    // Micro-normal relief is deliberately NOT applied here.
+    //
+    // QA_STATE cycle 57 recorded that the stock `normalMap` slot zeroes direct
+    // lighting under r185, and routed terrain relief through the TSL
+    // `normalNode` to dodge it. That dodge does not work: measured on Ashara,
+    // a terrain splat material WITH `normalNode` receives no key light at all
+    // (ground renders near-black and no cast shadow ever lands on it), and
+    // clearing only `normalNode` on the same material restores a correctly lit
+    // raked key with visible shadows, with no other change. The TSL normal
+    // path therefore inherits the same r185 defect, so terrain must stay on
+    // the stock normal (geometric) path.
+    //
+    // Relief is not lost: the splat albedo sets already carry baked grain,
+    // ripples and macro breakup, and `detailMeters`/`detailAmount` add a second
+    // albedo octave. Do not reintroduce a normal here without re-running the
+    // `__xoTerrainQa` isolation captures that prove direct light survives.
   }
 }
 
@@ -620,22 +608,30 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   // the in-bounds ground and the surrounding heightfield read as one world.
   const GROUND_GRAIN_METERS = 1.2;
   /** Keys of the ground family carrying the shared grain. */
-  const GRAIN_KEYS: ReadonlySet<string> = new Set(['asphalt', 'sidewalk', 'concrete', 'concreteDark', 'paving']);
+  const GRAIN_KEYS: ReadonlySet<string> = new Set(['asphalt', 'sidewalk', 'concrete', 'concreteDark', 'paving', 'dirtDesert', 'asphaltDesert']);
 
   const dirsByMat: Record<string, string> = {
     concrete: 'concrete', concreteDark: 'concreteDark', asphalt: 'asphalt',
     sidewalk: 'sidewalk', metal: 'metal', metalDark: 'metalDark', rust: 'rust',
     corrugated: 'corrugated', wood: 'wood', woodDark: 'woodDark',
     stoneBrick: 'stoneBrick', bricksOld: 'bricksOld', plaster: 'plaster',
-    plasterOld: 'plasterOld', grass: 'grass', dirt: 'dirt', rock: 'rock',
+    plasterOld: 'plasterOld', grass: 'grass', dirt: 'dirt', dirtDesert: 'packedEarth', rock: 'rock',
+    asphaltDesert: 'desertRoad',
     roofTile: 'roofTile', marble: 'marble', facadeA: 'facadeA',
   };
 
   const sets = new Map<string, Awaited<ReturnType<typeof loadTextureSet>>>();
   await Promise.all(
-    Object.entries(dirsByMat).map(async ([matKey, dir]) => {
+    Object.entries(dirsByMat).map(async ([, dir]) => {
       try {
-        sets.set(matKey, await loadTextureSet(dir));
+        // Key by `dir`, not `matKey`: `std()` below looks the set up with
+        // `sets.get(dir)`, so storing under the material key made every lookup
+        // miss and silently downgraded the whole hand-authored material library
+        // to the flat fallback palette (no albedo, no normal, no roughness
+        // map) in every build. Several material keys intentionally share one
+        // texture set (`dirt`/`dirtDesert`, `concrete`/`concreteDark`), so the
+        // set is the thing that must be addressable.
+        if (!sets.has(dir)) sets.set(dir, await loadTextureSet(dir));
       } catch {
         /* missing set falls back to flat material */
       }
@@ -668,7 +664,7 @@ export async function createMaterials(): Promise<MaterialLibrary> {
       concrete: 0x7d8084, concreteDark: 0x74777c, asphalt: 0x60646b, sidewalk: 0x777a7d,
       metal: 0x9aa4ad, metalDark: 0x59636d, rust: 0x7a4a30, corrugated: 0x88929c,
       wood: 0xa07848, woodDark: 0x5f4630, stoneBrick: 0x8d897f, bricksOld: 0x8d6f5f,
-      plaster: 0xbfb7a8, plasterOld: 0xb0a48c, grass: 0x5d7a43, dirt: 0x6e5a41,
+      plaster: 0xbfb7a8, plasterOld: 0xb0a48c, grass: 0x5d7a43, dirt: 0x6e5a41, dirtDesert: 0xb79d72,
       rock: 0x76736c, roofTile: 0x8a4a3a, marble: 0xd9d6cf, facadeA: 0x9fb2c0,
       facilityFloor: 0x9aa2ac,
     };
@@ -695,16 +691,15 @@ export async function createMaterials(): Promise<MaterialLibrary> {
     a.normalScale.set(0.35, 0.35);
     a.roughness = 0.98;
   }
-  // ASHARA is a high-noon desert. Reusing the blue-hour city asphalt made
-  // its highway collapse to a featureless black ribbon. Keep this surface
-  // untextured and matte so it retains a warm aggregate value under direct
-  // sun; road wear and lane breakup are authored as separate geometry.
-  mats.set('asphaltDesert', new MeshStandardNodeMaterial({
-    color: 0x4f4a43,
-    roughness: 0.97,
-    metalness: 0,
-    envMapIntensity: 0.24,
-  }));
+  // ASHARA is a high-noon desert. The shared asphalt albedo averages
+  // RGB(69,68,67) and a material tint is a channel-wise multiply, so it can
+  // only be darkened: the logistics highway used to be a deliberately
+  // untextured flat fill that read as a near-black ribbon across the dunes.
+  // `desertRoad` re-authors that albedo as faded asphalt with windblown sand
+  // in the low spots and the aggregate still showing through the wheel paths
+  // (avg RGB(115,110,102), chroma r-g 5.0 / g-b 7.7, luma 72/111/168,
+  // std 11.5), reusing the asphalt normal and roughness byte-for-byte.
+  mats.set('asphaltDesert', std('asphaltDesert', 'desertRoad', { roughness: 1 }));
   mats.set('sidewalk', std('sidewalk', 'sidewalk', { roughness: 1 }));
   // Outdoor steel family: weathered, painted or corroded — not clean metal.
   // Metalness ≥0.8 here made every shadowed face crush to near-black (no
@@ -749,6 +744,25 @@ export async function createMaterials(): Promise<MaterialLibrary> {
   }));
   mats.set('grass', std('grass', 'grass'));
   mats.set('dirt', std('dirt', 'dirt'));
+  // Packed-earth market lane. The stock CC0 `dirt` albedo averages RGB(80,66,36)
+  // - dark and strongly red - so no tint multiply can rescue it: multiplication
+  // only darkens channels, which is why every desert lane rendered from `dirt`
+  // read as a saturated red-brown smear. `packedEarth` re-authors that albedo
+  // from the same set's normal map (value follows surface relief, so colour
+  // tracks compaction) as a low-chroma sandy ramp averaging RGB(145,137,123).
+  // Its normal/roughness are the verified `dirt` files byte-for-byte, so the
+  // albedo is derived, not a new dependency. The tint stays near-neutral so the
+  // set's own chroma shows, and sits below the surrounding sand in value - a
+  // compacted track is darker than the loose ground beside it, which is what
+  // gives the lane its read. 3.2 m keeps aggregate legible at running speed; the
+  // raised normal gives ruts enough relief to catch the raked key rather than
+  // reading as a decal.
+  mats.set('dirtDesert', std('dirtDesert', 'packedEarth', {
+    color: 0xc4b9a6,
+    roughness: 1,
+    normalScale: 0.55,
+    metersPerTile: 3.2,
+  }));
   mats.set('rock', std('rock', 'rock'));
   mats.set('roofTile', std('roofTile', 'roofTile'));
   // CYCLE 24: roughness 0.45 made oldfront's trims/pier decks read as

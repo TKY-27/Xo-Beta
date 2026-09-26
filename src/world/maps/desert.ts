@@ -10,7 +10,7 @@
 import { Rng } from '../../core/rng';
 import { WorldBuilder } from '../builder';
 import type { MapDef, MatKey } from '../types';
-import { addBuilding, addDrumCluster, addGroundDecay, addMarketStall, dressingSpotClear, hardenExposedFlanks, scatterRocks, structureBaseY } from './common';
+import { addBuilding, addDrumCluster, addGroundDecay, dressingSpotClear, hardenExposedFlanks, scatterRocks, structureBaseY } from './common';
 
 const S = 500;
 
@@ -27,6 +27,10 @@ function terrainH(x: number, z: number): number {
   h += gaussian(x, z, -188, -146, 85, 6.5);  // western ridge
   h += gaussian(x, z, 184, 176, 95, 7.2);    // south-east escarpment
   h += gaussian(x, z, -205, 184, 80, 4.5);   // irrigation high bank
+  // Local market terrace: low authored relief breaks the POI's previously
+  // mathematical plane and gives the lane a crown without changing the map's
+  // broad silhouette.
+  h += gaussian(x, z, -42, -34, 24, 0.72) - gaussian(x, z, -34, -30, 11, 0.24);
 
   // Dry riverbed: a winding, readable depression with broad shoulders.
   const wadiZ = 42 + Math.sin(x * 0.018) * 18 + Math.sin(x * 0.006 + 1.2) * 9;
@@ -87,7 +91,7 @@ export function buildAsharaReach(): MapDef {
 
   hardenExposedFlanks(b, { mat: 'concreteDark', maxProps: 20 });
 
-  return b.finish({
+  const def = b.finish({
     preset: 'day',
     atmosphere: {
       // Dry bright desert: high cirrus, dust at the horizon, stronger but
@@ -102,19 +106,34 @@ export function buildAsharaReach(): MapDef {
     hdri: 'qwantani_puresky_2k.hdr',
     fogColor: 0xc7b99f,
     fogDensity: 0.00125,
-    sunDirection: [-0.48, -0.82, -0.3],
+    // Raked key (~34 deg elevation). The old near-noon sun (-0.48,-0.82,-0.3)
+    // threw every shadow straight down and out of frame, so buildings read as
+    // cardboard pasted on the horizon. A lower sun casts long graphic shadows
+    // across the lane, which is what actually grounds the district.
+    sunDirection: [-0.62, -0.42, -0.66],
     sunColor: 0xffe2b7,
-    sunIntensity: 3.35,
-    // Shadow fill: hard desert light needs a strong bounce floor — with
-    // ambient 0.62 the shaded sides of metal props crushed to near-black
-    // (cycle-23 A/B: roadside sign panel rendered (0,10,35) in full shade).
+    sunIntensity: 3.6,
+    // Hard desert light: keep fill low so form reads from the key. The old
+    // ambient 0.8 + hemi 1.02 + fill 0.72 (~43% of key) flattened every
+    // contact edge; a critic confirmed shaded and sunlit faces sat at the
+    // same value. Low fill + raked sun is the grounding fix, not a tint patch.
     ambientColor: 0xb8c4d0,
-    ambientIntensity: 0.8,
+    ambientIntensity: 0.28,
     hemisphereSky: 0x9fb9ce,
     hemisphereGround: 0x8b6f4e,
-    hemisphereIntensity: 1.02,
+    hemisphereIntensity: 0.45,
+    fillIntensity: 0.28,
     exposure: 1.04,
     envIntensity: 0.68,
+    // MEASURED (qa/probe-envscale-*.png): the `qwantani_puresky_2k` HDRI is a
+    // full sky dome with no dark ground half, so at the default per-material
+    // envMapIntensity 1 its diffuse irradiance out-weighed the 3.6 key and the
+    // market rendered with *zero* cast shadows — stalls, crates and both hero
+    // buildings cast nothing onto the lane. Scaling the world materials to
+    // ~0.12-0.25 of default let the raked key read through and the grounding
+    // appear. scene.environmentIntensity does not move the r185 node pipeline,
+    // hence the explicit material scale.
+    envMapScale: 0.2,
     backgroundBlurriness: 0.2,
     backgroundIntensity: 0.72,
     grade: {
@@ -137,6 +156,7 @@ export function buildAsharaReach(): MapDef {
       { id: 'dryStorm', cloudCover: 0.7, cloudShade: 0x4a4335, windSpeed: 0.08, thunder: true },
     ],
   });
+  return def;
 }
 
 function buildHeightfield(b: WorldBuilder): void {
@@ -160,13 +180,16 @@ function roadSegment(
   width: number,
   yaw: number,
   mat: MatKey = 'asphaltDesert',
+  shoulderMat: MatKey | null = 'dirt',
 ): void {
   // A dusty shoulder separates the paved route from the pale terrain and
   // prevents the road from reading as a floating black card at grazing view.
-  b.box(x, terrainH(x, z) + 0.025, z, length + 0.35, 0.045, width + 1.8, 'dirt', yaw, {
-    noCollide: true,
-    noRender: true,
-  });
+  if (shoulderMat) {
+    b.box(x, terrainH(x, z) + 0.025, z, length + 0.35, 0.045, width + 1.8, shoulderMat, yaw, {
+      noCollide: true,
+      noRender: true,
+    });
+  }
   // Keep segmented boxes for terrain-following collision/nav only. WorldView
   // renders one welded strip per road, avoiding overlapping coplanar tops and
   // the black cross-road seams they produced at every segment boundary.
@@ -209,7 +232,11 @@ function highway(b: WorldBuilder): void {
     for (let x = -248; x <= 248; x += 8) {
       points.push({ x, z: z + Math.sin((x + z) * 0.035) * 0.28, width: 1.55 });
     }
-    b.surfacePath(points, 'dirt', 0.012);
+    // Drain beds read as compacted, slightly damp sand. The shared ambientCG
+    // `dirt` set averages RGB(80,66,36) and a tint can only darken it, which
+    // painted near-black bands across the desert; use the desert packed-earth
+    // set instead so the drain reads as graded ground.
+    b.surfacePath(points, 'dirtDesert', 0.012);
     b.surfacePath(points.map((point) => ({ ...point, width: 0.42 })), 'rock', 0.026);
   }
   for (const x of [-192, -128, -64, 64, 128, 192]) {
@@ -226,94 +253,51 @@ function highway(b: WorldBuilder): void {
   }
 }
 
-function sunwallMarket(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
-  const blocks: Array<[number, number, number, number, number]> = [
-    [-23, -20, 15, 14, 2], [-4, -20, 13, 15, 2], [18, -18, 16, 13, 3],
-    [-22, 7, 14, 16, 2], [2, 8, 16, 14, 2], [23, 8, 12, 16, 2],
-    [-9, 30, 18, 12, 1], [16, 31, 14, 12, 2],
-  ];
-  for (let i = 0; i < blocks.length; i++) {
-    const [ox, oz, w, d, floors] = blocks[i]!;
-    const x = cx + ox;
-    const z = cz + oz;
-    const baseY = structureBaseY(terrainH, x, z, w, d);
-    addBuilding(b, {
-      x, z, baseY, w, d, floors,
-      wallMat: i % 3 === 0 ? 'plasterOld' : i % 3 === 1 ? 'plaster' : 'mudbrick',
-      trimMat: 'woodDark', floorMat: 'concreteDark', roofMat: 'concrete',
-      doors: [[i % 2 ? 1 : 0, Math.max(3, (i % 2 ? d : w) * 0.45), 2.4]],
-      roofAccess: floors > 1,
-      interiorDividers: floors > 1,
-    });
-    // Rooftop water/service silhouettes and facade drainage make the compact
-    // blocks read as maintained market buildings rather than repeated boxes.
-    if (i % 2 === 0) {
-      const roofY = baseY + floors * 3.6;
-      b.box(x + w * 0.22, roofY + 0.16, z - d * 0.18, 2.8, 0.32, 2.2, 'metalDark');
-      b.cyl(x + w * 0.22, roofY + 1.05, z - d * 0.18, 0.85, 1.65, 'metal', { segments: 14 });
-    }
-    b.cyl(x + w / 2 + 0.16, baseY + 1.65, z + d * 0.22, 0.08, 3.3, 'metalDark', {
-      segments: 8,
-      noCollide: true,
+function sunwallMarketLane(b: WorldBuilder, cx: number, cz: number): void {
+  // A real walkable spine gives the authored market a foreground, a route and
+  // a value break instead of leaving the buildings on an empty terrain plane.
+  // Collision is carried by the existing road-segment floor primitive; the
+  // visible ribbon is a terrain-following surface path, not a raised card.
+  for (let i = 0; i < 5; i++) {
+    // roadSegment stores length on local X; yaw 90° maps that to world Z so
+    // every 8m step covers the visible ribbon instead of leaving 2.4m holes.
+    roadSegment(b, cx, cz - 14 + i * 8, 8.2, 5.6, Math.PI / 2, 'dirtDesert', null);
+  }
+  const spine: Array<{ x: number; z: number; width: number }> = [];
+  for (let i = 0; i <= 8; i++) {
+    const t = i / 8;
+    spine.push({
+      x: cx + Math.sin(t * Math.PI * 1.4) * 0.32,
+      z: cz - 18 + t * 36,
+      width: 5.4 + Math.sin(t * Math.PI) * 1.2,
     });
   }
-  // A framed southern gateway marks the only five-metre gap between the first
-  // row of buildings. Previously the approach terminated in a blank plaster
-  // wall with no visual cue toward the market lanes behind it.
-  const entryX = cx - 13;
-  const entryZ = cz - 27.4;
-  const entryY = terrainH(entryX, entryZ);
+  b.surfacePath(spine, 'dirtDesert', 0.052);
+  // Two-stage verge. A single hard-edged band reads as a decal seam; a wide
+  // graded dirt shoulder plus a thin rock lip breaks the packed-earth/sand
+  // transition the way a trodden market approach actually wears down.
   for (const side of [-1, 1]) {
-    b.box(entryX + side * 2.15, entryY + 1.65, entryZ, 0.22, 3.3, 0.28, 'woodDark', 0, { noCollide: true });
+    b.surfacePath(spine.map((point) => ({
+      x: point.x + side * (point.width * 0.5 + 0.75),
+      z: point.z,
+      width: 1.7,
+    })), 'dirtDesert', 0.044);
+    b.surfacePath(spine.map((point) => ({
+      x: point.x + side * (point.width * 0.5 - 0.12),
+      z: point.z,
+      width: 0.34,
+    })), 'rock', 0.066);
   }
-  b.box(entryX, entryY + 3.18, entryZ, 4.6, 0.24, 0.32, 'woodDark', 0, { noCollide: true });
-  b.box(entryX, entryY + 2.83, entryZ - 0.04, 2.7, 0.5, 0.12, 'rust', 0, { noCollide: true });
-  // Original geometric market mark; avoids a featureless glowing rectangle
-  // while remaining language-neutral and legible at combat distance.
-  b.box(entryX - 0.72, entryY + 2.83, entryZ - 0.108, 0.16, 0.3, 0.035, 'paint', 0, { noCollide: true });
-  b.box(entryX - 0.4, entryY + 2.92, entryZ - 0.108, 0.48, 0.09, 0.035, 'paint', 0, { noCollide: true });
-  b.box(entryX - 0.4, entryY + 2.73, entryZ - 0.108, 0.48, 0.09, 0.035, 'paint', 0, { noCollide: true });
-  b.box(entryX + 0.48, entryY + 2.83, entryZ - 0.108, 0.82, 0.09, 0.035, 'signDimOrange', 0, { noCollide: true });
-  b.box(entryX, entryY + 3.05, entryZ + 1.2, 5.1, 0.12, 2.5, 'corrugated', 0, { noCollide: true });
-  b.light(entryX, entryY + 2.65, entryZ + 0.3, 0xffc07a, 0.85, 9);
-  // Overhead service cables and alternating shade panels add depth cues along
-  // the inner market lane without obstructing player or projectile movement.
-  for (let i = -2; i <= 2; i++) {
-    const laneZ = cz - 12 + i * 6;
-    b.box(cx, terrainH(cx, laneZ) + 3.65, laneZ, 34, 0.045, 0.045, 'metalDark', 0, { noCollide: true });
-    if (i % 2 === 0) {
-      b.box(cx - 3, terrainH(cx - 3, laneZ) + 3.35, laneZ, 11, 0.08, 3.3, i === 0 ? 'rust' : 'corrugated', 0, {
-        noCollide: true,
-      });
-    }
-  }
-  // Market arcade: shaded stalls, fabric-like awnings and waist-high cover.
-  for (let i = -3; i <= 3; i++) {
-    const x = cx + i * 5.2;
-    const y = terrainH(x, cz + 2);
-    b.box(x, y + 1.45, cz + 2, 4.4, 0.14, 3.2, i % 2 ? 'rust' : 'corrugated', 0, { noCollide: true });
-    b.box(x - 1.9, y + 0.7, cz + 2, 0.18, 1.4, 0.18, 'woodDark');
-    b.box(x + 1.9, y + 0.7, cz + 2, 0.18, 1.4, 0.18, 'woodDark');
-    if (i % 2 === 0) b.crate(x, y + 0.1, cz + 3.4, 0.75);
-  }
-  b.chest(cx + 5, terrainH(cx + 5, cz + 2) + 0.3, cz + 2, 'vault');
-  b.chest(cx - 25, terrainH(cx - 25, cz - 2) + 0.3, cz - 2, 'standard');
-  b.loot(cx + 24, terrainH(cx + 24, cz + 14) + 0.4, cz + 14, 'weapon');
-  b.loot(cx - 7, terrainH(cx - 7, cz - 14) + 0.4, cz - 14, 'heal');
-  // Keep storage against the district perimeter. Random scatter previously
-  // put a full-size crate in the only southern gateway, turning the landmark
-  // cue into an obstacle and blocking the first view down the market lane.
-  const storage: Array<[number, number, number]> = [
-    [-34, -27, 0.68], [32, -24, 0.76],
-    [-30, -7, 0.58], [31, -7, 0.72],
-    [-33, 20, 0.8], [32, 20, 0.62],
-    [-28, 39, 0.7], [27, 39, 0.66],
-  ];
-  for (const [ox, oz, scale] of storage) {
-    const x = cx + ox;
-    const z = cz + oz;
-    b.crate(x, terrainH(x, z) + 0.1, z, scale);
-  }
+}
+
+function sunwallMarket(b: WorldBuilder, rng: Rng, cx: number, cz: number): void {
+  sunwallMarketLane(b, cx, cz);
+  // Warm practical fill keeps the authored shop fronts readable when the sun
+  // is behind them; it is a real local light, not a post-process lift.
+  b.light(cx + 5.5, terrainH(cx + 5.5, cz) + 1.7, cz, 0xffc98a, 40, 9);
+  b.chest(cx + 23, terrainH(cx + 23, cz + 18) + 0.3, cz + 18, 'vault');
+  b.loot(cx + 24, terrainH(cx + 24, cz + 20) + 0.4, cz + 20, 'weapon');
+  b.loot(cx - 23, terrainH(cx - 23, cz + 19) + 0.4, cz + 19, 'heal');
   void rng;
 }
 
@@ -861,37 +845,6 @@ function desertDensity(b: WorldBuilder, rng: Rng): void {
   const clear = (x: number, z: number, hx: number, hz: number, yLow: number, yHigh: number): boolean =>
     dressingSpotClear(b.def, x, z, hx, hz, yLow, yHigh, { crates: true, vehicles: true, margin: 0.3 });
 
-  // -- Sunwall Market: stalls, rugs, pot clusters ---------------------------
-  const stalls: Array<[number, number, number, MatKey]> = [
-    [-50, -37, 0.1, 'rust'], [-41, -36.4, -0.15, 'roofTile'],
-    [-25, -36, 0.2, 'bricksOld'], [-46, -12, Math.PI / 2, 'roofTile'],
-  ];
-  for (const [sx, sz, yaw, rug] of stalls) {
-    const gy = terrainH(sx, sz);
-    if (!clear(sx, sz, 2.4, 1.8, gy, gy + 2.8)) continue;
-    addMarketStall(b, { x: sx, z: sz, baseY: gy, yaw, rugMat: rug, awningMat: 'plasterOld', goods: true });
-    b.crate(sx + rng.range(-1.4, 1.4), gy + 0.1, sz + rng.range(2.2, 2.8), rng.range(0.65, 0.85));
-  }
-  const rugs: Array<[number, number, number, MatKey]> = [
-    [-36, -38, 0.2, 'bricksOld'], [-20.5, -34, -0.12, 'rust'], [-32.5, -9, 0.32, 'roofTile'],
-  ];
-  for (const [rx, rz, yaw, mat] of rugs) {
-    const gy = terrainH(rx, rz);
-    if (!clear(rx, rz, 1.4, 0.9, gy, gy + 0.1)) continue;
-    b.box(rx, gy + 0.05, rz, 2.6, 0.02, 1.6, mat, yaw, { noCollide: true, castShadow: false });
-  }
-  const pot = (x: number, z: number, r: number, h: number, mat: MatKey): void => {
-    const gy = terrainH(x, z);
-    if (!clear(x, z, r + 0.2, r + 0.2, gy, gy + h)) return;
-    b.cyl(x, gy + h / 2, z, r, h, mat, { segments: 9 });
-    b.cyl(x, gy + h + 0.015, z, r * 0.7, 0.03, 'rock', { segments: 9, noCollide: true });
-  };
-  for (const [cx2, cz2] of [[-52.5, -38], [-20.5, -33], [-44.5, -22], [-29.5, -9]] as Array<[number, number]>) {
-    pot(cx2, cz2, 0.26, 0.55, 'mudbrick');
-    pot(cx2 + 0.85, cz2 + 0.2, 0.17, 0.3, 'rock');
-    pot(cx2 + 0.35, cz2 + 0.85, 0.22, 0.42, 'mudbrick');
-  }
-
   // -- Old Caravanserai: sack piles + working crates ------------------------
   const sack = (x: number, z: number, r: number): void => {
     const gy = terrainH(x, z);
@@ -1011,7 +964,10 @@ function groundDecay(b: WorldBuilder): void {
       // Wadi-crossing to Kestrel approach: open desert the QA frames cross.
       { x1: -150, z1: 62, x2: -10, z2: 46, width: 7 },
     ],
-    stainMat: 'dirt',
+    // Desert wear patches are wind-scoured sand, not soil: `dirtDesert` is the
+    // low-chroma packed-earth set, so stains stay close to the ground value
+    // instead of stamping dark red-brown blotches over the dunes.
+    stainMat: 'dirtDesert',
     trackMat: 'asphalt',
     spacing: 9,
     maxPieces: 34,
@@ -1020,14 +976,22 @@ function groundDecay(b: WorldBuilder): void {
 }
 
 function desertScatter(b: WorldBuilder, rng: Rng): void {
-  const exclusions = b.def.pois.map((poi) => ({ x: poi.x, z: poi.z, r: poi.radius + 7 }));
+  const exclusions = b.def.pois.map((poi) => ({
+    x: poi.x,
+    z: poi.z,
+    // The market POI radius is a landmark/navigation radius, not a request to
+    // erase the entire surrounding desert. Keep its authored market footprint
+    // clear while allowing sparse foreground rocks to establish scale.
+    r: poi.name === 'Sunwall Market' ? 24 : poi.radius + 7,
+  }));
   // Keep the authored travel corridors readable and physically traversable.
   // POI-only exclusions previously allowed large deterministic scatter rocks
   // to land in the highway carriageway (including directly on its centre
   // line), even though the road itself is a registered walkable platform.
   for (let x = -240; x <= 240; x += 12) exclusions.push({ x, z: -5, r: 6.4 });
   for (let z = 72; z <= 240; z += 12) exclusions.push({ x: 42, z, r: 5.4 });
-  scatterRocks(b, rng, 105, { minX: -242, maxX: 242, minZ: -242, maxZ: 242 }, exclusions, terrainH);
+  for (let z = -44; z <= -16; z += 7) exclusions.push({ x: -34, z, r: 4.6 });
+  scatterRocks(b, rng, 180, { minX: -242, maxX: 242, minZ: -242, maxZ: 242 }, exclusions, terrainH);
 
   // Sparse ecological clusters: palms near dry canals, dead scrub in wadis,
   // and exposed ridges left bare for long-range readability.

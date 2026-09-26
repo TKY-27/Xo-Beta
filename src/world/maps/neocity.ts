@@ -382,7 +382,7 @@ export function buildNeoCity(): MapDef {
   // Residual exposure only: authored infill above is the primary dressing.
   hardenExposedFlanks(b, { mat: 'concrete', maxProps: 12 });
 
-  return b.finish(
+  const def = b.finish(
     {
       preset: 'bluehour',
       atmosphere: {
@@ -408,6 +408,11 @@ export function buildNeoCity(): MapDef {
       hemisphereIntensity: 1.9,
       exposure: 1.16,
       envIntensity: 0.95,
+      // Measured IBL ratio (`qa/ibl-neocity-*.png`): at the default material
+      // intensity the night sky washes every surface into one flat blue value
+      // and computed cast shadows never read. Cutting per-material IBL to 0.3
+      // deepens the sky, restores ground contrast and lets the neon read.
+      envMapScale: 0.3,
       backgroundIntensity: 1.0,
       grade: {
         vignette: 0.34,
@@ -427,6 +432,7 @@ export function buildNeoCity(): MapDef {
         { id: 'dryNight', cloudCover: 0.5, starOpacity: 0.6, fogDensityScale: 0.85 },
       ] },
   );
+  return def;
 }
 
 function applyNeoCityShadowBudget(b: WorldBuilder): void {

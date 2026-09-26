@@ -163,7 +163,7 @@ async function frameDeltas(page: Page, durationMs: number): Promise<number[]> {
   })()`) as Promise<number[]>;
 }
 
-async function drawStats(page: Page): Promise<{ calls: number; triangles: number; frames: number }> {
+async function drawStats(page: Page): Promise<{ drawCalls: number; frameCalls: number; triangles: number; frames: number }> {
   return page.evaluate(`(async () => {
     const renderer = window.__xoState.threeRenderer;
     renderer.info.autoReset = false;
@@ -179,13 +179,14 @@ async function drawStats(page: Page): Promise<{ calls: number; triangles: number
       requestAnimationFrame(tick);
     });
     const result = {
-      calls: Math.round(renderer.info.render.calls / Math.max(1, frames)),
+      drawCalls: Math.round(renderer.info.render.drawCalls / Math.max(1, frames)),
+      frameCalls: Math.round(renderer.info.render.frameCalls / Math.max(1, frames)),
       triangles: Math.round(renderer.info.render.triangles / Math.max(1, frames)),
       frames,
     };
     renderer.info.autoReset = true;
     return result;
-  })()`) as Promise<{ calls: number; triangles: number; frames: number }>;
+  })()`) as Promise<{ drawCalls: number; frameCalls: number; triangles: number; frames: number }>;
 }
 
 async function main(): Promise<void> {
