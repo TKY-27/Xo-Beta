@@ -321,3 +321,80 @@ is that the surfaces are geometrically flat (twelve triangles) and that the
 districts are under-populated, so the lower third of many frames is empty
 ground rather than set dressing. That is a density and layout problem, not a
 material one.
+
+## Independent critic round 8 (31 captures, all four maps) — accepted findings and one refutation
+
+Scores: environment geometry 3, materials 4, lighting 2, grounding 4, density 2,
+art direction 3, cross-map distinctiveness 5. **Dominant impression reads as
+procedural/low-poly/toy/clay/blockout: YES. Acceptable at a GTA-V/AAA bar:
+NO.** The verdict stands.
+
+### Refuted: "zero cast shadows and zero ambient occlusion, globally"
+
+The panel's stated single strongest reason was that no object anywhere casts a
+shadow, and it cited `poi-ashara-market-south` as worst evidence. Direct
+inspection of that exact frame refutes it: a power pole throws a clear
+directional shadow across the sand, the shop row casts a shadow leftward across
+the lane, awnings shade their own frontage, and the shaded faces are plainly
+darker than the sunlit roof planes. `qa/poi-ashara-fuel-court.png` shows the
+compound wall shadow falling across the approach road.
+`qa/shadow-ashara-hall-ibl0.png` isolates the same rig with image-based light
+forced to zero and shows unambiguous shadows. `__xoShadowQa` reports
+`sunCastShadow true`, `mapSize [2048,2048]`, a texel-snapped frustum tracking
+the player, and `cast:true receive:true` on the authored market meshes.
+
+The likely source of the misreading: NeoCity is a night map, where there is no
+directional light to cast. The panel applied a daylight standard to a night
+frame. The Ashara frames it also cited do have shadows. The correct diagnosis
+for NeoCity is the one it lists lower down — the city has **no real local
+lights**, so night surfaces are lit only by ambient and emissive materials,
+which is what makes them read flat.
+
+### Accepted, ranked by perceptual impact
+
+1. **Prop density is the dominant remaining problem (2/10).** Subject plus
+   ~200 m of empty ground, repeatedly: `neocity/residential`, `neocity/transit`,
+   `eden/dorms`, `ashara/relay`, `neocity/garage`, `ashara/wadi`. No litter,
+   cables, signage, parked traffic, angled crates or wall-base wear. The
+   coverage census corroborates it from the other direction — the frames are
+   mostly ground quads because there is nothing else in them.
+2. **Named locations do not exist.** `neocity/garage` is two stacked boxes;
+   `neocity/transit` is two planters and a bench; `eden/greenhouse` is a fence
+   and planters; `eden/research` is an empty pavilion; `ashara/wadi` is a black
+   box. POI identity has to be built, not labelled.
+3. **Untextured flat-colour architecture as the primary building language.**
+   `neocity/spire` (grid of tan boxes with window decals), `neocity/market`,
+   `ashara/caravanserai` (black slab wall tops), `ashara/fuel-court`. Needs a
+   facade kit with floor bands, reveals, sills, cornices, downpipes and roof
+   plant, plus per-instance colour variation.
+4. **Rain is absent in NeoCity.** No streaks, no wet specular, no neon
+   reflection in the road, no ground spray, in any of the seven frames — while
+   the road material is authored wet. `poi-neocity-street` confirms it: wet
+   asphalt with a lamp streak, and no rain volume above it.
+5. **Terrain and prop intersections.** Floating hay bales
+   (`oldfront/forestcamp`), a zero-thickness dock plane held by nothing
+   (`eden/lake-level`), water meeting grass in a dead-straight line
+   (`eden/dock`), a trestle on bare posts with no abutment
+   (`oldfront/checkpoint`).
+6. **Texture scale abuse.** A single wood-grain image stretched flat across a
+   whole wall (`oldfront/keep`); the desert road reads as a mould overlay
+   rather than asphalt (`ashara/market-south`); painted-on horizontal stripes
+   pretending to be blinds (`eden/treatment`).
+7. **Theme mismatch at the root.** Old Front is specified medieval and reads as
+   a 19th-century American suburb with white cross-muntin windows.
+   `ashara/works` puts a modern white-and-orange shed with a blue container next
+   to a mudbrick market. Eden has no industrial language; NeoCity has no
+   cyberpunk language. This is an art-direction decision, not a defect in any
+   one asset.
+8. **Vegetation and rocks are blobby stand-ins** with no wind response or
+   per-instance colour variance, and `neocity/cyberdome` has a white
+   light-leak bloom in the lower-left corner that reads as a broken render.
+
+### Consequence for the campaign
+
+The panel's verdict is accepted: the gates are not met. The environment work
+that exists — authored market hall and shop row, the Eden ModKit lab, the
+grounded contact decals, the restored key light, the real road and packed-earth
+sets — is real and measured, but it occupies a small share of the frame in
+most views. Items 1, 2 and 3 are the critical path, and all three are
+authoring-volume problems rather than rendering problems.
