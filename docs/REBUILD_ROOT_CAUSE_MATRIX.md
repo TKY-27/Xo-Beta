@@ -287,3 +287,37 @@ tuning. It is a geometry/breakup problem: these ground and paving surfaces
 need macro breakup that survives mip filtering (a low-frequency albedo octave at
 a much larger tile scale), plus real subdivision where a surface spans a whole
 district.
+
+## Macro breakup for district-sized surfaces (follows the key-light fix)
+
+**Impact.** Large ground and paving surfaces still read as flat colour fields
+after the key light was restored: uniform normals plus a single tiling
+frequency means the mip chain averages every tile to the same value, so a road
+or courtyard that spans a whole district carries no visible variation at
+normal viewing distance.
+
+**Root cause.** `__xoPropQa` measured 30–45% of nearly every POI frame as one
+planar twelve-triangle quad with one world-projected texture. The material
+graph had exactly one octave of information in it, at the tile scale, and no
+low-frequency component to survive filtering.
+
+**Fix.** `ProjectedStandardMaterial.buildProjectionGraph()` multiplies the
+albedo by a world-space 2-octave fractal noise at nine times the tile scale
+(`macro` uniform, amplitude 0.17, clamped to 0.74–1.26, centred on 1.0 so
+exposure is unchanged and nothing can darken to black). Small props see it as
+subtle tonal variation across a face; district-sized planes gain the
+large-scale value and hue breakup they need. Relief and roughness are
+untouched, so the texture scale and response the panel measured earlier still
+hold.
+
+**Evidence.** `qa/poi-ashara-market-east.png` — the near sand field and the
+approach road now carry gentle large-scale warm/cool variation instead of a
+single flat tone, while the authored market hall, awnings, counters and
+shutters keep their detail.
+
+**Still open on these surfaces.** Amplitude is deliberately conservative
+because the same graph drives props as well as terrain; the remaining defect
+is that the surfaces are geometrically flat (twelve triangles) and that the
+districts are under-populated, so the lower third of many frames is empty
+ground rather than set dressing. That is a density and layout problem, not a
+material one.

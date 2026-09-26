@@ -11,7 +11,7 @@ import type { Node, UniformNode } from 'three/webgpu';
 import {
   abs, color, float, max, mix, mx_fractal_noise_float, mx_noise_float,
   normalize, normalWorld, positionWorld, sign, smoothstep, texture,
-  uniform, vec2,
+  uniform, vec2, vec3,
 } from 'three/tsl';
 import { loadTextureSet, type TextureSet } from '../assets/assets';
 import type { MatKey } from '../world/types';
@@ -188,6 +188,7 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
   private declare tintUniform?: UniformNode<'color', THREE.Color>;
   private declare roughUniform?: UniformNode<'float', number>;
   private declare normalScaleUniform?: UniformNode<'vec2', THREE.Vector2>;
+  private declare macroUniform?: UniformNode<'float', number>;
   private declare colorTex?: THREE.Texture;
   private declare roughTex?: THREE.Texture;
 
@@ -195,16 +196,19 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
     tint: UniformNode<'color', THREE.Color>;
     rough: UniformNode<'float', number>;
     ns: UniformNode<'vec2', THREE.Vector2>;
+    macro: UniformNode<'float', number>;
   } {
     if (!this.tintUniform) {
       this.tintUniform = uniform(new THREE.Color(0xffffff));
       this.roughUniform = uniform(1);
       this.normalScaleUniform = uniform(new THREE.Vector2(1, 1));
+      this.macroUniform = uniform(0.17);
     }
     return {
       tint: this.tintUniform,
       rough: this.roughUniform!,
       ns: this.normalScaleUniform!,
+      macro: this.macroUniform!,
     };
   }
 
@@ -292,7 +296,23 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
       .and(an.y.greaterThanEqual(an.z))
       .select(uvTop, an.x.greaterThanEqual(an.z).select(uvSideX, uvSideZ));
 
-    if (this.colorTex) this.colorNode = texture(this.colorTex).sample(puv).mul(u.tint);
+    if (this.colorTex) {
+      let base = texture(this.colorTex).sample(puv).mul(u.tint);
+      // Macro breakup. A single world-projected texture has one tiling
+      // frequency, so any surface large enough to need subdivision — the
+      // twelve-triangle road, paving and courtyard quads that own 30-45% of a
+      // typical frame — is averaged to a flat colour by the mip chain at any
+      // real viewing distance. A world-space noise at several times the tile
+      // scale survives that filtering, so a district-sized plane keeps
+      // believable large-scale value and hue variation. Centred on 1.0 and
+      // clamped, so exposure is unchanged and no surface can darken to black.
+      const macroMeters = Math.max(0.001, (metersPerTile ?? 4)) * 9;
+      const macro = mx_fractal_noise_float(
+        vec3(wPos.x, 0.0, wPos.z).mul(1 / macroMeters), 2, 2.1, 0.55,
+      );
+      base = base.mul(macro.mul(u.macro).add(1).clamp(0.74, 1.26));
+      this.colorNode = base;
+    }
     if (this.roughTex) {
       const rough = u.rough.mul(texture(this.roughTex).sample(puv).g);
       if (detailRough && detailRoughMeters && detailRoughMeters > 0) {
