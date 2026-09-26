@@ -3697,6 +3697,85 @@ function presentMatch(game: MatchLiveGame, dtReal: number): void {
       });
       return found;
     };
+    // QA: screen-coverage census. Casts a dense ray grid from the camera and
+    // reports which object owns how much of the frame, so a large flat or
+    // untextured mass can be named directly instead of inferred from a colour
+    // swatch. A screen-centre pick cannot do this: the first-person and HUD
+    // overlays sit exactly where the visual panel points. Works on both GPU
+    // backends — no framebuffer readback, which native WebGPU cannot do
+    // synchronously.
+    (window as unknown as Record<string, unknown>).__xoPropQa = (cols = 72, rows = 40) => {
+      const cam = rig.camera;
+      const hidden: THREE.Mesh[] = [];
+      const meshes: THREE.Mesh[] = [];
+      const stage = viewmodel?.group ?? null;
+      renderer.scene.traverse((n) => {
+        const o = n as THREE.Mesh;
+        if (!o.isMesh && !(o as unknown as { isInstancedMesh?: boolean }).isInstancedMesh) return;
+        if (stage && stage.getObjectById(o.id) === o) return;
+
+        // The sky dome and the storm veil always fill part of the frame and
+        // would otherwise crowd out everything else in the census.
+        const nm = o.name.toLowerCase();
+        if (nm.includes('skydome') || nm === 'storm-wall' || nm === 'sky') return;
+        // Revealing a hidden mesh can expose helper geometry with no material,
+        // which the raycaster cannot intersect (it reads `material.side`).
+        const hasMat = Array.isArray(o.material) ? o.material.length > 0 : o.material != null;
+        if (!hasMat) return;
+        if (!o.visible) {
+          hidden.push(o);
+          o.visible = true;
+        }
+        meshes.push(o);
+      });
+      const ray = new THREE.Raycaster();
+      ray.far = 500;
+      const ndc = new THREE.Vector2();
+      const counts = new Map<THREE.Mesh, { n: number; minX: number; maxX: number; minY: number; maxY: number }>();
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const sx = (c + 0.5) / cols;
+          const sy = (r + 0.5) / rows;
+          ndc.set(sx * 2 - 1, -(sy * 2 - 1));
+          ray.setFromCamera(ndc, cam);
+          // Multi-material geometry can carry a group index with no matching
+          // entry, which the raycaster surfaces as a hard error rather than a
+          // miss. A census sample is not worth a thrown exception.
+          let hit: THREE.Intersection | undefined;
+          try {
+            hit = ray.intersectObjects(meshes as unknown as THREE.Object3D[], false)[0];
+          } catch {
+            continue;
+          }
+          if (!hit) continue;
+          const e = counts.get(hit.object as THREE.Mesh) ?? { n: 0, minX: 1, maxX: 0, minY: 1, maxY: 0 };
+          e.n++;
+          e.minX = Math.min(e.minX, sx); e.maxX = Math.max(e.maxX, sx);
+          e.minY = Math.min(e.minY, sy); e.maxY = Math.max(e.maxY, sy);
+          counts.set(hit.object as THREE.Mesh, e);
+        }
+      }
+      for (const o of hidden) o.visible = false;
+      const total = cols * rows;
+      return [...counts.entries()]
+        .map(([o, e]) => {
+          const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+          const std = mats[0] as THREE.MeshStandardMaterial | undefined;
+          return {
+            name: o.name || std?.name || '(unnamed)',
+            mat: std?.name || '(anon)',
+            pct: Number(((e.n / total) * 100).toFixed(1)),
+            box: [e.minX, e.minY, e.maxX, e.maxY].map((v) => Number(v.toFixed(2))),
+            map: std?.map ? 'tex' : 'FLAT',
+            tris: o.geometry?.index
+              ? Math.round(o.geometry.index.count / 3)
+              : Math.round((o.geometry?.attributes?.position?.count ?? 0) / 3),
+            uuid: o.uuid.slice(0, 8),
+          };
+        })
+        .sort((a, b) => Number(b.pct) - Number(a.pct))
+        .slice(0, 18);
+    };
     // QA: recolour every material matching uuid/name/colour — A/B for
     // "is this mesh the suspect" at maximum contrast.
     (window as unknown as Record<string, unknown>).__xoTint = (prefix: string, hex = 'ff00ff') => {

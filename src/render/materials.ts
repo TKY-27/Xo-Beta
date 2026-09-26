@@ -9,9 +9,9 @@ import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 import type { Node, UniformNode } from 'three/webgpu';
 import {
-  abs, color, cross, float, max, mix, mx_fractal_noise_float, mx_noise_float,
+  abs, color, float, max, mix, mx_fractal_noise_float, mx_noise_float,
   normalize, normalWorld, positionWorld, sign, smoothstep, texture,
-  transformNormalToView, uniform, vec2, vec3,
+  uniform, vec2,
 } from 'three/tsl';
 import { loadTextureSet, type TextureSet } from '../assets/assets';
 import type { MatKey } from '../world/types';
@@ -307,17 +307,22 @@ class ProjectedStandardMaterial extends MeshStandardNodeMaterial {
         this.roughnessNode = rough;
       }
     }
-    if (this.normalTex) {
-      const mapN = texture(this.normalTex).sample(puv).xyz.mul(2).sub(1);
-      const mapNxy = mapN.xy.mul(u.ns);
-      // Face-tangent frame derived from the world normal.
-      const T0 = normalize(cross(vec3(0.0, 1.0, 0.0), wNrm));
-      const flat = abs(wNrm.y).greaterThan(0.99);
-      const T = flat.select(vec3(1.0, 0.0, 0.0), T0);
-      const B = flat.select(vec3(0.0, 0.0, 1.0), cross(wNrm, T0));
-      const wPerturbed = normalize(T.mul(mapNxy.x).add(B.mul(mapNxy.y)).add(wNrm.mul(mapN.z)));
-      this.normalNode = transformNormalToView(wPerturbed);
-    }
+    // Micro-normal relief is deliberately NOT applied here.
+    //
+    // This material is the backbone of the world: concrete, metal, wood, brick,
+    // paving, cloth and the dirt/asphalt sets are all built from it. Feeding
+    // the normal map through the TSL `normalNode` looked like the way to keep
+    // relief while dodging the r185 stock `normalMap` slot recorded in
+    // QA_STATE cycle 57, but it inherits the same defect — measured on the
+    // terrain, a material with `normalNode` set receives no key light at all
+    // and no cast shadow lands on it. Left in place, every lit surface in the
+    // game was being rendered by ambient and image-based light only, which is
+    // why materials read flat and dark regardless of texture or exposure.
+    //
+    // Relief is preserved through the albedo sets and the roughness grain
+    // octave above. Do not reintroduce a normal here without re-running the
+    // `__xoTerrainQa` / `__xoPropQa` isolation captures that prove direct
+    // light survives on both the terrain and a `ProjectedStandardMaterial`.
   }
 
   override get color(): THREE.Color {

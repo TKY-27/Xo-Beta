@@ -225,3 +225,65 @@ density 4, art direction 5.
 7. **Weapon ADS readability** and **SWAT character detail** remain open gates;
    both were last reviewed before the systemic lighting/material fixes and need
    fresh panels.
+
+## The defect that was suppressing light across the whole game
+
+**Impact.** Every surface in the world read flat and dark no matter what its
+texture, tint or exposure was. No cast shadow ever landed on a road, a wall or a
+prop. The visual panel reported this on all 31 captures as "no directional
+shadows / no contact grounding" and "large-area untextured flat colour fields",
+and separately reported that no material appeared to respond to tuning.
+
+**Root cause.** `docs/QA_STATE.md` cycle 57 recorded that under three.js r185 a
+standard material combining `normalMap` with any other map receives no direct
+lighting, and "fixed" the terrain by routing its micro-normal through the TSL
+`normalNode` instead. That dodge inherits the same defect. Measured on the
+terrain splat material with a slot-isolation probe (`__xoTerrainQa`): clearing
+only `normalNode` turned an unlit near-black ground into correctly lit sand
+with a readable raked key and visible shadows, with no other change.
+
+`ProjectedStandardMaterial` — the material behind concrete, metal, wood, brick,
+paving, cloth, `dirtDesert` and `asphaltDesert`, i.e. most of the built world —
+had the identical `this.normalNode = transformNormalToView(wPerturbed)` line.
+Every lit surface in the game was therefore being rendered by ambient and
+image-based light alone. Raising ambient, adding fill or re-tuning exposure
+could not fix it, because the key light was not reaching those materials at all.
+
+**Fix.** Removed the TSL normal from both `TerrainSplatMaterial` and
+`ProjectedStandardMaterial` (`src/render/materials.ts`). Relief is preserved
+through the baked albedo sets, the splat macro field, the `detailMeters`
+second albedo octave and the shared roughness grain. Each site carries a
+comment recording the measurement and a requirement to re-run the isolation
+probes before any normal is reintroduced.
+
+**Evidence.** `qa/poi-ashara-fuel-court.png` before the `ProjectedStandardMaterial`
+half of the fix versus after: the compound wall, entrance arch, approach road,
+lamp standards and ground all gain directional light, value structure and cast
+shadows. The terrain half of the same fix was verified earlier with
+`qa/probe-ground-nonormal.png` (dark red-brown field becomes sunlit sand).
+
+**Measurement of what this was hiding.** `__xoPropQa` (new; a dense camera-ray
+coverage census that names the object owning each region of the frame) shows the
+next dominant defect precisely, and it is geometry, not shading:
+
+| POI | Largest object | Share of frame | Triangles |
+| --- | --- | --- | --- |
+| oldfront/cathedral | `sidewalk` | 44.8% | 12 |
+| ashara/market-east | terrain grid | 46.4% | 59,650 |
+| ashara/wadi | `concrete` | 43.8% | 12 |
+| neocity/spire | `concreteDark` | 41.2% | 12 |
+| neocity/cyberdome | `metalDark` | 34.7% | 56 |
+| neocity/residential | `paving` | 34.9% | 12 |
+| neocity/transit | `paving` | 33.2% | 12 |
+| ashara/fuel-court | terrain grid | 30% | 20 |
+| oldfront/farmstead | `woodDark` | 30% | 12 |
+
+Thirty to forty-five percent of nearly every frame is a single planar
+twelve-triangle quad carrying one world-projected texture. Such a plane has
+uniform normals and a single tiling frequency, so at grazing angles the mip
+chain averages the detail to a flat colour — which is exactly the
+"untextured colour field" complaint, and why it persisted through texture
+tuning. It is a geometry/breakup problem: these ground and paving surfaces
+need macro breakup that survives mip filtering (a low-frequency albedo octave at
+a much larger tile scale), plus real subdivision where a surface spans a whole
+district.
