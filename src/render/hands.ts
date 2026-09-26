@@ -1137,14 +1137,24 @@ function buildSleeve(upperLength: number, foreLength: number, side: number): Sle
     const radius = y < upperLength
       ? 0.042 - 0.011 * upperT + 0.006 * Math.sin(Math.PI * upperT)
       : 0.032 - 0.012 * smooth(foreT) + 0.009 * belly;
+    // Close both ends into domes instead of flat caps.
+    //
+    // The end caps reuse the ring's UVs (u = j/16), so a flat cap fans a full
+    // texture width across a few centimetres and reads as a hard cross-hatched
+    // disc where the arm meets the camera — the single most visible artifact on
+    // the first-person arm. Collapsing the ring radius to zero at each end makes
+    // the cap degenerate and the surface close as a rounded shoulder / wrist
+    // mass, so there is no disc to see and the wrist end tucks into the glove.
+    const domeT = Math.min(y / 0.06, (length - y) / 0.05, 1);
+    const dome = Math.sqrt(Math.max(0, 1 - (1 - Math.max(0, domeT)) ** 2));
     const next = Array.from({ length: 16 }, (_, j) => {
       const angle = -j / 16 * Math.PI * 2;
       const elbowFold = Math.exp(-(((y - upperLength) / 0.052) ** 2)) * Math.cos((y - upperLength) * 230 + Math.sin(angle) * 2) * 0.004;
       const wristFold = Math.exp(-(((foreT - 0.85) / 0.14) ** 2)) * Math.cos(foreT * 72 + angle * 2) * 0.0025;
       const muscle = belly * (0.004 * Math.cos(angle - side * 0.7) + 0.002 * Math.cos(angle * 2));
       const seam = j === 3 || j === 11 ? 0.0008 : 0;
-      const r = radius + muscle + elbowFold + wristFold + seam;
-      const center = side * 0.006 * belly;
+      const r = (radius + muscle + elbowFold + wristFold + seam) * dome;
+      const center = side * 0.006 * belly * dome;
       const index = surface.vertex(center + Math.cos(angle) * r, y, Math.sin(angle) * r * (0.84 + 0.08 * foreT), 1, 0, smooth((y - upperLength + 0.04) / 0.08));
       const twistWeight = smooth((foreT - 0.12) / 0.65);
       const wristWeight = smooth((foreT - 0.94) / 0.06);
@@ -1201,7 +1211,13 @@ export class ArmSolver {
         pair.cuff.name = `authored-sleeve-${pair.side}-cuff`;
         pair.upper.visible = this.integratedArm;
         pair.fore.visible = this.integratedArm;
-        pair.cuff.visible = this.integratedArm;
+        // The cuff is always shown, integrated arm or not. LibHand is a
+        // bare-hand scan whose mesh is open at the wrist, so with no sleeve the
+        // camera looks straight into the hand's interior and the glove weave
+        // texture reads as a hard cross-hatched disc — the most conspicuous
+        // artifact on the first-person arm in every capture. The authored cuff
+        // is exactly the closure that opening needs.
+        pair.cuff.visible = true;
         this.group.add(pair.upper, pair.fore, pair.cuff);
       }
     } else {
@@ -1215,7 +1231,9 @@ export class ArmSolver {
   }
 
   solve(pivot: THREE.Object3D, wristWorld: THREE.Vector3[], settle = 0): void {
-    this.group.visible = this.integratedArm;
+    // Visible when there is an integrated arm to draw, or when authored cuffs
+    // are available to close the wrist of a hand-only rig.
+    this.group.visible = this.integratedArm || this.authoredSleeves !== null;
     for (let i = 0; i < 2; i++) {
       this.shoulder.copy(this.shoulders[i]!);
       this.shoulder.y -= 0.012 * settle;
@@ -1325,9 +1343,9 @@ export class ArmSolver {
     for (const pair of this.authoredSleeves ?? []) {
       pair.upper.visible = integrated;
       pair.fore.visible = integrated;
-      pair.cuff.visible = integrated;
+      pair.cuff.visible = true;
     }
-    this.group.visible = integrated;
+    this.group.visible = integrated || this.authoredSleeves !== null;
   }
 
   setVisible(v: boolean): void {

@@ -182,3 +182,46 @@ add the traversal saw no world materials and the call was a silent no-op).
 touched so the QA dump can confirm it ran. Ashara is set to `0.2` from the
 measured sweep; the other three maps still carry `envIntensity` values that were
 tuned against an inert lever and need their own measurement.
+
+## Independent critic round 7 (31 valid captures, all four maps) — findings and status
+
+The panel read all 31 `qa/poi-*.png` frames, captured with a verified teleport
+(the earlier round's NeoCity/Ashara frames were shot at the map spawn corner
+because the QA teleport silently ignored payloads without a nonce, so their
+"no shadows" and "IBL has no effect" conclusions were evidence-invalid and have
+been re-taken). Verdict: dominant impression still reads as procedural /
+low-poly / blockout — **YES**; acceptable at a GTA-V / AAA bar — **NO**.
+Scores: environment geometry 4, materials 3, lighting 3, terrain/grounding 2,
+density 4, art direction 5.
+
+### Fixed in response to this round
+
+| Impact | Root cause | Fix | Evidence |
+| --- | --- | --- | --- |
+| Objects read as stickers on the ground; no contact darkening anywhere | The contact-shadow discs sit a few centimetres above an undulating heightfield, so they lost the depth test across most of their radius and silently vanished. Lying logs and lamp posts were excluded from the spot list entirely. | `MeshBasicMaterial` on the disc pool gained a negative `polygonOffset` (factor -3, units -6) so it wins the depth test without lifting off the ground; opacity 0.5 → 0.62 with a darker core; the `cyl` branch now emits an elongated spot for horizontal pipe/log runs (previously `if (g.pitch || g.roll) continue`), deriving the run axis from the presentation Euler; lamp posts gained their own contact spots. | `qa/poi-oldfront-forestcamp.png` — logs, barn base and trees now show contact darkening where they previously floated. |
+| The single 2048² shadow map spans 220 m, so one texel is 0.107 m and a 2–5 cm contact band is sub-texel | Shadow frustum fitted for whole-map coverage only | Not fixed by a second cascade: three.js only darkens a light's own contribution with its own shadow map, so a shadow-only second light has no visual effect (verified, then reverted). The fitted per-object contact decals above carry the near-field term instead; cascade work remains open. | Reverted `sunNear` experiment; `renderer.ts` comment records why. |
+| First-person arm ends in a hard cross-hatched disc | LibHand is a bare-hand scan whose mesh is open at the wrist. With `integratedArm === false` the whole `ArmSolver` group was hidden, so nothing closed the opening and the glove weave texture was seen from inside. The procedural sleeve's flat end caps fanned a full texture width across a few centimetres for the same reason. | The authored sleeve cuff is now always visible (constructor, `solve()` group visibility and `setIntegratedArm`), so a hand-only rig gets authored geometry closing the wrist; the procedural sleeve's ring radius collapses to zero at both ends so its caps are degenerate domes. | `qa/poi-ashara-market-close.png` — the disc artifact is gone in the live capture. |
+
+### Open, ranked by perceptual impact
+
+1. **No real local lights.** Neon, lamp heads, window glows and light pools are
+   emissive materials and painted gradients; a lamp post stands in a uniformly
+   lit street with no falloff. `StaticLightPool` virtualises to 8 point lights.
+2. **Axis-aligned box architecture.** `b.box` cuboids with flat tops, no
+   reveals, no setbacks, no roof-form variety — the dominant remaining
+   "blockout" read in every district.
+3. **Terrain is a single flat texture per map** with visible tile seams and
+   unprojected decal quads; no slope/height splat, no macro variation.
+4. **Black voids.** Interiors and window openings land on pure `#000` because
+   only the key light reaches them and ambient was cut to 0.2–0.45.
+5. **Untextured/floating primitives** named per frame: a black slab at
+   `ashara/fuel-court`, an orange box at `ashara/market-east`, a blue box at
+   `neocity/residential`, a floating pipe stub at `oldfront/farmstead`, a dark
+   ellipse artifact on the road at `neocity/spire`, and a full-width bright
+   blue band at `neocity/transit`.
+6. **Fake reflections** — an inverted mirrored rectangle under the Ashara market
+   building, an opaque light-blue fountain disc at `oldfront/cathedral`, hard
+   elliptical puddle decals.
+7. **Weapon ADS readability** and **SWAT character detail** remain open gates;
+   both were last reviewed before the systemic lighting/material fixes and need
+   fresh panels.
