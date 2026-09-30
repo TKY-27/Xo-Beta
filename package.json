@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.20.0",
-    "three": "0.185.1",
+    "three": "0.186.1",
     "trystero": "0.25.4"
   },
   "devDependencies": {
