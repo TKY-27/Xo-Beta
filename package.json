@@ -38,7 +38,7 @@
     "cloudflare:dry-run": "npm run build && wrangler deploy --dry-run --outdir .wrangler/dry-run"
   },
   "dependencies": {
-    "@dimforge/rapier3d-compat": "0.20.0",
+    "@dimforge/rapier3d-compat": "0.21.0",
     "three": "0.185.1",
     "trystero": "0.25.4"
   },
